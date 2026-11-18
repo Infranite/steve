@@ -27,6 +27,10 @@ pub struct Harness {
     pub builtin: bool,
     /// Its adapter answered the last probe; `None`: not asked (no Node, or not yet).
     pub ready: Option<bool>,
+    /// Selection validation has some successful target reports, but other target Nodes remain
+    /// unknown. Known negative evidence still rejects a choice; an accepted save is unverified.
+    #[serde(skip)]
+    pub selection_unknown: bool,
     /// Steve's permission modes it offers; `None`: not known yet (all are shown).
     pub modes: Option<Vec<PermissionMode>>,
     /// The models it offers (what the probe reported, else its declared fallback list).
@@ -69,6 +73,7 @@ impl Harness {
             name: spec.name.clone(),
             builtin: spec.builtin,
             ready: None,
+            selection_unknown: false,
             modes: (offered.len() < 5).then_some(offered),
             models: p
                 .fallback_models

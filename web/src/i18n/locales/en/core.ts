@@ -177,6 +177,7 @@ export default {
     importedSome: "Imported {{ok}}, {{bad}} failed: {{error}}",
     imported_one: "Imported {{count}} conversation (read-only)",
     imported_other: "Imported {{count}} conversations (read-only)",
+    botSelectionUnknown: "Saved; the target Node’s model or effort list is unknown. It will be checked again before startup.",
     botSaved: "Saved; applies to future replies and runs",
     botCreated: "Created. Set its personality and way of working first",
     botDrafted: "Steve drafted it. Take a look and adjust",
@@ -543,6 +544,8 @@ export default {
     edit: "Edit reply", review: "Save changes for review", reviewNote: "Editing creates a draft for review; it does not send immediately. Review the message before approving it.", cancelEdit: "Cancel editing", retry: "Retry after restoring access",
   },
   card: {
+    retrySession: "Retry session startup",
+    fixBotConfig: "Fix Bot configuration",
     sessionTitle: "Conversation {{title}}",
     waited: "{{bot}} · waiting {{since}}",
     snooze: "Remind me later",

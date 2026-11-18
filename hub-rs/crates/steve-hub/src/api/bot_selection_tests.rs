@@ -276,7 +276,9 @@ async fn unknown_or_failed_probe_is_not_an_empty_supported_list() {
             h.models.clear();
             h.efforts.clear();
         }
-        e.create(json!({"name":format!("unknown-{ready:?}"),"harness":"codex","model":"future-model","reasoning_effort":"future-effort"})).await;
+        let (status, saved) = e.call("POST", "/bots", json!({"name":format!("unknown-{ready:?}"),"harness":"codex","model":"future-model","reasoning_effort":"future-effort"})).await;
+        assert_eq!(status, 200);
+        assert_eq!(saved["selection_validation"], "unknown");
         let (status, out) = e
             .call(
                 "POST",
@@ -369,4 +371,30 @@ async fn concurrent_harness_and_model_edits_never_commit_an_invalid_pair() {
     assert_eq!(out["model"], "shared-model");
     assert_eq!(out["reasoning_effort"], "low");
     assert_eq!(out["rules"], "keep");
+}
+
+#[tokio::test]
+async fn a_partially_unknown_target_set_does_not_certify_an_accepted_save() {
+    let e = Env::new();
+    e.catalogue.0.write().unwrap()[1].selection_unknown = true;
+    let (status, saved) = e
+        .call(
+            "POST",
+            "/bots",
+            json!({"name":"partial-evidence","harness":"codex","model":"gpt-6.1-sol"}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(saved["selection_validation"], "unknown");
+    let (status, _) = e
+        .call(
+            "POST",
+            "/bots",
+            json!({"name":"known-negative","harness":"codex","model":"not-offered"}),
+        )
+        .await;
+    assert_eq!(
+        status, 400,
+        "unknown targets do not erase another target's known incompatibility"
+    );
 }

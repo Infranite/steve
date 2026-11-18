@@ -1941,3 +1941,118 @@ fn withdrawing_a_queued_refresh_does_not_mark_the_protocol_delivered() {
             .contains("Steve 工作协议已更新")
     );
 }
+
+#[test]
+fn startup_blocker_survives_queued_input_and_cannot_be_continued_by_yolo() {
+    let k = Kit::new();
+    let i = k.item("run", "执行", None);
+    let sid = k.session(&i, "error");
+    k.db()
+        .store()
+        .sessions()
+        .stop_ended(
+            &sid,
+            None,
+            steve_store::SESSION_START_FAILURE,
+            Some("bad model"),
+            false,
+        )
+        .unwrap();
+    let card = k
+        .db()
+        .decision_create(crate::repo::NewDecision {
+            workspace_id: WS.into(),
+            kind: "fail".into(),
+            subject_type: steve_store::SESSION_START_FAILURE.into(),
+            subject_id: "dev".into(),
+            item_id: Some(i.clone()),
+            session_id: Some(sid.clone()),
+            question: "bad model".into(),
+            options: Some(vec!["retry".into()]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    k.db()
+        .store()
+        .queued()
+        .add(&sid, "initial task", "steve", &[])
+        .unwrap();
+    crate::lifecycle::settle(k.db(), &i).unwrap();
+    crate::lifecycle::supersede(k.db(), &i, &["fail"], "background queue").unwrap();
+    assert_eq!(k.db().decision(&card.id).unwrap().unwrap().status, "open");
+    assert_eq!(k.status(&i).0, "wait");
+    assert!(
+        k.core
+            .resolve(&card.id, "retry", "", steve_modules::outbound::YOLO_ACTOR)
+            .is_err()
+    );
+    k.db().session_patch(&sid, patch![status:"ended"]).unwrap();
+    let before = k.db().store().sessions().stop(&sid).unwrap();
+    k.core
+        .on_turn_end(crate::TurnEnd {
+            session_id: sid.clone(),
+            attempt: None,
+            stop_reason: "error".into(),
+            error: Some("late failure".into()),
+        })
+        .unwrap();
+    assert_eq!(k.db().store().sessions().stop(&sid).unwrap(), before);
+    assert!(k.db().queued(&sid).unwrap().is_empty());
+    assert_eq!(
+        k.db().decision(&card.id).unwrap().unwrap().status,
+        "expired"
+    );
+}
+
+#[test]
+fn startup_retry_after_an_explicit_harness_edit_hands_off_to_a_new_session() {
+    let k = Kit::new();
+    k.rt.st().starts_require_commit = true;
+    let i = k.item("wait", "执行", None);
+    let sid = k.session(&i, "error");
+    k.db()
+        .store()
+        .queued()
+        .add(&sid, "old harness protocol", "steve", &[])
+        .unwrap();
+    k.db()
+        .store()
+        .sessions()
+        .stop_ended(
+            &sid,
+            None,
+            steve_store::SESSION_START_FAILURE,
+            Some("bad model"),
+            false,
+        )
+        .unwrap();
+    let card = k
+        .db()
+        .decision_create(crate::repo::NewDecision {
+            workspace_id: WS.into(),
+            kind: "fail".into(),
+            subject_type: steve_store::SESSION_START_FAILURE.into(),
+            subject_id: "dev".into(),
+            item_id: Some(i.clone()),
+            session_id: Some(sid.clone()),
+            question: "bad model".into(),
+            options: Some(vec!["retry".into()]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    // Only this user edit may change the harness. A failure alone never chooses another one.
+    k.db().bot_patch("dev", &patch![harness:"codex",model:serde_json::Value::Null,reasoning_effort:serde_json::Value::Null], "me").unwrap();
+    k.core.resolve(&card.id, "retry", "", "me").unwrap();
+    let next = last_session(&k, &i);
+    assert_ne!(next.id, sid);
+    assert_eq!(next.harness, "codex");
+    assert_eq!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+    assert!(k.db().queued(&sid).unwrap().is_empty());
+    assert!(
+        k.rt.prompts_of(&next.id)
+            .iter()
+            .all(|p| !p.contains("old harness protocol"))
+    );
+}

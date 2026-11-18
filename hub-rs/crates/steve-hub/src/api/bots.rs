@@ -49,6 +49,27 @@ fn known_harness_ids(
     ids
 }
 
+fn selection_out(mut bot: Obj, harnesses: &[steve_core::harnesses::Harness]) -> Obj {
+    let explicit = ["model", "reasoning_effort"]
+        .iter()
+        .any(|k| bot.get(*k).is_some_and(|v| !v.is_null()));
+    let known = harnesses
+        .iter()
+        .find(|h| Some(h.id.as_str()) == bot.get("harness").and_then(Value::as_str))
+        .is_some_and(|h| h.ready == Some(true) && !h.selection_unknown);
+    let state = if !explicit {
+        "default"
+    } else if !known {
+        "unknown"
+    } else if steve_core::models::validate_bot_patch(None, &bot, harnesses).is_ok() {
+        "supported"
+    } else {
+        "unsupported"
+    };
+    bot.insert("selection_validation".into(), json!(state));
+    bot
+}
+
 /// `BotPatch` (or the create variant: `name` required), as the parsed object with only the present
 /// keys, in schema order. `harnesses`: the adapter ids the Hub knows ([`crate::config::Config::harness_ids`]).
 #[cfg(test)]
@@ -215,7 +236,7 @@ pub async fn create(
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let harnesses = st.domain.harnesses(false).await?;
+    let harnesses = st.domain.bot_harnesses(None).await?;
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, true, &allowed)?;
     let (ws, me) = (c.ws.clone(), c.me.clone());
@@ -232,7 +253,7 @@ pub async fn create(
             steve_core::models::validate_bot_patch(None, &p, &harnesses)
                 .map_err(ApiError::bad_request)?;
             let b = r.bot_create(&c.ws, &p, &c.me)?;
-            let out = bot_out(r, b, &c.ws)?;
+            let out = selection_out(bot_out(r, b, &c.ws)?, &harnesses);
             let id = out.get("id").and_then(Value::as_str).map(str::to_string);
             Ok((Value::Object(out), id))
         })
@@ -262,7 +283,7 @@ pub async fn draft(
     let mut k = Check::object(&v);
     let desc = k.str("desc", Str::len(2, 2000));
     k.finish()?;
-    let harnesses = st.domain.harnesses(false).await?;
+    let harnesses = st.domain.bot_harnesses(None).await?;
     let ws_pref = c.ws.clone();
     let preferred = st
         .read(move |r| {
@@ -330,12 +351,15 @@ pub async fn draft(
     f.insert("model".into(), model);
     f.insert("harness".into(), json!(harness_id));
     f.insert("perm_mode".into(), json!(perm_mode));
-    let harnesses = st.domain.harnesses(false).await?;
+    let harnesses = st.domain.bot_harnesses(None).await?;
     st.write(move |w| {
         steve_core::models::validate_bot_patch(None, &f, &harnesses)
             .map_err(ApiError::bad_request)?;
         let b = w.bot_create(&c.ws, &f, &c.me)?;
-        ok(Value::Object(bot_out(w, b, &c.ws)?))
+        ok(Value::Object(selection_out(
+            bot_out(w, b, &c.ws)?,
+            &harnesses,
+        )))
     })
     .await
 }
@@ -347,7 +371,7 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     check_bot(&st, &c.ws, &id).await?;
-    let harnesses = st.domain.harnesses(false).await?;
+    let harnesses = st.domain.bot_harnesses(Some(&id)).await?;
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, false, &allowed)?;
     st.write(move |r| {
@@ -383,7 +407,10 @@ pub async fn patch_one(
             own(r.project_get(dp)?, &c.ws, Noun::Project)?;
         }
         let b = r.bot_patch_checked(&id, &p, &c.me, &harnesses)?;
-        ok(Value::Object(bot_out(r, b, &c.ws)?))
+        ok(Value::Object(selection_out(
+            bot_out(r, b, &c.ws)?,
+            &harnesses,
+        )))
     })
     .await
 }
@@ -422,7 +449,7 @@ pub async fn duplicate(
     Path(id): Path<String>,
 ) -> ApiResult {
     check_bot(&st, &c.ws, &id).await?;
-    let harnesses = st.domain.harnesses(false).await?;
+    let harnesses = st.domain.bot_harnesses(Some(&id)).await?;
     st.write(move |r| {
         own_bot(r, &id, &c.ws)?;
         let Some(mut b) = r.bot_get(&id)? else {
@@ -440,7 +467,10 @@ pub async fn duplicate(
         off.insert("enabled".into(), json!(false));
         r.bot_patch(&nid, &off, &c.me)?;
         let got = r.bot_get(&nid)?.unwrap_or_default();
-        ok(Value::Object(bot_out(r, got, &c.ws)?))
+        ok(Value::Object(selection_out(
+            bot_out(r, got, &c.ws)?,
+            &harnesses,
+        )))
     })
     .await
 }

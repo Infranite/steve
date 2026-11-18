@@ -655,3 +655,42 @@ async fn an_undo_keeps_a_field_changed_since() {
     assert_eq!(k.db().setting(WS, "archDays", "x").unwrap(), "90");
     assert_eq!(k.db().setting(WS, "depsAfter", "x").unwrap(), "自动开始");
 }
+
+#[tokio::test]
+async fn bot_card_apply_uses_the_target_node_instead_of_a_different_nodes_offer() {
+    let k = Kit::new();
+    bot_catalogue(&k, &["next-model"], &["high"]);
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"model","value":"next-model"}]}"#.into()));
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "换模型")
+        .await
+        .unwrap();
+    let mut target = crate::harnesses::Harness::declared("claude-code", None);
+    target.ready = Some(true);
+    target.models.clear();
+    k.core
+        .models()
+        .set_bot_harnesses(std::sync::Arc::new(move |bot| {
+            assert_eq!(bot, Some("dev"));
+            vec![target.clone()]
+        }));
+    let before = k.db().bot("dev").unwrap().unwrap().model;
+    assert!(
+        k.core
+            .apply(&p.id, "me", WS)
+            .unwrap_err()
+            .to_string()
+            .contains("model")
+    );
+    assert_eq!(k.db().bot("dev").unwrap().unwrap().model, before);
+    let hs = k.core.models().harnesses();
+    k.core
+        .models()
+        .set_bot_harnesses(std::sync::Arc::new(move |_| hs.clone()));
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(
+        k.db().bot("dev").unwrap().unwrap().model.as_deref(),
+        Some("next-model")
+    );
+}

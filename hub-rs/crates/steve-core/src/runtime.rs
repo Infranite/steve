@@ -204,6 +204,15 @@ pub trait AgentRuntime: Send + Sync {
     /// A session the business side ended while a turn runs is let go once that turn is over.
     /// Errors when the backend cannot tell (its store failed): nothing is known to be let go.
     fn release(&self, session_id: &str) -> Result<Released>;
+    /// Human retry of a blocked session open. Background continues must never call this.
+    fn retry_session(
+        &self,
+        session_id: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> Result<()> {
+        let _ = (session_id, choice);
+        Err(crate::error::msg("当前执行后端不支持重试启动。"))
+    }
     /// Answer a pending tool permission (`None` = cancelled). Errors when the backend cannot tell
     /// (its store failed): the answer was not taken and the card stays open.
     fn answer_permission(&self, decision_id: &str, option_id: Option<&str>) -> Result<Answered>;

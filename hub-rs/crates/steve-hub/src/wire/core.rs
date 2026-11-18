@@ -807,6 +807,18 @@ impl RoutedRuntime {
 }
 
 impl steve_core::AgentRuntime for RoutedRuntime {
+    fn retry_session(
+        &self,
+        session: &str,
+        choice: &steve_node_api::HarnessChoice,
+    ) -> steve_core::Result<()> {
+        match self.route_strict(session)? {
+            Backend::Node(n) => n.retry_open(session, choice).map_err(Into::into),
+            _ => Err(CoreError::Msg(
+                "目标 Node 当前不可用，请连接后重试。".into(),
+            )),
+        }
+    }
     fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> steve_core::Result<()> {
         self.preflight(|p, c| p.can_run_item(c, item_id, bot_id, harness))
             .map_err(CoreError::Msg)
@@ -1983,6 +1995,13 @@ impl Domain for CoreDomain {
                 .await;
         }
         Ok(self.core.models().harnesses())
+    }
+
+    async fn bot_harnesses(
+        &self,
+        bot: Option<&str>,
+    ) -> BResult<Vec<steve_core::harnesses::Harness>> {
+        Ok(self.core.models().bot_harnesses(bot))
     }
 
     async fn models_view(&self, ws: &str) -> BResult<Value> {

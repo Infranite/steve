@@ -120,6 +120,13 @@ impl NodeRuntime {
 
     /// What [`Self::plan_in`] would answer, without planning (and without writing anything).
     fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
+        if ended_in(tx, session)? {
+            self.store.sessions().retire_queue(session)?;
+            return Ok(Planned::Held);
+        }
+        if startup_blocked_in(tx, session)? {
+            return Ok(Planned::Held);
+        }
         // Node facts and reconciliation can schedule the next queued turn without going through
         // RoutedRuntime::flush. Recheck the durable graph in the same transaction as the claim.
         if self.workflow_blocker_in(tx, session)?.is_some() {
@@ -649,6 +656,9 @@ fn queue_in(
     files: &[FileRef],
     created: i64,
 ) -> Result<(), StoreError> {
+    if ended_in(tx, session)? {
+        return Err(conflict("已结束的会话不能接收新消息，请使用当前会话。"));
+    }
     tx.execute(
         "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
         rusqlite::params![
@@ -674,6 +684,14 @@ fn queue_in(
         item_id: None,
     });
     Ok(())
+}
+
+pub(super) fn startup_blocked_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_stops WHERE session_id=? AND stop_reason=?)",
+        [session, steve_store::SESSION_START_FAILURE],
+        |r| r.get(0),
+    )?)
 }
 
 /// Messages said to a session while its turn runs, handed to that turn through a Steve tool call's

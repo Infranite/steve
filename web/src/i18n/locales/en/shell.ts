@@ -314,6 +314,7 @@ export default {
     place: "#{{n}}",
     afterRelease: "sends after the release",
     afterTurn: "sends when this turn ends",
+    afterStartupFix: "sends after fixing the configuration and retrying the failure card",
     afterStart: "sends once the session has started",
     briefWaiting: "The brief · work begins once the session has started",
     afterTurnInOrder: "sends in order when this turn ends",

@@ -784,6 +784,16 @@ pub fn wire_assembly(
         core_cfg,
     );
     core.models().set_harnesses(harnesses.source());
+    core.models().set_bot_harnesses(
+        harnesses.bot_source(
+            db.clone(),
+            routed
+                .bind_remote
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| node_host.as_ref().map(|_| "local".into())),
+        ),
+    );
     // once Steve's harness has said what it offers, untouched seeded bots reconcile if needed and
     // the cheap purposes get its quick model (once)
     let models = core.models().clone();

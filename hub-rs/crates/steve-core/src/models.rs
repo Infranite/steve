@@ -374,7 +374,12 @@ pub struct Models {
     defaults: Arc<Defaults>,
     /// Shared by every clone: the Hub sets it once it knows its adapters.
     harnesses: Arc<std::sync::RwLock<HarnessSource>>,
+    bot_harnesses: Arc<std::sync::RwLock<Option<BotHarnessSource>>>,
 }
+
+/// Choices supported by each known target of a Bot, with unknown probes left unknown.
+/// The Hub computes the intersection; another Node's larger offer must not certify a target.
+pub type BotHarnessSource = Arc<dyn Fn(Option<&str>) -> Vec<Harness> + Send + Sync>;
 
 /// A model id: what `--model` takes (`claude-opus-5-5`, `opus`, `us.anthropic.x-v1:0`, `x[1m]`, `@cf/meta/x`).
 static MODEL_ID: LazyLock<Regex> = LazyLock::new(|| {
@@ -453,12 +458,38 @@ impl Models {
             store,
             defaults: Arc::new(defaults),
             harnesses: Arc::new(std::sync::RwLock::new(crate::harnesses::builtin_source())),
+            bot_harnesses: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     /// From now on (this resolver and its clones) over the Hub's adapters ([`crate::harnesses`]).
     pub fn set_harnesses(&self, harnesses: HarnessSource) {
         *self.harnesses.write().unwrap_or_else(|e| e.into_inner()) = harnesses;
+    }
+
+    pub fn set_bot_harnesses(&self, source: BotHarnessSource) {
+        *self
+            .bot_harnesses
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(source);
+    }
+
+    pub fn bot_harnesses(&self, bot: Option<&str>) -> Vec<Harness> {
+        let source = self
+            .bot_harnesses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        source.map_or_else(|| self.harnesses(), |f| f(bot))
+    }
+
+    pub fn validate_bot_patch(
+        &self,
+        current: Option<&Map<String, Value>>,
+        patch: &Map<String, Value>,
+    ) -> Result<(), String> {
+        let bot = current.and_then(|b| b.get("id")).and_then(Value::as_str);
+        validate_bot_patch(current, patch, &self.bot_harnesses(bot))
     }
 
     /// The harness adapters Steve can run on now.

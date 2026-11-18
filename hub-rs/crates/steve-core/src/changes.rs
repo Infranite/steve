@@ -2160,7 +2160,6 @@ impl Core {
                 match p.target.kind.as_str() {
                     "bot" if new_bot_name(&tid).is_some() => {
                         let mut nb = p.patch.clone();
-                        let hs = self.models().harnesses();
                         let (def_harness, def_perm) = self.models().default_bot();
                         let h = nb
                             .get("harness")
@@ -2177,7 +2176,7 @@ impl Core {
                             };
                             nb.insert("perm_mode".into(), json!(pm));
                         }
-                        crate::models::validate_bot_patch(None, &nb, &hs).map_err(msg)?;
+                        self.models().validate_bot_patch(None, &nb).map_err(msg)?;
                         let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
                         before.insert("created".into(), json!(b.id));
                     }
@@ -2187,7 +2186,8 @@ impl Core {
                             .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
                         let b = serde_json::to_value(&cur_bot)?;
                         let hs = self.models().harnesses();
-                        crate::models::validate_bot_patch(b.as_object(), &p.patch, &hs)
+                        self.models()
+                            .validate_bot_patch(b.as_object(), &p.patch)
                             .map_err(msg)?;
                         let mut bp = p.patch.clone();
                         if let Some(next_id) = bp.get("harness").and_then(Value::as_str)

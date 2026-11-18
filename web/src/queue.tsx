@@ -18,9 +18,13 @@ import { Brief, type ComposerHandle } from "@/ui"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 
+/** A startup failure holds queued input until the user explicitly retries its card. */
+const startupBlocked = (sid: string) => st.items.some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
+
 /** when the queue goes, in the strip's header */
 export function queueNote(s: Sess | null) {
   if (st.hold) return t("shell:queue.afterRelease")
+  if (s && startupBlocked(s.id)) return t("shell:queue.afterStartupFix")
   if (s?.starting) return t("shell:queue.afterStart")
   if (s?.st === "run") return t("shell:queue.afterTurn")
   return t("shell:queue.notRunning")
@@ -36,13 +40,14 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, n
   const t = useT()
   if (!rows.length) return null
   const strip = (s: string) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)
+  const blocked = startupBlocked(sid)
   const brief = !!starting && rows.every((q) => q.via === "steve")
   return (
     <RunQueue label={t("shell:queue.region")} className={className} data-sq note={brief ? t("shell:queue.briefWaiting") : t("shell:queue.queuedN", { count: rows.length, note })}>
-      {rows.map((q, n) => <Row key={q.id} q={q} shown={strip(q.text)} place={numbered && !brief ? n : undefined} ops={starting && q.via === "steve" ? "none" : {
+      {rows.map((q, n) => <Row key={q.id} q={q} shown={strip(q.text)} place={numbered && !brief ? n : undefined} ops={(starting || blocked) && q.via === "steve" ? "none" : {
         edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
         withdraw: () => qWithdraw(sid, q.id, composer?.current, strip),
-        sendNow: starting ? undefined : () => qSendNow(sid, q.id),
+        sendNow: starting || blocked ? undefined : () => qSendNow(sid, q.id),
       }} />)}
     </RunQueue>
   )
@@ -151,7 +156,7 @@ export function QueuedComment({ sid, q, prefix = "", composer, note, starting, a
   const ops: Exclude<QOps, "none" | null> = {
     edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
     withdraw: () => qWithdraw(sid, q.id, composer?.current, (s) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)),
-    sendNow: starting ? undefined : () => qSendNow(sid, q.id),
+    sendNow: starting || startupBlocked(sid) ? undefined : () => qSendNow(sid, q.id),
   }
   const e = useQueuedEdit(shown, ops), t = useT()
   return <div className="min-w-0 flex-1" data-queued={q.id} data-queued-comment>

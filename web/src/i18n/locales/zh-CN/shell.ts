@@ -303,6 +303,7 @@ export default {
     place: "第 {{n}} 条",
     afterRelease: "等发布完成后发送",
     afterTurn: "本回合结束后发送",
+    afterStartupFix: "修正配置并从失败卡重试后发送",
     afterStart: "会话启动后发送",
     briefWaiting: "任务说明 · 会话启动后开始",
     afterTurnInOrder: "本回合结束后依次发送",

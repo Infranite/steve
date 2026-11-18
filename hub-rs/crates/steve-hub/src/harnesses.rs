@@ -59,6 +59,7 @@ struct Probed {
     local_unknown: bool,
     /// The remote Nodes whose answers `remote` holds.
     reported: BTreeSet<String>,
+    by_node: BTreeMap<String, (std::time::Instant, Vec<HarnessCapability>)>,
 }
 
 pub struct HubHarnesses {
@@ -146,6 +147,7 @@ impl HubHarnesses {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
         probed.generation += 1;
         probed.caps.clear();
+        probed.by_node.remove("local");
         probed.local_unknown = true;
     }
 
@@ -165,6 +167,12 @@ impl HubHarnesses {
         // replacement; otherwise a held ready follower can resurrect models after disconnect.
         probed.generation += 1;
         probed.local_unknown = caps.is_none();
+        probed.by_node.remove("local");
+        if let Some(caps) = &caps {
+            probed
+                .by_node
+                .insert("local".into(), (std::time::Instant::now(), caps.clone()));
+        }
         probed.caps = caps.unwrap_or_default();
         drop(probed);
         if let Some(f) = self.updated.get() {
@@ -182,6 +190,71 @@ impl HubHarnesses {
     pub fn source(self: &Arc<Self>) -> HarnessSource {
         let me = self.clone();
         Arc::new(move || me.list())
+    }
+
+    /// A Node's own recent report. Missing, failed or stale reports are unknown, never evidence
+    /// that a choice is unsupported. The runtime rechecks the actual Node before opening.
+    pub fn for_node(&self, node: &str) -> Vec<Harness> {
+        let known = self.list();
+        let probed = self.probed.read().unwrap_or_else(|e| e.into_inner());
+        let caps = probed
+            .by_node
+            .get(node)
+            .filter(|(at, _)| at.elapsed() < REFRESH * 2)
+            .map(|(_, caps)| caps.as_slice())
+            .unwrap_or_default();
+        known
+            .into_iter()
+            .map(|h| {
+                let cap = caps.iter().find(|c| c.name == h.id);
+                let mut h = merge(&h.id, self.declared.get(&h.id), cap);
+                if cap.is_none_or(|c| c.adapter.is_none()) {
+                    h.ready = None;
+                }
+                h
+            })
+            .collect()
+    }
+
+    pub fn bot_source(
+        self: &Arc<Self>,
+        store: steve_store::Store,
+        default_node: Option<String>,
+    ) -> steve_core::models::BotHarnessSource {
+        let me = self.clone();
+        Arc::new(move |bot| {
+            let mut nodes: BTreeSet<String> = store.reader(|c| {
+                let mut q = c.prepare("SELECT DISTINCT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE s.bot_id=? AND s.status<>'ended'")?;
+                let rows = q.query_map([bot], |r| r.get(0))?.collect::<Result<BTreeSet<String>, _>>()?;
+                Ok::<_, steve_store::StoreError>(rows)
+            }).unwrap_or_default();
+            nodes.extend(default_node.iter().cloned());
+            if nodes.is_empty() {
+                // Placement is not fixed yet; another Node's offer must not certify this one.
+                return me.for_node("");
+            }
+            let lists: Vec<_> = nodes.into_iter().map(|node| me.for_node(&node)).collect();
+            let mut out = me.for_node("");
+            for h in &mut out {
+                let reported: Vec<_> = lists
+                    .iter()
+                    .flat_map(|list| list.iter())
+                    .filter(|n| n.id == h.id && n.ready == Some(true))
+                    .collect();
+                if let Some(first) = reported.first() {
+                    *h = (*first).clone();
+                    h.selection_unknown = reported.len() < lists.len();
+                    h.models.retain(|m| {
+                        reported
+                            .iter()
+                            .all(|n| n.models.iter().any(|x| x.id == m.id))
+                    });
+                    h.efforts
+                        .retain(|e| reported.iter().all(|n| n.efforts.contains(e)));
+                }
+            }
+            out
+        })
     }
 
     /// Asks `node` now (`fresh`: its adapters again) and keeps the answer.
@@ -207,12 +280,19 @@ impl HubHarnesses {
     ) {
         let generation = self.generation();
         let mut remote_caps = Vec::new();
+        let mut by_node = BTreeMap::new();
         let mut reported = BTreeSet::new();
         let mut local_unknown = false;
         let mut combined: Vec<HarnessCapability> = Vec::new();
         if let Some(node) = local {
             match node.probe(fresh).await {
-                Ok(c) => combined = merge_cap_lists(combined, c.harnesses),
+                Ok(c) => {
+                    by_node.insert(
+                        "local".into(),
+                        (std::time::Instant::now(), c.harnesses.clone()),
+                    );
+                    combined = merge_cap_lists(combined, c.harnesses);
+                }
                 Err(e) => {
                     local_unknown = true;
                     tracing::warn!("harnesses: probe of the local Node: {e}");
@@ -237,6 +317,8 @@ impl HubHarnesses {
             for (id, res) in futures::future::join_all(asks).await {
                 match res {
                     Ok(Ok(c)) => {
+                        by_node
+                            .insert(id.clone(), (std::time::Instant::now(), c.harnesses.clone()));
                         remote_caps = merge_cap_lists(remote_caps, c.harnesses);
                         reported.insert(id);
                     }
@@ -258,6 +340,7 @@ impl HubHarnesses {
         probed.remote = remote_caps;
         probed.local_unknown = local_unknown;
         probed.reported = reported;
+        probed.by_node = by_node;
         drop(probed);
         if let Some(f) = self.updated.get() {
             f();
@@ -400,7 +483,7 @@ fn edit_manifest(
 }
 
 /// Adapter `id` as declared, with what its probe reported where it did.
-fn merge(
+pub(crate) fn merge(
     id: &str,
     declared: Option<&steve_acp::Declaration>,
     reported: Option<&HarnessCapability>,
@@ -694,6 +777,65 @@ mod tests {
         assert_eq!(ready_of(&n2, "claude-code"), Some(false));
         hs.invalidate();
         assert_eq!(ready_of(&n2, "claude-code"), None);
+    }
+
+    #[test]
+    fn bot_selection_uses_target_node_and_stale_or_missing_offers_stay_unknown() {
+        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let hs = HubHarnesses::of(&cfg);
+        let offer = |model: &str| AdapterOffer {
+            modes: vec![PermissionMode::Ask],
+            models: vec![AdapterModel {
+                id: model.into(),
+                name: None,
+                description: None,
+            }],
+            default_model: Some(model.into()),
+            efforts: vec![],
+        };
+        hs.update(vec![reported("claude-code", Some(offer("local-model")))]);
+        {
+            let mut p = hs.probed.write().unwrap();
+            let remote = vec![reported("claude-code", Some(offer("remote-model")))];
+            p.remote = remote.clone();
+            p.by_node
+                .insert("remote".into(), (std::time::Instant::now(), remote));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let source = hs.bot_source(store, Some("remote".into()));
+        let local = serde_json::json!({"harness":"claude-code","model":"local-model"});
+        let remote = serde_json::json!({"harness":"claude-code","model":"remote-model"});
+        assert!(
+            steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &hs.list())
+                .is_ok()
+        );
+        assert!(
+            steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &source(None))
+                .is_err()
+        );
+        assert!(
+            steve_core::models::validate_bot_patch(
+                None,
+                remote.as_object().unwrap(),
+                &source(None)
+            )
+            .is_ok()
+        );
+        hs.probed
+            .write()
+            .unwrap()
+            .by_node
+            .get_mut("remote")
+            .unwrap()
+            .0 = std::time::Instant::now() - REFRESH * 3;
+        assert!(source(None).iter().all(|h| h.ready.is_none()));
+        assert!(
+            steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &source(None))
+                .is_ok()
+        );
     }
 
     #[test]

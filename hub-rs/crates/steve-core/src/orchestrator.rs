@@ -1462,12 +1462,9 @@ impl Tx<'_> {
                 .models()
                 .agent_model(&item.workspace_id, &bot.harness)
         });
-        let reasoning_effort = bot.reasoning_effort.clone().filter(|e| {
-            self.c
-                .models()
-                .harness(&bot.harness)
-                .is_none_or(|h| h.takes_effort(e))
-        });
+        // Preserve the user's choice for target-Node preflight. Silently dropping an effort
+        // masks an invalid legacy Bot configuration and can run work with unintended settings.
+        let reasoning_effort = bot.reasoning_effort.clone();
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
             item_id: Some(item_id.into()),
@@ -2247,6 +2244,37 @@ impl Tx<'_> {
         let Some(session) = self.db().session(&t.session_id)? else {
             return Ok(());
         };
+        if session.status == "ended" {
+            self.st.pending.remove(&session.id);
+            return Ok(());
+        }
+        if t.stop_reason == steve_store::SESSION_START_FAILURE
+            || self
+                .db()
+                .store()
+                .sessions()
+                .stop(&session.id)?
+                .is_some_and(|s| {
+                    s.stop_reason.as_deref() == Some(steve_store::SESSION_START_FAILURE)
+                })
+        {
+            // A late notification of the failed open must not put a successful/manual retry
+            // back into waiting. The runtime already saved this stop atomically with its card.
+            if self
+                .db()
+                .store()
+                .sessions()
+                .stop(&session.id)?
+                .is_some_and(|s| {
+                    s.stop_reason.as_deref() == Some(steve_store::SESSION_START_FAILURE)
+                })
+                && let Some(item) = session.item_id.as_deref()
+                && self.db().item(item)?.is_some_and(|i| i.status != "pause")
+            {
+                settle(self.db(), item)?;
+            }
+            return Ok(());
+        }
         /* how it ended, kept for the stall watch (durably: the same after a restart). A turn you
          * stopped stays yours until a message starts another: the end of an older turn that comes
          * late (no message sent since) neither takes that from you nor is judged again */
@@ -2989,6 +3017,69 @@ impl Tx<'_> {
         let reget = |t: &Tx| t.db().decision(id).map(|d| d.expect("decision exists"));
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
+            ("fail", steve_store::SESSION_START_FAILURE) => {
+                if actor == YOLO_ACTOR || choice != "retry" {
+                    return Err(msg("会话启动失败需要你修正配置后手动重试。"));
+                }
+                let session = s
+                    .as_ref()
+                    .filter(|s| s.status != "ended")
+                    .ok_or_else(|| msg("旧会话已结束，请使用当前会话。"))?;
+                let bot = self
+                    .db()
+                    .bot(session.bot_id.as_deref().unwrap_or("steve"))?
+                    .ok_or_else(|| msg("Bot 不存在，请重新指派。"))?;
+                let current = serde_json::to_value(&bot)?;
+                self.c
+                    .models()
+                    .validate_bot_patch(current.as_object(), current.as_object().unwrap())
+                    .map_err(msg)?;
+                let selection = steve_node_api::HarnessChoice {
+                    harness: bot.harness,
+                    model: bot.model.or_else(|| {
+                        self.c
+                            .models()
+                            .agent_model(&session.workspace_id, &session.harness)
+                    }),
+                    effort: bot.reasoning_effort,
+                };
+                let i = iid()?;
+                let db = self.db().clone();
+                if !selection.harness.eq(&session.harness) {
+                    // The user saved a different harness and explicitly clicked Retry. Keep
+                    // identity immutable and use the ordinary handoff. Starting may refresh
+                    // Node roots from another thread, so it must follow the store commit.
+                    self.rt().can_run(&i, &bot.id, &selection.harness)?;
+                    db.atomic(|| {
+                        self.db().decision_resolve(
+                            id,
+                            json!({"choice":"retry"}),
+                            "resolved",
+                            None,
+                        )?;
+                        self.hand_off(&i, &session.id)
+                    })?;
+                    self.start_or_fail(&i, None, None)?;
+                    return reget(self);
+                }
+                db.atomic(|| {
+                    self.db()
+                        .decision_resolve(id, json!({"choice":"retry"}), "resolved", None)?;
+                    self.rt().retry_session(&session.id, &selection)?;
+                    if self.db().queued(&session.id)?.is_empty() {
+                        self.rt().prompt(
+                            &session.id,
+                            "配置已修正，请继续处理这个事项。",
+                            "steve",
+                            &[],
+                        )?;
+                    }
+                    self.db()
+                        .item_patch(&i, patch![status:"run", now:"正在重试会话启动"])?;
+                    Ok(())
+                })?;
+                return reget(self);
+            }
             ("ask", DESIGN_DECISION) => {
                 if actor == YOLO_ACTOR {
                     return Err(crate::cycle::conflict("设计是否实现必须由用户决定"));
@@ -3780,6 +3871,11 @@ impl Tx<'_> {
             .decision(id)?
             .filter(|d| d.status == "open")
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
+        if d.subject_type == steve_store::SESSION_START_FAILURE {
+            return Err(msg(
+                "请修正配置后重试，或重新指派、结束事项；启动失败卡需要保留。",
+            ));
+        }
         let is_tool_perm = d.kind == "approve" && d.subject_type == "tool_call";
         if is_tool_perm {
             self.rt().answer_permission(id, None)?;

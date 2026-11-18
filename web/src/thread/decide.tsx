@@ -20,6 +20,7 @@ import { isPeopleDecision } from "@/people/pending"
 import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
+import { editBot } from "@/manage"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
 import type { ReactNode } from "react"
 
@@ -67,7 +68,7 @@ export function CardTools({ i, w }: { i: Item; w: Wait }) {
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("common:action.more")} className="text-muted-foreground" data-decision-more={i.id} />}><EllipsisIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-52">
-        {!(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
+        {w.subject !== "session_start" && !(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
         {i.id && <><DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
       </DropdownMenuContent>
@@ -81,6 +82,7 @@ function Detail({ w, extra }: { w: Wait; extra?: ReactNode }) {
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
     {w.subject === "chan_message" && <OpenInFeishu url={w.openUrl} className="-ml-2 self-start" />}
+    {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => w.subjectId && editBot(w.subjectId)}>{t("core:card.fixBotConfig")}</Button>}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
     {w.draft && !isToolCall(w) && <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>}
     {extra}
@@ -158,7 +160,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     const os = w.options.filter((o) => FAIL_ORDER.includes(o)).sort((a, b) => FAIL_ORDER.indexOf(a) - FAIL_ORDER.indexOf(b))
     const go = os.includes("continue")
     return {
-      d: { ...base, options: os.filter((o) => o !== "continue").map((o) => opt(o, FAIL_CHOICE[o], { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
+      d: { ...base, options: os.filter((o) => o !== "continue").map((o) => opt(o, w.subject === "session_start" && o === "retry" ? tr("core:card.retrySession") : FAIL_CHOICE[o], { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
       answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option); else if (go) act("continue", a.text) },
     }
   }

@@ -234,7 +234,42 @@ impl NodeRuntime {
         let n = &self.node;
         match l.method.as_str() {
             "prepare_workspace" => n.prepare_workspace(parse(&l.request)?).await,
-            "open_session" => n.open_session(parse(&l.request)?).await,
+            "open_session" => {
+                let cmd: Command<OpenSession> = parse(&l.request)?;
+                // Only before first acceptance: an uncertain command keeps its identity and is
+                // reconciled, never manufactured into a rejection while it may already run.
+                if !l.maybe_sent {
+                    let ended = self
+                        .store
+                        .sessions()
+                        .get(cmd.body.session.as_str())
+                        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?
+                        .is_none_or(|s| s.status == "ended");
+                    if ended {
+                        return Err(ApiError::new(ErrorCode::Invalid, "已结束的会话不能重开。"));
+                    }
+                    if let Ok(report) = n.probe(false).await {
+                        let cap = report
+                            .harnesses
+                            .iter()
+                            .find(|h| h.name == cmd.body.choice.harness);
+                        let mut h = crate::harnesses::merge(&cmd.body.choice.harness, None, cap);
+                        // Legacy discovery without a session offer says nothing about selectable
+                        // models/efforts; a declared fallback is not a successful capability probe.
+                        if cap.is_none_or(|c| c.adapter.is_none()) {
+                            h.ready = None;
+                        }
+                        let selection = json!({"harness":cmd.body.choice.harness,"model":cmd.body.choice.model,"reasoning_effort":cmd.body.choice.effort});
+                        steve_core::models::validate_bot_patch(
+                            None,
+                            selection.as_object().unwrap(),
+                            &[h],
+                        )
+                        .map_err(|why| ApiError::new(ErrorCode::Invalid, why))?;
+                    }
+                }
+                n.open_session(cmd).await
+            }
             "start_turn" => {
                 let blocked = if self.domain.dynamic_workflows() {
                     None
@@ -533,8 +568,8 @@ impl NodeRuntime {
 
     /// An open is over. Opened: a turn that waited for it (its attempt was refused because the
     /// Node had let the session go) goes as a new attempt; otherwise what is queued goes. Not
-    /// opened: such a turn ends as failed, and the session stays let go (the next message tries
-    /// again; nothing is retried by itself).
+    /// opened: such a turn ends as failed, and the session stays let go with a durable startup
+    /// stop. Only an explicit human retry clears it; queued input never opens it again.
     pub(super) fn opened_in(
         &self,
         tx: &Tx,
@@ -604,13 +639,14 @@ impl NodeRuntime {
             }
             return Ok(None);
         }
-        // the user hears why even when no turn waited (the queued message stays for the next try)
+        // Failed opens never spend the same queued startup message again automatically.
+        // The durable stop is independent of the card's UI status and survives Hub restarts.
         let text =
             steve_i18n::stored(|| steve_i18n::t!("hub.node.stop.reopen_failed", detail = detail));
         let mut end = Some(End {
             session: s.to_string(),
             attempt: None,
-            stop: "error".to_string(),
+            stop: steve_store::SESSION_START_FAILURE.to_string(),
             error: Some(text.clone()),
         });
         if let Some(turn) = waiting {
@@ -631,7 +667,7 @@ impl NodeRuntime {
             end = Some(End {
                 session: s.to_string(),
                 attempt: Some(last_attempt_in(tx, &turn)?),
-                stop: c.stop_reason.clone(),
+                stop: steve_store::SESSION_START_FAILURE.to_string(),
                 error: Some(text),
             });
         }
@@ -650,13 +686,80 @@ impl NodeRuntime {
         system_in(
             tx,
             s,
-            &format!("Node 没能打开这个会话（{detail}），下一条消息会再试。"),
+            &format!(
+                "Node 没能打开这个会话（{detail}），已停止自动重试，请修正 Bot 配置后从失败卡重试。"
+            ),
         )?;
         self.release_if_ended_in(tx, s)?;
-        if let Some(e) = &end {
-            status_in(tx, s, settled_status(&e.stop))?;
+        if ended_in(tx, s)? {
+            tx.execute("DELETE FROM queued WHERE session_id=?", [s])?;
+            return Ok(None);
         }
+        status_in(tx, s, "error")?;
+        self.startup_failed_in(tx, s, detail)?;
         Ok(end)
+    }
+
+    pub(super) fn startup_failed_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        detail: &str,
+    ) -> Result<(), StoreError> {
+        let reason = steve_store::SESSION_START_FAILURE;
+        let (ws, item, bot): (String, Option<String>, Option<String>) = tx.query_row(
+            "SELECT workspace_id,item_id,bot_id FROM sessions WHERE id=?",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let question = format!("会话启动失败：{detail}");
+        // A changed cause replaces the previous startup blocker. Upgrade repair also replaces
+        // legacy generic stop cards, while unknown-effect/release cards remain untouched.
+        let previous = tx
+            .prepare(
+                "SELECT id FROM decisions WHERE status='open' AND (session_id=?1 OR item_id=?2)",
+            )?
+            .query_map(rusqlite::params![session, item], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for id in previous {
+            let Some(d) = self.store.decisions().get(&id)? else {
+                continue;
+            };
+            let obsolete = (d.subject_type == reason
+                && d.session_id.as_deref() == Some(session)
+                && d.question != question)
+                || (steve_core::lifecycle::stop_card(&d)
+                    && d.session_id.as_deref().is_none_or(|id| id == session));
+            if obsolete {
+                steve_store::decision_resolve_in(
+                    tx,
+                    &d.id,
+                    &json!({"superseded":"已保留当前会话启动失败的原因和重试入口"}),
+                    "expired",
+                )?;
+            }
+        }
+        tx.execute("INSERT INTO session_stops(session_id,stop_reason,error,ended,updated) VALUES (?1,?2,?3,?4,?4) ON CONFLICT(session_id) DO UPDATE SET stop_reason=?2,error=?3,ended=?4,updated=?4", rusqlite::params![session, reason, detail, now()])?;
+        let existing: Option<String> = tx.query_row("SELECT id FROM decisions WHERE session_id=? AND subject_type=? AND question=? ORDER BY created LIMIT 1", [session, reason, &question], |r| r.get(0)).optional()?;
+        if let Some(id) = existing {
+            tx.execute("UPDATE decisions SET status='open',result=NULL,resolved=NULL,undo=NULL WHERE id=? AND status<>'open'", [&id])?;
+            tx.publish(steve_store::ChangeEvent::Decision {
+                id,
+                item_id: Some(item.clone()),
+            });
+        } else {
+            steve_store::decision_create_in(tx, &steve_store::NewDecision {
+                workspace_id: ws, kind: "fail".into(), subject_type: reason.into(),
+                subject_id: bot.unwrap_or_default(), item_id: item.clone(), session_id: Some(session.into()),
+                question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
+                options: Some(vec!["retry".into()]), requested_by: "steve".into(),
+            })?;
+        }
+        if let Some(item) = item {
+            tx.execute("UPDATE items SET status='wait',now=?,updated=? WHERE id=? AND phase<>'closed' AND status<>'pause'", rusqlite::params![question,now(),item])?;
+            tx.publish(steve_store::ChangeEvent::Item { id: item });
+        }
+        Ok(())
     }
 
     /// An abandon the Node refused or could not finish: the attempt stays unknown, its session
