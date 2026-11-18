@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
+use steve_acp::usage::testkit::{PollHold, hold_polls};
 use steve_node::{LocalNode, NodeConfig, PolicyCeiling, Root, Storage};
 use steve_node_api::testkit::{RecordingSink, build};
 use steve_node_api::*;
@@ -41,6 +42,14 @@ fn choice() -> HarnessChoice {
 /// the 60 s deadline of [`limits`]). The budget is above all of that, so only the message the meter
 /// sends after the control file reaches it, however late the sampler's first poll comes.
 const OUTPUT_BUDGET: u64 = 256 << 10;
+/// The longest a test waits for something it observes (a live report, an attempt's end). It only
+/// bounds a failure: a loaded runner, not the code under test, decides how long these take.
+const EVENT_WAIT: Duration = Duration::from_secs(30);
+/// How far ahead of its start a deadline stop is set: time for the meter to start and report live
+/// usage before it (the test then persists its tail under a poll hold, not against this clock).
+const DEADLINE_AFTER_MS: i64 = 5_000;
+/// The bound on a stop and its settlement, from the moment its condition is armed.
+const STOP_WAIT: Duration = Duration::from_secs(8);
 
 fn limits() -> Limits {
     Limits {
@@ -94,7 +103,7 @@ impl Fixture {
         Self { dir, node, sink }
     }
     async fn finished(&self, op: &str) -> Observed {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + EVENT_WAIT;
         loop {
             let state = self
                 .node
@@ -214,7 +223,7 @@ impl Fixture {
             .collect()
     }
     async fn live(&self, attempt: &str) -> UsageReport {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + EVENT_WAIT;
         loop {
             if let Some(r) = self
                 .reports(attempt)
@@ -774,6 +783,16 @@ fn persist_tail(path: &std::path::Path) {
     file.sync_all().unwrap();
 }
 
+/// Hands the live meter its stop action. The meter acts as soon as the control file exists, so
+/// the file appears only complete (written aside, then renamed): a plain write could let it read
+/// the file between its creation and its content, act on nothing, and leave the stop to the idle
+/// budget or the deadline.
+fn arm(source: &std::path::Path, action: &str) {
+    let aside = source.with_extension("arming");
+    std::fs::write(&aside, action).unwrap();
+    std::fs::rename(&aside, source.with_extension("control")).unwrap();
+}
+
 impl Fixture {
     fn sources(&self) -> Vec<std::path::PathBuf> {
         std::fs::read_dir(self.dir.path().join("configured-home/sessions/2026/01/01"))
@@ -800,7 +819,7 @@ impl Fixture {
             spec.run.limits.max_output_bytes = OUTPUT_BUDGET;
         }
         if action == "deadline" {
-            spec.run.limits.deadline = Timestamp(now() + 1100);
+            spec.run.limits.deadline = Timestamp(now() + DEADLINE_AFTER_MS);
         }
         if research {
             spec.run.policy.permissions = PermissionMode::Plan;
@@ -822,24 +841,21 @@ impl Fixture {
                 earlier: vec![],
             });
         }
-        let deadline = spec.run.limits.deadline.0;
         self.node.start_job(command(attempt, spec)).await.unwrap();
         assert_eq!(self.live(attempt).await.tokens, expected(40, 60, 20, 5));
-        if action == "deadline" {
-            tokio::time::sleep(Duration::from_millis((deadline - now() - 10).max(0) as u64)).await;
-        }
-        let source = self
-            .sources()
+        self.sources()
             .into_iter()
             .find(|p| !before.contains(p))
-            .expect("new bound source");
-        if action == "idle" {
-            // Stop activity first, then persist in the gap between the final pre-stop poll
-            // and idle expiry. The test never waits for a poll after persisting the tail.
-            std::fs::write(source.with_extension("control"), "idle").unwrap();
-            tokio::time::sleep(Duration::from_millis(1100)).await;
-        }
-        source
+            .expect("new bound source")
+    }
+    /// Persists the attempt's tail where no live poll can read it: polls are held (and any poll
+    /// in flight has returned) before the bytes are written, and stay held while the guard lives.
+    /// Only the final settlement can collect the tail, however the runner schedules the
+    /// sampler's ticks around the stop.
+    async fn persist_unpolled_tail(&self, attempt: &str, source: &std::path::Path) -> PollHold {
+        let hold = hold_polls(attempt).await;
+        persist_tail(source);
+        hold
     }
     async fn stop_cancel(&self, attempt: &str) {
         self.node
@@ -905,10 +921,10 @@ async fn think_and_research_cancel_persisted_unpolled_tails_concurrently_and_iso
     let f = Fixture::new();
     let think = f.stop_job("think-tail", false, "cancel").await;
     let research = f.stop_job("research-tail", true, "cancel").await;
-    // The second call's live120 may coincide with the first's tick. Persist only now, then
-    // cancel both immediately; do not await a normal sampler tick after either source write.
-    persist_tail(&think);
-    persist_tail(&research);
+    // Persist both tails only now, under poll holds, then cancel both: no normal sampler tick
+    // can read either source write.
+    let _think_hold = f.persist_unpolled_tail("think-tail", &think).await;
+    let _research_hold = f.persist_unpolled_tail("research-tail", &research).await;
     let started = Instant::now();
     tokio::join!(f.stop_cancel("think-tail"), f.stop_cancel("research-tail"));
     for attempt in ["think-tail", "research-tail"] {
@@ -949,8 +965,10 @@ async fn research_stop_budgets_and_policy_settle_persisted_tail_without_new_tool
     for action in ["idle", "output", "tools", "turns", "policy", "deadline"] {
         let attempt = format!("research-{action}");
         let source = f.stop_job(&attempt, true, action).await;
-        persist_tail(&source);
-        std::fs::write(source.with_extension("control"), action).unwrap();
+        let _hold = f.persist_unpolled_tail(&attempt, &source).await;
+        // For `idle` the meter's heartbeats end only now, after the tail is persisted, so the
+        // idle budget expires after it too.
+        arm(&source, action);
         let started = Instant::now();
         let state = f.finished(&attempt).await;
         assert!(
@@ -964,7 +982,13 @@ async fn research_stop_budgets_and_policy_settle_persisted_tail_without_new_tool
             "{action}: {state:?}"
         );
         f.final_once_before_end(&attempt, expected(70, 80, 30, 7));
-        assert!(started.elapsed() < Duration::from_secs(8));
+        // A deadline stop is armed at its deadline, at most DEADLINE_AFTER_MS ahead.
+        let armed = if action == "deadline" {
+            Duration::from_millis(DEADLINE_AFTER_MS as u64)
+        } else {
+            Duration::ZERO
+        };
+        assert!(started.elapsed() < STOP_WAIT + armed, "{action}");
         f.process_gone(&source).await;
         // Permission denial cannot execute the request or authorize a later call.
         assert!(!f.sink.events().iter().any(|e| matches!(&e.subject, Subject::Execution(x) if x.attempt().as_str() == attempt)
@@ -984,14 +1008,14 @@ async fn think_budget_and_missing_raw_source_keep_bound_final_and_cleanup() {
     ] {
         let attempt = format!("{}-{action}", if research { "research" } else { "think" });
         let source = f.stop_job(&attempt, research, action).await;
-        persist_tail(&source);
+        let _hold = f.persist_unpolled_tail(&attempt, &source).await;
         if action == "missing" {
             // Raw source becomes unavailable before its next poll: preserve live evidence,
             // diagnose unknown tail; do not fabricate the known but now unreadable +60.
             std::fs::remove_file(&source).unwrap();
             f.stop_cancel(&attempt).await;
         } else {
-            std::fs::write(source.with_extension("control"), action).unwrap();
+            arm(&source, action);
         }
         assert!(!matches!(
             f.finished(&attempt).await,
@@ -1034,7 +1058,7 @@ async fn cancellation_kills_only_owned_term_resistant_groups_before_final_and_ne
             .unwrap()
             .parse()
             .unwrap();
-        persist_tail(&source);
+        let _hold = f.persist_unpolled_tail(attempt, &source).await;
         let started = Instant::now();
         f.stop_cancel(attempt).await;
         f.finished(attempt).await;
@@ -1079,7 +1103,7 @@ async fn research_cancellation_cannot_ack_end_before_failed_final_write_is_retri
     let source = f.stop_job("research-retry", true, "cancel").await;
     let db = rusqlite::Connection::open(f.dir.path().join("node/node.sqlite3")).unwrap();
     db.execute_batch("CREATE TRIGGER reject_final BEFORE INSERT ON events WHEN json_extract(NEW.event,'$.body.type')='usage' AND json_extract(NEW.event,'$.body.report.measurement')='final' BEGIN SELECT RAISE(ABORT,'injected final write failure'); END;").unwrap();
-    persist_tail(&source);
+    let _hold = f.persist_unpolled_tail("research-retry", &source).await;
     f.stop_cancel("research-retry").await;
     tokio::time::sleep(Duration::from_millis(3800)).await;
     assert!(

@@ -282,6 +282,10 @@ impl Sampler {
         report
     }
     pub async fn poll(&mut self) -> Vec<Fact> {
+        #[cfg(any(test, feature = "testkit"))]
+        let Some(_polling) = testkit::begin(&self.prefix) else {
+            return vec![];
+        };
         self.read(false).await;
         if self.snapshot == self.last {
             return vec![];
@@ -453,6 +457,78 @@ impl Sampler {
     }
 }
 
+/// Test seam (feature `testkit`): hold the live polls of one attempt, named by its sampler
+/// prefix. A held poll reads nothing and reports nothing, like a poll that found no change;
+/// [`Sampler::finish`] is never held. A test that persists source bytes under a hold knows that
+/// only the final settlement reads them, without racing [`POLL_INTERVAL`] on the wall clock.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Attempt {
+        holds: usize,
+        polling: usize,
+    }
+
+    static ATTEMPTS: LazyLock<Mutex<HashMap<String, Attempt>>> = LazyLock::new(Default::default);
+
+    fn attempts() -> MutexGuard<'static, HashMap<String, Attempt>> {
+        ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn release(prefix: &str, f: impl FnOnce(&mut Attempt)) {
+        let mut all = attempts();
+        if let Some(a) = all.get_mut(prefix) {
+            f(a);
+            if a.holds == 0 && a.polling == 0 {
+                all.remove(prefix);
+            }
+        }
+    }
+
+    /// Holds `prefix`'s live polls until the guard drops. Returns once none of them is in flight:
+    /// a poll that began before the hold has already returned what it read. A poll is bounded by
+    /// its read budget, so this wait is too.
+    pub async fn hold_polls(prefix: &str) -> PollHold {
+        attempts().entry(prefix.into()).or_default().holds += 1;
+        while attempts().get(prefix).is_some_and(|a| a.polling > 0) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        PollHold(prefix.into())
+    }
+
+    #[must_use = "the hold ends when the guard drops"]
+    pub struct PollHold(String);
+
+    impl Drop for PollHold {
+        fn drop(&mut self) {
+            release(&self.0, |a| a.holds -= 1);
+        }
+    }
+
+    /// One live poll in flight; `None` while the attempt is held.
+    pub(super) struct Polling(String);
+
+    pub(super) fn begin(prefix: &str) -> Option<Polling> {
+        let mut all = attempts();
+        let a = all.entry(prefix.into()).or_default();
+        if a.holds > 0 {
+            return None;
+        }
+        a.polling += 1;
+        Some(Polling(prefix.into()))
+    }
+
+    impl Drop for Polling {
+        fn drop(&mut self) {
+            release(&self.0, |a| a.polling -= 1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +589,31 @@ mod tests {
         assert_ne!(live.report_id, end.report_id);
         assert_eq!(live.tokens, end.tokens);
         assert_eq!(live.meter_epoch, end.meter_epoch);
+    }
+
+    #[tokio::test]
+    async fn held_polls_report_nothing_and_leave_the_tail_to_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = path(dir.path());
+        // its own prefix: the other tests here sample "attempt" concurrently
+        let mut s = Sampler::start(None, "s", "held-attempt", Epoch::new("epoch").unwrap()).await;
+        s.reader = Some(Arc::new(Mutex::new(Reader::Rollout(Rollout::new(
+            dir.path().into(),
+            "s".into(),
+            20,
+        )))));
+        s.read(true).await;
+        let hold = testkit::hold_polls("held-attempt").await;
+        std::fs::write(&p, tick()).unwrap();
+        assert!(s.poll().await.is_empty());
+        let facts = s.finish(vec![], Duration::ZERO).await;
+        assert_eq!(report(&facts, Measurement::Final).tokens.input, Some(40));
+        drop(hold);
+        let live = s.poll().await;
+        assert_eq!(
+            report(&live, Measurement::Cumulative).tokens.input,
+            Some(40)
+        );
     }
 
     #[tokio::test]

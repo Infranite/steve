@@ -5,6 +5,11 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+# Test seam: `usage::testkit` holds an attempt's live usage polls, so a test can persist source
+# bytes that only the final settlement reads. Never enabled in the Hub or Node build.
+testkit = []
+
 [dependencies]
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
