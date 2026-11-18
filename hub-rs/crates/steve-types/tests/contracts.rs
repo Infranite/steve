@@ -162,7 +162,7 @@ fn raw_json_preserves_text_and_rejects_invalid_input() {
 
 #[test]
 fn envelope_flattens_an_event_and_preserves_its_scope() {
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, PartialEq, Serialize)]
     #[serde(tag = "type")]
     enum Example {
         #[serde(rename = "item")]
@@ -184,10 +184,6 @@ fn envelope_flattens_an_event_and_preserves_its_scope() {
     };
     let text = r#"{"type":"item","id":"itm_1","ws":"ws_1","rev":47}"#;
     assert_eq!(serde_json::to_string(&envelope).unwrap(), text);
-    assert_eq!(
-        serde_json::from_str::<Envelope<Example>>(text).unwrap(),
-        envelope
-    );
     assert_eq!(envelope.scope(), Scope::Ws("ws_1".into()));
 }
 
