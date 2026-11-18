@@ -188,3 +188,14 @@ async fn clone_to(
     })
     .await
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route(
+            "/projects/setup/preview",
+            post(project_setup::setup_preview),
+        )
+        .route("/projects/setup", post(project_setup::setup))
+}

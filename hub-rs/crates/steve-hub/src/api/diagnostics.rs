@@ -145,3 +145,14 @@ async fn capture_authorized(st: AppState, cx: Ctx, id: String, bytes: Bytes) -> 
     .await?;
     view(&st, &cx, &id).await
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route(
+            "/items/{id}/debug",
+            get(diagnostics::explain).post(diagnostics::capture),
+        )
+        .route("/items/{id}/debug/events", get(diagnostics::events))
+}

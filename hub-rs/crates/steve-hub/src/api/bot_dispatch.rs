@@ -415,3 +415,19 @@ pub(super) fn item_dispatch(
         "placement":placement
     }))
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route(
+            "/bot-teams",
+            get(bot_dispatch::list).post(bot_dispatch::create),
+        )
+        .route("/bot-teams/default", put(bot_dispatch::set_default))
+        .route("/bot-teams/{id}", put(bot_dispatch::update))
+        .route(
+            "/bots/{id}/execution-nodes",
+            get(bot_dispatch::candidates).put(bot_dispatch::set_bindings),
+        )
+}

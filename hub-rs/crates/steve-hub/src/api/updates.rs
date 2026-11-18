@@ -126,3 +126,14 @@ mod tests {
         assert!(owner(&cx).is_ok());
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/updates", get(updates::status).post(updates::request))
+        .route("/updates/check", post(updates::check))
+        .route("/updates/{id}", get(updates::get))
+        .route("/updates/{id}/approve", post(updates::approve))
+        .route("/updates/{id}/reject", post(updates::reject))
+}

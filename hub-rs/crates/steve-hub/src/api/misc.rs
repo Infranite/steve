@@ -1607,3 +1607,97 @@ pub async fn kinds_reviewed(
     k.finish()?;
     ok(st.domain.kinds_reviewed(&c.ws, ids).await?)
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/me", get(misc::me))
+        .route("/state", get(misc::state))
+        .route("/workspaces", post(misc::workspace_create))
+        .route("/workspaces/{id}", patch(misc::workspace_patch))
+        .route("/workspaces/{id}/switch", post(misc::workspace_switch))
+        .route("/thread", post(misc::thread_say))
+        .route("/thread/stop", post(misc::thread_stop))
+        .route("/thread/history", get(misc::thread_history))
+        .route("/thread/search", get(misc::thread_search))
+        .route(
+            "/thread/queued/{id}",
+            patch(misc::thread_queued_edit).delete(misc::thread_queued_withdraw),
+        )
+        .route("/notifications/read", post(misc::notifications_read))
+        .route(
+            "/notifications/{id}/dismiss",
+            post(misc::notifications_dismiss),
+        )
+        .route("/thread/{id}/promote", post(misc::thread_promote))
+        .route("/thread/{id}/reroute", post(misc::thread_reroute))
+        .route("/thread/{id}/offer", post(misc::thread_offer))
+        .route("/thread/{id}/suggest", post(misc::thread_suggest))
+        .route("/thread/{id}/a2ui", post(misc::thread_a2ui))
+        .route("/thread/runs/{id}/stop", post(misc::thread_run_stop))
+        .route("/thread/runs/{id}", delete(misc::thread_run_stop))
+        .route("/items/{id}/thread", patch(misc::item_thread_follow))
+        .route("/decisions/{id}", post(misc::decision_resolve))
+        .route("/decisions/{id}/dismiss", post(misc::decision_dismiss))
+        .route("/decisions/{id}/undo", post(misc::decision_undo))
+        .route("/tags", post(misc::tag_create))
+        .route(
+            "/tags/{id}",
+            patch(misc::tag_patch).delete(misc::tag_remove),
+        )
+        .route("/tags/{id}/merge", post(misc::tag_merge))
+        .route("/tags/kinds/backfill", post(misc::kinds_backfill))
+        .route(
+            "/tags/kinds/review",
+            get(misc::kinds_review).post(misc::kinds_reviewed),
+        )
+        .route("/access", get(crate::access::overview))
+        .route(
+            "/access/oidc",
+            get(crate::access::oidc_get)
+                .put(crate::access::oidc_put)
+                .delete(crate::access::oidc_delete),
+        )
+        .route("/access/tokens", post(crate::access::token_create))
+        .route("/capabilities/steve", get(crate::caps_api::steve_h))
+        .route("/access/tokens/{id}", delete(crate::access::token_revoke))
+        .route("/access/clients/{id}", delete(crate::access::client_revoke))
+        .route("/access/pairings", post(crate::access::pair_create))
+        .route("/access/pairings/{id}", get(crate::access::pair_status))
+        .route("/settings/schema", get(misc::settings_schema))
+        .route(
+            "/settings/models",
+            get(misc::models_get).patch(misc::models_patch),
+        )
+        .route("/settings/models/select", post(misc::models_select))
+        .route("/settings", patch(misc::settings_patch))
+        .route("/onboard/start", post(misc::onboard_start))
+        .route("/onboard/skip", post(misc::onboard_skip))
+        .route("/audit", get(misc::audit_list))
+        .route("/config/draft", post(misc::config_draft))
+        .route("/config/{id}/apply", post(misc::config_apply))
+        .route("/config/{id}/undo", post(misc::config_undo))
+        .route("/config/{id}/drop", post(misc::config_drop))
+        .route("/devices", get(misc::devices))
+        .route("/vitals", get(crate::nodes::vitals::get))
+        .route("/devices/{id}", patch(misc::device_patch))
+        .route("/system/models", get(misc::system_models))
+        .route("/system/harnesses", post(misc::system_harness_add))
+        .route(
+            "/system/harnesses/{id}/install",
+            post(misc::system_harness_install),
+        )
+        .route(
+            "/system/harnesses/{id}",
+            delete(misc::system_harness_remove),
+        )
+        .route("/system/workspaces", get(misc::system_workspaces))
+        .route(
+            "/system/workspaces/reclaim",
+            post(misc::system_workspaces_reclaim),
+        )
+        .route("/system/backup", get(misc::system_backup))
+        .route("/system/outbox", get(misc::system_outbox))
+        .route("/system/outbox/revive", post(misc::system_outbox_revive))
+}

@@ -63,3 +63,14 @@ pub async fn delete(
     })
     .await
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/node-env/{node}", get(node_env::list))
+        .route(
+            "/node-env/{node}/{key}",
+            put(node_env::put).delete(node_env::delete),
+        )
+}

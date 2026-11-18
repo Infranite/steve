@@ -189,3 +189,14 @@ pub async fn download(
     );
     Ok(res)
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route(
+            "/files",
+            post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/files/{id}", get(files::download))
+}

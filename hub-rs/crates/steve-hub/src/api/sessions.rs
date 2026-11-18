@@ -716,3 +716,41 @@ mod tests {
         assert_eq!(after_bound(Some("Infinity")), None);
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/sessions", get(sessions::list))
+        .route("/sessions/search", get(sessions::search))
+        .route(
+            "/sessions/{id}",
+            get(sessions::get_one)
+                .patch(sessions::patch_one)
+                .delete(sessions::delete_one),
+        )
+        .route("/sessions/{id}/events", get(sessions::events))
+        .route("/sessions/{id}/messages", post(sessions::message))
+        .route("/sessions/{id}/cancel", post(sessions::cancel))
+        .route("/sessions/{id}/end", post(sessions::end))
+        .route("/sessions/{id}/continue", post(sessions::continue_new))
+        .route("/sessions/{id}/fork", post(sessions::fork))
+        .route("/sessions/{id}/link", post(sessions::link))
+        .route("/sessions/{id}/queued", get(sessions::queued_list))
+        .route("/sessions/{id}/resume", get(sessions::resume))
+        .route(
+            "/sessions/{id}/principal-state",
+            get(sessions::principal_state),
+        )
+        .route(
+            "/sessions/{id}/queued/{qid}",
+            patch(sessions::queued_edit).delete(sessions::queued_remove),
+        )
+        .route(
+            "/sessions/{id}/queued/{qid}/send-now",
+            post(sessions::queued_send_now),
+        )
+        .route("/queued/{id}", delete(sessions::drop_queued))
+        .route("/local-sessions", get(sessions::local))
+        .route("/local-sessions/import", post(sessions::import))
+}
