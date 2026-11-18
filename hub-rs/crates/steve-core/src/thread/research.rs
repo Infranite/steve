@@ -914,7 +914,9 @@ impl Core {
             } else {
                 format!("{partial}\n\n（已停下）")
             };
-            let mut meta = self.inline_meta(ws, j, None, json!({}))?;
+            /* steps of their own shape (a tool list, the time taken): the web reads them on every reply */
+            let mut meta =
+                self.inline_meta(ws, j, None, json!({"tools": [], "ms": now() - j.t0}))?;
             meta["stopped"] = json!(true);
             meta[SYSTEM] = json!(true);
             self.inline_reply(ws, j, &text, &meta)?;

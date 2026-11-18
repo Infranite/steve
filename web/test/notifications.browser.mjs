@@ -43,6 +43,7 @@ async function open(options = {}) {
     if (p === "/api/me/notification-policy" && method === "GET") return model.policyFail ? error() : json(resource.policy)
     if (p === "/api/me/notification-policy" && method === "PUT") {
       if (model.putFail) return error()
+      if (model.putGate) { model.putSent(); await model.putGate }
       resource.policy = req.postDataJSON(); return json({ ok: true })
     }
     if (p === "/api/me/notifications") return model.inboxFail ? error() : json(resource.inbox)
@@ -179,24 +180,29 @@ try {
     assert.ok(await page.locator("[data-notify-save]").isEnabled())
     await page.close()
   }
-  // Full-app A→B switch: B state stalls while A's real form remains clickable.
-  // Saving/reading that old form must remain in A, never cancel B's pending delivery.
+  // Full-app A→B switch: A's save is still in flight when B is chosen, and B's state stalls.
+  // While B loads the app shows its splash, so A's form is gone and cannot be edited against B (the native
+  // shell's switch reports not-ready until B is loaded). The in-flight save completes in A, never touches B.
   {
     const otherModel = { policy: { ...defaultPolicy, enabled: true, mode: "now", party_id: me.id, space_id: target.space_id }, inbox: [entry("b-waiting", { state: "waiting" })] }
     const unchangedB = structuredClone(otherModel)
-    const { page, calls, model, stateRequested, releaseState } = await open({ fullApp: true, otherModel, policy: { ...defaultPolicy, enabled: true, party_id: me.id } })
+    let releasePut, putSent
+    const putGate = new Promise((resolve) => { releasePut = resolve }), putStarted = new Promise((resolve) => { putSent = resolve })
+    const { page, calls, model, stateRequested, releaseState } = await open({ fullApp: true, otherModel, putGate, putSent, policy: { ...defaultPolicy, enabled: true, party_id: me.id } })
     await page.locator("[data-notify-enabled]").waitFor()
+    await page.locator("[data-notify-enabled]").click()
+    await page.locator("[data-notify-save]").click()
+    await putStarted
     await page.locator("[data-ws-switch]").click()
     await page.locator('[data-ws-opt="Second workspace"]').click()
     await stateRequested
-    assert.ok(await page.locator("[data-notify-enabled]").isChecked(), "old A form is still mounted in the delayed state window")
-    await page.locator("[data-notify-enabled]").click()
-    await page.locator("[data-notify-save]").click()
-    await page.locator("[data-notify-save-status]").filter({ hasText: /^已保存$/ }).waitFor()
-    assert.equal(model.policy.enabled, false)
+    await page.locator("[data-notify-enabled]").waitFor({ state: "detached" })
+    releasePut()
+    for (let i = 0; i < 100 && model.policy.enabled !== false; i++) await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(model.policy.enabled, false, "A's save lands in A")
     const writes = calls.filter((c) => c.method === "PUT" || c.path.endsWith("/seen"))
     assert.equal(writes.length, 1)
-    assert.ok(writes.every((c) => c.workspace === "ws_1"), "all old-form writes stay bound to A")
+    assert.ok(writes.every((c) => c.workspace === "ws_1"), "the in-flight save stays bound to A")
     assert.deepEqual(otherModel, unchangedB, "B policy and pending notification stay unchanged")
     releaseState()
     await page.waitForFunction(() => location.hash === "#/")

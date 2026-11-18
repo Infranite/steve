@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:18778"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) await mkdir(shots, { recursive: true })

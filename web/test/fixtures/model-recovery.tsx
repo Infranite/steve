@@ -10,7 +10,7 @@ st.owner = true
 st.onboard = -1
 st.workspace = { id: "w1", name: "个人" } as typeof st.workspace
 st.bots = { steve: { id: "steve", n: "Steve", main: true, harness: "claude-code", h: "Claude Code", model: "old-model", m: "old-model", mem: [], memCount: 0, routines: [], color: "#8b9eac", round: 60 } as unknown as Bot }
-st.runtimes = [{id:"claude-code", name:"Claude Code"}, {id:"codex", name:"Codex"}] as typeof st.runtimes
+st.runtimes = [{id:"claude-code", name:"Claude Code", ok:true}, {id:"codex", name:"Codex", ok:true}] as typeof st.runtimes
 st.settings = { onboard: "pending" }
 st.thread = [
   { id: "question", k: "me", t: "用来构建 AI Native 的生活与工作", files: [{id:"file-1",name:"context.txt",mime:"text/plain",size:42} as any], created: Date.now() - 2000 },

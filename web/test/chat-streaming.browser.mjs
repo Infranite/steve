@@ -77,7 +77,8 @@ try {
     await input.fill("请解释一个概念，给我一段比较长的回答。")
     const start = Date.now()
     await input.press("Enter")
-    const draft = page.locator("[data-chat-draft] .md")
+    // the reply being written, not the live steps above it (their notes are Markdown too)
+    const draft = page.locator("[data-chat-draft] .md:not([data-live-steps] .md)")
     await until(async () => (await draft.textContent().catch(() => ""))?.includes("首段已经到达"), "first streamed text")
     const first = Date.now() - start
     const mid = await page.locator("[data-chat-draft]").getAttribute("data-chat-draft")
