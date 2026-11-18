@@ -181,7 +181,6 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
                 | "node"
                 | "client"
                 | "event"
-                | "steve.thinking"
                 | "steve.draft"
                 | "steve.tool"
                 | "stats"
@@ -201,7 +200,8 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
 #[test]
 #[ignore = "W1.3a: enable when events carry ws"]
 fn s1_hub_and_user_events_invalidate_globally() {
-    for ty in ["device", "release.hold", "node", "client"] {
+    // Client presence is stateless even though its audience is User.
+    for ty in ["device", "release.hold", "node"] {
         let bus = Bus::new();
         bus.publish_value(frame(ty, false));
         assert_eq!(counts(&bus), (1, 1, 1, 0), "{ty}");
@@ -210,16 +210,11 @@ fn s1_hub_and_user_events_invalidate_globally() {
 
 #[test]
 #[ignore = "W1.3a: enable when events carry ws"]
-fn s1_live_and_stats_never_invalidate_state() {
-    for ty in [
-        "event",
-        "steve.thinking",
-        "steve.draft",
-        "steve.tool",
-        "stats",
-    ] {
+fn s1_stateless_events_never_invalidate_state() {
+    // Thinking remains in /api/state and is covered by the workspace invalidation test.
+    for ty in ["event", "steve.draft", "steve.tool", "stats", "client"] {
         let bus = Bus::new();
-        bus.publish_value(frame(ty, true));
+        bus.publish_value(frame(ty, ty != "client"));
         assert_eq!(bus.generation_for("a"), 0, "{ty}");
         assert_eq!(bus.generation_for("b"), 0, "{ty}");
         assert_eq!(bus.stats_generation(), u64::from(ty == "stats"), "{ty}");

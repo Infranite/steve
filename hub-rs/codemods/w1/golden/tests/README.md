@@ -139,8 +139,9 @@ YOLO's project scope is explicitly set to `off`; autonomous execution is never e
 
 `bus_generation.rs` pins all 39 wire types, typed HubEvent publishing/accumulation, and invalid/missing
 workspace behavior using only the Bus public API. Ordinary tests pass on the reference baseline.
-Three ignored tests express S1: workspace isolation, global Hub/User invalidation, and stateless
-LiveEvent/stats. Running `--ignored` currently passes workspace isolation but fails on `client`
-(currently stateless) and `steve.thinking` (currently state-invalidating), as expected. W1.3a must
-replace the JSON construction with typed events and remove the ignores. No production behavior
-is changed by these preparatory tests.
+Three ignored tests express S1: workspace isolation (including `steve.thinking`), global Hub/User
+invalidation except `client`, and the unchanged stateless set: `event`, `steve.draft`, `steve.tool`,
+`stats`, `client`. All three pass with `--ignored` on the reference baseline. Workspace fixtures
+explicitly inject `ws`, so this does not prove that legacy producers now supply it: none of these
+tests currently fails for missing producer metadata. W1.3a must replace the JSON construction with
+typed events and remove the ignores. No production behavior is changed by these preparatory tests.
