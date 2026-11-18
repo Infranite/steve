@@ -61,15 +61,16 @@ const ask = (method, params) => new Promise((res) => { const id = ++nextId; wait
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(() => r(false), ms); cancel = () => { clearTimeout(t); r(true) } })
 const options = [{ optionId: "allow", name: "Always Allow", kind: "allow_always" }, { optionId: "once", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]
 
-let toolN = 0, streamFailures = 0
+let toolN = 0, streamFailures = 0, capacityFailures = 0, capacitySeconds = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|streamfail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|streamfail|capacityfail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
     if (cmd === "streamfail") streamFailures = Number(a)
+    if (cmd === "capacityfail") [capacityFailures, capacitySeconds] = a.split(" ").map(Number)
     if (cmd === "flood") for (let i = 0; i < 2000; i++) {
       const gate = process.env.FAKE_ACP_FLOOD_GATE
       while (gate && !(Number(readFileSync(gate, "utf8")) > i)) if (await sleep(5)) return { ...out, stopReason: "cancelled" }
@@ -127,6 +128,11 @@ async function turn(text) {
   if (streamFailures > 0) {
     streamFailures--
     say("\nstream disconnected before completion: upstream stream interrupted")
+  }
+  if (capacityFailures > 0) {
+    capacityFailures--
+    const recovery = new Date(Date.now() + capacitySeconds * 1000).toISOString()
+    say(`\nAPI Error: 503 Service Unavailable: no eligible upstream account is currently available; the earliest account is expected to be available at ${recovery}`)
   }
   return out
 }

@@ -482,6 +482,30 @@ fn provider_stream_interruption_exhausted_card_is_not_automatically_continued_by
 }
 
 #[test]
+fn provider_capacity_exhausted_card_is_not_automatically_continued_by_yolo() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "fail",
+        "item",
+        "模型服务容量不足：已自动重试 3 次仍失败；预计恢复时间：2026-11-18T08:02:00Z",
+        "",
+        &["continue", "delivered", "look"],
+    );
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("declined", "continue.other")
+    );
+    t.clock.advance(3_600_000);
+    assert!(t.engine.tick().is_empty());
+    assert_eq!(t.decision(&d).status, "open");
+    assert!(t.kit.rt.prompts_of(&sid).is_empty());
+}
+
+#[test]
 fn a_stopped_agent_is_continued_at_once() {
     let t = t();
     let (item, sid, _) = t.item();

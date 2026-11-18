@@ -13,6 +13,8 @@ use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
 use steve_store::{ChangeEvent, FileRef, FnPublisher, Store, StoreError};
 
+#[path = "node_runtime/capacity.rs"]
+mod capacity;
 #[path = "node_runtime/stream_interruption.rs"]
 mod stream_interruption;
 

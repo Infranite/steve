@@ -36,6 +36,7 @@ use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
 use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod apply;
+mod capacity_retry;
 mod config;
 mod cost;
 mod heads;
@@ -903,7 +904,7 @@ fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, 
 
 /// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
 fn settled_status(stop_reason: &str) -> &'static str {
-    if stop_reason == "error" || stop_reason == stream_retry::STREAM_INTERRUPTED {
+    if stop_reason == "error" || steve_core::runtime::is_model_service_failure(stop_reason) {
         "error"
     } else {
         "idle"

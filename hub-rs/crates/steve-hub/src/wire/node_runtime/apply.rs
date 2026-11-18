@@ -726,8 +726,8 @@ impl NodeRuntime {
         roles.insert((session.to_string(), message.to_string()), role);
     }
 
-    /// An attempt is over: the Hub decides. A passing failure with no tool run, or an interrupted
-    /// provider stream, is tried again as a new attempt of the same turn after a wait.
+    /// An attempt is over: the Hub decides. Passing gateway, stream and capacity failures retry
+    /// as new attempts of the same turn. Service failures resume safely even after tools ran.
     pub(super) fn after_attempt_in(
         &self,
         tx: &Tx,
@@ -741,12 +741,23 @@ impl NodeRuntime {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let stream = c.stop_reason == stream_retry::STREAM_INTERRUPTED;
+        let capacity = c.stop_reason == capacity_retry::UNAVAILABLE;
+        let service = stream || capacity;
+        let capacity_wait = if capacity {
+            self.capacity_wait_in(tx, turn, ordinal, c)?
+        } else {
+            None
+        };
         let retry = c.outcome == Outcome::Failed
-            && ((stream && self.stream_retry_allowed_in(tx, session)?)
-                || (!stream && c.transient && !c.acted))
+            && ((service && self.stream_retry_allowed_in(tx, session)?)
+                || (!service && c.transient && !c.acted))
             && !cancelled
             && self.workflow_blocker_in(tx, session)?.is_none()
-            && (ordinal as usize) < RETRY_DELAYS_MS.len();
+            && if capacity {
+                capacity_wait.is_some()
+            } else {
+                (ordinal as usize) < RETRY_DELAYS_MS.len()
+            };
         // a retry carries the config of its first attempt: never once a change is waiting
         let waits = retry && config::desired_in(tx, session)?.is_some();
         if waits {
@@ -781,7 +792,15 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
-            let prompt = if stream {
+            let prompt = if capacity {
+                capacity_retry::capacity_retry_prompt(
+                    c.error
+                        .as_ref()
+                        .map(|e| e.safe_detail.as_str())
+                        .unwrap_or("service unavailable"),
+                    ordinal + 1,
+                )
+            } else if stream {
                 stream_retry::stream_retry_prompt(
                     c.error
                         .as_ref()
@@ -793,21 +812,50 @@ impl NodeRuntime {
                 spec.run.prompt
             };
             self.attempt_in(tx, session, turn, ordinal + 1, prompt)?;
-            let delay = RETRY_DELAYS_MS[ordinal as usize];
+            let at = capacity_wait
+                .as_ref()
+                .map(|w| w.at)
+                .unwrap_or_else(|| now() + RETRY_DELAYS_MS[ordinal as usize]);
+            let delay = at - now();
             tx.execute(
                 "UPDATE node_commands SET retry_at=? WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?) AND method='start_turn'",
-                rusqlite::params![now() + delay, turn],
+                rusqlite::params![at, turn],
             )?;
-            let text = format!(
-                "{}，{} 秒后自动重试（第 {} 次）",
-                if stream {
-                    "模型服务流中断"
+            if let Some(w) = &capacity_wait {
+                tx.execute(
+                    "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.provider_capacity',json(?1)) WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?2) AND method='start_turn'",
+                    rusqlite::params![json!({"deadline":w.deadline,"error":w.error,"retries":w.retries}).to_string(),turn],
+                )?;
+            }
+            let text = if capacity {
+                let error = c
+                    .error
+                    .as_ref()
+                    .map(|e| e.safe_detail.as_str())
+                    .unwrap_or_default();
+                if capacity_wait.as_ref().is_some_and(|w| w.at == w.deadline) {
+                    format!(
+                        "模型服务容量不足，预计恢复时间超出本轮等待上限；等待至 15 分钟上限后提示处理，期间不提前请求；{error}"
+                    )
                 } else {
-                    "推理网关暂时不可用"
-                },
-                delay / 1000,
-                ordinal + 1
-            );
+                    format!(
+                        "模型服务容量不足，{} 秒后自动重试（第 {} 次，上限 3 次 / 15 分钟）；{error}",
+                        (delay + 999) / 1000,
+                        ordinal + 1
+                    )
+                }
+            } else {
+                format!(
+                    "{}，{} 秒后自动重试（第 {} 次）",
+                    if stream {
+                        "模型服务流中断"
+                    } else {
+                        "推理网关暂时不可用"
+                    },
+                    delay / 1000,
+                    ordinal + 1
+                )
+            };
             rt::add_event_in(
                 tx,
                 session,
@@ -833,7 +881,11 @@ impl NodeRuntime {
             attempt: Some(last_attempt_in(tx, turn)?),
             stop: c.stop_reason.clone(),
             error: c.error.as_ref().map(|e| {
-                if stream && ordinal as usize >= RETRY_DELAYS_MS.len() {
+                if capacity && ordinal >= capacity_retry::RETRIES {
+                    format!("已自动重试 {ordinal} 次仍失败，已达次数上限；{}", said(e))
+                } else if capacity && capacity_wait.is_none() {
+                    format!("等待已达 15 分钟上限；{}", said(e))
+                } else if stream && ordinal as usize >= RETRY_DELAYS_MS.len() {
                     format!("已自动重试 {ordinal} 次仍失败：{}", said(e))
                 } else {
                     said(e)

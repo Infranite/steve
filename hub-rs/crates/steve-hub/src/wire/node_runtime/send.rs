@@ -26,6 +26,7 @@ impl NodeRuntime {
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
         let lease = match self.send_tx(|tx| {
+            self.expire_capacity_waits_in(tx)?;
             self.note_waiting_in(tx)?;
             match rt::lease_command_in(
                 tx,

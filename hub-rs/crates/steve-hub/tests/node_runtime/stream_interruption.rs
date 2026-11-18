@@ -3,7 +3,7 @@ use super::*;
 const ERROR: &str = "stream disconnected before completion: upstream stream interrupted";
 const STOP: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
 
-async fn say(h: &H, exec: &ExecutionRef, role: Role, parts: &[&str]) {
+pub(super) async fn say(h: &H, exec: &ExecutionRef, role: Role, parts: &[&str]) {
     let subject = Subject::Execution(exec.clone());
     h.node
         .emit(
@@ -34,7 +34,7 @@ async fn say(h: &H, exec: &ExecutionRef, role: Role, parts: &[&str]) {
     }
 }
 
-fn retry_at(h: &H) -> i64 {
+pub(super) fn retry_at(h: &H) -> i64 {
     h.q("SELECT retry_at FROM node_commands WHERE target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id='s1')")
 }
 
