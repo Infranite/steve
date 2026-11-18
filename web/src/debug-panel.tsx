@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { BugIcon, CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
-import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugSnapshot } from "@/api/debug"
+import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugShadow, type DebugSnapshot } from "@/api/debug"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -134,6 +134,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
           <span>{t("views:debug.observed", { time: time(snapshot.observed_at) })}</span>
         </div>
         <CurrentBlockers snapshot={snapshot} />
+        {snapshot.state?.shadow && <ShadowState shadow={snapshot.state.shadow} />}
         <div className="flex flex-col items-start gap-3 border-t border-foreground/6 pt-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1">
             <p className="type-callout" data-debug-capture-state>{capture?.active ? elapsed ? t("views:debug.expiryChecking") : t("views:debug.recording", { duration: clockDur(Math.max(0, (capture.expires_at ?? now) - now)) }) : t("views:debug.notRecording")}</p>
@@ -199,6 +200,24 @@ function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
     {deps?.resume_blocker && <p className="break-words type-footnote text-attention">{deps.resume_blocker}</p>}
     {state?.changed_during_read && <p role="status" className="type-footnote text-attention">{t("views:debug.stateChanged")}</p>}
     {state && <details><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary><pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all type-footnote font-mono text-muted-foreground">{json(state)}</pre></details>}
+  </div>
+}
+
+/** Shown next to today's state for comparison only; the item's UI does not use it yet. */
+function ShadowState({ shadow }: { shadow: DebugShadow }) {
+  const t = useT()
+  const lane = (value: string | null) => value === "needs_you" ? t("views:debug.laneNeedsYou") : value === "running" ? t("views:debug.laneRunning") : value === "done" ? t("views:debug.laneDone") : t("views:debug.unknown")
+  const settled = shadow.settled === "evaluable" ? t("views:debug.settledEvaluable") : shadow.settled === "busy" ? t("views:debug.settledBusy") : t("views:debug.settledUnknown")
+  const yes = (holds: boolean) => holds ? t("views:debug.yes") : t("views:debug.no")
+  const next = shadow.next_step
+  const step = next ? [next.type, next.kind, next.id ?? next.decision_id ?? next.session_id ?? next.action].filter(Boolean).join(" · ") + (next.at ? ` · ${time(next.at)}` : "") : null
+  return <div className="space-y-1 border-t border-foreground/6 pt-3" data-debug-shadow>
+    <h4 className="type-label text-tertiary">{t("views:debug.shadow")}</h4>
+    <p className="type-footnote text-muted-foreground">{t("views:debug.shadowHint")}</p>
+    <p className="break-words type-footnote">{shadow.label}<span className="ml-2 type-footnote font-mono text-muted-foreground">{t("views:debug.shadowLane", { lane: lane(shadow.lane), row: shadow.row })}</span></p>
+    <p className={cn("type-footnote", shadow.agrees ? "text-muted-foreground" : "text-attention")} data-debug-shadow-agrees={shadow.agrees}>{shadow.agrees ? t("views:debug.shadowAgrees") : t("views:debug.shadowDiffers", { today: lane(shadow.today.lane) })}</p>
+    <p className="break-all type-footnote font-mono text-muted-foreground">{step ? t("views:debug.shadowNext", { step }) : t("views:debug.shadowNoNext")}</p>
+    <p className="type-footnote text-muted-foreground">{t("views:debug.shadowSettled", { settled })} · {t("views:debug.shadowPredicates", { review: yes(shadow.reviewable.holds), merge: yes(shadow.mergeable.holds), close: yes(shadow.closable.holds) })}</p>
   </div>
 }
 

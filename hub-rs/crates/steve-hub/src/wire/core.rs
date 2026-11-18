@@ -1563,6 +1563,10 @@ impl Domain for CoreDomain {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.lifecycle_view(&id).map(Some)).await
     }
+    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+        let (c, id) = (self.core.clone(), id.to_string());
+        blocking(move || c.shadow_view(&id)).await
+    }
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         let (c, id) = (self.core.clone(), id.to_string());
         blocking(move || c.diagnostic_snapshot(&id)).await

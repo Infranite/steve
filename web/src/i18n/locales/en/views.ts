@@ -42,6 +42,8 @@ export default {
     "markRead": "Mark read"
 },
   debug: {
+    shadow: "Derived state (shadow)", shadowHint: "Computed from the item's facts next to today's state. Nothing acts on it yet.", shadowLane: "{{lane}} · row {{row}}", shadowAgrees: "Agrees with today's state", shadowDiffers: "Differs from today's state ({{today}})", shadowNext: "Next step: {{step}}", shadowNoNext: "No next step", shadowPredicates: "Reviewable {{review}} · Mergeable {{merge}} · Closable {{close}}", shadowSettled: "Settled: {{settled}}", yes: "yes", no: "no",
+    settledEvaluable: "evaluable", settledBusy: "known busy", settledUnknown: "unknown", laneNeedsYou: "Needs you", laneRunning: "Running", laneDone: "Done",
     open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence. New items capture decision details for their first 30 minutes.",
     current: "Current state", stateUnavailable: "The current state can't be read right now.", refresh: "Refresh", loading: "Loading…",
     itemState: "Item state: {{status}}", revision: "Cycle {{cycle}} · Goal revision {{revision}}", observed: "Observed at {{time}}",

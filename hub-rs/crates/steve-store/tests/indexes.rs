@@ -404,6 +404,22 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-store repo/items.rs dependents",
         "SELECT item_id FROM item_deps WHERE dep_id = ?",
     ),
+    // ---------------------------------------------------------------- item facts (#327)
+    (
+        "item_delivery_facts_item",
+        "steve-store repo/item_facts.rs deliveries",
+        "SELECT * FROM item_delivery_facts WHERE item_id=? AND cycle=? ORDER BY observed_at,rowid",
+    ),
+    (
+        "item_waits_open",
+        "steve-store repo/item_facts.rs waits_open",
+        "SELECT * FROM item_waits WHERE item_id=? AND cycle=? AND resolved_at IS NULL ORDER BY next_check,rowid",
+    ),
+    (
+        "runtime_turns_session",
+        "steve-store repo/item_facts.rs latest_turn",
+        "SELECT turn_id,state,updated FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
+    ),
     // ---------------------------------------------------------------- YOLO
     (
         "yolo_actions_window",

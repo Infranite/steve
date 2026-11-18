@@ -11,6 +11,7 @@ mod decisions;
 mod dependency_waits;
 pub mod feed;
 mod files;
+pub mod item_facts;
 pub mod gateway_ledger;
 mod items;
 pub mod jobs;
