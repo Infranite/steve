@@ -425,7 +425,7 @@ Calendars are data sources like any other connection. Under **Connections**, a c
 
 ## Realtime output statistics
 
-Poll `GET /api/stats/realtime` once per second with the same sign-in and `x-steve-ws` workspace header as other APIs. Workspace membership is checked by the API middleware; optional `project` and `bot` references must belong to that workspace, otherwise the response is 404. Together they form an intersection. Historical `range`, `from`, `to`, `hour`, time zone, model and source parameters have no effect. A workspace query parameter cannot switch the authenticated workspace. Responses use `Cache-Control: no-store` and bypass the historical statistics cache.
+The Statistics page does not display or poll realtime output metrics. For diagnostics, call `GET /api/stats/realtime` with the same sign-in and `x-steve-ws` workspace header as other APIs. Workspace membership is checked by the API middleware; optional `project` and `bot` references must belong to that workspace, otherwise the response is 404. Together they form an intersection. Historical `range`, `from`, `to`, `hour`, time zone, model and source parameters have no effect. A workspace query parameter cannot switch the authenticated workspace. Responses use `Cache-Control: no-store` and bypass the historical statistics cache.
 
 The stable response fields are:
 

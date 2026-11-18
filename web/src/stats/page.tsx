@@ -24,7 +24,6 @@ import { WorkflowSection } from "@/stats/workflow"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
 import { EventsSection } from "@/stats/events"
-import { RealtimeStats } from "@/stats/realtime"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { fmtN, fmtUsage, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
@@ -105,10 +104,9 @@ export function StatsView() {
             </NowLine>
             <RunState className="px-2" />
           </div>
-          <RealtimeStats key={JSON.stringify([f.project ?? null, f.bot ?? null])} project={f.project} bot={f.bot} />
           {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={NAME(f.range)} close={() => setDrill(null)} />}
         </div>
-        {s.s === "absent" ? <Empty title={t("stats:realtime.historyMissing")} sub={t("stats:realtime.historyMissingSub")} />
+        {s.s === "absent" ? <Empty title={t("stats:page.historyMissing")} sub={t("stats:page.historyMissingSub")} />
           : s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
           : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
           : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
