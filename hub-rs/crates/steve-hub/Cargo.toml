@@ -83,6 +83,8 @@ tokio = { version = "=1.54.1", features = ["test-util"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }
 http-body-util = "=0.1.5"
+# The source guards in tests/ parse Rust with it.
+syn = { version = "=2.0.119", features = ["full", "visit"] }
 steve-mail = { path = "../steve-mail", features = ["fake"] }
 steve-vault = { path = "../steve-vault" }
 steve-channels = { path = "../steve-channels", features = ["fake"] }
