@@ -258,6 +258,7 @@ pub struct Config {
     pub worktrees: PathBuf,
     pub scratch: PathBuf,
     pub listen: Listen,
+    pub metrics: Option<crate::metrics::Listen>,
     /// Primary public origin, trailing `/` stripped; decides the cookie `Secure` flag.
     pub public_url: String,
     /// Every origin Steve is served on; OIDC login returns to the one the browser used.
@@ -615,6 +616,20 @@ impl Config {
                 port_n as u16,
                 get("STEVE_ALLOW_ANY_HOST").as_deref() == Some("1"),
             )?,
+            metrics: {
+                let listen =
+                    crate::metrics::Listen::parse(&env("STEVE_METRICS_LISTEN", "127.0.0.1:9464"))?;
+                match env("STEVE_METRICS", "off").as_str() {
+                    "" | "off" => None,
+                    "prometheus" => Some(listen),
+                    _ => {
+                        return Err(ConfigError::Invalid {
+                            var: "STEVE_METRICS",
+                            msg: "expected off or prometheus".into(),
+                        });
+                    }
+                }
+            },
             public_url,
             public_urls,
             web_port,

@@ -51,6 +51,14 @@ pub fn check(get: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Re
             errors.push(format!("STEVE_HOME: {e}"));
         }
     }
+    if let Some(crate::metrics::Listen::Unix(path)) = &cfg.metrics {
+        let parent = path.parent().expect("absolute socket path");
+        if !parent.is_dir() {
+            errors.push("STEVE_METRICS_LISTEN: unix socket parent directory must exist".into());
+        } else if let Err(e) = creatable(parent) {
+            errors.push(format!("STEVE_METRICS_LISTEN: {e}"));
+        }
+    }
     let mut warnings = Vec::new();
     match crate::wire::local_node_mode(&vars, cfg.no_resume) {
         Err(e) => errors.push(e.to_string()),
@@ -257,6 +265,39 @@ mod tests {
                 && w.contains("own sign-in")
                 && w.contains("never a copy")),
             "{en:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_rejects_unknown_modes_and_non_loopback_addresses() {
+        for kv in [
+            vec![("STEVE_METRICS", "other")],
+            vec![
+                ("STEVE_METRICS", "prometheus"),
+                ("STEVE_METRICS_LISTEN", "0.0.0.0:9464"),
+            ],
+        ] {
+            let r = run(&kv);
+            assert!(
+                !r.ok && r.errors.iter().any(|e| e.starts_with("STEVE_METRICS")),
+                "{r:?}"
+            );
+        }
+        let r = run(&[
+            ("STEVE_METRICS", "prometheus"),
+            ("STEVE_METRICS_LISTEN", "[::1]:9464"),
+        ]);
+        assert!(r.ok, "{r:?}");
+        let r = run(&[
+            ("STEVE_METRICS", "prometheus"),
+            ("STEVE_METRICS_LISTEN", "unix:/nonexistent/metrics/socket"),
+        ]);
+        assert!(
+            !r.ok
+                && r.errors
+                    .iter()
+                    .any(|e| e.starts_with("STEVE_METRICS_LISTEN")),
+            "{r:?}"
         );
     }
 
