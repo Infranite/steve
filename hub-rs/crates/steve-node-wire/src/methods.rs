@@ -131,6 +131,7 @@ rpc_table! {
     EVENTS_COMMIT = "events.commit": NodeToHub Events Commit false;
     // HubTools
     TOOL_CATALOG = "tool.catalog": NodeToHub Control Read false;
+    TOOL_SESSION_CATALOG = "tool.session_catalog": NodeToHub Control Read false;
     TOOL_CALL = "tool.call": NodeToHub Control Tool true;
     TOOL_INSPECT = "tool.inspect": NodeToHub Control Read false;
     TOOL_CANCEL = "tool.cancel": NodeToHub Control Command true;

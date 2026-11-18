@@ -83,9 +83,32 @@ fn authorize_session(
     {
         return Err(denied());
     }
+    let (s, gated) = bound_session(
+        store,
+        node,
+        session.as_str(),
+        active,
+        allow_dependency_management,
+    )?;
+    Ok((s, spec, gated))
+}
+
+fn bound_session(
+    store: &Store,
+    node: &NodeId,
+    session: &str,
+    check_gate: bool,
+    allow_dependency_management: bool,
+) -> ApiResult<(Session, bool)> {
+    let bound=store.reader(|c| Ok::<_,StoreError>(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_sessions r WHERE r.session_id=?1 AND r.node_session_id=?1 AND r.node_id=?2 AND EXISTS(SELECT 1 FROM node_commands c WHERE c.node_id=?2 AND c.method='open_session' AND json_extract(c.request,'$.body.session')=?1 AND json_extract(c.request,'$.body.policy.tools')='hub'))",
+        params![session,node.as_str()],|r|r.get::<_,bool>(0))?)).map_err(internal)?;
+    if !bound {
+        return Err(denied());
+    }
     let s = store
         .sessions()
-        .get(session.as_str())
+        .get(session)
         .map_err(internal)?
         .ok_or_else(denied)?;
     // Same ended-session revocation as sessions.by_token(), plus no imported/read-only sessions.
@@ -95,7 +118,7 @@ fn authorize_session(
     // Steve tools enter through the Node without a harness permission card. Recheck the same
     // persisted gate used for turns before every fresh call, including the check after its fence.
     // A known ToolKey must still be readable when a wait/replan stops further work.
-    let gated = active
+    let gated = check_gate
         && store
             .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
             .map_err(internal)?
@@ -131,7 +154,7 @@ fn authorize_session(
             return Err(denied());
         }
     }
-    Ok((s, spec, gated))
+    Ok((s, gated))
 }
 
 /// A research job of this Node (grant [`RESEARCH_GRANT`]) and its thread run: the job attempt must
@@ -368,6 +391,31 @@ impl NodeTools {
             tools,
         })
     }
+    async fn listed_catalog(&self, caller: Caller) -> ApiResult<Catalog> {
+        let attachment = if let Caller::Session(s) = &caller {
+            let (store, id) = (self.store.clone(), s.id.clone());
+            blocking(move || store.sessions().mcp_attachment(&id).map_err(internal)).await?
+        } else {
+            None
+        };
+        let catalog = Self::catalog_of(&*self.service()?, &caller).await?;
+        // A prefetch or configuration declaration is not attachment evidence. This is the
+        // session's authenticated catalog request from its Node's MCP endpoint.
+        if let (Caller::Session(s), Some(a)) = (&caller, attachment)
+            && !a.ready
+            && [
+                steve_mcp::tools::UPDATE,
+                steve_mcp::tools::ASK,
+                steve_mcp::tools::DELIVER,
+            ]
+            .iter()
+            .all(|name| catalog.tools.iter().any(|t| t.name == *name))
+        {
+            let (store, id) = (self.store.clone(), s.id.clone());
+            blocking(move || store.sessions().confirm_mcp(&id, &a.open).map_err(internal)).await?;
+        }
+        Ok(catalog)
+    }
     fn key(key: &ToolKey) -> ApiResult<String> {
         serde_json::to_string(key).map_err(internal)
     }
@@ -452,31 +500,20 @@ fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Optio
 }
 #[async_trait]
 impl HubTools for NodeTools {
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        let (store, node) = (self.store.clone(), self.node.clone());
+        let (s, gated) =
+            blocking(move || bound_session(&store, &node, session.as_str(), true, true)).await?;
+        self.listed_catalog(if gated {
+            Caller::DependencyManagement(s)
+        } else {
+            Caller::Session(s)
+        })
+        .await
+    }
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         let caller = self.authorized(&execution, true).await?;
-        let attachment = if let Caller::Session(s) = &caller {
-            let (store, id) = (self.store.clone(), s.id.clone());
-            blocking(move || store.sessions().mcp_attachment(&id).map_err(internal)).await?
-        } else {
-            None
-        };
-        let catalog = Self::catalog_of(&*self.service()?, &caller).await?;
-        // A prefetch or configuration declaration is not attachment evidence. This is the
-        // session's authenticated catalog request from its Node's MCP endpoint.
-        if let (Caller::Session(s), Some(a)) = (&caller, attachment)
-            && !a.ready
-            && [
-                steve_mcp::tools::UPDATE,
-                steve_mcp::tools::ASK,
-                steve_mcp::tools::DELIVER,
-            ]
-            .iter()
-            .all(|name| catalog.tools.iter().any(|t| t.name == *name))
-        {
-            let (store, id) = (self.store.clone(), s.id.clone());
-            blocking(move || store.sessions().confirm_mcp(&id, &a.open).map_err(internal)).await?;
-        }
-        Ok(catalog)
+        self.listed_catalog(caller).await
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         let key = q.key();
@@ -503,6 +540,19 @@ impl HubTools for NodeTools {
             && !(matches!(session, Caller::Session(_)) && service.allows_unlisted())
         {
             return Err(ApiError::new(ErrorCode::Denied, "tool outside catalog"));
+        }
+        if let Caller::Session(s) = &session {
+            let (store, id) = (self.store.clone(), s.id.clone());
+            blocking(move || {
+                if let Some(a) = store.sessions().mcp_attachment(&id).map_err(internal)? {
+                    store
+                        .sessions()
+                        .confirm_mcp_call(&id, &a.open)
+                        .map_err(internal)?;
+                }
+                Ok(())
+            })
+            .await?;
         }
         if !q.args.is_object() {
             return Err(ApiError::new(
@@ -846,6 +896,72 @@ pub(crate) mod tests {
             deadline: Timestamp(steve_store::now() + 60_000),
         }
     }
+    #[tokio::test]
+    async fn session_discovery_without_a_turn_is_scoped_and_never_authorizes_a_call() {
+        let h = fixture(vec![]).await;
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        let service = Arc::new(Mock {
+            calls: AtomicUsize::new(0),
+            gate: None,
+        });
+        tools.install(service.clone()).unwrap();
+        let q = request(&tools, h.exec.clone()).await;
+        h.store.transaction::<_,StoreError>(|tx| {
+            tx.execute_batch("UPDATE runtime_attempts SET state='finished'; UPDATE runtime_sessions SET active_attempt=NULL,phase='ready'; UPDATE runtime_turns SET active_attempt=NULL,state='finished';")?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(
+            tools
+                .session_catalog(SessionId::new("s1").unwrap())
+                .await
+                .unwrap()
+                .tools[0]
+                .name,
+            "test"
+        );
+        assert!(
+            tools.call(q).await.is_err(),
+            "discovering an idle session cannot reuse its stale attempt"
+        );
+        assert_eq!(service.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            tools
+                .session_catalog(SessionId::new("foreign-session").unwrap())
+                .await
+                .is_err()
+        );
+        let foreign = NodeTools::open(
+            h.store.clone(),
+            NodeId::new("foreign-node").unwrap(),
+            &h.dir.path().join("foreign"),
+        )
+        .unwrap();
+        foreign.install(service.clone()).unwrap();
+        assert!(
+            foreign
+                .session_catalog(SessionId::new("s1").unwrap())
+                .await
+                .is_err()
+        );
+        h.store
+            .sessions()
+            .patch(
+                "s1",
+                &steve_store::SessionPatch {
+                    status: Some("ended".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            tools
+                .session_catalog(SessionId::new("s1").unwrap())
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn once_conflict_revocation_and_durable_result() {
         let h = fixture(vec![]).await;

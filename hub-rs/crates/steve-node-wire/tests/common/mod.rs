@@ -88,6 +88,12 @@ pub struct StubTools {
 
 #[async_trait]
 impl HubTools for StubTools {
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        Ok(Catalog {
+            revision: Revision::new(format!("catalog-{session}")).unwrap(),
+            tools: vec![],
+        })
+    }
     async fn catalog(&self, _: ExecutionRef) -> ApiResult<Catalog> {
         Ok(Catalog {
             revision: Revision::new("c1").unwrap(),

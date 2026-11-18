@@ -114,6 +114,7 @@ pub struct McpAttachment {
     pub open: String,
     pub ready: bool,
     pub seq: i64,
+    pub fault: Option<String>,
 }
 
 const SESSION: &str = "SELECT * FROM sessions WHERE id = ?";
@@ -121,8 +122,8 @@ const SESSION: &str = "SELECT * FROM sessions WHERE id = ?";
 impl Sessions<'_> {
     pub fn mcp_attachment(&self, id: &str) -> Result<Option<McpAttachment>> {
         self.0.read(|c| {
-            one(c, "SELECT seq,json_extract(data,'$.steve_mcp.open'),json_extract(data,'$.steve_mcp.ready') FROM events WHERE session_id=? AND kind='system' AND json_type(data,'$.steve_mcp.open')='text' ORDER BY seq DESC LIMIT 1", [id], |r| {
-                Ok(McpAttachment {seq:r.get(0)?, open:r.get(1)?, ready:r.get(2)?})
+            one(c, "SELECT seq,json_extract(data,'$.steve_mcp.open'),json_extract(data,'$.steve_mcp.ready'),json_extract(data,'$.steve_mcp.fault') FROM events WHERE session_id=? AND kind='system' AND json_type(data,'$.steve_mcp.open')='text' ORDER BY seq DESC LIMIT 1", [id], |r| {
+                Ok(McpAttachment {seq:r.get(0)?, open:r.get(1)?, ready:r.get(2)?,fault:r.get(3)?})
             })
         })
     }
@@ -146,7 +147,7 @@ impl Sessions<'_> {
             if self.get(id)?.is_none_or(|s| s.status == "ended")
                 || self
                     .mcp_attachment(id)?
-                    .is_none_or(|a| a.open != open || a.ready)
+                    .is_none_or(|a| a.open != open || a.ready || a.fault.is_some())
             {
                 return Ok(());
             }
@@ -155,6 +156,39 @@ impl Sessions<'_> {
                 "system",
                 serde_json::json!({
                     "steve_mcp":{"open":open,"ready":true}
+                }),
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Catalog discovery is not proof that an actual call has a valid execution identity.
+    pub fn confirm_mcp_call(&self, id: &str, open: &str) -> Result<()> {
+        self.0.atomic(|| {
+            if self.get(id)?.is_none_or(|s|s.status=="ended") || self.mcp_attachment(id)?.is_none_or(|a|a.open!=open) {return Ok(());}
+            let known=self.0.read(|c| one(c,"SELECT seq FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.steve_mcp_called')=?2 LIMIT 1",[id,open],|r|r.get::<_,i64>(0)))?.is_some();
+            if self.mcp_attachment(id)?.is_some_and(|a|!a.ready) {
+                self.0.events().add(id,"system",serde_json::json!({"steve_mcp":{"open":open,"ready":true}}))?;
+            }
+            if !known { self.0.events().add(id,"system",serde_json::json!({"steve_mcp_called":open}))?; }
+            Ok(())
+        })
+    }
+
+    /// Only a Hub-validated Node report from a currently claimed attempt may call this.
+    pub fn mcp_attempt_missing(&self, id: &str) -> Result<()> {
+        self.0.atomic(|| {
+            let Some(a) = self.mcp_attachment(id)? else {
+                return Ok(());
+            };
+            if a.fault.as_deref() == Some("missing_attempt") {
+                return Ok(());
+            }
+            self.0.events().add(
+                id,
+                "system",
+                serde_json::json!({
+                    "steve_mcp":{"open":a.open,"ready":false,"fault":"missing_attempt"}
                 }),
             )?;
             Ok(())

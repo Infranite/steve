@@ -196,7 +196,7 @@ fn a_confirmed_attachment_resets_the_consecutive_recreation_budget() {
     k.db()
         .store()
         .sessions()
-        .confirm_mcp(&ns, &format!("open-{ns}"))
+        .confirm_mcp_call(&ns, &format!("open-{ns}"))
         .unwrap();
     // The adapter may attach before the inherited counter is recorded by the creator.
     k.db()
@@ -260,4 +260,30 @@ fn attachment_proof_is_per_open_and_cannot_leak_across_sessions_or_arrive_late()
     let restored = sessions.mcp_attachment(&a).unwrap().unwrap();
     assert!(restored.ready);
     assert_eq!(restored.open, "new-open");
+}
+
+#[test]
+fn a_catalog_without_a_usable_attempt_does_not_reset_recovery_budget() {
+    let k = Kit::new();
+    let (item, mut sid) = started(&k);
+    for attempt in 0..3 {
+        let sessions = k.db().store().sessions();
+        sessions.confirm_mcp(&sid, &format!("open-{sid}")).unwrap();
+        sessions.mcp_attempt_missing(&sid).unwrap();
+        sessions.confirm_mcp(&sid, &format!("open-{sid}")).unwrap();
+        assert!(
+            !sessions.mcp_attachment(&sid).unwrap().unwrap().ready,
+            "listing again cannot clear an execution fault"
+        );
+        k.rt.end_turn(&k.core, &sid, "end_turn", None);
+        let ns = latest(&k, &item);
+        if attempt < 2 {
+            assert_ne!(ns, sid);
+            sid = ns;
+            expect(&k, &sid);
+        } else {
+            assert_eq!(ns, sid);
+        }
+    }
+    assert_eq!(k.open_fails(&item).len(), 1);
 }

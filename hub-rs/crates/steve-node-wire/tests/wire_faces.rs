@@ -24,6 +24,21 @@ fn show<T: Serialize>(r: &ApiResult<T>) -> String {
     }
 }
 
+#[tokio::test]
+async fn session_tool_discovery_round_trips_without_an_execution() {
+    let w = wire(FakeNode::new("n1"), 1);
+    let tools = steve_node_wire::RemoteTools(w.link.clone());
+    let catalog = tools
+        .session_catalog(SessionId::new("session-before-first-turn").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        catalog.revision.as_str(),
+        "catalog-session-before-first-turn"
+    );
+    assert!(w.tools.calls.lock().unwrap().is_empty());
+}
+
 fn rel(s: &str) -> RelPath {
     RelPath::new(s).unwrap()
 }

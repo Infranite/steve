@@ -21,6 +21,9 @@ impl Tx<'_> {
         let Some(a) = self.db().store().sessions().mcp_attachment(sid)? else {
             return Ok(false); // pre-upgrade/foreign runtimes supplied no attachment contract
         };
+        if a.fault.as_deref() == Some("missing_attempt") {
+            return Ok(true);
+        }
         if a.ready {
             return Ok(false);
         }
@@ -83,17 +86,21 @@ impl Tx<'_> {
         let retries = if manual {
             0
         } else {
-            // A successor's startup can confirm its catalog before start_session_files returns
-            // and writes the inherited counter. Any confirmation in this session resets it,
-            // irrespective of that event ordering; a later reopen starts a fresh failure streak.
+            // A usable MCP call can precede the inherited counter. Discovery alone does not
+            // reset a streak: a mounted server may still lack an execution identity.
             self.db().store().reader(|c| -> Result<_> {
-                Ok(c.query_row("SELECT json_extract(data,'$.mcp_recovery_attempt') FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.mcp_recovery_attempt')='integer' AND NOT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.steve_mcp.ready')=1) ORDER BY seq DESC LIMIT 1", [sid], |r| r.get::<_,i64>(0)).optional()?.unwrap_or(0))
+                Ok(c.query_row("SELECT json_extract(data,'$.mcp_recovery_attempt') FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.mcp_recovery_attempt')='integer' AND NOT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.steve_mcp_called')='text') ORDER BY seq DESC LIMIT 1", [sid], |r| r.get::<_,i64>(0)).optional()?.unwrap_or(0))
             })?
         };
         if retries >= MAX_RECREATIONS {
             self.block_missing_mcp(sid, item)?;
             return Ok(true);
         }
+        let cause = if a.fault.as_deref() == Some("missing_attempt") {
+            "Steve 工具无法关联运行尝试（Node 没有 active attempt，但 Hub 仍记录执行中）"
+        } else {
+            "没有挂上 Steve 工具"
+        };
         let ctx = self.transcript_up_to(sid, i64::MAX)?;
         let waiting = self.db().queued(sid)?;
         let mut files: Vec<FileRef> = vec![];
@@ -126,7 +133,7 @@ impl Tx<'_> {
             }
         }
         let opening = format!(
-            "上一个会话没有挂上 Steve 工具，已自动转到新会话。先用 steve_update 确认工具可用。\n\n上一个会话的对话：\n{ctx}\n\n尚未处理的用户消息：\n{}\n\n先核对代码、PR 和实际操作现状，再接着收尾；已经完成的推送、合并、打 tag、发布不要重做。做完用 steve_deliver 交付，需要用户决定时用 steve_ask。",
+            "上一个会话{cause}，已自动转到新会话。先用 steve_update 确认工具可用。\n\n上一个会话的对话：\n{ctx}\n\n尚未处理的用户消息：\n{}\n\n先核对代码、PR 和实际操作现状，再接着收尾；已经完成的推送、合并、打 tag、发布不要重做。做完用 steve_deliver 交付，需要用户决定时用 steve_ask。",
             messages.join("\n\n")
         );
         // Commit the terminal old session before asking another thread to place/open its successor.
@@ -140,8 +147,8 @@ impl Tx<'_> {
             }
             crate::lifecycle::supersede_where(self.db(),item,crate::lifecycle::stop_card,"没有挂上 Steve 工具，转到新会话")?;
             self.db().session_patch(sid,patch![status:"ended"])?;
-            self.db().event_add(sid, "system", json!({"text":"没有收到本次启动的 Steve 工具目录，已结束此会话并自动重开。"}))?;
-            self.db().timeline_add(item, "steve", "sys", &format!("会话 #{} 没有挂上 Steve 工具，自动重开（第 {}/{MAX_RECREATIONS} 次）；保留已有工作并核对后继续",s.no,retries+1),Some(sid))
+            self.db().event_add(sid, "system", json!({"text":format!("{cause}，已结束此会话并自动重开。")}))?;
+            self.db().timeline_add(item, "steve", "sys", &format!("会话 #{} {cause}，自动重开（第 {}/{MAX_RECREATIONS} 次）；保留已有工作并核对后继续",s.no,retries+1),Some(sid))
         })?;
         // Runtime calls acquire their coordinator lock before the store writer. Never call them
         // inside the store transaction: an inbox worker could already hold that lock waiting for
@@ -187,7 +194,7 @@ impl Tx<'_> {
     }
 
     fn block_missing_mcp(&mut self, sid: &str, item: &str) -> Result<()> {
-        let question = "Steve 工具未挂上，连续自动重开 2 次仍未恢复；已停止自动重试，请检查 Hub/Node 连接后点击重试，或重新指派。";
+        let question = "Steve 工具挂载或执行身份异常，连续自动重开 2 次仍未恢复；已停止自动重试，请检查 Hub/Node 连接后点击重试，或重新指派。";
         let db = self.db().clone();
         db.atomic(|| {
             self.db()

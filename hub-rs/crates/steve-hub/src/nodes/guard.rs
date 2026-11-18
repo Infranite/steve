@@ -293,6 +293,14 @@ pub struct GuardedTools(pub LinkCtx);
 
 #[async_trait]
 impl HubTools for GuardedTools {
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        self.0.live()?;
+        self.0
+            .fleet
+            .tools_for(&self.0.node)
+            .session_catalog(session)
+            .await
+    }
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         self.0.live()?;
         self.0
