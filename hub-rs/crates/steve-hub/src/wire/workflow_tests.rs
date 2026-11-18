@@ -74,6 +74,7 @@ impl Fixture {
             workspaces,
             worktrees: Some(cfg.worktrees.clone()),
             preflight: None,
+            dispatch_harnesses: None,
         });
         let core = Core::new(
             steve_core::repo::Db::new(store.clone()),

@@ -4,6 +4,7 @@
 mod annotations;
 pub(crate) mod attention;
 mod avatar;
+mod bot_dispatch;
 mod bots;
 pub mod dedupe;
 mod deliveries;
@@ -702,6 +703,16 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/decisions/{id}/dismiss", post(misc::decision_dismiss))
         .route("/decisions/{id}/undo", post(misc::decision_undo))
         // bots
+        .route(
+            "/bot-teams",
+            get(bot_dispatch::list).post(bot_dispatch::create),
+        )
+        .route("/bot-teams/default", put(bot_dispatch::set_default))
+        .route("/bot-teams/{id}", put(bot_dispatch::update))
+        .route(
+            "/bots/{id}/execution-nodes",
+            get(bot_dispatch::candidates).put(bot_dispatch::set_bindings),
+        )
         .route("/bots", post(bots::create))
         .route("/bots/draft", post(bots::draft))
         .route(
@@ -723,7 +734,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         )
         // projects and filesystem
         .route("/projects", post(projects::create))
-        .route("/projects/setup/preview", post(project_setup::setup_preview))
+        .route(
+            "/projects/setup/preview",
+            post(project_setup::setup_preview),
+        )
         .route("/projects/setup", post(project_setup::setup))
         .route("/projects/describe", post(projects::describe))
         .route("/projects/{id}", patch(projects::patch_one))

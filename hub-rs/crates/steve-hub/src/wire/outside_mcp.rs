@@ -98,7 +98,8 @@ pub fn tools() -> Vec<Value> {
         "inputSchema": schema(json!({
             "goal": {"type": "string", "description": "What should be done, self-contained."},
             "title": {"type": "string", "description": "A short title; Steve writes one when left out."},
-            "bot": {"type": "string", "description": "The id or name of the Bot to do it; Steve chooses when left out."}
+            "bot": {"type": "string", "description": "The id or name of the Bot to do it; Steve chooses when left out."},
+            "team": {"type": "string", "description": "A Bot Team id or unambiguous name in this workspace, for this item only. Omit to use the workspace default."}
         }), &["goal"]),
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
     }));
@@ -286,7 +287,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     let obj = args.as_object().cloned().unwrap_or_default();
     if obj
         .keys()
-        .any(|k| !["goal", "title", "bot"].contains(&k.as_str()))
+        .any(|k| !["goal", "title", "bot", "team"].contains(&k.as_str()))
     {
         return Err("Invalid arguments: unexpected property.".into());
     }
@@ -294,6 +295,30 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
         .ok_or("Invalid arguments: goal must be a non-empty string.")?
         .to_string();
     let title = text_arg(args, "title").map(str::to_string);
+    let team = match args.get("team") {
+        None => None,
+        Some(_) => {
+            let wanted = text_arg(args, "team")
+                .ok_or("Invalid arguments: team must be a non-empty string.")?;
+            let teams = x
+                .store
+                .reader(|c| steve_store::bot_dispatch::teams(c, &o.ws))
+                .map_err(|e| e.to_string())?;
+            if wanted == steve_store::bot_dispatch::LEGACY || teams.iter().any(|t| t.id == wanted) {
+                Some(wanted.to_string())
+            } else {
+                let mut matches = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(wanted));
+                match (matches.next(), matches.next()) {
+                    (Some(t), None) => Some(t.id.clone()),
+                    _ => {
+                        return Err(
+                            "No unambiguous Bot Team by that id or name in this workspace.".into(),
+                        );
+                    }
+                }
+            }
+        }
+    };
     let core = x.tools.core.clone();
     // a Bot named by id or name, of this workspace
     let bot = match text_arg(args, "bot") {
@@ -330,7 +355,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     };
     let routed = if bot.is_none() || title.is_none() {
         Some(
-            core.route(&o.ws, &goal, &[], false)
+            core.route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
                 .await
                 .map_err(|e| e.to_string())?,
         )
@@ -358,6 +383,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
             goal,
             title,
             bot,
+            team,
             project,
             source: Some((format!("MCP · {source}"), "mcp".into())),
             tag_ids,

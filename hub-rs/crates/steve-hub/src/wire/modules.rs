@@ -58,6 +58,7 @@ impl steve_flow::Core for FlowCore {
                     goal: req.goal,
                     title: req.title,
                     bot: Some(req.bot),
+                    team: None,
                     project: req.project.map(Some),
                     source: Some(req.source),
                     parent: None,

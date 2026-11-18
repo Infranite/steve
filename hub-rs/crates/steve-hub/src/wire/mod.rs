@@ -7,6 +7,7 @@
 
 pub mod acp_stats;
 pub mod auth;
+pub(crate) mod bot_dispatch;
 pub mod bot_skills;
 pub mod calendar;
 pub mod chan;
@@ -796,6 +797,7 @@ pub fn wire_assembly(
         workspaces: workspaces.clone(),
         worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
         preflight: Some(preflight.clone()),
+        dispatch_harnesses: Some(harnesses.clone()),
     });
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),

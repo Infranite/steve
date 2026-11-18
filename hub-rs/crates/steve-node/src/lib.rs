@@ -4409,6 +4409,18 @@ impl Discovery for LocalNode {
                 };
                 adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
                 if let Some(a) = c.adapter.as_mut() {
+                    let ceiling = &self.0.cfg.ceiling;
+                    a.execution_modes = a.session.as_ref().map(|o| {
+                        o.modes
+                            .iter()
+                            .copied()
+                            .filter(|m| {
+                                ceiling.full_network
+                                    && PolicyCeiling::rank(*m)
+                                        <= PolicyCeiling::rank(ceiling.max_permissions)
+                            })
+                            .collect()
+                    });
                     a.update = self.0.adapter_updates.get(&self.0.cfg.acp, h);
                 }
                 if let Some(req) = requirements.get(h) {

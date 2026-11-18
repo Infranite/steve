@@ -651,7 +651,10 @@ async fn your_answer_that_reached_the_hub_after_the_draft_opened_stops_yolo() {
         .await
         .response
         .unwrap();
-    let (draft, card) = (r.out_message_id.expect("draft"), r.decision_id.expect("card"));
+    let (draft, card) = (
+        r.out_message_id.expect("draft"),
+        r.decision_id.expect("card"),
+    );
     // said 38.5 s after their message, stored now, without passing the inbound path
     you_said_elsewhere(&h, "D_LI", -2);
     h.env.clock.advance(600_000);

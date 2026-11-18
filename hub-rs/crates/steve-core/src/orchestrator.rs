@@ -48,6 +48,7 @@ pub struct CreateItem {
     pub goal: String,
     pub title: String,
     pub bot: Option<String>,
+    pub team: Option<String>,
     /// `None`: not given (the bot's default project); `Some(None)`: explicitly no project.
     pub project: Option<Option<String>>,
     /// `[label, code]`, e.g. `["对话", "chat"]`; `None` keeps the column default.
@@ -1273,43 +1274,67 @@ impl Tx<'_> {
 
     pub(crate) fn create_item(&mut self, n: CreateItem) -> Result<Item> {
         let db = self.db();
+        let (item, bot, project, guessed) = db.atomic(|| {
+            let ws = n.ws.as_str();
+            let team = db.store().reader(|c| steve_store::bot_dispatch::selected(c, ws, n.team.as_deref()))?;
+            let selected_bot = n.bot.as_deref().filter(|b| !b.is_empty());
+            let bot = match selected_bot {
+                Some(b) if db.bot_in_workspace(b, ws)? => db.bot(b)?,
+                _ => None,
+            };
+            let bot = match &team {
+                Some(team) => match (selected_bot, bot) {
+                    (_, Some(b)) if b.enabled && team.member(&b.id).is_some() => b,
+                    (None, _) => {
+                        let bots = db.bots(ws)?;
+                        team.members.iter().find_map(|m| bots.iter().find(|b| b.id == m.bot && b.enabled))
+                            .cloned()
+                            .ok_or_else(|| crate::cycle::conflict(steve_i18n::t!("core.bot_team.no_members")))?
+                    }
+                    _ => return Err(crate::cycle::conflict(steve_i18n::t!("core.bot_team.outside_team"))),
+                },
+                None => match bot {
+                    Some(b) => b,
+                    None => db.main_bot()?,
+                },
+            };
+            let project = match &n.project {
+                Some(p) => db.project(p.as_deref().filter(|p| !p.is_empty()))?,
+                None => db.project(bot.default_project.as_deref())?,
+            };
+            let project = project.filter(|p| p.workspace_id == ws);
+            /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
+            let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
+            /* whose access its runs use: the member who asked (Steve, a flow or a stranger: nobody) */
+            let requested_by = match n.requester.as_deref().or(n.actor.as_deref()) {
+                Some(a) if db.store().workspaces().is_member(ws, a)? => Some(a.to_string()),
+                _ => None,
+            };
+            let item = db.item_create(
+                ws,
+                &NewItem {
+                    title: n.title.clone(),
+                    goal: n.goal.clone(),
+                    bot_id: bot.id.clone(),
+                    project_id: project.as_ref().map(|p| p.id.clone()),
+                    kind: None,
+                    status: Some(if n.propose { "wait" } else { "run" }.into()),
+                    stage: Some(if n.propose { "规划" } else { "定义" }.into()),
+                    source: n.source.clone(),
+                    parent: n.parent.clone(),
+                    tags,
+                    requested_by,
+                },
+            )?;
+            if let Some(team) = &team {
+                db.store().transaction(|c| {
+                    steve_store::bot_dispatch::snapshot(c, &item.id, team,
+                        if n.team.is_some() { "explicit" } else { "default" })
+                })?;
+            }
+            Ok((item, bot, project, guessed))
+        })?;
         let ws = n.ws.as_str();
-        let bot = match n.bot.as_deref().filter(|b| !b.is_empty()) {
-            Some(b) if db.bot_in_workspace(b, ws)? => db.bot(b)?,
-            _ => None,
-        };
-        let bot = match bot {
-            Some(b) => b,
-            None => db.main_bot()?,
-        };
-        let project = match &n.project {
-            Some(p) => db.project(p.as_deref().filter(|p| !p.is_empty()))?,
-            None => db.project(bot.default_project.as_deref())?,
-        };
-        let project = project.filter(|p| p.workspace_id == ws);
-        /* exactly one category, in the same write as the item: Steve's pick if nobody named one */
-        let (tags, guessed) = crate::kinds::settle(db, ws, &n.tag_ids, &n.title, &n.goal)?;
-        /* whose access its runs use: the member who asked (Steve, a flow or a stranger: nobody) */
-        let requested_by = match n.requester.as_deref().or(n.actor.as_deref()) {
-            Some(a) if db.store().workspaces().is_member(ws, a)? => Some(a.to_string()),
-            _ => None,
-        };
-        let item = db.item_create(
-            ws,
-            &NewItem {
-                title: n.title.clone(),
-                goal: n.goal.clone(),
-                bot_id: bot.id.clone(),
-                project_id: project.as_ref().map(|p| p.id.clone()),
-                kind: None,
-                status: Some(if n.propose { "wait" } else { "run" }.into()),
-                stage: Some(if n.propose { "规划" } else { "定义" }.into()),
-                source: n.source.clone(),
-                parent: n.parent.clone(),
-                tags,
-                requested_by,
-            },
-        )?;
         let where_ = project
             .as_ref()
             .map(|p| format!("，项目 {}", p.name))
@@ -4696,6 +4721,7 @@ impl Tx<'_> {
             actor: Some(actor.into()),
             requester: None,
             files: vec![],
+            team: None,
         })?;
         if let Some(pi) = s.item_id.as_deref() {
             self.db().timeline_add(

@@ -434,6 +434,7 @@ pub struct RoutedRuntime {
     /// Whether a principal's Bot can run at all ([`super::preflight::Preflight`]), asked before
     /// a session is made or a message opens one. `None`: not asked.
     pub preflight: Option<Arc<super::preflight::Preflight>>,
+    pub dispatch_harnesses: Option<Arc<crate::harnesses::HubHarnesses>>,
 }
 
 /// Whether boot recovery leaves `session` to the Node it is bound to (enabled here or not: a
@@ -596,7 +597,7 @@ impl RoutedRuntime {
     }
 
     /// The harness mode `session_id` is meant to start in (YOLO's widening included).
-    fn perm_mode(&self, session_id: &str) -> Option<String> {
+    pub(super) fn perm_mode(&self, session_id: &str) -> Option<String> {
         self.host.perm_mode(session_id)
     }
 
@@ -652,6 +653,11 @@ impl RoutedRuntime {
             .into_iter()
             .filter(|id| id != "local")
             .filter_map(|id| steve_node_api::NodeId::new(id).ok())
+            .filter(|id| {
+                self.store
+                    .reader(|c| steve_store::bot_dispatch::legacy_spread(c, id.as_str()))
+                    .unwrap_or(false)
+            })
             .filter(|id| f.remote(id).generation().is_some())
             .filter_map(|id| load(id.as_str()).map(|l| (id, l)));
         spread_pick(here, there)
@@ -740,7 +746,7 @@ impl RoutedRuntime {
     }
 
     /// [`Self::local_binding`], saying why there is none.
-    fn local_plan(
+    pub(super) fn local_plan(
         &self,
         session_id: &str,
     ) -> Result<super::node_runtime::Binding, super::node_binding::Unbound> {
@@ -762,6 +768,9 @@ impl RoutedRuntime {
 
     /// Why nothing runs `session_id` (bound to no Node), as stored text (zh-CN).
     fn refused(&self, session_id: &str) -> String {
+        if let Some(why) = self.dispatch_refusal(session_id) {
+            return why;
+        }
         steve_i18n::stored(|| {
             let why = match &self.node {
                 None => steve_i18n::t!("hub.node.unbound.off"),
@@ -820,6 +829,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         }
     }
     fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> steve_core::Result<()> {
+        if self.check_dispatch(item_id, bot_id)? {
+            return Ok(());
+        }
         self.preflight(|p, c| p.can_run_item(c, item_id, bot_id, harness))
             .map_err(CoreError::Msg)
     }
@@ -916,15 +928,21 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 && f.remote(&id).generation().is_some())
         };
         // Recovery keeps the bound Node; availability on some other Node is no substitute.
+        let mut fixed = false;
         for session in self.store.sessions().of_item(item_id)? {
             if session.status != "ended"
                 && let Some(node) = node_of_strict(&self.store, &session.id)?
-                && !eligible(&node)?
             {
-                return Err(CoreError::Msg(steve_i18n::t!(
-                    "hub.workflow.node_unavailable"
-                )));
+                if !eligible(&node)? {
+                    return Err(CoreError::Msg(steve_i18n::t!(
+                        "hub.workflow.node_unavailable"
+                    )));
+                }
+                fixed = true;
             }
+        }
+        if fixed || self.check_dispatch(item_id, item.bot_id.as_deref().unwrap_or("steve"))? {
+            return Ok(());
         }
         if eligible("local")? {
             return Ok(());
@@ -989,6 +1007,17 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         if let Err(e) = self.check_workflow_session(session_id) {
             tracing::warn!(session_id, "协作运行未就绪：{e}");
             return;
+        }
+        match self.bind_dispatch(session_id, after) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    session_id,
+                    "dispatch policy unreadable or binding failed: {e}"
+                );
+                return;
+            }
         }
         // the tag its item asks of a Node (B7): a Node with it, the Hub's own first
         let mut here = false;
@@ -1481,6 +1510,7 @@ impl Domain for CoreDomain {
             goal: p.goal,
             title: p.title,
             bot: p.bot,
+            team: p.team,
             project: p.project,
             source: Some((a, b)),
             parent: None,
@@ -1518,7 +1548,14 @@ impl Domain for CoreDomain {
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
-        let r = self.core.route(ws, text, &[], false).await.map_err(cerr)?;
+        self.route_for_team(ws, text, None).await
+    }
+    async fn route_for_team(&self, ws: &str, text: &str, team: Option<&str>) -> BResult<Route> {
+        let r = self
+            .core
+            .route_for_team(ws, text, &[], false, false, team)
+            .await
+            .map_err(cerr)?;
         Ok(Route {
             kind: r.kind,
             title: r.title,
@@ -1997,6 +2034,11 @@ impl Domain for CoreDomain {
         Ok(self.core.models().harnesses())
     }
 
+    async fn bot_nodes(&self, ws: &str, bot: &str) -> BResult<Value> {
+        let (rt, ws, bot) = (self.routed.clone(), ws.to_string(), bot.to_string());
+        blocking(move || rt.bot_candidates(&ws, &bot)).await
+    }
+
     async fn bot_harnesses(
         &self,
         bot: Option<&str>,
@@ -2415,6 +2457,7 @@ mod routed_tests {
             store,
             worktrees: None,
             preflight: None,
+            dispatch_harnesses: None,
         }
     }
 

@@ -78,11 +78,25 @@ impl NodeRuntime {
     /// never open at once (they share the item's worktree). A release that fails is asked again
     /// and the session waits for that one instead ([`Self::release_again_in`]).
     pub fn bind_after(&self, b: &Binding, after: Option<&str>) -> Result<(), StoreError> {
-        self.bind_new(b, after).map(|_| ())
+        self.bind_new(b, after, None).map(|_| ())
+    }
+
+    pub(crate) fn bind_after_scoped(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        placement: &Value,
+    ) -> Result<(), StoreError> {
+        self.bind_new(b, after, Some(placement)).map(|_| ())
     }
 
     /// [`Self::bind_after`]. Whether the binding is new.
-    fn bind_new(&self, b: &Binding, after: Option<&str>) -> Result<bool, StoreError> {
+    fn bind_new(
+        &self,
+        b: &Binding,
+        after: Option<&str>,
+        placement: Option<&Value>,
+    ) -> Result<bool, StoreError> {
         self.running()?;
         let workspace = WorkspaceRef {
             node: self.node_id.clone(),
@@ -107,6 +121,19 @@ impl NodeRuntime {
                 return Err(conflict("已结束的会话不能绑定或重开。"));
             }
             self.session_owners_work_in(tx, &b.session)?;
+            let existing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?)",
+                [&b.session],
+                |r| r.get(0),
+            )?;
+            if !existing {
+                super::super::bot_dispatch::commit_guard(
+                    tx,
+                    &b.session,
+                    self.node_id.as_str(),
+                    placement.is_some(),
+                )?;
+            }
             let fresh = rt::bind_session_in(
                 tx,
                 &rt::SessionBinding {
@@ -120,6 +147,15 @@ impl NodeRuntime {
             )?;
             if !fresh {
                 return Ok(false);
+            }
+            if let Some(placement) = placement {
+                let item: String = tx.query_row(
+                    "SELECT item_id FROM sessions WHERE id=?",
+                    [&b.session],
+                    |r| r.get(0),
+                )?;
+                steve_store::bot_dispatch::decision(tx, &item, placement)?;
+                tx.publish(steve_store::ChangeEvent::Item { id: item });
             }
             // whose access it runs with and who reads it, fixed now (a remote Node's owner reads it too)
             let owner: Option<String> = if self.is_remote() {

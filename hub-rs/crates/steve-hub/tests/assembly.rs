@@ -415,7 +415,14 @@ fn wire_err(asm: Assembly) -> String {
 fn builtin_ids_and_without() {
     assert_eq!(
         Assembly::builtin().ids(),
-        ["feishu.bot", "feishu.self", "ext_ws", "mail.imap", "github", "calendar"]
+        [
+            "feishu.bot",
+            "feishu.self",
+            "ext_ws",
+            "mail.imap",
+            "github",
+            "calendar"
+        ]
     );
     let asm = Assembly::builtin()
         .without("feishu.self")
