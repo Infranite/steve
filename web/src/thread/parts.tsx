@@ -23,6 +23,7 @@ import { Trans } from "react-i18next"
 import { flushSync } from "react-dom"
 import { t as tr, useT } from "@/i18n"
 import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
+import { steveToolIcon } from "@/tool-icons"
 import { DeliveryCards } from "@/delivery-card"
 import { loadItem } from "@/store"
 
@@ -45,7 +46,7 @@ export function researchSummary(s: Steps, includeTime = true): string {
 }
 const ICON: Partial<Record<ToolClass, typeof FileTextIcon>> = { read: FileTextIcon, search: SearchIcon, kb: LibraryIcon, exec: TerminalIcon, edit: PencilIcon, fetch: GlobeIcon, meet: CheckIcon }
 /** the icon of a research tool row */
-export function researchIcon(name: string, kind?: string) { return ICON[toolClass(name, kind)] ?? FileTextIcon }
+export function researchIcon(name: string, kind?: string) { return steveToolIcon(name) ?? ICON[toolClass(name, kind)] ?? FileTextIcon }
 /** "读" / "执行" / "保存画像": the verb of one tool row; a tool Steve has no word for goes by its own name */
 export function researchToolLabel(name: string, kind?: string): string {
   const c = toolClass(name, kind), step = meetStep(name)
@@ -58,7 +59,7 @@ const GROUP: Partial<Record<ToolClass, "read" | "search" | "run" | "fetch" | "ed
 export function researchStep(key: string, name: string, kind: string | undefined, brief: string, state: StepState, more: Partial<ToolStep> = {}): ToolStep {
   const c = toolClass(name, kind), g = GROUP[c], label = researchToolLabel(name, kind)
   const merged = (calls: number, distinct: number, running: boolean) => g ? tr(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : tr("core:trail.group.tool", { name: label, count: calls })
-  return { t: "tool", key, state, verb: [liveLabel(name, kind), label], subj: brief, mono: true, group: g ?? (c === "meet" ? undefined : "tool:" + name), merged,
+  return { t: "tool", key, state, icon: researchIcon(name, kind), verb: [liveLabel(name, kind), label], subj: brief, mono: true, group: g ?? (c === "meet" ? undefined : "tool:" + name), merged,
     chip: brief ? { label: brief, mono: true, icon: researchIcon(name, kind) } : undefined, attrs: { kind: c }, ...more }
 }
 

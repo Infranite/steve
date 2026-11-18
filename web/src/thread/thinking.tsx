@@ -38,7 +38,7 @@ export function ChatThinking({ items, status = "running", label, startedAt, dura
     const title = tools.length > 1 && first.merged ? first.merged(tools.length,sources.length,running) : first.verb[running ? 0 : 1]
     const body = tools.some((s) => s.body || s.below) ? <div className="flex flex-col gap-2">{tools.map((s) => <Fragment key={s.key}>{s.body && <div>{tools.length > 1 && s.subj && <p className="type-code break-all">{s.subj}</p>}{s.body}</div>}{s.below}</Fragment>)}</div> : undefined
     return { id: first.key, kind: first.group === "search" || first.group === "fetch" ? "search" : "step", label: <>{title}{tools.length === 1 && first.extra}{tools.length > 1 && failed && ` · ${t("thread:thinking.callFailures", { count: tools.filter((s) => s.state === "fail").length })}`}</>,
-      status: running ? "running" : failed ? "error" : "done", activeLabel: typeof title === "string" ? title : undefined, sources, body, icon: Icon ? <Icon /> : undefined,
+      status: running ? "running" : failed ? "error" : "done", activeLabel: typeof title === "string" ? title : undefined, sources, body, icon: Icon ? <Icon size={16} strokeWidth={1.5} aria-hidden /> : undefined,
       attrs: { ...attrs(first.attrs), ...(tools.length > 1 ? { "data-step-group": first.group, "data-step-count": String(tools.length) } : {}) } }
   }
   for (const item of groups) {

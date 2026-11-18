@@ -52,7 +52,7 @@ export function turnSpans(evs: any[], at: number[], items: TrailItem[], t0: numb
     const end = running ? undefined : e[13] && e[13] > at[j] ? rel(e[13]) : Math.max(start, rel(next) || start)
     /* the detail says what the steps say: Steve's verb and its subject ("读取 workflows.rs", "读事项") */
     const verb = s ? s.verb[running ? 0 : 1] : "", what = [verb, s?.subj && s.subj !== verb ? s.subj : ""].filter(Boolean).join(" ")
-    return { id: "e" + j, kind: e[9] === "Task" || e[9] === "Agent" ? "subagent" : "tool", name: c?.name || String(e[2] ?? ""), detail: what ? clip(what, 80) : undefined,
+    return { id: "e" + j, kind: e[9] === "Task" || e[9] === "Agent" ? "subagent" : "tool", name: c?.name || String(e[2] ?? ""), icon: c?.icon, detail: what ? clip(what, 80) : undefined,
       status: running ? "running" : failed ? "failed" : "done", start, end,
       input: text(c?.args) && cut(text(c!.args)!, 300), output: failed ? undefined : text(c?.result) && cut(text(c!.result)!, 300), error: failed ? (c?.error ? c.error.slice(0, 300) : t("core:toolCard.failedText")) : undefined }
   })

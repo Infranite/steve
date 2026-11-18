@@ -10,6 +10,7 @@ import { Section, Loading, Blank, Notice, Disclosure } from "@/ui"
 import { capsApi, type BotCaps, type ToolPin } from "@/api/caps"
 import { errText, useList } from "./common"
 import { toolDescKey, catalogPin, catalogUsage } from "./tool-catalog"
+import { steveToolIcon } from "@/tool-icons"
 
 type Choice = ToolPin & { name: string; description: string; category: string; enabled?: boolean }
 const key = (p: ToolPin) => `${p.kind}:${p.target}`
@@ -51,8 +52,8 @@ export function BotToolPins({ bot, caps }: { bot: string; caps: BotCaps | null }
     .sort((a, b) => Number(core.has(b.target)) - Number(core.has(a.target)) || Number(pinned.has(key(b))) - Number(pinned.has(key(a))) || a.name.localeCompare(b.name))
     .filter((x) => !needle || `${x.name} ${x.description} ${x.category}`.toLocaleLowerCase().includes(needle))
     .map((x) => {
-      const always = x.kind === "tool" && core.has(x.target), on = pinned.has(key(x)), u = usage.get(x.target)
-      return { id: key(x), name: x.name, description: x.description, category: x.category, icon: <PinIcon />, source: always ? t("caps:pins.always") : x.enabled === false ? t("caps:pins.disabled") : on ? t("caps:pins.pinned") : x.category,
+      const always = x.kind === "tool" && core.has(x.target), on = pinned.has(key(x)), u = usage.get(x.target), Icon = (x.kind === "tool" && steveToolIcon(x.target)) || PinIcon
+      return { id: key(x), name: x.name, description: x.description, category: x.category, icon: <Icon strokeWidth={1.5} aria-hidden />, source: always ? t("caps:pins.always") : x.enabled === false ? t("caps:pins.disabled") : on ? t("caps:pins.pinned") : x.category,
         uses: u ? t("caps:pins.usage", { days: tools.days, searched: u.searched, called: u.called }) : undefined,
         action: always ? undefined
           : <Button size="xs" variant={on ? "secondary" : "ghost"} disabled={busy || (!on && (tools.pins.length >= MAX_PINS || x.enabled === false))} onClick={() => void flip(x, !on)} aria-label={t(on ? "caps:pins.unpinName" : "caps:pins.pinName", { name: x.name })} data-tool-pin={key(x)} aria-pressed={on}>{on ? <PinOffIcon /> : <PinIcon />}{t(on ? "caps:pins.unpin" : "caps:pins.pin")}</Button> }

@@ -8,6 +8,7 @@ import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIco
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
 import { type TrailItem } from "@/components/work-trail"
 import { toolClass } from "@/thread/tools"
+import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -67,7 +68,7 @@ export function StepsBlock({ m }: { m: Msg }) {
     const known = TOOL[tool.name], item = tool.result?.item as string | undefined, state = tool.status === "failed" ? "fail" : "done"
     const err = (tool.error || (s.research && tool.status === "failed")) ? <div className="pb-1 type-callout text-destructive">{s.research ? researchError(tool.error) : tool.error}</div> : undefined
     const extra = tool.ms > 0 ? <span className="shrink-0 tabular-nums text-tertiary">{secs(tool.ms)}</span> : undefined
-    if (!known && brief !== undefined) { items.push(researchStep(String(n), tool.name, tool.kind, brief, state, { body: err, attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name } })); return }
+    if (!known && (brief !== undefined || steveToolIcon(tool.name))) { items.push(researchStep(String(n), tool.name, tool.kind, brief ?? "", state, { body: err, extra: brief === undefined ? extra : undefined, attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name } })); return }
     const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
       : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : ""
     const label = known ? known[0]() : tool.name
