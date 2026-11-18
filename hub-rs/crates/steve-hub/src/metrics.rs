@@ -53,7 +53,10 @@ impl Listen {
 fn recorder() -> PrometheusRecorder {
     // Explicit buckets give distributions without the exporter's time-window maintenance task.
     PrometheusBuilder::new()
-        .set_buckets(&[0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0])
+        .set_buckets(&[
+            0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
+            0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 100.0,
+        ])
         .expect("static nonempty buckets")
         .build_recorder()
 }
@@ -476,7 +479,9 @@ mod tests {
             );
         }
         assert!(
-            text.contains("steve_http_request_duration_seconds_bucket"),
+            text.contains("steve_http_request_duration_seconds_bucket")
+                && text.contains("le=\"0.0025\"")
+                && text.contains("le=\"0.000025\""),
             "{text}"
         );
         assert!(
