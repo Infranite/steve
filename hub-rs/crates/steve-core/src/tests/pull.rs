@@ -1204,3 +1204,153 @@ fn when_no_allowed_method_can_merge_the_card_says_why_at_once() {
     assert_eq!(release_op(&k, &x).evidence["pr_problem"], "merge_method");
     assert_eq!(k.phase(&x.item), "closing");
 }
+
+#[test]
+fn closeout_publishes_only_current_checks_and_deduplicates_conversation_milestones() {
+    use crate::{pull::Closeout, thread::hidden};
+
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let ws = k.db().item(&x.item).unwrap().unwrap().workspace_id;
+    let origin = k
+        .db()
+        .message_add(&ws, "me", "跟进 PR", None, None)
+        .unwrap();
+    let host = k
+        .db()
+        .message_add(
+            &ws,
+            "steve",
+            "跟进中",
+            Some(&x.item),
+            Some(&json!({
+                "card": {"item": x.item, "state": "deliver", "delivery": {"text": "验收结果"}}
+            })),
+        )
+        .unwrap();
+    k.db()
+        .store()
+        .thread()
+        .item_add(&x.item, &ws, &origin, Some(&host), false)
+        .unwrap();
+    for _ in 0..crate::thread::flowback::FAR {
+        k.db()
+            .message_add(&ws, "me", "其他消息", None, None)
+            .unwrap();
+    }
+    let messages = || k.db().messages(&ws).unwrap();
+    let visible_card = || {
+        let mut cards: Vec<_> = messages()
+            .into_iter()
+            .filter(|m| !hidden(m) && m.meta["card"]["item"] == x.item)
+            .collect();
+        assert_eq!(cards.len(), 1);
+        cards.pop().unwrap()
+    };
+    let read = || {
+        Closeout::from_evidence(
+            &release_op(&k, &x).evidence,
+            k.phase(&x.item) == "closed",
+            !merge_cards(&k, &x).is_empty(),
+        )
+        .unwrap()
+    };
+    let h = head(&x.wt);
+    let queued = json!({"statusCheckRollup": [
+        {"name": "rust", "status": "QUEUED"},
+        {"context": "lint", "state": "SUCCESS"},
+        {"name": "optional", "status": "COMPLETED", "conclusion": "SKIPPED"}
+    ]});
+    gh.prs(open_pr(&h, queued.clone()));
+    look(&k);
+    assert_eq!(read().status, "awaiting_approval");
+    let approvals = merge_cards(&k, &x);
+    assert_eq!(approvals.len(), 1);
+    assert_ne!(visible_card().id, host, "a decision promotes the card");
+    assert_eq!(visible_card().meta["card"]["decision"], approvals[0]);
+    look(&k);
+    assert_eq!(merge_cards(&k, &x), approvals);
+    assert!(gh.merges().is_empty());
+    k.core.resolve(&approvals[0], "yes", "", "me").unwrap();
+    let quiet_at = visible_card().meta["card"]["at"].clone();
+    let lines = k.timeline_texts(&x.item);
+    look(&k);
+    let p = read();
+    assert_eq!((p.status, p.next_owner), ("waiting_checks", "steve"));
+    let checks = p.pr.unwrap().checks.unwrap();
+    assert_eq!(
+        (checks.passed, checks.pending, checks.failed, checks.other),
+        (1, 1, 0, 1)
+    );
+    assert_eq!(visible_card().meta["card"]["at"], quiet_at);
+    assert_eq!(
+        k.timeline_texts(&x.item),
+        lines,
+        "routine polls don't add timeline entries"
+    );
+
+    gh.prs(open_pr(
+        &h,
+        json!({"statusCheckRollup": [
+            {"name": "rust", "status": "COMPLETED", "conclusion": "FAILURE"}
+        ]}),
+    ));
+    look(&k);
+    assert_eq!(
+        (read().status, read().next_owner),
+        ("checks_failed", "agent")
+    );
+    let card = visible_card();
+    assert_eq!(card.meta["card"]["pr_event"]["kind"], "pr_checks_failed");
+    assert_eq!(card.meta["card"]["delivery"]["text"], "验收结果");
+    look(&k);
+    assert_eq!(visible_card().meta, card.meta);
+    assert_eq!(gh.merges().len(), 0);
+
+    let failed = read();
+    gh.offline(true);
+    look(&k);
+    let down = read();
+    assert_eq!(down.status, "sync_failed");
+    assert_eq!(down.last_success_at, failed.last_success_at);
+    assert_eq!(
+        down.pr, failed.pr,
+        "the old result is labelled stale, not replaced with success"
+    );
+    assert!(down.sync_error.unwrap().contains("error connecting"));
+    assert_eq!(
+        visible_card().meta,
+        card.meta,
+        "an individual failed poll is quiet"
+    );
+    gh.offline(false);
+
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    g(
+        &x.wt,
+        &["commit", "--amend", "-qm", "same result, new head"],
+    );
+    let h2 = head(&x.wt);
+    assert_ne!(h2, h);
+    gh.prs(open_pr(&h2, queued));
+    look(&k);
+    let fresh = read();
+    assert_eq!(fresh.status, "waiting_checks");
+    assert_eq!(fresh.sync_error, None);
+    let pr = fresh.pr.unwrap();
+    assert_eq!(pr.head, h2);
+    assert!(pr.checks.unwrap().failing.is_empty());
+    assert_eq!(visible_card().meta, card.meta);
+    assert!(gh.merges().is_empty());
+
+    gh.prs(open_pr(&h2, json!({})));
+    look(&k);
+    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    assert_eq!((read().status, read().next_owner), ("merged", "none"));
+    assert_eq!(read().pr.unwrap().state, "MERGED");
+    assert_eq!(visible_card().meta["card"]["pr_event"]["kind"], "pr_merged");
+    assert!(gh.merges()[0].ends_with(&format!("--match-head-commit {h2}")));
+    let card = visible_card();
+    look(&k);
+    assert_eq!(visible_card().meta, card.meta);
+}

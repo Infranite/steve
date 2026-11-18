@@ -2,6 +2,7 @@
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
+import { CloseoutSummary } from "@/item-closeout"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
@@ -249,6 +250,7 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (s.kind === "unavailable") return { label: tr("views:itemState.unavailable"), dot: "fail", tone: "fail" }
   if (s.kind === "idle" && !i.rel) return { label: tr("views:itemState.idle"), dot: "pause", tone: "quiet" }
   if (i.rel?.tone === "run") return { label: tr("thread:card.status.releasing"), dot: "run", tone: "run" }
+  if (s.kind === "closing") return { label: tr("views:itemState.closing"), dot: s.tone === "wait" ? "wait" : "run", tone: s.tone === "wait" ? "wait" : "run" }
   if (s.kind === "queued") return { label: tr("thread:card.status.queued"), dot: "run", tone: "run" }
   return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }
@@ -333,6 +335,7 @@ export function ItemCard({ c }: { c: ItemCardState }) {
         </span>
         <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
+      {i.closeout && <CloseoutSummary value={i.closeout} />}
       {d && <DeliveryBlock key={d.decision ?? d.text} d={d} />}
       {i.outs.length > 0 && <DeliveryCards key={i.id} item={i.id} outs={i.outs} anns={i.anns} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>
