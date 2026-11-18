@@ -7,9 +7,11 @@ description = "Steve's shared contract types: ids, code values, errors and domai
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
+# Only for the opaque `RawJson` payload; contract types never hold a parsed `Value`.
+serde_json = { version = "=1.0.154", features = ["raw_value"] }
 strum = { version = "=0.28.0", features = ["derive"] }
-# TypeScript bindings for the web client, generated only with the `ts` feature (and checked by its tests).
-ts-rs = { version = "=12.0.1", optional = true }
 
-[features]
-ts = ["dep:ts-rs"]
+[dev-dependencies]
+# TypeScript bindings for the web client: types derive `TS` under `cfg(test)`, so the workspace tests
+# generate them and compare with the committed files.
+ts-rs = "=12.0.1"
