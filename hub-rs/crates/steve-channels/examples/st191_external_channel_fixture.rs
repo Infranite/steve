@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/fixture/state", get(state))
         .route("/fixture/decision/{id}", post(decide))
         .route("/fixture/tick", post(tick))
-        .nest("/api", api::routes(ch))
+        .nest("/api", connections::routes(conns).merge(api::routes(ch)))
         .layer(Extension(f))
         .layer(Extension(caller(WS, ME)))
         .with_state(modules);

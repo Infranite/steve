@@ -183,9 +183,27 @@ impl Replies {
             .map(|(id, _)| id.clone())
             .filter(|id| *id != plan.message_id)
             .collect();
-        // drafting took a while: you may have answered meanwhile, or the sender went on and a later
-        // turn took this one (crate::presence, gate 2)
-        if let Some(e) = ch.owner_stop(plan)? {
+        // Serialize gate 2 with closing earlier drafts: a group reaction must not arrive between
+        // the check and that write and then close cards outside the reacted-to message's scope.
+        let stopped = if earlier.is_empty() {
+            ch.owner_stop(plan)?
+        } else {
+            ch.store().transaction(|tx| {
+                let stopped = crate::presence::stop(tx, &plan.ws, &plan.message_id, ch.now())?;
+                if stopped.is_none() {
+                    crate::presence::supersede(
+                        tx,
+                        &plan.ws,
+                        &plan.space_id,
+                        crate::presence::Answering::Messages(&earlier),
+                        crate::presence::BY_LATER,
+                        &plan.message_id,
+                    )?;
+                }
+                Ok(stopped)
+            })?
+        };
+        if let Some(e) = stopped {
             tracing::info!(
                 space = plan.space_id,
                 reason = e.reason(),
@@ -196,18 +214,6 @@ impl Replies {
                 composer_skip: Some(format!("{}（{}）", e.label(), e.reason())),
                 ..Acted::default()
             }));
-        }
-        if !earlier.is_empty() {
-            ch.store().transaction(|tx| {
-                crate::presence::supersede(
-                    tx,
-                    &plan.ws,
-                    &plan.space_id,
-                    crate::presence::Answering::Messages(&earlier),
-                    crate::presence::BY_LATER,
-                    &plan.message_id,
-                )
-            })?;
         }
         // a contact you starred: whatever the composer made of it, it reaches you as a card, its
         // reply (if any) the card's candidate draft (crate::decide)

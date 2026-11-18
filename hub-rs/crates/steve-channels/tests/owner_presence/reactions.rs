@@ -501,6 +501,83 @@ async fn reaction_on_an_old_message_never_silences_a_new_dm_or_group_message() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn equal_message_timestamps_do_not_let_an_earlier_reaction_handle_later_arrivals() {
+    for space in ["D_LI", "C_DEV"] {
+        for reaction_first in [false, true] {
+            let h = setup().await;
+            let old =
+                h.ch.on_inbound(WS, &h.me, msg(&h, space, "old", "ulilei", "第一件事", 0))
+                    .await
+                    .unwrap();
+            if reaction_first {
+                h.ch.on_reaction(WS, &h.me, reaction(&h, space, "old", "upx"))
+                    .unwrap();
+            }
+            let new = push(
+                &h,
+                &h.me,
+                at_you(msg(&h, space, "new", "ulilei", "第二件事", 0)),
+            )
+            .await;
+            let response = new.response.unwrap();
+            let draft = response.out_message_id.expect("later message still drafts");
+            let card = response.decision_id.unwrap();
+            if !reaction_first {
+                h.ch.on_reaction(WS, &h.me, reaction(&h, space, "old", "upx"))
+                    .unwrap();
+            }
+            assert!(stop(&h, &old.message_id).is_some());
+            assert_eq!(
+                stop(&h, &new.message_id),
+                None,
+                "{space}, reaction_first={reaction_first}"
+            );
+            assert_eq!(status(&h, &draft), "draft");
+            assert_eq!(decision(&h, &card).0, "open");
+            let turn = h
+                .env
+                .store()
+                .reader(|c| presence::turn(c, WS, &old.message_id))
+                .unwrap();
+            assert_eq!(turn, vec![old.message_id]);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn equal_timestamp_dm_bursts_stop_at_the_nearest_other_sender() {
+    let h = setup().await;
+    let mut ids = Vec::new();
+    for (id, sender) in [
+        ("unrelated", "ulilei"),
+        ("boundary", "uhan"),
+        ("early", "ulilei"),
+        ("reacted", "ulilei"),
+        ("later", "ulilei"),
+    ] {
+        ids.push(
+            h.ch.on_inbound(WS, &h.me, msg(&h, "D_LI", id, sender, id, 0))
+                .await
+                .unwrap()
+                .message_id,
+        );
+    }
+    h.ch.on_reaction(WS, &h.me, reaction(&h, "D_LI", "reacted", "upx"))
+        .unwrap();
+    assert_eq!(stop(&h, &ids[0]), None);
+    assert_eq!(stop(&h, &ids[1]), None);
+    assert!(stop(&h, &ids[2]).is_some());
+    assert!(stop(&h, &ids[3]).is_some());
+    assert_eq!(stop(&h, &ids[4]), None);
+    let turn = h
+        .env
+        .store()
+        .reader(|c| presence::turn(c, WS, &ids[3]))
+        .unwrap();
+    assert_eq!(turn, ids[2..4]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn only_the_reacted_message_in_groups_but_earlier_unanswered_burst_in_dms() {
     for (space, prior_handled) in [("D_LI", true), ("C_DEV", false)] {
         let h = setup().await;

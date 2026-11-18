@@ -567,9 +567,27 @@ pub fn turn(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<String>
         return Ok(Vec::new());
     };
     let my = my_accounts(c, ws, &space)?;
-    let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
-    let before = lines(c, ws, &space, from, t.at, &my)?;
+    let before = before_turn(c, ws, &space, &t, &my)?;
     Ok(burst(&t, &before, BURST_GAP_MS))
+}
+
+/// `lines` uses the stored arrival order to break timestamp ties. A turn ends at its target even
+/// when later arrivals have the same provider timestamp. Keep newest first here so `burst`'s stable
+/// time sort also preserves the nearest sender/answered boundary within a timestamp.
+fn before_turn(
+    c: &Connection,
+    ws: &str,
+    space: &str,
+    target: &Said,
+    my: &[String],
+) -> ChannelResult<Vec<Said>> {
+    let from = target.at - BURST_GAP_MS * BURST_MAX as i64;
+    let mut before = lines(c, ws, space, from, target.at, my)?;
+    if let Some(index) = before.iter().position(|s| s.id == target.id) {
+        before.truncate(index);
+    }
+    before.reverse();
+    Ok(before)
 }
 
 /// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
@@ -584,8 +602,7 @@ pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, 
         return Ok(Vec::new());
     }
     let my = my_accounts(tx, ws, &space)?;
-    let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
-    let mut before = lines(tx, ws, &space, from, t.at, &my)?;
+    let mut before = before_turn(tx, ws, &space, &t, &my)?;
     // An earlier message handled by a reaction is a boundary, not part of the next draft. The
     // reaction itself never takes a later message into its scope.
     for s in &mut before {

@@ -21,9 +21,10 @@ pub struct IncomingReaction {
     pub revision: Option<i64>,
 }
 
-/// The latest change per actor/emoji wins even when different connections saw it. A removal wins
-/// equal timestamps. Apply visibility before folding, so a private identity cannot disclose events
-/// to another member through a shared message.
+/// Fold producer revisions within each receiving connection, then the latest visible change per
+/// actor/emoji across connections. Unversioned changes use timestamps, with removal winning ties.
+/// Apply visibility before folding, so a private identity cannot disclose events to another member
+/// through a shared message.
 pub fn list(c: &Connection, message: &str, mask: i64) -> ChannelResult<Vec<IncomingReaction>> {
     let mut st = c.prepare_cached(
         "WITH scoped AS (
