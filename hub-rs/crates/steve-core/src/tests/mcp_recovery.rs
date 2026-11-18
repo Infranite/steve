@@ -198,6 +198,10 @@ fn a_confirmed_attachment_resets_the_consecutive_recreation_budget() {
         .sessions()
         .confirm_mcp(&ns, &format!("open-{ns}"))
         .unwrap();
+    // The adapter may attach before the inherited counter is recorded by the creator.
+    k.db()
+        .event_add(&ns, "system", json!({"mcp_recovery_attempt":2}))
+        .unwrap();
     expect(&k, &ns); // a later open in the same conversation loses attachment
     k.rt.end_turn(&k.core, &ns, "end_turn", None);
     let next = latest(&k, &item);

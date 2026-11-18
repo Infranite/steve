@@ -83,8 +83,11 @@ impl Tx<'_> {
         let retries = if manual {
             0
         } else {
+            // A successor's startup can confirm its catalog before start_session_files returns
+            // and writes the inherited counter. Any confirmation in this session resets it,
+            // irrespective of that event ordering; a later reopen starts a fresh failure streak.
             self.db().store().reader(|c| -> Result<_> {
-                Ok(c.query_row("SELECT json_extract(data,'$.mcp_recovery_attempt') FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.mcp_recovery_attempt')='integer' AND seq>COALESCE((SELECT MAX(seq) FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.steve_mcp.ready')=1),0) ORDER BY seq DESC LIMIT 1", [sid], |r| r.get::<_,i64>(0)).optional()?.unwrap_or(0))
+                Ok(c.query_row("SELECT json_extract(data,'$.mcp_recovery_attempt') FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.mcp_recovery_attempt')='integer' AND NOT EXISTS(SELECT 1 FROM events WHERE session_id=?1 AND kind='system' AND json_extract(data,'$.steve_mcp.ready')=1) ORDER BY seq DESC LIMIT 1", [sid], |r| r.get::<_,i64>(0)).optional()?.unwrap_or(0))
             })?
         };
         if retries >= MAX_RECREATIONS {
@@ -143,20 +146,33 @@ impl Tx<'_> {
         // Runtime calls acquire their coordinator lock before the store writer. Never call them
         // inside the store transaction: an inbox worker could already hold that lock waiting for
         // our writer, while cancellation waits for it. The ended session cannot claim new input.
-        match self.rt().release(sid)? {
-            Released::Pending(op) => {
+        match self.rt().release(sid) {
+            Ok(Released::Pending(op)) => {
                 self.st.handoffs.insert(item.into(), op);
             }
-            Released::Gone => {}
-            Released::Busy => {
+            Ok(Released::Gone) => {}
+            Ok(Released::Busy) => {
                 self.fail(
                     item,
                     "旧会话仍在执行，未确认释放，暂不重开；请检查 Node 后重新指派。",
                 )?;
                 return Ok(true);
             }
+            Err(e) => {
+                self.fail(
+                    item,
+                    &format!("Steve 工具恢复未能确认旧会话释放：{e}；请检查 Node 后重新指派。"),
+                )?;
+                return Ok(true);
+            }
         }
-        self.rt().cancel(sid)?;
+        if let Err(e) = self.rt().cancel(sid) {
+            self.fail(
+                item,
+                &format!("Steve 工具恢复未能停止旧会话：{e}；请检查 Node 后重新指派。"),
+            )?;
+            return Ok(true);
+        }
         match self.start_session_files(item, Some(&opening), None, &files) {
             Ok(ns) => {
                 self.db()
