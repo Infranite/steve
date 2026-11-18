@@ -1490,3 +1490,91 @@ fn different_refusals_are_continued_with_the_latest_reason() {
     let p = k.rt.prompts_of(&sid).pop().unwrap();
     assert!(p.contains(&format!("原因：{scope}")), "{p}");
 }
+
+/* ── your Finish when nothing can take Steve's follow-up (#347) ── */
+
+fn told_the_agent(k: &Kit, x: &Remote) -> usize {
+    k.rt.prompts_of(&x.session)
+        .iter()
+        .filter(|p| p.contains("按这个项目的约定"))
+        .count()
+}
+
+#[test]
+fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_queued_message() {
+    let k = kit(2);
+    let x = remote(&k, upstream::DONE_MERGE, false);
+    k.db()
+        .session_patch(&x.session, crate::patch![status: "error"])
+        .unwrap();
+    g(
+        &x.repo,
+        &["worktree", "remove", "--force", &x.wt.to_string_lossy()],
+    );
+    k.finish(&x.item).unwrap();
+    assert!(k.wait(|| !k.open_fails(&x.item).is_empty()));
+    let fails = k.open_fails(&x.item);
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(
+        fails[0].contains("Steve 核对不了是否已经PR 合并到默认分支"),
+        "{fails:?}"
+    );
+    assert_eq!(k.phase(&x.item), "closing", "your Finish stands");
+    assert!(
+        k.db().queued(&x.session).unwrap().is_empty(),
+        "nothing queued"
+    );
+    assert_eq!(told_the_agent(&k, &x), 0);
+    let t = k.timeline_texts(&x.item);
+    assert!(!t.iter().any(|l| l.contains("收到新的消息")), "{t:?}");
+    // checked again: still one card, still closing
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(k.open_fails(&x.item).len(), 1);
+    assert_eq!(k.phase(&x.item), "closing");
+    // you checked it merged: done
+    let d = k
+        .db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.kind == "fail" && d.status == "open")
+        .unwrap();
+    assert_eq!(d.options, ["release_live", "release_waive", "look"]);
+    k.core.resolve(&d.id, "release_live", "", "me").unwrap();
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.status(&x.item)
+    );
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    assert_eq!(i.outcome.as_deref(), Some("completed"));
+}
+
+#[test]
+fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_queueing_it() {
+    let k = kit(2);
+    let x = remote(&k, upstream::DONE_MERGE, false);
+    k.db()
+        .session_patch(&x.session, crate::patch![status: "error"])
+        .unwrap();
+    k.finish(&x.item).unwrap();
+    assert!(k.wait(|| !k.open_fails(&x.item).is_empty() && k.core.tx().st.probing.is_empty()));
+    let fails = k.open_fails(&x.item);
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(
+        fails[0].contains("Bot 的会话出错停下了") && fails[0].contains("提交还不在 origin/main 上"),
+        "{fails:?}"
+    );
+    assert_eq!(k.phase(&x.item), "closing");
+    assert!(k.db().queued(&x.session).unwrap().is_empty());
+    assert_eq!(told_the_agent(&k, &x), 0);
+    // merged on the host afterwards: the next check completes it
+    merge_and_tag(&x, None);
+    k.core.tx().forget_probe(&x.item);
+    k.core.lifecycle_tick().unwrap();
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.status(&x.item)
+    );
+}

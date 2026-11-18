@@ -27,7 +27,6 @@ use serde_json::{Value, json};
 use crate::cycle::{ACTIVE, CLOSING, OP_BUILD, OP_RELEASE, Policy};
 use crate::error::Result;
 use crate::lifecycle::settle;
-use crate::orchestrator::To;
 use crate::repo::{Item, ItemExt};
 use crate::thread::flowback::{Update, flow_quiet};
 use crate::upstream::{DONE_MERGE, DONE_TAG, Probe};
@@ -131,11 +130,12 @@ fn head_of(cwd: &str) -> Option<String> {
 }
 
 impl Tx<'_> {
-    /// The project's completion rule for this item, when it has one and works in a git worktree.
+    /// The project's completion rule for this item, when it has one and works in a git worktree (or
+    /// did: a worktree removed since is still the item's, the rule still decides, #347).
     pub(crate) fn done_rule(&self, i: &Item) -> Result<Option<String>> {
         /* a worktree on a Node is looked at there, never on the Hub's disk */
         if i.branch.as_deref().is_none_or(str::is_empty)
-            || (!self.git_on_node(&i.id) && i.cwd.as_deref().is_none_or(|c| !Path::new(c).is_dir()))
+            || (!self.git_on_node(&i.id) && i.cwd.as_deref().is_none_or(str::is_empty))
         {
             return Ok(None);
         }
@@ -241,6 +241,10 @@ impl Tx<'_> {
         let Some(s) = self.active_session(item_id)? else {
             return self.fail(item_id, why);
         };
+        /* its session is in error: a message would only wait in its queue (#347) */
+        if s.status == "error" {
+            return self.fail(item_id, why);
+        }
         let waiting = self
             .db()
             .decisions_of_item(item_id)?
@@ -697,6 +701,11 @@ impl Tx<'_> {
         if op.status != "pending" {
             return Ok(());
         }
+        /* the pull request this result is followed on merged with it: the host's word is the
+         * evidence, whatever became of the branch (deleted on merge) or the worktree since (#347) */
+        if rule == DONE_MERGE && self.pr_merge_meets(i, &op)? {
+            return Ok(());
+        }
         /* nothing of its own on the branch (as frozen when it was delivered, else as it is now), and no
          * merged pull request of its branch says otherwise: there is no change to merge, so the rule
          * does not apply and the acceptance alone completes it; it is never reported as merged
@@ -740,8 +749,16 @@ impl Tx<'_> {
             return Ok(());
         }
         let Some(p) = self.fresh_probe(i) else {
-            /* a look starts (or already runs); it comes back to the gate */
-            let _ = self.probe_async(i, rule, Probing::Requirement);
+            /* a look starts (or already runs); it comes back to the gate. None can start without
+             * the worktree's HEAD: nothing can be checked, a card for you */
+            if !self.probe_async(i, rule, Probing::Requirement) {
+                return self.requirement_unread(
+                    i,
+                    &op,
+                    rule,
+                    "读不到事项的工作区（它可能已经被清理）",
+                );
+            }
             return Ok(());
         };
         if p.met {
@@ -763,6 +780,11 @@ impl Tx<'_> {
             let required = self.build_required(i)?;
             self.track_build(i, &p, required)?;
             return Ok(());
+        }
+        /* the worktree or the remote can't be read: telling the agent to push would not help, and
+         * nothing says what is missing; a card for you (#347). Steve keeps looking while it waits */
+        if p.unread {
+            return self.requirement_unread(i, &op, rule, &p.summary());
         }
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
          * on GitHub, follows the branch's pull request (`pull`: CI, conflicts, Steve's own merge) */
@@ -816,19 +838,25 @@ impl Tx<'_> {
                     }
                 }
             }
-            let to = match self.active_session(&i.id)? {
-                Some(s) => To::Session(s.id),
-                None => To::Decision {
-                    live: None,
-                    item: Some(i.id.clone()),
-                },
-            };
+            let to = self.steve_to(&i.id)?;
             let build =
                 build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
             let how = if p.slug.is_some() {
                 crate::pull::follow_text(&branch)
             } else {
                 "推送这个分支，在代码托管上开到默认分支的合并请求（PR/MR；修 bug 先建 issue 并关联）；合并按托管方的流程完成，不要推送默认分支、不要手工打 tag。".into()
+            };
+            let Some(to) = to else {
+                /* its session is in error: a message would only wait in its queue and void the
+                 * acceptance once it ran nothing (#347); a card for you instead */
+                return self.fail(
+                    &i.id,
+                    &format!(
+                        "验收通过了，按这个项目的约定{}后事项才算完成，现在还差：{}。Bot 的会话出错停下了，Steve 没有给它排消息：让它继续，或者在代码托管上合并后事项照常完成。",
+                        rule_text(rule),
+                        p.summary()
+                    ),
+                );
             };
             self.send(
                 &to,
@@ -840,6 +868,63 @@ impl Tx<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// The completion rule can't be checked (no worktree any more, a remote that can't be read): a
+    /// card for you, once per result, instead of a message to the agent (#347). Your "已经上线" meets
+    /// the requirement, "不需要发布" waives it; Steve keeps looking meanwhile and a look that can read
+    /// decides as usual.
+    fn requirement_unread(
+        &mut self,
+        i: &Item,
+        op: &steve_store::ItemOperation,
+        rule: &str,
+        why: &str,
+    ) -> Result<()> {
+        if op.evidence["unread_told"] == json!(true) {
+            return Ok(());
+        }
+        self.db().store().transaction(|tx| {
+            steve_store::operation_set_in(
+                tx,
+                &op.id,
+                "pending",
+                &json!({"unread_told": true, "unread": why}),
+            )
+        })?;
+        crate::lifecycle::supersede(self.db(), &i.id, &["fail"], "需要你核对远端")?;
+        let pr = match op.evidence["pr"].as_u64() {
+            Some(n) => format!("（跟踪的是 PR #{n}）"),
+            None => String::new(),
+        };
+        self.db().decision_create(crate::repo::NewDecision {
+            workspace_id: i.workspace_id.clone(),
+            kind: "fail".into(),
+            subject_type: "item".into(),
+            subject_id: i.id.clone(),
+            item_id: Some(i.id.clone()),
+            question: format!(
+                "验收通过了，但 Steve 核对不了是否已经{}{pr}：{why}。已经合并了就选「已经上线」，不用等它就选「不需要发布」。",
+                rule_text(rule)
+            ),
+            options: Some(vec![
+                "release_live".into(),
+                "release_waive".into(),
+                "look".into(),
+            ]),
+            requested_by: "steve".into(),
+            ..Default::default()
+        })?;
+        self.db().timeline_add(
+            &i.id,
+            "steve",
+            "sys",
+            &format!("Steve 核对不了远端：{why}；等你核对"),
+            None,
+        )?;
+        self.db()
+            .item_patch(&i.id, patch![stage: "收尾", now: "核对不了远端，等你核对"])?;
+        settle(self.db(), &i.id)
     }
 
     /// The build the completion tag started is followed from now on: once per tag, or, `required` by

@@ -1453,17 +1453,17 @@ impl Tx<'_> {
         Ok(true)
     }
 
-    /// Asks the agent of the item to publish (the required release of an accepted result).
+    /// Asks the agent of the item to publish (the required release of an accepted result); its
+    /// session in error, a card for you instead.
     pub(crate) fn await_release_for(&mut self, item_id: &str) -> Result<()> {
-        let to = match self
-            .active_session(item_id)?
-            .filter(|s| s.status != "ended")
-        {
-            Some(s) => To::Session(s.id),
-            None => To::Decision {
-                live: None,
-                item: Some(item_id.into()),
-            },
+        let Some(to) = self.steve_to(item_id)? else {
+            /* its session is in error: a message would only wait in its queue (#347) */
+            self.db()
+                .item_patch(item_id, patch![stage: "收尾", now: "等待发布"])?;
+            return self.fail(
+                item_id,
+                "验收通过了，还差发布；Bot 的会话出错停下了，Steve 没有给它排消息。让它继续，或者确认不需要发布。",
+            );
         };
         self.await_release(item_id, &to)
     }
