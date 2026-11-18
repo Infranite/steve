@@ -666,6 +666,7 @@ pub struct CreateItem {
     pub title: String,
     pub bot: Option<String>,
     pub team: Option<String>,
+    pub deps: Vec<String>,
     /// `None` → the bot's default project; `Some(None)` → explicitly no project.
     pub project: Option<Option<String>>,
     pub tag_ids: Vec<String>,

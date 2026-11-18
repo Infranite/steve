@@ -5,6 +5,208 @@ use crate::runtime::AgentRuntime;
 use crate::testkit::Kit;
 use crate::{Core, CoreConfig, ItemAction, patch};
 
+#[test]
+fn creation_saves_prerequisites_before_admission_and_starts_once_after_restart() {
+    let k = Kit::new();
+    let first = k.item("run", "执行", None);
+    let second = k.item("run", "执行", None);
+    let attachment = crate::repo::FileRef {
+        id: "fixture-file".into(),
+        name: "input.txt".into(),
+        mime: "text/plain".into(),
+        size: 5,
+    };
+    let i = k
+        .core
+        .create_item(crate::CreateItem {
+            ws: WS.into(),
+            title: "dependent".into(),
+            goal: "work after prerequisites".into(),
+            bot: Some("dev".into()),
+            deps: vec![first.clone(), second.clone()],
+            opening: Some("original dispatch context".into()),
+            files: vec![attachment.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(i.status, "block");
+    assert_eq!(k.db().deps_of(&i.id).unwrap().len(), 2);
+    assert!(k.db().sessions_of_item(&i.id).unwrap().is_empty());
+    assert!(k.open_kinds(&i.id).is_empty());
+    assert!(k.rt.st().created.is_empty());
+    assert!(!k.core.config().scratch.join(&i.id).exists());
+    assert!(k.core.start_session(&i.id, None, None, &[]).is_err());
+    let reopened = k.reopened();
+    reopened.lifecycle_tick().unwrap();
+    complete(&k, &first);
+    reopened.lifecycle_tick().unwrap();
+    assert!(k.db().sessions_of_item(&i.id).unwrap().is_empty());
+    complete(&k, &second);
+    // A crash between status admission and the first session insert still owes the initial
+    // start, rather than a question to the owner or an untracked idle item.
+    k.db().item_patch(&i.id, patch![status:"run"]).unwrap();
+    reopened.lifecycle_tick().unwrap();
+    reopened.lifecycle_tick().unwrap();
+    let sessions = k.db().sessions_of_item(&i.id).unwrap();
+    assert_eq!(sessions.len(), 1);
+    let prompts = k.rt.prompts_of(&sessions[0].id);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("original dispatch context"));
+    assert!(prompts[0].contains("无需为核对进度读取其他事项或请求扩大读取范围"));
+    assert!(
+        k.rt.st()
+            .files
+            .iter()
+            .any(|(sid, files)| sid == &sessions[0].id && files == &vec![attachment.clone()])
+    );
+    assert!(k.open_kinds(&i.id).is_empty());
+}
+
+#[test]
+fn adding_a_prerequisite_to_a_running_legacy_item_blocks_questions_and_followups() {
+    for asked_before_wait in [false, true] {
+        let k = Kit::new();
+        let (item, dep, s) = setup(&k);
+        if asked_before_wait {
+            k.core
+                .tool_ask(&s, "Can I read the prerequisite?", &[])
+                .unwrap();
+        }
+        let gate = k.rt.stop_gate.write().unwrap();
+        k.core.add_dep(&item, &dep).unwrap();
+        assert_eq!(k.status(&item).0, "block");
+        assert!(k.open_kinds(&item).is_empty());
+        assert!(
+            k.core
+                .tool_ask(&s, "Can I expand access to the prerequisite?", &[])
+                .is_err()
+        );
+        assert!(
+            k.core
+                .tool_request_approval(&s, "Restore prerequisite read scope", "Check progress")
+                .is_err()
+        );
+        drop(gate);
+        k.rt.end_turn(&k.core, &s.id, "cancelled", None);
+        k.core.check_stalls().unwrap();
+        assert!(k.open_kinds(&item).is_empty());
+        assert_eq!(k.rt.prompts_of(&s.id).len(), 1);
+        complete(&k, &dep);
+        k.core.lifecycle_tick().unwrap();
+        k.core.lifecycle_tick().unwrap();
+        assert_eq!(k.rt.prompts_of(&s.id).len(), 2);
+        assert_eq!(k.db().sessions_of_item(&item).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn creation_obeys_disabled_continuation_when_completion_calls_back_directly() {
+    let k = Kit::with(|c| c.no_resume = true);
+    let dep = k.item("run", "执行", None);
+    let item = k
+        .core
+        .create_item(crate::CreateItem {
+            ws: WS.into(),
+            title: "blocked snapshot".into(),
+            goal: "wait".into(),
+            deps: vec![dep.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+    k.core.item_action(&dep, ItemAction::Finish, "me").unwrap();
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(k.status(&item.id).0, "block");
+    assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
+    assert!(k.open_kinds(&item.id).is_empty());
+}
+
+#[test]
+fn creation_rejects_an_invalid_prerequisite_batch_without_leaving_an_item_or_session() {
+    let k = Kit::new();
+    let valid = k.item("done", "收尾", None);
+    k.db()
+        .exec(
+            "INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')",
+            &[],
+        )
+        .unwrap();
+    let foreign = k
+        .db()
+        .item_create(
+            "other",
+            &crate::repo::NewItem {
+                title: "foreign".into(),
+                goal: "private".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let before = k.db().items_all(WS).unwrap().len();
+    for invalid in ["missing", foreign.id.as_str()] {
+        assert!(
+            k.core
+                .create_item(crate::CreateItem {
+                    ws: WS.into(),
+                    title: "invalid".into(),
+                    goal: "invalid prerequisites".into(),
+                    deps: vec![valid.clone(), invalid.into()],
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert_eq!(k.db().items_all(WS).unwrap().len(), before);
+        assert!(k.rt.st().created.is_empty());
+    }
+}
+
+#[test]
+fn creation_waits_for_success_and_respects_notify_and_proposal_decisions() {
+    let k = Kit::new();
+    let dep = k.item("drop", "收尾", None);
+    let make = |propose| {
+        k.core
+            .create_item(crate::CreateItem {
+                ws: WS.into(),
+                title: "dependent".into(),
+                goal: "wait for success".into(),
+                bot: Some("dev".into()),
+                deps: vec![dep.clone()],
+                propose,
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let automatic = make(false);
+    let proposal = make(true);
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(k.status(&automatic.id).0, "block");
+    assert!(k.db().sessions_of_item(&automatic.id).unwrap().is_empty());
+    assert!(k.db().sessions_of_item(&proposal.id).unwrap().is_empty());
+    k.db()
+        .settings_set(
+            WS,
+            json!({"depsAfter":"提醒我开始"}).as_object().unwrap(),
+            "me",
+        )
+        .unwrap();
+    complete(&k, &dep);
+    k.core.lifecycle_tick().unwrap();
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(k.open_kinds(&automatic.id), ["propose"]);
+    assert_eq!(k.open_kinds(&proposal.id), ["propose"]);
+    assert!(k.rt.st().created.is_empty());
+    let d = k
+        .db()
+        .decisions_of_item(&automatic.id)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open")
+        .unwrap();
+    k.core.resolve(&d.id, "yes", "", "me").unwrap();
+    assert_eq!(k.db().sessions_of_item(&automatic.id).unwrap().len(), 1);
+}
+
 fn setup(k: &Kit) -> (String, String, Session) {
     let item = k.item("run", "执行", None);
     let dep = k.item("run", "执行", None);
@@ -96,6 +298,12 @@ fn item_page_registers_the_existing_dependency_without_running_a_turn() {
         "started"
     );
     assert_eq!(k.rt.prompts_of(&s.id).len(), before.len() + 1);
+    assert!(
+        k.rt.prompts_of(&s.id)
+            .last()
+            .unwrap()
+            .contains("无需为核对进度读取其他事项或请求扩大读取范围")
+    );
 }
 
 #[test]
@@ -114,6 +322,16 @@ fn busy_turn_yields_to_block_without_watchdog_or_early_delivery() {
     assert_eq!(view["end_turn"], true);
     assert_eq!(view["resume_source"], "item");
     assert_eq!(view["open_dependencies"], json!([dep]));
+    assert!(k.open_kinds(&item).is_empty());
+    assert!(
+        k.core
+            .tool_ask(
+                &s,
+                "Can I expand access to check prerequisite progress?",
+                &[]
+            )
+            .is_err()
+    );
     assert!(k.open_kinds(&item).is_empty());
     assert!(k.core.tool_deliver(&s, "不能提前", &[], &[], &[]).is_err());
     assert!(

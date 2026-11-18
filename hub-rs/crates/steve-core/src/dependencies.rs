@@ -47,6 +47,30 @@ impl Core {
 }
 
 impl Tx<'_> {
+    pub(crate) fn dependency_summary(&self, item: &str) -> Result<String> {
+        let mut summary = vec![];
+        for dep in self.db().deps_of(item)? {
+            let (title, now) = self
+                .db()
+                .item(&dep)?
+                .map(|i| (i.title, i.now))
+                .unwrap_or_default();
+            summary.push(format!("{dep}「{title}」：{now}"));
+        }
+        Ok(summary.join("\n"))
+    }
+
+    /// A stale turn can still report after dependency admission closed. Readiness belongs to
+    /// the Hub; that turn must not replace the wait with a question or a scope approval card.
+    pub(crate) fn dependency_question_guard(&self, item: &str) -> Result<()> {
+        if self.dependency_waiting(item)? || !deps_open(self.db(), item)?.is_empty() {
+            return Err(conflict(
+                "事项正在等待前置完成，由 Hub 核对进度；请结束回合等待，不要向用户提问或请求恢复读取范围",
+            ));
+        }
+        Ok(())
+    }
+
     fn tool_item_dependencies(&mut self, session: &Session, args: Value) -> Result<Value> {
         let s = self
             .db()
@@ -252,6 +276,20 @@ impl Tx<'_> {
         }
         for ws in self.db().workspace_ids()? {
             for i in self.db().items_all(&ws)? {
+                // Startup can be interrupted after its status changes but before a first session
+                // is committed. Persisted edges still own admission: recover that sessionless
+                // item through the same gate, never through the stalled-agent question path.
+                if matches!(i.phase.as_str(), ACTIVE | crate::cycle::READY)
+                    && !i.archived
+                    && i.status == "run"
+                    && !self.db().deps_of(&i.id)?.is_empty()
+                    && self.db().sessions_of_item(&i.id)?.is_empty()
+                {
+                    self.db()
+                        .item_patch(&i.id, crate::patch![status:"block",now:"等待前置事项完成"])?;
+                    self.check_blocked(&i.id)?;
+                    continue;
+                }
                 if matches!(i.phase.as_str(), ACTIVE | crate::cycle::READY)
                     && !i.archived
                     && i.status != "pause"
@@ -358,8 +396,8 @@ impl Tx<'_> {
                 .as_ref()
                 .is_some_and(|s| s.bot_id == item.bot_id && s.readonly == 0);
         let text = format!(
-            "前置事项都已完成：{}\n等待原因：{}\n请先回读事项及交付记录，再继续未完成工作；不要重复已经完成的外部操作。",
-            self.db().deps_of(id)?.join("、"),
+            "Hub 已核对前置事项都已完成：\n{}\n等待原因：{}\n请先回读本事项及其交付记录，再继续未完成工作；不要重复已经完成的外部操作。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
+            self.dependency_summary(id)?,
             wait.reason
         );
         let sid = session.as_ref().map(|s| s.id.as_str()).unwrap_or("");

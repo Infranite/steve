@@ -1511,6 +1511,7 @@ impl Domain for CoreDomain {
             title: p.title,
             bot: p.bot,
             team: p.team,
+            deps: p.deps,
             project: p.project,
             source: Some((a, b)),
             parent: None,

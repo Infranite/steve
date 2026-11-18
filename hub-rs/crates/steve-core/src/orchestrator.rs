@@ -55,6 +55,8 @@ pub struct CreateItem {
     pub source: Option<(String, String)>,
     pub parent: Option<Parent>,
     pub tag_ids: Vec<String>,
+    /// Verified prerequisite IDs, committed with the item before any session can be opened.
+    pub deps: Vec<String>,
     /// Start with a 方案 decision instead of a session.
     pub propose: bool,
     pub opening: Option<String>,
@@ -1276,6 +1278,13 @@ impl Tx<'_> {
         let db = self.db();
         let (item, bot, project, guessed) = db.atomic(|| {
             let ws = n.ws.as_str();
+            for dep in &n.deps {
+                let prerequisite = db.item(dep)?.filter(|i| i.workspace_id == ws && i.kind == "task")
+                    .ok_or_else(|| crate::cycle::conflict("前置事项不存在或不属于当前工作空间"))?;
+                if self.workflow_child(&prerequisite)? {
+                    return Err(crate::cycle::conflict("工作单元不能作为事项的前置，请使用其主事项"));
+                }
+            }
             let team = db.store().reader(|c| steve_store::bot_dispatch::selected(c, ws, n.team.as_deref()))?;
             let selected_bot = n.bot.as_deref().filter(|b| !b.is_empty());
             let bot = match selected_bot {
@@ -1326,6 +1335,18 @@ impl Tx<'_> {
                     requested_by,
                 },
             )?;
+            for dep in &n.deps {
+                db.dep_add(&item.id, dep)?;
+            }
+            if !deps_open(db, &item.id)?.is_empty() {
+                db.item_patch(&item.id, patch![status: "block", now: "等待前置事项完成"])?;
+                // The timeline owns the original input and attachments across a restart. No
+                // execution session (or queued harness message) exists before admission.
+                if n.opening.is_some() || !n.files.is_empty() {
+                    db.timeline_add_files(&item.id, "steve", &format!("deferred_start:{}", item.cycle),
+                        n.opening.as_deref().unwrap_or(""), None, &n.files)?;
+                }
+            }
             if let Some(team) = &team {
                 db.store().transaction(|c| {
                     steve_store::bot_dispatch::snapshot(c, &item.id, team,
@@ -1349,7 +1370,7 @@ impl Tx<'_> {
             &format!("Steve 建立事项，交给 {}{where_}{kind}", bot.display()),
             None,
         )?;
-        let mut detail = json!({"bot": bot.id, "project": item.project_id});
+        let mut detail = json!({"bot": bot.id, "project": item.project_id, "deps": n.deps});
         if let Some((a, b)) = &n.source {
             detail["source"] = json!([a, b]);
         }
@@ -1400,6 +1421,12 @@ impl Tx<'_> {
         bot: Option<&str>,
         files: &[FileRef],
     ) -> Result<()> {
+        if self.dependency_waiting(item)? || !deps_open(self.db(), item)?.is_empty() {
+            self.lc_guard_open(item)?;
+            self.db()
+                .item_patch(item, patch![status: "block", now: "等待前置事项完成"])?;
+            return Ok(());
+        }
         // the error is formatted inside too: an `ApiError`'s text is rendered when displayed
         steve_i18n::stored(
             || match self.start_session_files(item, opening, bot, files) {
@@ -1739,6 +1766,7 @@ impl Tx<'_> {
     ) -> Result<()> {
         let db = self.db().clone();
         db.atomic(|| {
+            self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 提了新的问题")?;
             let d = db.decision_create(NewDecision {
                 workspace_id: s.workspace_id.clone(),
@@ -1793,6 +1821,7 @@ impl Tx<'_> {
         };
         let db = self.db().clone();
         db.atomic(|| {
+            self.dependency_question_guard(item)?;
             supersede(&db, item, &["ask", "fail"], "Bot 继续往下做了")?;
             let d = db.decision_create(NewDecision {
                 workspace_id: s.workspace_id.clone(),
@@ -2498,7 +2527,9 @@ impl Tx<'_> {
             );
             return Ok(());
         }
-        if self.dependency_waiting(item_id)? {
+        if self.dependency_waiting(item_id)?
+            || (item.status == "block" && !deps_open(self.db(), item_id)?.is_empty())
+        {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
@@ -2923,6 +2954,16 @@ impl Tx<'_> {
         if i.status != "block" || !deps_open(self.db(), item_id)?.is_empty() {
             return Ok(());
         }
+        if self.cfg().no_resume
+            || self.holding()
+            || self
+                .db()
+                .decisions_of_item(item_id)?
+                .iter()
+                .any(|d| d.status == "open")
+        {
+            return Ok(());
+        }
         if matches!(
             i.phase.as_str(),
             crate::cycle::CLOSING | crate::cycle::CLOSED
@@ -2959,26 +3000,31 @@ impl Tx<'_> {
                 .db()
                 .item_patch(item_id, patch![status: "wait", now: "前置完成，等你开始"]);
         }
-        let mut summary = vec![];
-        for d in self.db().deps_of(item_id)? {
-            let (title, now_) = self
-                .db()
-                .item(&d)?
-                .map(|x| (x.title, x.now))
-                .unwrap_or_default();
-            summary.push(format!("{d}「{title}」：{now_}"));
-        }
         self.db().item_patch(
             item_id,
             patch![status: "run", now: "前置事项都已完成，开始处理"],
         )?;
         let m = format!(
-            "前置事项都已完成：\n{}\n现在开始这个事项。",
-            summary.join("\n")
+            "Hub 已核对前置事项都已完成：\n{}\n现在开始这个事项。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
+            self.dependency_summary(item_id)?
         );
         match self.active_session(item_id)? {
             Some(s) => self.prompt(&s.id, &m, "steve"),
-            None => self.start_or_fail(item_id, Some(&m), None)?,
+            None => {
+                let deferred = self
+                    .db()
+                    .timeline(item_id)?
+                    .into_iter()
+                    .find(|e| e.kind == format!("deferred_start:{}", i.cycle));
+                let opening = deferred.as_ref().map(|e| e.text.as_str()).unwrap_or("");
+                let files = deferred.as_ref().map(|e| e.files.as_slice()).unwrap_or(&[]);
+                let m = if opening.is_empty() {
+                    m
+                } else {
+                    format!("{m}\n{opening}")
+                };
+                self.start_or_fail_files(item_id, Some(&m), None, files)?;
+            }
         }
         Ok(())
     }
@@ -3007,12 +3053,27 @@ impl Tx<'_> {
             db.dep_add(item_id, dep)?;
             db.timeline_add(item_id, "me", "sys", &format!("添加前置事项 {dep}"), None)?;
             let i = self.item(item_id)?;
-            let busy = self
-                .active_session(item_id)?
-                .is_some_and(|s| self.busy(&s.id));
-            if self.item(dep)?.status != "done" && status_in(&i, &["run", "prop", "pause"]) && !busy
+            if !deps_open(&db, item_id)?.is_empty()
+                && matches!(i.phase.as_str(), crate::cycle::READY | crate::cycle::ACTIVE)
+                && !i.archived
             {
-                db.item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
+                crate::lifecycle::supersede_where(
+                    &db,
+                    item_id,
+                    |d| d.kind == "ask" || crate::lifecycle::stop_card(d),
+                    "已设置前置事项，由 Hub 核对进度",
+                )?;
+                if status_in(&i, &["run", "prop", "wait"]) {
+                    db.item_patch(item_id, patch![status: "block", now: "等待前置事项完成"])?;
+                }
+                for s in db.sessions_of_item(item_id)? {
+                    if s.readonly == 0
+                        && s.source == "Steve"
+                        && let Some(turn) = self.rt().running(&s.id)
+                    {
+                        self.st.cancels.push((turn, item_id.into()));
+                    }
+                }
             }
             Ok(())
         })
@@ -4786,6 +4847,7 @@ impl Tx<'_> {
                 at: Some(Some(seq)),
             }),
             tag_ids,
+            deps: vec![],
             propose: false,
             opening: Some(opening),
             actor: Some(actor.into()),
