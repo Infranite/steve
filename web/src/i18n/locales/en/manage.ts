@@ -305,8 +305,6 @@ export default {
     effort: "Reasoning effort",
     effortHintMain: "Used for Steve's own judgments and its working conversations.",
     effortHint: "Applies to new conversations; available levels depend on the model and harness.",
-    device: "Device",
-    deviceHint: "The Hub is the only runner for now; pair more devices to pin it to one",
     project: "Default project",
     projectHint: "Items without a project go into this one when handed to it",
     projectInfer: "Infer from the item",

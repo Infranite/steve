@@ -301,8 +301,6 @@ export default {
     effort: "思考强度",
     effortHintMain: "Steve 的判断和它的执行会话都用这个强度。",
     effortHint: "对新会话生效；实际可用档位由所选模型与 Harness 决定。",
-    device: "运行设备",
-    deviceHint: "现在只有 Hub 这一台执行节点；配对更多设备后可以固定在某台上",
     project: "默认项目",
     projectHint: "没指定项目的事项，交给它时默认放进这个项目",
     projectInfer: "按事项推断",
