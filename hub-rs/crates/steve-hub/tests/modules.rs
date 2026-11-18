@@ -317,7 +317,10 @@ async fn tz_setting() {
             None
         )
         .await,
-        (400, json!({ "error": "设置项不对：tz" }))
+        (
+            400,
+            json!({"error": "设置项不对：tz", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
     let (_, st) = c.call("GET", "/api/state", None, None).await;
     assert_eq!(st["settings"]["tz"], "UTC");
@@ -411,7 +414,10 @@ async fn model_settings() {
             None
         )
         .await,
-        (400, json!({"error": "分流 的模型名不对：a b"}))
+        (
+            400,
+            json!({"error": "分流 的模型名不对：a b", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
     assert_eq!(
         c.call(
@@ -648,7 +654,10 @@ async fn module_config_drafts_go_to_the_modules() {
         .await;
     assert_eq!(
         (s, v),
-        (500, json!({ "error": "这份草稿已经失效，请重新说一次" }))
+        (
+            500,
+            json!({"error": "这份草稿已经失效，请重新说一次", "code":"internal", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
     // contacts registered its targets (and merge its decision handlers)
     let (s, v) = c
@@ -659,7 +668,11 @@ async fn module_config_drafts_go_to_the_modules() {
             None,
         )
         .await;
-    assert_ne!(v, json!({ "error": "参数不对：target.kind" }), "{s} {v}");
+    assert_ne!(
+        v,
+        json!({"error": "参数不对：target.kind", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}}),
+        "{s} {v}"
+    );
     // an unknown kind is still a validation error
     assert_eq!(
         c.call(
@@ -669,7 +682,10 @@ async fn module_config_drafts_go_to_the_modules() {
             None
         )
         .await,
-        (400, json!({ "error": "参数不对：target.kind" }))
+        (
+            400,
+            json!({"error": "参数不对：target.kind", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
 }
 
@@ -715,7 +731,10 @@ async fn a_module_decision_is_undone_through_the_route() {
     assert_eq!(
         c.call("POST", "/api/decisions/dec_undo/undo", None, None)
             .await,
-        (500, json!({ "error": "这个决定不能撤销" }))
+        (
+            500,
+            json!({"error": "这个决定不能撤销", "code":"internal", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
 }
 
@@ -902,7 +921,10 @@ async fn panels_and_mentions() {
     );
     assert_eq!(
         c.call("GET", "/api/items/ST-999/panels", None, None).await,
-        (404, json!({ "error": "没有这个事项" }))
+        (
+            404,
+            json!({"error": "没有这个事项", "code":"not_found", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
     );
     let (s, v) = c
         .call(

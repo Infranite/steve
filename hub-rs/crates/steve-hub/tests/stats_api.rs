@@ -437,7 +437,10 @@ async fn stats_routes() {
             .await;
         assert_eq!(
             (s, v),
-            (400, json!({"error": format!("参数不对：{field}")})),
+            (
+                400,
+                json!({"error": format!("参数不对：{field}"), "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+            ),
             "{q}"
         );
     }
@@ -452,9 +455,21 @@ async fn stats_routes() {
     let (s, v) = e
         .call("GET", "/api/stats/summary?project=prj_other", None)
         .await;
-    assert_eq!((s, v), (404, json!({"error": "没有这个项目"})));
+    assert_eq!(
+        (s, v),
+        (
+            404,
+            json!({"error": "没有这个项目", "code":"not_found", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = e.call("GET", "/api/stats/summary?bot=nobody", None).await;
-    assert_eq!((s, v), (404, json!({"error": "没有这个 Bot"})));
+    assert_eq!(
+        (s, v),
+        (
+            404,
+            json!({"error": "没有这个 Bot", "code":"not_found", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, _) = e.call("GET", "/api/stats/items/ST-999", None).await;
     assert_eq!(s, 404);
     let (s, _) = e.call("GET", "/api/stats/sessions/ses_nope", None).await;
@@ -589,7 +604,10 @@ async fn stats_routes() {
         let (s, v) = e.call("GET", &format!("/api/stats/{q}"), None).await;
         assert_eq!(
             (s, v),
-            (400, json!({"error": format!("参数不对：{field}")})),
+            (
+                400,
+                json!({"error": format!("参数不对：{field}"), "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+            ),
             "{q}"
         );
     }
@@ -602,11 +620,23 @@ async fn stats_routes() {
         assert_eq!(s, 200, "{q}: {v}");
     }
     let (s, v) = e.call("GET", "/api/stats/items?limit=101", None).await;
-    assert_eq!((s, v), (400, json!({"error": "参数不对：limit"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "参数不对：limit", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = e.call("GET", "/api/stats/items", None).await;
     assert_eq!((s, &v["total"]), (200, &json!(0)), "{v}");
     let (s, v) = e.call("GET", "/api/stats/items?only=nope", None).await;
-    assert_eq!((s, v), (400, json!({"error": "参数不对：only"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "参数不对：only", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = e.call("GET", "/api/stats/items?only=done", None).await;
     assert_eq!((s, &v["total"]), (200, &json!(0)), "{v}");
 
@@ -617,7 +647,13 @@ async fn stats_routes() {
     let (s, v) = e
         .call("PUT", "/api/stats/prices", Some(json!({"prices": [{"match": "a", "input": -1, "output": 1, "cache_read": 0, "cache_write": 0}]})))
         .await;
-    assert_eq!((s, v), (400, json!({"error": "参数不对：prices[0].input"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "参数不对：prices[0].input", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = e.call("PUT", "/api/stats/prices", Some(prices(8.0))).await;
     assert_eq!(s, 200, "{v}");
     // the cached summary is gone: 1M input at $8

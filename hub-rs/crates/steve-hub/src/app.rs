@@ -230,6 +230,7 @@ pub fn app(
     routes
         .layer(middleware::from_fn_with_state(mcp, mcp_gate))
         .layer(middleware::from_fn_with_state(st.clone(), maintenance_gate))
+        .layer(middleware::from_fn(crate::error::error_contract))
         .layer(compression())
         .layer(middleware::from_fn(vary_encoding))
         .layer(middleware::from_fn(slow_requests))

@@ -31,6 +31,23 @@ pub enum Code {
 }
 
 impl Code {
+    /// HTTP edge fallback; domain-specific codes require an explicit contract body.
+    pub const fn from_http_status(status: u16) -> Self {
+        match status {
+            401 => Self::Unauthenticated,
+            403 => Self::Forbidden,
+            404 => Self::NotFound,
+            409 => Self::Conflict,
+            413 => Self::TooLarge,
+            429 => Self::RateLimited,
+            501 => Self::Unsupported,
+            503 => Self::Unavailable,
+            504 => Self::Timeout,
+            400..=499 => Self::Invalid,
+            _ => Self::Internal,
+        }
+    }
+
     pub const fn http_status(self) -> u16 {
         match self {
             Self::Invalid => 400,
