@@ -981,6 +981,8 @@ From **Devices → Add device → Install remotely**, the Hub can install a Node
    The pairing code goes over stdin, never on a command line. A code made for an install is *confirmed*: the owner authorised the install, so the Node is active once it pairs, with no fingerprint to compare by hand.
 3. When it is done, stop `tailcat serve` on the target. The key is deleted on the Hub, and the unpacked archive on the target.
 
+Closing the dialog keeps the current install available to resume. If it has not started or has failed, **Cancel this pairing** discards it and deletes its temporary SSH key on the Hub. Stop `tailcat serve` on the original target with Ctrl-C, then add another device to get a new command and key. **Retry** keeps the current install and target. An install that is running or completed cannot be cancelled; cancellation does not uninstall anything or revoke a Node that already paired. A setup attempt that exits without claiming its pairing code invalidates that code.
+
 The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-nodes-over-tailcat) is on, else at the Hub's HTTPS `STEVE_PUBLIC_URL`. Without either, the install refuses to start. A development build has no release to install from. A Hub without access to GitHub can take the release files from a local directory with `STEVE_NODE_INSTALLERS=<dir>` (`steve-installer.json` and the installer archives of its version). Supported targets are those of the releases: Apple silicon macOS and x86_64 Linux. Without tailcat, use the paste-in command Devices shows with the pairing code.
 
 ## The Hub's own Node in a process of its own

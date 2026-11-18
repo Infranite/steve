@@ -16,6 +16,8 @@ use steve_node_wire::Identity;
 const ADDR: &str = "tcFAKEtarget0123456789_-x";
 /// An address whose setup fails as an unpaired one did.
 const FAIL: &str = "tcFAILtarget0123456789_-x";
+/// The screenshot's failure: the probe succeeds, sending the archive exits 255.
+const FAIL_SEND: &str = "tcSENDtarget0123456789_-x";
 
 fn script(p: &Path, body: &str) {
     std::fs::write(p, format!("#!/bin/sh\n{body}")).unwrap();
@@ -77,6 +79,18 @@ async fn call(
     (s, r.json().await.unwrap_or(Value::Null))
 }
 
+async fn stopped(h: &Hub, id: &str) -> Value {
+    for _ in 0..200 {
+        let (s, v) = call(h, reqwest::Method::GET, "u1", &format!("/{id}"), json!({})).await;
+        assert_eq!(s, 200);
+        if v["state"] != "running" {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("install {id} did not stop");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_hub_installs_a_node_that_is_active_once_paired() {
     let tools = tempfile::tempdir().unwrap();
@@ -89,7 +103,9 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
         &tools.path().join("ssh"),
         &format!(
             "echo \"$@\" >> '{log}'\nfor a; do cmd=\"$a\"; done\n\
-             case \"$*\" in *{FAIL}*\"setup node\"*) echo 'pairing code: Error: no pairing code' >&2; exit 1 ;; esac\n\
+             case \"$*\" in\n\
+             *{FAIL_SEND}*) case \"$cmd\" in *\"uname -sm\"*) ;; *) cat >/dev/null; echo 'transfer failed' >&2; exit 255 ;; esac ;;\n\
+             *{FAIL}*\"setup node\"*) cat > '{home}/failed-code'; echo 'pairing code: Error: no pairing code' >&2; exit 1 ;; esac\n\
              HOME='{home}' exec sh -c \"$cmd\"\n",
             log = tools.path().join("ssh.log").display(),
             home = target.path().display()
@@ -151,6 +167,23 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     )
     .await;
     assert_eq!((s, v["state"].as_str()), (200, Some("running")), "{v}");
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u1",
+        &format!("/{id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 409, "a running install is not discarded");
+    assert!(
+        h.dir
+            .path()
+            .join("tailcat/installs")
+            .join(&id)
+            .join("key")
+            .exists()
+    );
 
     // a second install to the same address joins the running one
     let (_, other) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
@@ -306,4 +339,150 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
         failing.as_str(),
         "the newest first: {all}"
     );
+
+    // A setup that failed must not leave a still-usable auto-confirming pairing code.
+    let failed_code = std::fs::read_to_string(target.path().join("failed-code")).unwrap();
+    assert_eq!(
+        h.claim(failed_code.trim(), &Identity::generate().unwrap())
+            .await
+            .0,
+        403
+    );
+
+    // Only its owner can cancel it, including its SSH key. Repeated cancellation is harmless.
+    let failed_dir = h.dir.path().join("tailcat/installs").join(&failing);
+    assert!(failed_dir.join("key").exists());
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u2",
+        &format!("/{failing}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 404);
+    assert!(failed_dir.join("key").exists());
+    for _ in 0..2 {
+        let (s, _) = call(
+            &h,
+            reqwest::Method::DELETE,
+            "u1",
+            &format!("/{failing}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    assert!(!failed_dir.exists());
+    let (s, _) = call(
+        &h,
+        reqwest::Method::GET,
+        "u1",
+        &format!("/{failing}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 404, "cancelled attempts cannot be resumed");
+    let (s, _) = call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{failing}/run"),
+        json!({"address": ADDR}),
+    )
+    .await;
+    assert_eq!(s, 404, "a stale tab cannot restart a cancelled attempt");
+
+    // Waiting installs can be discarded too, but completed installs and their paired Nodes stay.
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u1",
+        &format!("/{other}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(!h.dir.path().join("tailcat/installs").join(&other).exists());
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u1",
+        &format!("/{id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 409);
+    assert_eq!(
+        h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")),
+        "active"
+    );
+
+    // Reproduce the send/255 failure from the screenshot, then cancel it.
+    let (_, send) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
+    let send_id = send["id"].as_str().unwrap();
+    let (s, _) = call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{send_id}/run"),
+        json!({"address": FAIL_SEND}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let send_failed = stopped(&h, send_id).await;
+    assert_eq!(send_failed["failed_step"], "send");
+    assert!(send_failed["error"].as_str().unwrap().contains("255"));
+    let (s, _) = call(
+        &h,
+        reqwest::Method::DELETE,
+        "u1",
+        &format!("/{send_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    assert!(!h.dir.path().join("tailcat/installs").join(send_id).exists());
+    let (_, all) = call(&h, reqwest::Method::GET, "u1", "", json!({})).await;
+    assert_eq!(
+        all["installs"].as_array().unwrap().len(),
+        1,
+        "only the completed install remains"
+    );
+
+    // The next target gets a new key and operation, and can really claim its new code.
+    std::fs::remove_file(target.path().join("paired")).unwrap();
+    std::fs::remove_file(&code_file).unwrap();
+    let (_, next) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
+    let next_id = next["id"].as_str().unwrap();
+    assert_ne!(next["id"], send["id"]);
+    assert_ne!(next["command"], send["command"]);
+    assert_eq!(next["state"], "waiting");
+    assert!(next["address"].is_null());
+    assert_eq!(next["steps"], json!([]));
+    let (s, _) = call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{next_id}/run"),
+        json!({"address": ADDR}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    for _ in 0..200 {
+        if code_file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let next_code = std::fs::read_to_string(&code_file).unwrap();
+    let (s, claim) = h
+        .claim(next_code.trim(), &Identity::generate().unwrap())
+        .await;
+    assert_eq!(s, 200);
+    std::fs::write(target.path().join("paired"), "").unwrap();
+    let next_done = stopped(&h, next_id).await;
+    assert_eq!(next_done["state"], "done");
+    assert_eq!(next_done["node_id"], claim["node_id"]);
+    assert_ne!(next_done["node_id"], done["node_id"]);
 }

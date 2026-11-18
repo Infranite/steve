@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client"
+import { StrictMode } from "react"
 import "../../src/index.css"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { DevicesRoute } from "../../src/devices"
@@ -26,4 +27,5 @@ function Sheet() {
   const sh = getSheet()
   return sh?.kind === "addDevice" ? <AddDeviceDialog key={JSON.stringify(sh.payload ?? {})} {...(sh.payload ?? {})} /> : null
 }
-createRoot(document.getElementById("root")!).render(<SidebarProvider><Routed /><Sheet /></SidebarProvider>)
+const content = <SidebarProvider><Routed /><Sheet /></SidebarProvider>
+createRoot(document.getElementById("root")!).render(location.search.includes("strict") ? <StrictMode>{content}</StrictMode> : content)

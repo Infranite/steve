@@ -156,6 +156,11 @@ export function AddDeviceDialog(payload: { kind?: Kind; node?: string; ask?: boo
         {values.via === "tailcat" && !tailcatReady && <TailcatSwitch s={tailcat} onChange={setTailcat} />}
         {pairError && <p role="alert" className="type-callout text-destructive">{pairError}</p>}
         {(values.via === "direct" || tailcatReady) && <>
+          <div className="flex flex-col gap-2" data-install-steve>
+            <p className="type-callout text-foreground">{t("devices:add.installCli")}</p>
+            <CodeBlock compact wrap code="brew install infranite/tap/steve" language="bash" data-install-steve-command />
+            <p className="type-footnote text-pretty text-muted-foreground">{t("devices:add.installCliPlatforms")} <a href="https://brew.sh/" target="_blank" rel="noreferrer" className="text-blue hover:underline">{t("devices:add.installHomebrew")}</a></p>
+          </div>
           <p className="type-callout text-foreground">{t("devices:add.run")}</p>
           <CodeBlock compact wrap code={`steve setup node --hub ${hubUrl}${pin}`} language="bash" data-setup-command />
           {pairing && (pairing.expires > now ? <div className="flex flex-col gap-1.5" data-pair-code>
@@ -298,12 +303,26 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
     try { await f() } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
   useEffect(() => {
-    if (!op) void act(async () => { show(resumable((await api.installs()).installs) ?? await api.createInstall()) })
+    if (op) return
+    let live = true
+    setBusy(true); setError("")
+    void (async () => {
+      try {
+        const saved = resumable((await api.installs()).installs)
+        // A closed step (or StrictMode's discarded effect) must not create another waiting install.
+        if (!live) return
+        const next = saved ?? await api.createInstall()
+        if (live) show(next)
+      } catch (e) { if (live) setError((e as Error).message) }
+      finally { if (live) setBusy(false) }
+    })()
+    return () => { live = false }
   }, [])
   useEffect(() => {
     if (op?.state !== "running") return
-    const timer = setInterval(() => { void api.install(op.id).then(show).catch(() => {}) }, 1000)
-    return () => clearInterval(timer)
+    let live = true
+    const timer = setInterval(() => { void api.install(op.id).then((v) => { if (live) show(v) }).catch(() => {}) }, 1000)
+    return () => { live = false; clearInterval(timer) }
   }, [op?.id, op?.state])
   if (!op) return error ? <p role="alert" className="type-callout text-destructive">{error}</p> : <Spinner className="size-4" />
   /* the trail's keys are built from the step and phase names */
@@ -315,6 +334,10 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
     const v = await api.runInstall(op.id, address)
     setJoined(v.id !== op.id)
     show(v)
+  })
+  const cancel = () => void act(async () => {
+    await api.cancelInstall(op.id)
+    closeSheet()
   })
   return (
     <div className="flex flex-col gap-3 type-callout" data-remote-install>
@@ -332,8 +355,12 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
         <CodeBlock compact wrap code={op.command} language="bash" data-install-command />
         <label className="text-foreground" htmlFor="install-address">{t("shell:devices.install.step2")}</label>
         <div className="flex gap-2">
-          <Input id="install-address" className="font-mono" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
+          <Input id="install-address" className="font-mono" value={address} disabled={busy} onChange={(e) => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
           <Button type="button" disabled={busy || !address.trim()} onClick={run} data-install-run>{op.state === "failed" ? t("shell:devices.install.retry") : t("shell:devices.install.run")}</Button>
+        </div>
+        <div className="flex flex-col items-start gap-1">
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={cancel} data-install-cancel>{t("shell:devices.install.cancel")}</Button>
+          <p className="type-footnote text-pretty text-muted-foreground">{t("shell:devices.install.cancelHint")}</p>
         </div>
       </>}
       {op.state === "done" && <p className="inline-flex items-center gap-1.5 text-success" data-install-done><CheckCircle2Icon className="size-4" aria-hidden />{t("shell:devices.install.done", { id: op.node_id ?? "" })}</p>}

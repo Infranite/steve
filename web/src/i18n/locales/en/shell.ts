@@ -170,6 +170,8 @@ export default {
       step2: "2. Paste the tc… address it prints here. The Hub does the rest: it fetches and checks the installer, installs, pairs and starts the Node, which needs no fingerprint check this way:",
       run: "Install",
       retry: "Retry",
+      cancel: "Cancel this pairing",
+      cancelHint: "After cancelling, you can add another device. Stop tailcat serve on the original target with Ctrl-C.",
       done: "Done: Node {{id}} is paired and started. Give it project directories to use it.",
       progress: "Install progress",
       working: "Working",

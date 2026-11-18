@@ -80,6 +80,7 @@
   "hub.nodes.install_step_setup": "Installing, pairing and starting the Node on the target",
   "hub.nodes.install_step_done": "The Node is paired and started",
   "hub.nodes.install_busy": "Another install to this machine is running; wait for it to end",
+  "hub.nodes.install_cancel_inactive": "Only waiting or failed installs can be cancelled. Refresh to see the current state",
   "hub.nodes.install_stalled_probe": "The target machine did not answer within %{secs} s: is tailcat serve still running there, and is the address right?",
   "hub.nodes.install_stalled_fetch": "Downloading the installer stalled: no data for %{secs} s. Check the Hub's internet connection and retry",
   "hub.nodes.install_stalled_send": "Sending the installer stalled: the target took no data for %{secs} s. Is tailcat serve still running there?",
