@@ -87,9 +87,9 @@ async fn source_id_only_reactions_close_drafts_and_hold_yolo_at_send() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reply_source_in_another_chat_cannot_bind_or_persist_a_draft() {
+async fn a_foreign_context_source_cannot_bind_a_reply_in_another_chat() {
     use steve_channels::Outbound;
-    use steve_channels::deliver::{Auth, OutRequest, OutTarget, Purpose};
+    use steve_channels::deliver::{Auth, Delivered, OutRequest, OutTarget, Purpose};
     let h = setup().await;
     let source =
         h.ch.on_inbound(
@@ -114,6 +114,7 @@ async fn a_reply_source_in_another_chat_cannot_bind_or_persist_a_draft() {
         .unwrap();
     let mut target = OutTarget::reply(&plan);
     target.source_message_id = Some(source.message_id);
+    target.reply_to = None;
     let result = steve_channels::DraftOnly
         .deliver(
             &h.ch,
@@ -128,9 +129,14 @@ async fn a_reply_source_in_another_chat_cannot_bind_or_persist_a_draft() {
             },
         )
         .await;
-    assert!(result.is_err());
-    assert_eq!(drafts(&h), 0);
+    let Delivered::Drafted { message_id, .. } = result.unwrap() else {
+        panic!("expected draft")
+    };
+    assert_eq!(drafts(&h), 1);
     assert_eq!(count(&h, "SELECT count(*) FROM chan_reply_sources", &[]), 0);
+    h.ch.on_reaction(WS, &h.me, reaction(&h, "D_LI", "private", "upx"))
+        .unwrap();
+    assert_eq!(status(&h, &message_id), "draft");
 }
 
 #[tokio::test(flavor = "multi_thread")]
