@@ -244,6 +244,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-core/src/gateway.rs", 1, N0d, "LocalAcp's scratch directory"),
     e(Harness, "steve-hub/src/wire/research.rs", 1, Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
+    e(Fs, "steve-hub/src/metrics.rs", 2, Hub, "metrics socket mode 0600 and read-only /proc/self/io process counter on Linux; no workspace data"),
     /* project directories on the Hub host */
     e(Spawn, "steve-core/src/git.rs", 1, NoNode, "git for items no Node holds"),
     e(Fs, "steve-core/src/git.rs", 3, NoNode, "locking the repository's common .git directory around git worktree changes for items no Node holds"),

@@ -707,6 +707,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         cfg.listen.port,
     );
     let listeners = cfg.listen.bind().await?;
+    crate::metrics::start(st.clone()).await;
     if cfg.listen.any() {
         tracing::warn!(
             "STEVE_HOST includes a wildcard address: the Hub is reachable from every network \

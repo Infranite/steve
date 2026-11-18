@@ -30,6 +30,7 @@ pub mod files;
 pub mod harnesses;
 pub mod jobs;
 pub mod js;
+pub mod metrics;
 pub mod nodes;
 pub mod notify;
 pub mod plugins;
