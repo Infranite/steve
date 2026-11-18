@@ -72,7 +72,13 @@ const answer = {{kind: "answer", confidence: 0.9}}
 const reply = {{thought: "", answer: "评论是纯文本。", offer: {{title: "修评论", goal: "让评论支持 markdown"}}}}
 serve((head, rest) => {{
   const all = head + "\n" + rest
-  if (all.includes("You are the router")) return JSON.stringify(all.includes('User message: "帮我把') ? item : answer)
+  if (all.includes("You are the router")) {{
+    const line = all.split("\n").findLast(l => l.startsWith("User message: "))
+    const text = line ? JSON.parse(line.slice("User message: ".length)) : ""
+    if (text.includes("已开 issues #417")) return JSON.stringify(item)
+    if (text.includes("强制补充")) return JSON.stringify({{kind:"supplement",confidence:0.95,item:text.match(/ST-\d+/)?.[0]}})
+    return JSON.stringify(all.includes('User message: "帮我把') ? item : answer)
+  }}
   if (!all.includes("排队") && all.includes("慢慢说")) {{ const t = Date.now(); while (Date.now() - t < 20000) {{}} }}
   return JSON.stringify(reply)
 }})
@@ -163,6 +169,75 @@ async fn start() -> Env {
         http,
         cookie,
     }
+}
+
+/// #427: reproduce both the textual-reference shortcut and a mistaken model supplement on an
+/// isolated, fully wired Hub. No real model or installation state is used.
+#[tokio::test]
+async fn a_finished_item_never_swallows_a_main_conversation_request() {
+    let e = start().await;
+    let (s, old) = e
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title":"旧工作", "goal":"旧工作", "bot":"steve", "mode":"propose"
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{old}");
+    let old = old["id"].as_str().unwrap();
+    let (s, v) = e
+        .call(
+            "POST",
+            &format!("/api/items/{old}/actions"),
+            Some(json!({"action":"drop"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.call("GET", &format!("/api/items/{old}"), None).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["phase"], "closed", "{v}");
+
+    let before = e.thread().await.len();
+    let text = format!("#{old} 已开 issues #417–#420，请给每个 issue 分别建一个事项");
+    let (s, v) = e
+        .call("POST", "/api/thread", Some(json!({"text":text})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let thread = e.settle(before + 2).await;
+    let reply = thread.last().unwrap();
+    assert_eq!(thread[before]["text"], text);
+    assert_ne!(reply["item_id"].as_str().expect("new work"), old);
+    assert_eq!(reply["meta"]["steps"]["route"]["kind"], "item");
+    assert!(reply["meta"].get("error").is_none(), "{reply}");
+
+    let before = thread.len();
+    let text = format!("{old} 强制补充：统计也需要调整");
+    let (s, v) = e
+        .call("POST", "/api/thread", Some(json!({"text":text})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let thread = e.settle(before + 2).await;
+    let card = thread.last().unwrap();
+    assert_eq!(card["meta"]["steps"]["route"]["guard"], "closed");
+    assert_eq!(card["meta"]["suggest"]["choices"][0]["id"], "new");
+    assert!(card["meta"].get("error").is_none(), "{card}");
+    let (s, v) = e
+        .call(
+            "POST",
+            &format!("/api/thread/{}/suggest", card["id"].as_str().unwrap()),
+            Some(json!({"choice":"new"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let new = v["item"]["id"].as_str().expect("separate work");
+    assert_ne!(new, old);
+    let (s, v) = e.call("GET", &format!("/api/items/{new}"), None).await;
+    assert_eq!(s, 200);
+    assert_eq!(v["goal"], text);
+    let (_, v) = e.call("GET", &format!("/api/items/{old}"), None).await;
+    assert_eq!(v["phase"], "closed");
 }
 
 #[tokio::test]

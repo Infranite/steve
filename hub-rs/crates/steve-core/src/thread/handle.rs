@@ -5,7 +5,7 @@ use super::decide::{self, DecideCtx};
 use super::offer::{ThreadItem, confirms};
 use super::research::{Inline, InlineJob, QUEUE_FULL, SYSTEM};
 use super::suggest;
-use super::{AT, Job, REF, Steps, lock, route_step};
+use super::{AT, Job, Steps, lock, route_step};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{Route, Said};
@@ -158,7 +158,7 @@ impl Core {
         }
     }
 
-    /// One `route_log` row for a message that was not routed by the model (`/汇报`, `#ST-n`).
+    /// One `route_log` row for a message that was not routed by the model (`/汇报`, explicit target).
     fn log_fixed(&self, ws: &str, mid: &str, kind: &str, item: Option<&str>) -> Result<()> {
         self.store().store().thread().route_add(&NewRouteLog {
             workspace_id: ws.into(),
@@ -213,14 +213,15 @@ impl Core {
             _ => None,
         };
         if let Some(id) = target.filter(|_| !guest)
-            && db.item(&id)?.is_some_and(|i| i.workspace_id == ws)
+            && db
+                .item(&id)?
+                .is_some_and(|i| i.workspace_id == ws && !i.is_finished())
         {
             if PROGRESS.is_match(text) {
                 self.log_fixed(ws, mid, "status", Some(&id))?;
                 reply(&self.status_text(&id)?, None, Some(json!({"status": id})));
                 return Ok(());
             }
-            self.log_fixed(ws, mid, "supplement", Some(&id))?;
             if !quiet {
                 self.phase(ws, "supplement");
             }
@@ -229,42 +230,13 @@ impl Core {
                 "supplement",
                 json!({"item": id, "files": files.len()}),
             );
-            Steps::end(steps, i, self.forward(&id, text, files, mid), |_| json!({}))?;
-            self.acknowledge(&id, reply);
-            return Ok(());
-        }
-        /* “#ST-n …” always goes to the item; a bare “ST-n …” unless it asks about it (“ST-n 进展怎样了？”) */
-        if let Some(c) = REF.captures(text).filter(|_| !guest)
-            && (text.starts_with('#') || !decide::pure_question(text))
-        {
-            let id = c[1].to_string();
-            if db.item(&id)?.is_some_and(|i| i.workspace_id == ws) {
-                let rest = REF.replace(text, "");
-                let rest = if rest.is_empty() {
-                    text.to_string()
-                } else {
-                    rest.to_string()
-                };
-                if PROGRESS.is_match(&rest) {
-                    self.log_fixed(ws, mid, "status", Some(&id))?;
-                    reply(&self.status_text(&id)?, None, Some(json!({"status": id})));
-                    return Ok(());
-                }
+            if Steps::end(
+                steps,
+                i,
+                self.forward_open(&id, text, files, mid),
+                |sent| json!({"sent": sent}),
+            )? {
                 self.log_fixed(ws, mid, "supplement", Some(&id))?;
-                if !quiet {
-                    self.phase(ws, "supplement");
-                }
-                let i = Steps::begin(
-                    steps,
-                    "supplement",
-                    json!({"item": id, "files": files.len()}),
-                );
-                Steps::end(
-                    steps,
-                    i,
-                    self.forward(&id, &rest, files, mid),
-                    |_| json!({}),
-                )?;
                 self.acknowledge(&id, reply);
                 return Ok(());
             }
@@ -353,6 +325,17 @@ impl Core {
             d = decide::for_main(d, &r);
         }
         d = decide::for_owner(d, conv.owner_only && conv.research);
+        /* The item may have ended since the router saw it, including an ahead-of-turn route.
+         * Keep the original message actionable instead of forwarding it into a lifecycle error. */
+        if !guest
+            && (d.kind == "supplement" || d.for_item.is_some())
+            && let Some(id) = r.item.as_deref()
+            && db.item(id)?.is_some_and(|i| i.is_finished())
+        {
+            d.kind = "suggest".into();
+            d.guard = Some("closed");
+            d.for_item = Some(id.into());
+        }
         if plain.is_some() {
             d.guard = Some(if meeting { "meet" } else { "q" });
         }
@@ -436,9 +419,21 @@ impl Core {
                     "supplement",
                     json!({"item": id, "files": files.len()}),
                 );
-                Steps::end(steps, i, self.forward(&id, text, files, mid), |_| json!({}))?;
-                self.acknowledge(&id, reply);
-                Logged { item: Some(id) }
+                if Steps::end(
+                    steps,
+                    i,
+                    self.forward_open(&id, text, files, mid),
+                    |sent| json!({"sent": sent}),
+                )? {
+                    self.acknowledge(&id, reply);
+                    Logged { item: Some(id) }
+                } else {
+                    d.for_item = Some(id.clone());
+                    let item = db.item(&id)?;
+                    let (q, card) = suggest::card(&r, &d, item.as_ref());
+                    reply(&q, None, Some(json!({"suggest": card})));
+                    Logged { item: None }
+                }
             }
             "status" => {
                 let id = r.item.clone().unwrap_or_default();
@@ -702,7 +697,7 @@ impl Core {
             None if r.bot_from_project => {
                 format!("好，交给 {} 了，做完请你验收。", self.bot_name(&item))
             }
-            None if !r.reply.is_empty() => r.reply.clone(),
+            None if !r.reply.is_empty() && r.kind != "supplement" => r.reply.clone(),
             None => "好，交给它了，做完请你验收。".into(),
         };
         let people = match self.item_people(ws, user, &item.id, text, mentions) {

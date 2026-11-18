@@ -105,6 +105,8 @@ Configuration done through chat, corrections to automations, contact merges and 
 
 Each message is sorted into one of nine routes: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and CI runs a routing eval built from real messages. When Steve can't tell whether a message is new work or belongs to an existing item, it asks.
 
+Mentioning an item number (including `#ST-n`) supplies context. A new request creates new work; only clear supplements go to unfinished items. Finished items remain available for questions, and a proposed supplement to one offers separate work or discussion in the conversation. A reference does not focus later messages on that item.
+
 - **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a read-only OS sandbox (`sandbox-exec` on macOS, bubblewrap on Linux). The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
 - An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
 - Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
