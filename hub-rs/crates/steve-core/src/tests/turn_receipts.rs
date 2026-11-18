@@ -31,7 +31,12 @@ fn receipt(core: &Core, s: &Session, attempt: Option<&str>) -> Option<Mark> {
 }
 
 #[test]
-fn provider_stream_interruption_after_a_committed_delivery_or_question_does_not_resurrect_work() {
+fn provider_failure_after_a_committed_delivery_or_question_does_not_resurrect_work() {
+    provider_failure_after_receipt(crate::runtime::MODEL_STREAM_INTERRUPTED);
+    provider_failure_after_receipt(crate::runtime::MODEL_SERVICE_UNAVAILABLE);
+}
+
+fn provider_failure_after_receipt(stop: &str) {
     for deliver in [true, false] {
         let k = Kit::new();
         let (id, s) = started(&k);
@@ -44,7 +49,7 @@ fn provider_stream_interruption_after_a_committed_delivery_or_question_does_not_
         k.rt.end_turn(
             &k.core,
             &s.id,
-            crate::runtime::MODEL_STREAM_INTERRUPTED,
+            stop,
             Some("stream disconnected before completion: upstream stream interrupted"),
         );
         assert!(k.open_fails(&id).is_empty());

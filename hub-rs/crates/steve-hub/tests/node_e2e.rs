@@ -533,6 +533,107 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c
+        .item(
+            &h,
+            "capacity failure acceptance @tool execute Bash\n@capacityfail 4 5",
+        )
+        .await;
+    let item = h
+        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+        .unwrap();
+    let retry_count = || {
+        h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?", &sid)
+    };
+    let cards = || {
+        h.count(
+            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
+            &item,
+        )
+    };
+    assert!(
+        wait(30, || retry_count() == 2).await,
+        "first capacity wait; {}",
+        hub_log(&h)
+    );
+    assert_eq!(cards(), 0);
+    let (scheduled, observed, completion): (i64, i64, String) = h.db().query_row(
+        "SELECT c.retry_at,a.updated,a.completion FROM node_commands c JOIN runtime_attempts a ON a.turn_id=(SELECT turn_id FROM runtime_attempts WHERE attempt_id=c.target_attempt) AND a.ordinal=0 WHERE c.target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)",
+        [&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    let completion: steve_node_api::Completion = serde_json::from_str(&completion).unwrap();
+    let recovery =
+        steve_acp::capacity_recovery_at(&completion.error.unwrap().safe_detail, observed).unwrap();
+    assert!(
+        scheduled >= recovery + 1_000 && scheduled >= observed,
+        "the advertised recovery must be respected"
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='tool'",
+            &sid
+        ),
+        2,
+        "the first attempt already ran a tool"
+    );
+    let exhausted = wait(60, || cards() == 1).await;
+    let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h.db().prepare(
+        "SELECT a.ordinal,a.state,a.completion,a.updated FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? ORDER BY a.ordinal",
+    ).unwrap().query_map([&sid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_, _>>().unwrap();
+    assert!(
+        exhausted,
+        "capacity ceiling; attempts={observed_attempts:?}; now={}; {}",
+        steve_store::now(),
+        hub_log(&h)
+    );
+    assert_eq!(retry_count(), 4);
+    assert_eq!(h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item), 0);
+    let question = h
+        .one(
+            "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
+            &item,
+        )
+        .unwrap();
+    assert!(
+        question.starts_with("模型服务容量不足：")
+            && question.contains("已自动重试 3 次仍失败")
+            && question.contains("预计恢复时间：20"),
+        "{question}"
+    );
+    assert!(!question.contains("Agent 停下来了"), "{question}");
+    let prompts = h.prompts();
+    let retries: Vec<_> = prompts
+        .iter()
+        .filter(|p| p.contains("不占用未交付续跑次数"))
+        .collect();
+    assert_eq!(retries.len(), 3);
+    assert!(
+        retries
+            .iter()
+            .all(|p| p.contains("不要重做") && p.contains("模型服务容量不足"))
+    );
+    assert_eq!(
+        h.one("SELECT status FROM items WHERE id=?", &item)
+            .as_deref(),
+        Some("wait")
+    );
+    let (status, state) = c.call("GET", "/api/state", None).await;
+    assert_eq!(status, 200);
+    assert!(
+        state["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["question"] == question)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_node_session_end_to_end() {
     let h = Home::new();
     let token = control_token(&h);

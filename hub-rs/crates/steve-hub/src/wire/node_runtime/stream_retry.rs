@@ -1,4 +1,4 @@
-//! Provider stream failures use the logical turn's durable attempts/backoff, including when tools
+//! Provider service failures use the logical turn's durable attempts/backoff, including when tools
 //! already ran. They resume with a reminder to inspect effects, never by replaying the original task.
 
 use super::*;
@@ -28,12 +28,42 @@ impl NodeRuntime {
             .as_ref()
             .map(|e| e.safe_detail.as_str())
             .filter(|e| !e.trim().is_empty());
+        let tail = if matches!(c.stop_reason.as_str(), "end_turn" | "error") && error.is_none() {
+            self.attempt_assistant_tail_in(tx, session, attempt)?
+        } else {
+            String::new()
+        };
+        let capacity = if error.is_some_and(steve_acp::is_capacity_error) {
+            error.map(String::from)
+        } else if matches!(
+            c.stop_reason.as_str(),
+            "service_unavailable"
+                | "provider_unavailable"
+                | "model_service_unavailable"
+                | "overloaded"
+                | "503"
+        ) {
+            Some(error.unwrap_or(&c.stop_reason).to_string())
+        } else if matches!(c.stop_reason.as_str(), "end_turn" | "error") && error.is_none() {
+            steve_acp::capacity_error_tail(&tail).map(String::from)
+        } else {
+            None
+        };
+        if let Some(e) = capacity {
+            c.outcome = Outcome::Failed;
+            c.stop_reason = capacity_retry::UNAVAILABLE.into();
+            c.error = Some(ApiError::new(
+                ErrorCode::Internal,
+                steve_acp::capacity_summary(&e, now()),
+            ));
+            c.transient = true;
+            return Ok(c);
+        }
         let evidence = if error.is_some_and(steve_acp::is_stream_interruption) {
             error.map(String::from)
         } else if steve_acp::is_stream_interruption(&c.stop_reason) {
             Some(error.unwrap_or(&c.stop_reason).to_string())
         } else if matches!(c.stop_reason.as_str(), "end_turn" | "error") && error.is_none() {
-            let tail = self.attempt_assistant_tail_in(tx, session, attempt)?;
             steve_acp::stream_interruption_tail(&tail).map(String::from)
         } else {
             None

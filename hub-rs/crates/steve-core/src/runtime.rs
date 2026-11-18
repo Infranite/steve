@@ -126,6 +126,13 @@ pub enum Released {
 /// bounded backoff; it must never spend the no-delivery continue budget at turn end.
 pub const MODEL_STREAM_INTERRUPTED: &str = "model_stream_interrupted";
 
+/// A provider capacity outage, after the runtime's bounded, recovery-aware retry policy.
+pub const MODEL_SERVICE_UNAVAILABLE: &str = "model_service_unavailable";
+
+pub fn is_model_service_failure(stop: &str) -> bool {
+    matches!(stop, MODEL_STREAM_INTERRUPTED | MODEL_SERVICE_UNAVAILABLE)
+}
+
 /// A finished turn, as the runtime hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {

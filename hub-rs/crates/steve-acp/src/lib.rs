@@ -15,6 +15,7 @@
 steve_i18n::init!();
 
 pub mod adapters;
+mod capacity;
 mod config;
 mod errors;
 pub mod managed;
@@ -31,6 +32,9 @@ mod util;
 pub use adapters::{
     AdapterEntry, AdapterProperties, AdapterSpec, Declaration, Login, ModeMap, StateDir,
     UsageFallback,
+};
+pub use capacity::{
+    capacity_error_tail, capacity_recovery_at, capacity_summary, is_capacity_error,
 };
 pub use config::{
     AcpConfig, default_claude_adapter, default_claude_executable, default_codex_adapter,
