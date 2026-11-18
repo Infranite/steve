@@ -152,6 +152,12 @@ struct State {
     upgrade_outcome: Option<(String, Option<String>)>,
     /// Upgrades staged, with what was asked.
     staged: Vec<NodeUpgrade>,
+    /// Removals this Node was asked for, by operation ([`FakeNode::removal_calls`]).
+    removals: BTreeMap<OperationId, NodeRemoveState>,
+    /// What the Hub asked of removals, in order: `begin`, `commit` or `abandon`, with the operation.
+    removal_calls: Vec<(&'static str, OperationId)>,
+    /// A removal never gets past draining ([`FakeNode::set_remove_stall`]).
+    remove_stall: bool,
     harnesses: Option<Vec<HarnessCapability>>,
     /// The files under the roots, as on disk.
     files: BTreeMap<(RootId, RelPath), FakeFile>,
@@ -288,6 +294,16 @@ impl FakeNode {
         self.st().staged.clone()
     }
 
+    /// A removal stays `draining` (the Node never gets ready) until told otherwise.
+    pub fn set_remove_stall(&self, stall: bool) {
+        self.st().remove_stall = stall;
+    }
+
+    /// What the Hub asked of removals so far, in order: `begin`, `commit` or `abandon`.
+    pub fn removal_calls(&self) -> Vec<(&'static str, OperationId)> {
+        self.st().removal_calls.clone()
+    }
+
     /// Writes a file under a root (a new version every time).
     pub fn put_file(&self, root: &str, rel: &str, bytes: &[u8]) {
         let mut st = self.st();
@@ -387,6 +403,9 @@ impl FakeNode {
             upgrades: old.upgrades,
             upgrade_outcome: old.upgrade_outcome,
             staged: old.staged,
+            removals: old.removals,
+            removal_calls: old.removal_calls,
+            remove_stall: old.remove_stall,
             files: old.files,
             scan_issues: old.scan_issues,
             history: old.history,
@@ -2346,6 +2365,61 @@ impl Discovery for FakeNode {
             .get(&operation)
             .cloned()
             .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such upgrade"))
+    }
+    async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
+        let mut st = self.st();
+        if !st.features.iter().any(|f| f == FEATURE_NODE_REMOVE) {
+            return unsupported("node removal");
+        }
+        if let Some(s) = st.removals.get(&r.operation) {
+            return Ok(s.clone());
+        }
+        if st.removals.values().any(|s| !s.is_terminal()) {
+            return Err(ApiError::new(
+                ErrorCode::Busy,
+                "another removal is unfinished",
+            ));
+        }
+        let state = NodeRemoveState {
+            operation: r.operation.clone(),
+            phase: if st.remove_stall { "draining" } else { "ready" }.into(),
+            running: st.active.len() as u32,
+            error: None,
+            updated: Timestamp(st.now),
+        };
+        st.removals.insert(r.operation.clone(), state.clone());
+        st.removal_calls.push(("begin", r.operation));
+        Ok(state)
+    }
+    async fn remove_commit(&self, c: RemoveCommit) -> ApiResult<NodeRemoveState> {
+        let mut st = self.st();
+        let now = Timestamp(st.now);
+        st.removal_calls.push((
+            if c.abandon { "abandon" } else { "commit" },
+            c.operation.clone(),
+        ));
+        let Some(state) = st.removals.get_mut(&c.operation) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such removal"));
+        };
+        if state.is_terminal() {
+            return Ok(state.clone());
+        }
+        if c.abandon {
+            state.phase = "abandoned".into();
+        } else if state.phase != "ready" {
+            return Err(ApiError::new(ErrorCode::Busy, "the node is still draining"));
+        } else {
+            state.phase = "removing".into();
+        }
+        state.updated = now;
+        Ok(state.clone())
+    }
+    async fn remove_status(&self, operation: OperationId) -> ApiResult<NodeRemoveState> {
+        self.st()
+            .removals
+            .get(&operation)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such removal"))
     }
     async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
         let all: Vec<HistoryEntry> = self.st().history.iter().map(|(e, _)| e.clone()).collect();

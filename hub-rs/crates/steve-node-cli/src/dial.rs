@@ -233,12 +233,29 @@ pub async fn run(home: &Home) -> Result<()> {
     if let Some(u) = crate::upgrade::ServiceUpgrader::detect(&home.0) {
         node.set_upgrader(u);
     }
-    run_until(
-        &node,
-        serve_at(node.clone(), Some(Home(home.0.clone())), &p, &id, &trust),
-        stopping,
-    )
-    .await
+    // ... and remove it from this machine
+    let remover = crate::remove::ServiceRemover::detect(&home.0);
+    if let Some(r) = &remover {
+        node.set_remover(r.clone());
+    }
+    let dropped = remover.map(|r| r.dropped());
+    let serving = serve_at(node.clone(), Some(Home(home.0.clone())), &p, &id, &trust);
+    let serving = async {
+        let Some(dropped) = dropped else {
+            return serving.await;
+        };
+        tokio::select! {
+            r = serving => r,
+            // a removal the Hub confirmed: the link goes with the dial future, and the process
+            // waits for the removal's helper to stop its service (it does not exit by itself,
+            // which the service manager would answer with a restart)
+            _ = dropped.notified() => {
+                tracing::info!("removed from this machine by the hub: link dropped, waiting to be stopped");
+                std::future::pending().await
+            }
+        }
+    };
+    run_until(&node, serving, stopping).await
 }
 
 /// [`run`] for a Node whose pairing and trust its host gives (the Hub's own Node in a process of

@@ -14,6 +14,7 @@ pub mod link;
 pub mod listener;
 pub mod pairing;
 pub mod registry;
+pub mod removal;
 pub mod tailcat;
 pub mod upgrade;
 pub mod vitals;
@@ -93,6 +94,8 @@ pub struct NodeService {
     pub installs: std::sync::OnceLock<Arc<install::Installs>>,
     /// Upgrading paired Nodes to the Hub's release (set once at boot).
     pub upgrades: std::sync::OnceLock<Arc<upgrade::Upgrades>>,
+    /// Removing paired Nodes from their machines (set once at boot).
+    pub removals: std::sync::OnceLock<Arc<removal::Removals>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
@@ -162,6 +165,17 @@ impl NodeService {
         self.links.lock().await
     }
 
+    /// After the store says `id` is revoked: its live link goes and its coordinator holds, under
+    /// the lock a link is installed with (a link being installed either saw the revocation in the
+    /// store or is in the registry by now).
+    pub async fn revoked(&self, id: &str) {
+        let _g = self.links.lock().await;
+        self.registry.kill(id, "revoked");
+        if let Some(rt) = self.fleet.runtime_for(id) {
+            rt.set_paused(true);
+        }
+    }
+
     pub fn new(
         store: Store,
         fleet: Arc<NodeFleet>,
@@ -191,6 +205,7 @@ impl NodeService {
             tailcat: std::sync::OnceLock::new(),
             installs: std::sync::OnceLock::new(),
             upgrades: std::sync::OnceLock::new(),
+            removals: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -245,7 +260,10 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes/pairings", post(pairing::create))
         .route("/nodes/tailcat", get(tailcat::get).put(tailcat::put))
         .route("/nodes/installs", post(install::create).get(install::list))
-        .route("/nodes/installs/{id}", get(install::get).delete(install::cancel))
+        .route(
+            "/nodes/installs/{id}",
+            get(install::get).delete(install::cancel),
+        )
         .route("/nodes/installs/{id}/run", post(install::run))
         .route(
             "/nodes/upgrade-default",
@@ -253,6 +271,7 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         )
         .route("/nodes/{id}/upgrade", post(upgrade::start))
         .route("/nodes/{id}/upgrade/switch", post(upgrade::switch_now))
+        .route("/nodes/{id}/remove", post(removal::start))
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

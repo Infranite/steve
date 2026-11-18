@@ -145,6 +145,28 @@ pub trait Discovery: Send + Sync {
             "this node is upgraded by its operator",
         ))
     }
+    /// Begin removing this Node from its machine ([`NodeRemove`]). Only a Node that advertises
+    /// [`FEATURE_NODE_REMOVE`] does; any other is removed by its operator on that machine.
+    async fn remove_begin(&self, _r: NodeRemove) -> ApiResult<NodeRemoveState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is removed by its operator",
+        ))
+    }
+    /// Confirm (or give up) a removal that is `ready` ([`RemoveCommit`]).
+    async fn remove_commit(&self, _c: RemoveCommit) -> ApiResult<NodeRemoveState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is removed by its operator",
+        ))
+    }
+    /// The state of a removal this Node knows (`invalid` for one it does not).
+    async fn remove_status(&self, _operation: OperationId) -> ApiResult<NodeRemoveState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is removed by its operator",
+        ))
+    }
     /// Asynchronous, journaled setup. Retrying the same command reads its receipt. Only an
     /// authenticated, colocated Hub owner may request it; remote Nodes remain operator-managed.
     async fn install_harness(&self, _c: Command<InstallHarness>) -> ApiResult<Receipt> {
