@@ -1,5 +1,45 @@
 /* The devices pages (devices*.tsx, device-model.ts): the Hub, its Nodes and the clients signed in to it, in one place */
 export default {
+  harnessUpdates: {
+  "title": "CLI 与 ACP 更新",
+  "sub": "在此 Node 检查和升级受管组件；provider 和登录由设备自行管理。",
+  "check": "检查新版本",
+  "checking": "正在查询此设备的组件版本…",
+  "observed": "设备信息读取于 {{at}}",
+  "checked": "版本检查于 {{at}}",
+  "available": "有新版本",
+  "details": "查看详情",
+  "owner": "仅实例所有者可以检查和升级 Node 组件。",
+  "oldNode": "此 Node 尚不支持组件更新。请先在设备版本卡升级 Node；无法远程升级时，在该设备使用原安装方式更新 Steve Node。",
+  "unavailable": "暂时无法读取或提交更新，请查看详情后重试。",
+  "stale": "以下是上次读取的数据，连接恢复后会继续查询结果。",
+  "loading": "正在读取此设备的更新信息…",
+  "empty": "此设备没有报告可检查的组件。",
+  "external": "由设备自行维护；请在 Node 上使用原安装方式升级。",
+  "other": "{{count}} 个未安装或不支持更新的运行环境",
+  "wrongNode": "更新信息与目标 Node 不一致，请刷新。",
+  "upgrade": "升级受管组件",
+  "retry": "重新尝试",
+  "requesting": "正在提交…",
+  "running": "正在升级…",
+  "unknown": "结果尚未确认，正在查询同一操作；不会自动重新安装。",
+  "unknownRetry": "Node 已确认旧操作结果未知。可显式重试；Node 会先确认旧安装器已停止。",
+  "state": {
+    "unchecked": "尚未检查",
+    "current": "已是最新",
+    "available": "有新版本",
+    "check_failed": "检查失败",
+    "unsupported": "不支持自动更新",
+    "not_installed": "未安装"
+  },
+  "result": {
+    "running": "设备正在处理，等待最终结果",
+    "unknown": "结果未知",
+    "succeeded": "升级成功，安装版本已核对",
+    "failed": "升级失败，请查看详情"
+  }
+},
+
   title: "设备",
   addDevice: "添加设备",
   nodesN_other: "{{count}} 个 Node",

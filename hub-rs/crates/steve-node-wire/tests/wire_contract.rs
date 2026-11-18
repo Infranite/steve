@@ -187,6 +187,36 @@ async fn unknown_methods_are_unsupported_and_the_link_stays() {
 }
 
 #[tokio::test]
+async fn old_nodes_refuse_the_update_handshake_before_a_remote_upgrade_is_sent() {
+    let fake = FakeNode::new("n1");
+    let w = wire(fake.clone(), 1);
+    assert_eq!(
+        w.remote.harness_updates(false).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    let c = Command {
+        id: op("optional_upgrade"),
+        issued_at: Timestamp(1),
+        accept_before: Timestamp(i64::MAX),
+        grant: GrantId::new("owner").unwrap(),
+        body: UpgradeHarness {
+            harness: "fixture".into(),
+            versions: std::collections::BTreeMap::from([("adapter".into(), "2.0.0".into())]),
+        },
+    };
+    let error = w.remote.upgrade_harness(c).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(error.safe_detail.contains("harness-updates-v1"));
+    assert_eq!(
+        fake.operation(op("optional_upgrade"))
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Invalid
+    );
+}
+
+#[tokio::test]
 async fn every_method_is_served() {
     // each table entry reaches its port: nothing answers "unknown method"
     let fake = FakeNode::new("n1");

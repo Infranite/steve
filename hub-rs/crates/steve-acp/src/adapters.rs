@@ -1002,6 +1002,75 @@ pub struct Component {
     pub minimum: Option<&'static str>,
 }
 
+/// Update inventory is separate from setup requirements: discovering a separately installed CLI
+/// must not make a working ACP adapter unavailable, nor silently install a CLI the owner omitted.
+pub struct UpdateComponent {
+    pub id: &'static str,
+    pub name: String,
+    pub package: Option<&'static str>,
+    pub command: Option<PathBuf>,
+}
+
+/// Official npm sources for CLI and ACP components. Name-specific knowledge stays in this
+/// registry. Single-package CLIs expose ACP themselves; they need only one version check.
+pub fn update_components(cfg: &crate::AcpConfig, id: &str) -> Vec<UpdateComponent> {
+    let Some(b) = BUILTINS.iter().find(|b| b.id == id) else {
+        return vec![UpdateComponent {
+            id: "custom",
+            name: cfg.adapter_spec(id).name,
+            package: None,
+            command: cfg.adapters.get(id).cloned(),
+        }];
+    };
+    let mut result: Vec<_> = components(id)
+        .iter()
+        .map(|c| UpdateComponent {
+            id: c.id,
+            name: if c.id == "adapter" {
+                format!("{} ACP", b.name)
+            } else {
+                c.name.into()
+            },
+            package: Some(c.package),
+            command: cfg.component_command(id, c),
+        })
+        .collect();
+    let cli = match id {
+        "claude-code" => Some((
+            "@anthropic-ai/claude-code",
+            "claude",
+            Some(&cfg.claude_executable),
+        )),
+        "codex" => Some(("@openai/codex", "codex", None)),
+        _ => None,
+    };
+    if let Some((package, bin, configured)) = cli {
+        let command = configured
+            .filter(|p| !p.as_os_str().is_empty())
+            .cloned()
+            .or_else(|| crate::config::which_in(bin, std::env::var_os("PATH").as_deref()));
+        result.insert(
+            0,
+            UpdateComponent {
+                id: "cli",
+                name: format!("{} CLI", b.name),
+                package: Some(package),
+                command,
+            },
+        );
+    } else if result.is_empty() {
+        result.push(UpdateComponent {
+            id: "cli",
+            name: format!("{} CLI / ACP", b.name),
+            package: None,
+            command: cfg.adapters.get(id).cloned(),
+        });
+    } else if result.len() == 1 {
+        result[0].name = format!("{} CLI / ACP", b.name);
+    }
+    result
+}
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         id: "claude-code",

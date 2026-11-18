@@ -35,6 +35,7 @@ impl Lease {
     pub(crate) fn reserve(inner: &Arc<Inner>, id: &str) -> Option<Self> {
         let mut busy = inner.adapter_maintenance.lock().unwrap();
         if busy.is_some()
+            || inner.node_upgrade_pending()
             || inner.closed.load(std::sync::atomic::Ordering::SeqCst)
             || inner.j.read(idle).is_err()
         {
@@ -64,7 +65,7 @@ pub(crate) fn no_orphan_installer(t: &Tx) -> ApiResult<()> {
     Ok(())
 }
 
-fn executable(path: &Path) -> Option<PathBuf> {
+pub(crate) fn executable(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let usable = |p: &Path| {
         p.metadata()
@@ -148,10 +149,10 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
             ));
         }
     }
-    if t.ops()?
-        .iter()
-        .any(|(_, o)| !o.receipt.state.is_finished() && o.method != "install_harness")
-    {
+    if t.ops()?.iter().any(|(_, o)| {
+        !o.receipt.state.is_finished()
+            && !matches!(o.method.as_str(), "install_harness" | "upgrade_harness")
+    }) {
         return Err(ApiError::new(
             ErrorCode::Busy,
             "execution or workspace work is active or unknown; wait for it before installing adapters",

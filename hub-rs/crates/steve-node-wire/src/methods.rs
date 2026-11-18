@@ -111,6 +111,8 @@ rpc_table! {
     // Discovery
     HARNESS_PROBE = "harness.probe": HubToNode Control Read false;
     HARNESS_INSTALL = "harness.install": HubToNode Control Command true;
+    HARNESS_UPDATES = "harness.updates": HubToNode Control Read false;
+    HARNESS_UPGRADE = "harness.upgrade": HubToNode Control Command true;
     HISTORY_LIST = "history.list": HubToNode Control Read false;
     HISTORY_IMPORT = "history.import": HubToNode Control Command true;
     IMPORT_PAGE = "import.page": HubToNode Control Read false;

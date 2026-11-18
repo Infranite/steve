@@ -29,6 +29,7 @@ mod exec;
 pub mod git;
 mod harness_context;
 mod harness_login;
+mod harness_updates;
 pub mod history;
 mod host;
 mod inline_images;
@@ -72,6 +73,11 @@ pub trait Upgrader: Send + Sync {
     async fn stage(&self, node: &LocalNode, u: NodeUpgrade) -> ApiResult<NodeUpgradeState>;
     async fn switch(&self, node: &LocalNode, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState>;
     fn status(&self, operation: &OperationId) -> ApiResult<NodeUpgradeState>;
+    /// Persisted maintenance survives a Node restart. A host with no durable upgrade record
+    /// can keep the default; the Node also reserves admission while stage/switch is called.
+    fn maintenance_pending(&self) -> bool {
+        false
+    }
 }
 
 /// What removes a Node from its machine when the Hub asks ([`Discovery::remove_begin`]): the host
@@ -512,6 +518,8 @@ pub(crate) struct Inner {
     /// Admission for prefix mutations and new execution, shared by explicit installs and the
     /// daily updater. Held only while inspecting/reserving work, never across an await.
     adapter_maintenance: Mutex<Option<String>>,
+    harness_updates: harness_updates::Updates,
+    node_upgrading: AtomicBool,
     adapter_io: tokio::sync::RwLock<()>,
     imports: history::Imports,
     research: research::Research,
@@ -521,6 +529,10 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    fn node_upgrade_pending(&self) -> bool {
+        self.node_upgrading.load(Ordering::SeqCst)
+            || self.upgrader.get().is_some_and(|u| u.maintenance_pending())
+    }
     pub(crate) fn roots(&self) -> Arc<Vec<Root>> {
         if let Some((path, seen)) = self.roots_file.lock().unwrap().as_mut() {
             let changed = std::fs::metadata(&*path).and_then(|m| m.modified()).ok();
@@ -1468,7 +1480,36 @@ pub struct LocalDir {
     pub owned: bool,
 }
 
+struct NodeUpgradeHold<'a> {
+    active: &'a AtomicBool,
+    _prefix: steve_acp::managed::PrefixLock,
+}
+impl Drop for NodeUpgradeHold<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+}
+
 impl LocalNode {
+    fn reserve_node_upgrade(&self) -> ApiResult<NodeUpgradeHold<'_>> {
+        let maintenance = self.0.adapter_maintenance.lock().unwrap();
+        if maintenance.is_some() || self.0.node_upgrading.load(Ordering::SeqCst) {
+            return Err(ApiError::new(
+                ErrorCode::Busy,
+                "Component installation or another Node upgrade call is running",
+            ));
+        }
+        self.0.j.read(adapter_setup::no_orphan_installer)?;
+        // A shared lease allows active harnesses (the release switch retains its existing
+        // drain/force policy), but excludes a CLI or another Node's npm installer.
+        let prefix = steve_acp::managed::prefix_lock(&self.0.cfg.acp.steve_home, false)
+            .map_err(|e| ApiError::new(ErrorCode::Busy, e))?;
+        self.0.node_upgrading.store(true, Ordering::SeqCst);
+        Ok(NodeUpgradeHold {
+            active: &self.0.node_upgrading,
+            _prefix: prefix,
+        })
+    }
     /// The OS sandbox this Node's runs get (`seatbelt`, `bubblewrap`), or why they get none.
     pub fn confinement(&self) -> Result<&'static str, String> {
         self.0.confine.state()
@@ -1507,6 +1548,8 @@ impl LocalNode {
             adapter_probes: Default::default(),
             adapter_updates: Default::default(),
             adapter_maintenance: Mutex::new(None),
+            harness_updates: Default::default(),
+            node_upgrading: AtomicBool::new(false),
             adapter_io: tokio::sync::RwLock::new(()),
             imports: Default::default(),
             session_capacity: AtomicUsize::new(cfg.capacity.sessions as usize),
@@ -1700,6 +1743,7 @@ impl LocalNode {
                 if inner.closed.load(Ordering::SeqCst) {
                     return;
                 }
+                harness_updates::Updates::schedule(&LocalNode(inner.clone()), false);
                 let (waiting, installed) = inner.adapter_updates.check(&inner).await;
                 if installed {
                     // the next probe asks the new release
@@ -1882,6 +1926,8 @@ impl LocalNode {
                     && let Some(harness) =
                         serde_json::to_value(&c.body).map_err(internal)?["harness"].as_str()
                     && let Some(prior) = t.installation(harness)?
+                    && t.op(&prior.operation)?
+                        .is_some_and(|o| o.method == "install_harness")
                     && !prior.state.is_finished()
                     && !matches!(prior.state, Observed::Unknown { .. })
                 {
@@ -1931,7 +1977,9 @@ impl LocalNode {
             )?;
             t.save_spec(&c.id, &c.body)?;
             emit_all(&self.0, t, d.events)?;
-            if method == "install_harness" {
+            if matches!(method, "install_harness" | "upgrade_harness")
+                && !receipt.state.is_finished()
+            {
                 *maintenance = Some(
                     serde_json::to_value(&c.body).map_err(internal)?["harness"]
                         .as_str()
@@ -4200,6 +4248,24 @@ fn root_of(at: &RootPath) -> RootPath {
 
 #[async_trait]
 impl Discovery for LocalNode {
+    async fn harness_updates(&self, fresh: bool) -> ApiResult<HarnessUpdateReport> {
+        self.start_adapter_updates();
+        harness_updates::Updates::schedule(self, fresh);
+        let mut report = self.0.harness_updates.report(&self.0)?;
+        for h in &mut report.harnesses {
+            if h.can_upgrade {
+                let req = adapter_setup::requirements(&self.0.cfg.acp, &h.harness).await;
+                if let Some(e) = req.node_error.or(req.npm_error) {
+                    h.can_upgrade = false;
+                    h.reason = Some(e);
+                }
+            }
+        }
+        Ok(report)
+    }
+    async fn upgrade_harness(&self, c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
+        self.upgrade_components(c).await
+    }
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         if self.0.cfg.capacity.sessions == 0 {
             return unsupported("this node runs no sessions");
@@ -4255,6 +4321,12 @@ impl Discovery for LocalNode {
         }
         let mut prefix = None;
         let (r, fresh) = self.accept("install_harness", &c, |t| {
+            if self.0.node_upgrade_pending() {
+                return Err(ApiError::new(
+                    ErrorCode::Busy,
+                    "A Node release upgrade is in progress",
+                ));
+            }
             adapter_setup::idle(t)?;
             prefix = Some(
                 steve_acp::managed::prefix_lock(&cfg.steve_home, true)
@@ -4459,7 +4531,11 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()];
+                let mut f = vec![
+                    FEATURE_SECRET_FILE.into(),
+                    FEATURE_ARTIFACT_READ.into(),
+                    FEATURE_HARNESS_UPDATES.into(),
+                ];
                 if self.0.upgrader.get().is_some() {
                     f.push(FEATURE_NODE_UPGRADE.into());
                 }
@@ -4473,13 +4549,19 @@ impl Discovery for LocalNode {
     }
     async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         match self.0.upgrader.get().cloned() {
-            Some(up) => up.stage(self, u).await,
+            Some(up) => {
+                let _hold = self.reserve_node_upgrade()?;
+                up.stage(self, u).await
+            }
             None => unsupported("this node is upgraded by its operator"),
         }
     }
     async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
         match self.0.upgrader.get().cloned() {
-            Some(up) => up.switch(self, s).await,
+            Some(up) => {
+                let _hold = self.reserve_node_upgrade()?;
+                up.switch(self, s).await
+            }
             None => unsupported("this node is upgraded by its operator"),
         }
     }

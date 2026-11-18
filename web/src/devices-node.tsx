@@ -28,6 +28,7 @@ import { NodeVersion } from "@/devices-upgrade"
 import { RunningCard } from "@/devices-work"
 import { TakeWork, useWorkSettings } from "@/devices-config"
 import { NodeContext } from "@/devices-context"
+import { NodeHarnessUpdates } from "@/devices-harness-updates"
 import { LeaveCard, RemoveDialog } from "@/devices-remove-dialog"
 import { NodeHarnesses } from "@/devices-harnesses"
 
@@ -81,6 +82,7 @@ function NodeDetail({ v }: { v: NodeView }) {
         <TakeWork v={v} w={w} />
         <NodeContext v={v} editable={v.local || pairable} />
         <NodeHarnesses v={v}>{v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}</NodeHarnesses>
+        <NodeHarnessUpdates v={v} />
         <Identity v={v} />
         <Projects v={v} />
         {pairable && <LeaveCard onUnpair={() => setRevoking(true)} onRemove={() => setRemoving(true)} />}
