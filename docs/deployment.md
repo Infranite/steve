@@ -1515,6 +1515,23 @@ their identities even when their capacities match. Disks have no historical seri
 local in-process Node has no remote round-trip time. Monitoring read errors, no samples, gaps
 and stale snapshots are displayed separately.
 
+## Incoming reactions
+
+Incoming emoji changes are stored separately from Steve's outgoing acknowledgement reactions. Active reactions appear on the conversation's message with the actor, emoji, provenance and provider action time, and are supplied to the composer as context. Removal tombstones survive reconnects and restarts; an older create event cannot undo a newer removal, and removal wins equal timestamps. Reaction visibility follows the identity that received the event as well as the message's existing visibility.
+
+Only an identified owner's reaction with affirmative `manual` provenance counts as handling a message. A group reaction applies to the exact message; a DM reaction also covers that sender's earlier unanswered messages in the same consecutive burst (the existing one-minute gap and ten-message bound). It does not cover later messages, other senders, another burst or another chat, and is never treated as the owner being live in the chat. Another person's reaction, an automated assistant on the owner's account, and unknown provenance are context only. Steve's own automatic acknowledgement echoes never count as manual responses.
+
+On an account where Steve speaks as you, a handled message stops before drafting, after generation, before YOLO approval/retry and at queued sending. Waiting drafts and “找你” cards close as superseded with `你已用表情回应`; a bot's own handoffs are unaffected. An explicit human approval retains its existing precedence. Removing the last qualifying reaction removes that handling fact if there is no other response; it does not revive a closed approval, replay an old message, or resend a sent, pending or uncertain reply. Sending capabilities, disclosure checks and provider write policy still apply.
+
+Adapter support:
+
+| Source | Incoming events | Manual attribution |
+| --- | --- | --- |
+| Native Feishu bot long connection | `im.message.reaction.created_v1` and `im.message.reaction.deleted_v1`, when subscribed in the Feishu app | The official envelope identifies `user`/`app`, but cannot distinguish a click from a user-token API call. User events stay `unknown`; app events are `automated`. They provide context without suppressing drafts. The user-account history poller does not fetch reaction history. |
+| External channel service (`ext_ws` v1) | Optional `reaction` feed items in `changes.batch` | `origin: manual` is accepted only as a trusted service's affirmative attribution; default is `unknown`, and bot actors are always `automated`. Services that cannot establish provenance must use `unknown`. |
+
+An external feed item is `{type:"reaction", chat_id, id?, source_id?, actor:Sender, emoji, change:"created"|"removed", action_ms, origin?:"manual"|"automated"|"unknown"}`. At least one of `id` and `source_id` must identify the **target message**, not the reaction event. `source_id` is connection-scoped; `id` is the platform message id. The Hub can keep a reaction until that target arrives. The optional event is additive to v1; existing services work unchanged. A service such as an openlark bridge must forward the upstream created/deleted events into this shape itself; updating the Hub does not update or prove support in that separate service. No real-account or production gateway acceptance is implied.
+
 ## Conversation digest base
 
 The Hub's deterministic intake checks stored channel spaces and mail threads once a minute. It does not fetch connector history, start a harness, call a model or send messages. Conversation identifiers are `space:<Steve space ID>` and `mail_thread:<Steve thread ID>`; packet facts use Steve's message, contact and item IDs. Other source types need an explicit reader/access adapter, not a provider-specific ID guessed by a model. The owner's source visibility applies: another member's personal channels and private mail are not intake sources. Digest REST endpoints require the workspace owner; workspace membership alone is insufficient.

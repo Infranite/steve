@@ -2264,6 +2264,18 @@ impl Outbox {
             {
                 return Ok((String::new(), None, Some(d)));
             }
+            // Serialize the last presence check with draft creation. A reaction can land after
+            // the composer's gate, including while the conversation-backed reply was running.
+            // Explicit human requests/decisions and trigger words retain their existing contract.
+            if p.mode == Mode::Own
+                && req.purpose == Purpose::Reply
+                && !proxy
+                && matches!(req.auth, Auth::None | Auth::Rule { .. })
+                && let Some(src) = &t.source_message_id
+                && crate::presence::stop(tx, &t.ws, src, now)?.is_some()
+            {
+                return Ok((String::new(), None, Some(Delivered::Skipped)));
+            }
             let id = insert_out(
                 tx,
                 &NewOut {

@@ -556,6 +556,9 @@ impl Channels {
             )
         })?;
         let mut inbound = written.inbound;
+        store.transaction(|tx| {
+            crate::incoming_reactions::attach(tx, ws, conn, &inbound.message_id)
+        })?;
         if inbound.duplicate {
             // another identity's copy of a message stored first from a bot's (or your own account's
             // copy, again): only your own account's copy says whether it is meant for you

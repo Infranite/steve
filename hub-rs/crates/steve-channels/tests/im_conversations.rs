@@ -1827,19 +1827,22 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn react_settled_synchronizes_with_detached_ack_provider_without_polling() {
     let h = setup(true).await;
-    *h.fake.reaction_delay.lock().unwrap() = Some(std::time::Duration::from_millis(60));
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let resume = Arc::new(tokio::sync::Barrier::new(2));
+    *h.fake.reaction_pause.lock().unwrap() = Some((entered.clone(), resume.clone()));
     let m = push(
         &h,
         &h.bot.clone(),
         msg("C_OPS", "r1", "ulilei", "部署挂了怎么办", true, false),
     )
     .await;
+    entered.wait().await;
     assert_eq!(state(&h, &m.message_id), "ack");
     assert!(
         h.fake.reactions_on("r1").is_empty(),
         "detached provider call is still in flight when synchronous FakeThread::say returns"
     );
-    h.ch.react_settled(&m.message_id).await;
+    tokio::join!(h.ch.react_settled(&m.message_id), resume.wait());
     assert_eq!(h.fake.reactions_on("r1"), [ReactionKind::Ack]);
 }
 

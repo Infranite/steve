@@ -879,6 +879,49 @@ pub struct WireMessage {
     pub raw: Value,
 }
 
+/// Optional reaction feed item. A bridge must positively know a human click before declaring
+/// `origin=manual`; signed-in identity alone is not that evidence.
+pub fn reaction(v: &Value, now: i64, realm: &str) -> Result<crate::ReactionEvent, String> {
+    let actor = WireSender::parse(v.get("actor").ok_or("a reaction without actor")?)?;
+    let (system, handle) = actor.id.hub(realm);
+    let emoji = v
+        .get("emoji")
+        .and_then(Value::as_str)
+        .filter(|e| opaque_ok(e, 128))
+        .ok_or("a reaction without valid emoji")?
+        .to_string();
+    let origin = if actor.is_bot {
+        crate::ReactionOrigin::Automated
+    } else {
+        match v.get("origin").and_then(Value::as_str) {
+            Some("manual") => crate::ReactionOrigin::Manual,
+            Some("automated") => crate::ReactionOrigin::Automated,
+            _ => crate::ReactionOrigin::Unknown,
+        }
+    };
+    let removed = match v.get("change").and_then(Value::as_str) {
+        Some("created") => false,
+        Some("removed") => true,
+        _ => return Err("a reaction without created/removed change".into()),
+    };
+    let message_ext_id = opt_id(v, "id")?;
+    let message_source_id = opt_id(v, "source_id")?;
+    if message_ext_id.is_none() && message_source_id.is_none() {
+        return Err("a reaction without target message".into());
+    }
+    Ok(crate::ReactionEvent {
+        space_ext_id: Some(id(v, "chat_id")?),
+        message_ext_id,
+        message_source_id,
+        actor: crate::HandleRef::new(system, handle),
+        actor_name: actor.display,
+        origin,
+        emoji,
+        at: time(v, "action_ms", now)?,
+        removed,
+    })
+}
+
 /// The largest `raw` kept (§6).
 const MAX_RAW: usize = 64 * 1024;
 

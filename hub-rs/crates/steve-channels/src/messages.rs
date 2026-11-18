@@ -333,6 +333,8 @@ pub struct ChanMessage {
     /// The link that opens it (or, where its platform has no link to one message, its chat) in its
     /// platform's own client ([`crate::open_link`]); `null` when there is none.
     pub open_url: Option<String>,
+    /// Active incoming reactions, distinct from Steve's own acknowledgement lifecycle.
+    pub reactions: Vec<crate::incoming_reactions::IncomingReaction>,
 }
 
 const MSG_COLS: &str = "m.id, m.space_id, m.direction, coalesce(a.display_name, a.handle_display, p.name, ''), m.sender_party_id,
@@ -374,6 +376,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
         basis: Value::Null,
         history: r.get(20)?,
         open_url: None,
+        reactions: Vec::new(),
     })
 }
 
@@ -387,7 +390,7 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<ChanMessage>> {
         .optional()?;
     match m {
         Some(mut m) => {
-            with_basis(c, &mut m)?;
+            with_basis(c, &mut m, -1)?;
             Ok(Some(m))
         }
         None => Ok(None),
@@ -433,8 +436,11 @@ pub(crate) fn message_ref(
 /// The outbound message's basis (C5), for the interfaces only you see; attachments in their public
 /// form (no provider keys; `url` or `unavailable`) and an old card / post read again from its raw
 /// event ([`crate::media::present`]); its link into the platform's client ([`ChanMessage::open_url`]).
-fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
+fn with_basis(c: &Connection, m: &mut ChanMessage, mask: i64) -> ChannelResult<()> {
     m.open_url = crate::open_link::message_url(c, &m.id)?;
+    if m.purged.is_none() {
+        m.reactions = crate::incoming_reactions::list(c, &m.id, mask)?;
+    }
     if m.direction == "out" {
         m.basis = crate::basis::summary_of(c, &m.id)?;
     }
@@ -465,7 +471,7 @@ pub fn page(
         .query_map(params![space, before, limit as i64, mask], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
-        with_basis(c, m)?;
+        with_basis(c, m, mask)?;
     }
     Ok(rows)
 }
@@ -494,7 +500,7 @@ pub fn page_before(
         .query_map(params![space, at, id, limit as i64, mask], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
-        with_basis(c, m)?;
+        with_basis(c, m, mask)?;
     }
     Ok(rows)
 }
