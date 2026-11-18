@@ -258,6 +258,10 @@ pub struct Probe {
     pub slug: Option<String>,
     /// What is still missing, in words (empty when `met`).
     pub missing: Vec<String>,
+    /// The worktree or the remote could not be read (no worktree any more, a fetch that failed):
+    /// `missing` says why, and nothing about the item's change is known. Not the agent's to fix by
+    /// pushing: a card for you (#347).
+    pub unread: bool,
 }
 
 impl Probe {
@@ -286,9 +290,20 @@ fn missing(m: impl Into<String>) -> Probe {
     }
 }
 
+/// [`Probe::unread`], with why.
+pub(crate) fn unread(m: impl Into<String>) -> Probe {
+    Probe {
+        unread: true,
+        ..missing(m)
+    }
+}
+
 /// Where the commit `head` of the worktree `dir` stands against `rule` (`merge` or `tag`), after
 /// fetching the remote `origin`. Talks to the network: never under the core's lock.
 pub fn probe(dir: &Path, rule: &str) -> Probe {
+    if !dir.is_dir() {
+        return unread("事项的工作区不在了");
+    }
     if git(dir, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty()) {
         return missing("工作区还有没提交的改动");
     }
@@ -297,7 +312,7 @@ pub fn probe(dir: &Path, rule: &str) -> Probe {
         return missing("没有 origin 远端，核对不了是否已合并");
     };
     if let Err(e) = fetch(dir) {
-        return missing(format!("取不到远端的最新状态：{e}"));
+        return unread(format!("取不到远端的最新状态：{e}"));
     }
     let Some(up) = [
         "refs/remotes/origin/HEAD",
@@ -318,7 +333,7 @@ pub fn probe(dir: &Path, rule: &str) -> Probe {
         ..Default::default()
     };
     let Ok(head) = git(dir, &["rev-parse", "HEAD"]) else {
-        return missing("读不到 HEAD");
+        return unread("读不到 HEAD");
     };
     match presence(dir, &head, up) {
         Presence::Landed { commit } => p.landed = Some(commit),

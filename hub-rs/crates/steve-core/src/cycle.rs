@@ -13,9 +13,13 @@
 //! returns at once; the close itself is committed by [`Tx::lc_try_close`] once the gate holds:
 //! 1. no productive work of the item runs — a turn in flight on any of its sessions (`is_busy`
 //!    covers adapter start, the turn and the gateway-retry wait), a session still `running` /
-//!    `starting`, a resume intent, or messages queued for a session;
+//!    `starting`, a resume intent, or messages of a person queued for a session (Steve's own queued
+//!    follow-ups void nothing and are dropped once it closes, #347);
 //! 2. no required operation of this cycle and revision is still open ([`steve_store::ItemOperation`]);
-//! 3. (completion) the frozen result is unchanged — same revision, same worktree fingerprint;
+//! 3. (completion) the frozen result is unchanged — same revision, same worktree fingerprint; once
+//!    the pull request the accepted result is followed on merged with it, the worktree is no longer
+//!    looked at (#347), and a worktree that moved while such a pull request is open voids the result
+//!    only once the host was asked whether it merged meanwhile;
 //! 4. (completion) the acceptance is decided: human, automatic or waived;
 //! 5. (completion) no question or approval raised after the request is still open: an answer may
 //!    change what is left to do, so the close is judged again once it was handled (cards older than the
@@ -65,6 +69,10 @@ pub const READY: &str = "ready";
 pub const ACTIVE: &str = "active";
 pub const CLOSING: &str = "closing";
 pub const CLOSED: &str = "closed";
+
+/// The `via` of a message Steve itself queued for a session (a continue, a follow-up about the
+/// release or the pull request), as the queue and the conversation show it.
+pub const STEVE_VIA: &str = "steve";
 
 pub const COMPLETE: &str = "complete";
 pub const CANCEL: &str = "cancel";
@@ -917,7 +925,8 @@ impl Tx<'_> {
 
     /// What still holds the item's closing.
     pub(crate) fn lc_gate(&self, i: &Item, c: &Closing) -> Result<Gate> {
-        let now = match looks_at_worktree(i, c) {
+        let looks = looks_at_worktree(i, c) && self.pr_merged_accepted(i, c)?.is_none();
+        let now = match looks {
             false => None,
             /* on a Node: what it said last, or the worktree left out */
             true if self.git_on_node(&i.id) => self.git_seen(&i.id).map(|s| Some(s.print.clone())),
@@ -944,7 +953,8 @@ impl Tx<'_> {
             if self.busy(&s.id) || matches!(s.status.as_str(), "running" | "starting") {
                 g.turn = true;
             }
-            if c.kind == COMPLETE && !self.db().queued(&s.id)?.is_empty() {
+            /* only a person's input voids a completion: what Steve queued itself does not (#347) */
+            if c.kind == COMPLETE && self.db().queued(&s.id)?.iter().any(|q| q.via != STEVE_VIA) {
                 g.input = true;
             }
         }
@@ -1020,10 +1030,15 @@ impl Tx<'_> {
         let Some(mut c) = closing_of(&i) else {
             return Ok(false);
         };
+        /* the pull request the accepted result is followed on merged with it: that is the result,
+         * whatever became of the branch or the worktree since (deleted on merge, cleaned up), so
+         * neither is looked at any more (#347) */
+        let merged = self.pr_merged_accepted(&i, &c)?.is_some();
         /* on a Node the worktree's facts are gathered off the lock: until they are here (or while
          * its Node can't be reached) nothing is decided on them, the closing holds. Only when the
          * gate uses them: a frozen result to compare, one to freeze, an accepted one to release */
-        let node = c.kind == COMPLETE
+        let node = !merged
+            && c.kind == COMPLETE
             && (c.print_pending || c.accepted || looks_at_worktree(&i, &c))
             && self.git_on_node(item_id);
         /* `Some(None)`: its Node says there is no git checkout */
@@ -1063,7 +1078,7 @@ impl Tx<'_> {
          * (a turn, an acceptance, an operation, a question): the check that clears it looks then. */
         let held = self.lc_gate_at(&i, &c, None)?;
         let others = held.turn || held.input || held.operation || held.acceptance || held.decision;
-        let now = match looks_at_worktree(&i, &c) {
+        let now = match looks_at_worktree(&i, &c) && !merged {
             false => None,
             true if node => print.clone(),
             true if self.st.lc_ticking && others && !held.changed => None,
@@ -1083,6 +1098,11 @@ impl Tx<'_> {
         /* a result that moved is void before anything is started on its acceptance (the acceptance
          * hooks, a GitHub PR card) */
         if g.changed && !g.turn {
+            /* the merge fact comes before the worktree's: while the pull request the result is
+             * followed on may have merged meanwhile, the host is asked first (#347) */
+            if self.pr_merge_unseen(&i, &c)? {
+                return Ok(false);
+            }
             /* the frozen result moved after it was frozen (and nothing is still at work on it): say what
              * moved, and tell the agent, which may well believe its delivery still stands */
             let now = match now {
@@ -1262,6 +1282,8 @@ impl Tx<'_> {
         if !committed {
             return Ok(false);
         }
+        /* nothing of Steve's automation for the item is left to run */
+        self.drop_steve_queued(&i.id)?;
         self.db().timeline_add(
             &i.id,
             "steve",

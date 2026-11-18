@@ -8,7 +8,8 @@
 //! - Steve merges it itself, never through the host's auto-merge (#239): on a look where the item is
 //!   still closing on the same revision, every check of the pull request passed and its head is the
 //!   accepted result, it runs `gh pr merge --match-head-commit <that head>` with the first merge method
-//!   the repository allows (`gh api repos/{slug}`). The accepted head is the worktree's commit only
+//!   the repository allows (`gh api repos/{slug}`), leaving out a rebase GitHub says it can't do (the
+//!   REST `rebaseable`) and moving on to the next allowed method when GitHub refuses one (#316). The accepted head is the worktree's commit only
 //!   when the whole accepted result is committed there (its tree is the worktree's): an edit not
 //!   committed goes back to the agent, never merged in part. A result that was invalidated is never
 //!   merged, and nothing armed on the host has to be taken back; one invalidated while Steve's merge
@@ -20,8 +21,11 @@
 //! - a merge that fails is tried again later, waiting longer each time ([`MERGE_RETRY_MS`]); after
 //!   [`MERGE_FAILS_CARD`] failures in a row, or [`UNKNOWN_LOOKS_CARD`] looks in a row the host could
 //!   not answer, a card for you;
-//! - merged → the completion rule ([`crate::upstream::probe`]) is looked at again and the item closes on
-//!   what the remote shows;
+//! - merged → the item closes: a pull request this result saw that merged with the accepted head (Steve's
+//!   merge, or the host's head was the accepted one) is the evidence itself, whatever became of its
+//!   branch (deleted on merge) or the worktree since; otherwise the completion rule
+//!   ([`crate::upstream::probe`]) is looked at again and the item closes on what the remote shows. The
+//!   pull request is looked up by its number once this result saw it (#347);
 //! - a conflict with the default branch, a branch behind it that the host requires up to date, a failed
 //!   check, a draft, a head other than the accepted result, or an accepted result not all committed →
 //!   the agent is woken with what is wrong, once per pushed head and at most [`PR_TELLS_MAX`] times a
@@ -42,9 +46,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use steve_modules::outbound::YOLO_ACTOR;
 
-use crate::cycle::{CLOSING, COMPLETE, OP_RELEASE, closing_of, conflict};
+use crate::cycle::{
+    CLOSING, COMPLETE, Closing, OP_RELEASE, closing_of, conflict, fingerprint_head,
+};
 use crate::error::Result;
-use crate::orchestrator::To;
 use crate::repo::{Decision, Item, NewDecision};
 use crate::thread::flowback::{Update, flow_quiet};
 use crate::util::{js_head, now};
@@ -89,6 +94,30 @@ pub(crate) fn is_tell_key(key: &str) -> bool {
     TELL_KEYS.iter().any(|t| key.starts_with(t))
 }
 
+/// How long a closing whose worktree moved waits for the host to say whether the pull request it is
+/// followed on merged, before the result is void all the same (the host can't be asked).
+pub const PR_VERIFY_MS: i64 = 3 * PR_EVERY_MS;
+
+/// The release `o` follows a pull request this result saw that merged with the accepted result
+/// (closing `c`): Steve merged it at the accepted head, or the host says its head was the accepted
+/// head when it merged (a rebase, a squash or a merge commit of it alike).
+pub(crate) fn merged_with(o: &steve_store::ItemOperation, c: &Closing) -> bool {
+    let ev = &o.evidence;
+    if o.kind != OP_RELEASE
+        || ev["pr"].as_u64().is_none()
+        || ev["pr_merged"] != json!(true)
+        || ev["pr_merged_void"] == json!(true)
+    {
+        return false;
+    }
+    let head = c
+        .fingerprint
+        .as_deref()
+        .map(fingerprint_head)
+        .filter(|h| !h.is_empty());
+    ev["pr_merged_by"] == json!("steve") || head.is_some_and(|h| ev["pr_head"].as_str() == Some(h))
+}
+
 /// The statistics mark of a pull request: `awaiting` (left to you), `merged`.
 pub const MARK_PR: &str = "pr";
 
@@ -114,6 +143,9 @@ pub struct Pr {
     pub pending: bool,
     /// The host is still working out whether it can merge (`UNKNOWN`).
     pub settling: bool,
+    /// The commit merging it made on the default branch (merged only): a squash or a rebase copy of
+    /// its head, or a merge commit.
+    pub merge_commit: Option<String>,
 }
 
 impl Pr {
@@ -202,13 +234,17 @@ pub fn read(list: &Value) -> Look {
         failing,
         pending,
         settling: mergeable == "UNKNOWN" || merge_state == "UNKNOWN",
+        merge_commit: p["mergeCommit"]["oid"]
+            .as_str()
+            .filter(|c| !c.is_empty())
+            .map(String::from),
     })
 }
 
-/// The merge method to ask for, from `gh api repos/{slug}` output: rebase, squash or merge, the first
-/// one the repository allows. The `allow_*` fields are only there for an account that may write to
-/// the repository.
-pub fn merge_method(repo: &Value) -> std::result::Result<&'static str, String> {
+/// The merge methods the repository allows, from `gh api repos/{slug}` output, in the order Steve
+/// asks for them: rebase, squash, merge. The `allow_*` fields are only there for an account that may
+/// write to the repository.
+pub fn merge_methods(repo: &Value) -> std::result::Result<Vec<&'static str>, String> {
     const METHODS: [(&str, &str); 3] = [
         ("allow_rebase_merge", "--rebase"),
         ("allow_squash_merge", "--squash"),
@@ -217,11 +253,47 @@ pub fn merge_method(repo: &Value) -> std::result::Result<&'static str, String> {
     if METHODS.iter().all(|(k, _)| repo.get(k).is_none()) {
         return Err("读不到仓库允许的合并方式：gh 登录的账号对这个仓库没有写权限".into());
     }
-    METHODS
+    let allowed: Vec<_> = METHODS
         .into_iter()
-        .find(|(k, _)| repo[k].as_bool() == Some(true))
+        .filter(|(k, _)| repo[k].as_bool() == Some(true))
         .map(|(_, m)| m)
-        .ok_or_else(|| "仓库没有允许任何合并方式".into())
+        .collect();
+    if allowed.is_empty() {
+        return Err("仓库没有允许任何合并方式".into());
+    }
+    Ok(allowed)
+}
+
+/// The first merge method the repository allows ([`merge_methods`]).
+pub fn merge_method(repo: &Value) -> std::result::Result<&'static str, String> {
+    merge_methods(repo).map(|m| m[0])
+}
+
+/// The methods to try for a pull request, of those the repository allows: a rebase is left out when
+/// the host already said the branch can't be rebased (`rebaseable == false`, #316); `None` (the host
+/// has not worked it out yet) keeps it, and a refusal then moves on to the next one ([`merge_any`]).
+pub fn methods_for(allowed: &[&'static str], rebaseable: Option<bool>) -> Vec<&'static str> {
+    allowed
+        .iter()
+        .copied()
+        .filter(|m| *m != "--rebase" || rebaseable != Some(false))
+        .collect()
+}
+
+/// The host refused the merge for its method, not for the pull request (a branch that can't be
+/// rebased, a method the repository does not allow): the next allowed method may still merge it.
+pub fn method_refused(e: &str) -> bool {
+    let e = e.to_lowercase();
+    [
+        "can't be rebased",
+        "cannot be rebased",
+        "can not be rebased",
+        "merges are not allowed",
+        "merge method is not allowed",
+        "not allowed on this repository",
+    ]
+    .iter()
+    .any(|w| e.contains(w))
 }
 
 /// `gh args…` with a deadline: its stdout, or why it failed.
@@ -237,7 +309,7 @@ fn gh(gh: &Path, args: &[&str]) -> std::result::Result<String, String> {
 }
 
 /// The fields `look` asks `gh pr list` for.
-pub const PR_FIELDS: &str = "number,state,url,headRefOid,isDraft,mergeable,mergeStateStatus,autoMergeRequest,statusCheckRollup";
+pub const PR_FIELDS: &str = "number,state,url,headRefOid,isDraft,mergeable,mergeStateStatus,autoMergeRequest,statusCheckRollup,mergeCommit";
 
 /// The pull request of `branch` in `slug`.
 pub fn look(gh_cli: &Path, slug: &str, branch: &str) -> Look {
@@ -256,24 +328,87 @@ pub fn look(gh_cli: &Path, slug: &str, branch: &str) -> Look {
     }
 }
 
+/// Pull request `number` of `slug`, by its number (`gh pr view`): what the host says of the one a
+/// result is followed on even once its branch was deleted (#347), with the commit merging it made.
+pub fn look_number(gh_cli: &Path, slug: &str, number: u64) -> Look {
+    match gh(
+        gh_cli,
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            slug,
+            "--json",
+            PR_FIELDS,
+        ],
+    ) {
+        Ok(out) => match serde_json::from_str::<Value>(&out) {
+            Ok(v) if v.is_object() => read(&json!([v])),
+            Ok(_) => Look::Unknown("gh 的输出看不懂".into()),
+            Err(e) => Look::Unknown(e.to_string()),
+        },
+        Err(e) => Look::Unknown(e),
+    }
+}
+
 /// What a merge Steve asked for came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Merging {
     Merged,
+    /// The host could not merge it now (tried again later).
     Failed(String),
+    /// No method the repository allows can merge it (each one's reason): yours to look at (#316).
+    Refused(String),
 }
 
-/// The merge method `slug` allows ([`merge_method`]), from the host.
-pub fn repo_merge_method(gh_cli: &Path, slug: &str) -> std::result::Result<&'static str, String> {
+/// The merge methods `slug` allows ([`merge_methods`]), from the host.
+pub fn repo_merge_methods(
+    gh_cli: &Path,
+    slug: &str,
+) -> std::result::Result<Vec<&'static str>, String> {
     let repo = gh(gh_cli, &["api", &format!("repos/{slug}")]).and_then(|out| {
         serde_json::from_str::<Value>(&out).map_err(|e| format!("gh api 的输出看不懂：{e}"))
     })?;
-    merge_method(&repo)
+    merge_methods(&repo)
+}
+
+/// Whether the host can rebase pull request `number` of `slug` (the REST `rebaseable`); `None` when it
+/// has not worked it out yet or can't be asked.
+pub fn rebaseable(gh_cli: &Path, slug: &str, number: u64) -> Option<bool> {
+    let out = gh(gh_cli, &["api", &format!("repos/{slug}/pulls/{number}")]).ok()?;
+    serde_json::from_str::<Value>(&out).ok()?["rebaseable"].as_bool()
+}
+
+/// Merges pull request `number` at `head` with the first of `methods` the host takes: a method it
+/// refuses for this pull request ([`method_refused`]) moves on to the next one, any other failure
+/// stops (tried again later). Every call is pinned to `head` (`--match-head-commit`).
+pub fn merge_any(gh_cli: &Path, slug: &str, number: u64, head: &str, methods: &[&str]) -> Merging {
+    let mut refused = vec![];
+    for m in methods {
+        match merge(gh_cli, slug, number, head, m) {
+            Merging::Failed(e) if method_refused(&e) => {
+                refused.push(format!("{}：{}", method_name(m), js_head(&e, 200)));
+            }
+            other => return other,
+        }
+    }
+    Merging::Refused(refused.join("；"))
+}
+
+/// A merge method in words.
+pub fn method_name(m: &str) -> &'static str {
+    match m {
+        "--rebase" => "rebase 合并",
+        "--squash" => "squash 合并",
+        _ => "merge commit",
+    }
 }
 
 /// Merges pull request `number` of `slug` at `head` and nowhere else (`--match-head-commit`: a head
-/// pushed since is refused by the host) with `method` ([`repo_merge_method`]). One `gh` call only:
-/// it is what runs after the last look at whether the result still stands.
+/// pushed since is refused by the host) with `method` ([`repo_merge_methods`]). One `gh` call: it
+/// is what runs after the last look at whether the result still stands ([`merge_any`] tries the next
+/// method only when the host refused this one, which merged nothing).
 pub fn merge(gh_cli: &Path, slug: &str, number: u64, head: &str, method: &str) -> Merging {
     let n = number.to_string();
     match gh(
@@ -311,6 +446,9 @@ pub(crate) struct Due {
     branch: String,
     /// Looked at only for whether it merged: the branch has nothing of its own (#218).
     only_merged: bool,
+    /// The pull request this result is followed on (seen by this result): looked up by its number,
+    /// so a deleted branch does not hide it (#347).
+    tracked: Option<u64>,
     /// Steve may merge this result: an independent review passed it, or you said yes.
     may_merge: bool,
     /// When a merge that failed may be tried again.
@@ -386,7 +524,12 @@ impl Core {
         let due = self.tx().prs_due()?;
         let gh_cli = self.config().gh.clone();
         for d in &due {
-            let look = look(&gh_cli, &d.slug, &d.branch);
+            /* the pull request this result is followed on, by its number first: its branch may be
+             * gone (merged with "delete branch"); a closed one may have a newer one of its branch */
+            let look = match d.tracked.map(|n| look_number(&gh_cli, &d.slug, n)) {
+                Some(Look::Found(pr)) if pr.state != "CLOSED" => Look::Found(pr),
+                _ => look(&gh_cli, &d.slug, &d.branch),
+            };
             let open = matches!(&look, Look::Found(pr) if !d.only_merged && pr.state == "OPEN" && !pr.draft);
             /* looked at only for an open pull request Steve may merge or tell about: the worktree's
              * fingerprint is not free */
@@ -398,15 +541,28 @@ impl Core {
                         && pr.mergeable_now()
                         && &pr.head == h =>
                 {
-                    /* the method is read first, so that between asking again under the lock (a
-                     * result invalidated since is never merged) and the merge there is the merge
-                     * call alone; the host refuses any other head */
-                    match repo_merge_method(&gh_cli, &d.slug) {
+                    /* the methods are read first (and whether the branch can be rebased, #316), so
+                     * that between asking again under the lock (a result invalidated since is never
+                     * merged) and the merge there are the merge calls alone; the host refuses any
+                     * other head */
+                    match repo_merge_methods(&gh_cli, &d.slug) {
                         Err(e) => Some(Merging::Failed(e)),
-                        Ok(m) if self.tx().pr_may_merge(&d.op)? => {
-                            Some(merge(&gh_cli, &d.slug, pr.number, h, m))
+                        Ok(allowed) => {
+                            let can_rebase = match allowed.first() {
+                                Some(&"--rebase") => rebaseable(&gh_cli, &d.slug, pr.number),
+                                _ => None,
+                            };
+                            let methods = methods_for(&allowed, can_rebase);
+                            if methods.is_empty() {
+                                Some(Merging::Refused(
+                                    "GitHub 说这个分支不能 rebase（分支里有合并提交，或 rebase 会冲突），而仓库只允许 rebase 合并".into(),
+                                ))
+                            } else if self.tx().pr_may_merge(&d.op)? {
+                                Some(merge_any(&gh_cli, &d.slug, pr.number, h, &methods))
+                            } else {
+                                None
+                            }
                         }
-                        Ok(_) => None,
                     }
                 }
                 _ => None,
@@ -472,6 +628,124 @@ impl Tx<'_> {
                     && o.evidence["pr"].as_u64().is_some()
             })
             .max_by_key(|o| o.revision))
+    }
+
+    /// The release of the item's current result, when its pull request merged with the accepted
+    /// result ([`merged_with`]): the requirement is met and the worktree no longer matters (#347).
+    pub(crate) fn pr_merged_accepted(
+        &self,
+        i: &Item,
+        c: &Closing,
+    ) -> Result<Option<steve_store::ItemOperation>> {
+        if c.kind != COMPLETE || !c.accepted || c.frozen_revision != i.revision {
+            return Ok(None);
+        }
+        Ok(self
+            .db()
+            .store()
+            .items()
+            .operations(&i.id, i.cycle)?
+            .into_iter()
+            .find(|o| o.revision == i.revision && merged_with(o, c)))
+    }
+
+    /// The accepted result's worktree moved while the pull request it is followed on was open (as
+    /// this result saw it): `true` while the closing waits for the host to say whether it merged
+    /// meanwhile (a merge with "delete branch", a worktree cleaned up after it), which the next look
+    /// answers ([`Core::check_prs`], started now). Once the host answered after the move, or could
+    /// not be asked for [`PR_VERIFY_MS`], `false`: the moved result is void as before.
+    pub(crate) fn pr_merge_unseen(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+        if c.kind != COMPLETE || !c.accepted || c.frozen_revision != i.revision {
+            return Ok(false);
+        }
+        let Some(o) = self
+            .db()
+            .store()
+            .items()
+            .operations(&i.id, i.cycle)?
+            .into_iter()
+            .find(|o| {
+                o.kind == OP_RELEASE
+                    && o.revision == i.revision
+                    && o.status == "pending"
+                    && o.evidence["pr"].as_u64().is_some()
+                    && o.evidence["pr_state"] == json!("OPEN")
+                    && o.evidence["pr_merged"] != json!(true)
+                    && o.evidence["pr_slug"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+            })
+        else {
+            return Ok(false);
+        };
+        let t = now();
+        let since = match self.st.pr_verify.get(&o.id) {
+            Some(&since) => since,
+            None => {
+                self.st.pr_verify.insert(o.id.clone(), t);
+                /* looked at now, not on the next interval */
+                self.st.pr_checked.remove(&o.id);
+                let core = self.c.clone();
+                crate::detach(move || {
+                    if let Err(e) = core.check_prs() {
+                        tracing::warn!("pull request check: {e}");
+                    }
+                });
+                tracing::info!(
+                    item = %i.id,
+                    "closing check: the worktree moved, asking whether PR #{} merged first",
+                    o.evidence["pr"]
+                );
+                return Ok(true);
+            }
+        };
+        let answered = o.evidence["pr_looked"]
+            .as_i64()
+            .is_some_and(|at| at >= since);
+        if answered || t - since >= PR_VERIFY_MS {
+            self.st.pr_verify.remove(&o.id);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// The tracked pull request merged with the accepted result ([`merged_with`]): the requirement of
+    /// a project done once merged is met on the host's word, with no look at the worktree (it may be
+    /// gone) or the remote branch (deleted on merge). `true` when it was.
+    pub(crate) fn pr_merge_meets(
+        &mut self,
+        i: &Item,
+        op: &steve_store::ItemOperation,
+    ) -> Result<bool> {
+        let Some(c) = closing_of(i) else {
+            return Ok(false);
+        };
+        if !merged_with(op, &c) {
+            return Ok(false);
+        }
+        let n = op.evidence["pr"].as_u64().unwrap_or(0);
+        let commit = op.evidence["pr_merge_commit"].as_str().unwrap_or("");
+        let what = if commit.is_empty() {
+            format!("PR #{n} 已合并")
+        } else {
+            format!("PR #{n} 已合并（合并提交 {}）", js_head(commit, 7))
+        };
+        let ev = json!({"rule": crate::upstream::DONE_MERGE, "note": what,
+            "landed": (!commit.is_empty()).then_some(commit)});
+        self.db()
+            .store()
+            .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "succeeded", &ev))?;
+        self.db().timeline_add(
+            &i.id,
+            "steve",
+            "sys",
+            &format!(
+                "Steve 核对：{what}；按约定（{}）算完成",
+                crate::takeover::rule_text(crate::upstream::DONE_MERGE)
+            ),
+            None,
+        )?;
+        Ok(true)
     }
 
     /// The accepted result passed an independent review: the item's work graph, as it was accepted,
@@ -562,6 +836,7 @@ impl Tx<'_> {
                 slug,
                 branch,
                 only_merged: o.evidence["own"] == json!(false),
+                tracked: o.evidence["pr"].as_u64(),
                 may_merge: self.pr_may_merge(&o.id)?,
                 merge_after: o.evidence["pr_merge_after"].as_i64().unwrap_or(0),
                 frozen: closing_of(&i).and_then(|c| c.fingerprint),
@@ -629,6 +904,11 @@ impl Tx<'_> {
         if unknown > 0 && !matches!(look, Look::Unknown(_)) {
             ev["pr_unknown"] = json!(0);
         }
+        /* when the host last answered: a closing check that saw the worktree move waits for an
+         * answer after that before it voids the result (#347) */
+        if !matches!(look, Look::Unknown(_)) {
+            ev["pr_looked"] = json!(now());
+        }
         match look {
             Look::Unknown(e) => {
                 let n = unknown + 1;
@@ -681,6 +961,10 @@ impl Tx<'_> {
                 ev["pr"] = json!(pr.number);
                 ev["pr_url"] = json!(pr.url);
                 ev["pr_state"] = json!(pr.state);
+                ev["pr_head"] = json!(pr.head);
+                if let Some(c) = &pr.merge_commit {
+                    ev["pr_merge_commit"] = json!(c);
+                }
                 match pr.state.as_str() {
                     "MERGED" => {
                         if o.evidence["pr_merged"] != json!(true) {
@@ -821,6 +1105,24 @@ impl Tx<'_> {
                         self.mark_merged(&i, &pr, review, "steve");
                         close = true;
                     }
+                    Some(Merging::Refused(why)) => {
+                        /* no method the repository allows can merge it: trying again would only be
+                         * refused again, so it is yours now, with why (#316); looked at again later */
+                        let n = o.evidence["pr_merge_failures"].as_i64().unwrap_or(0) + 1;
+                        ev["pr_merge_failures"] = json!(n);
+                        ev["pr_merge_after"] = json!(now() + merge_retry_ms(n));
+                        ev["pr_merge_error"] = json!(js_head(why, 300));
+                        ev["pr_problem"] = json!("merge_method");
+                        card = Some((
+                            format!("method:{}", pr.head),
+                            format!(
+                                "Steve 合并不了 PR #{}（{}）：仓库允许的合并方式都不行——{}。你可以在 GitHub 上看看，换一种合并方式或自己合并，合并后事项照常完成。",
+                                pr.number,
+                                pr.url,
+                                js_head(why, 300)
+                            ),
+                        ));
+                    }
                     Some(Merging::Failed(e)) => {
                         let n = o.evidence["pr_merge_failures"].as_i64().unwrap_or(0) + 1;
                         let wait = merge_retry_ms(n);
@@ -910,12 +1212,15 @@ impl Tx<'_> {
     /// The agent hears it now: its session gets the prompt (queued behind a running turn); without a
     /// session, it starts one.
     fn pr_wake(&mut self, item: &str, text: &str) -> Result<()> {
-        let to = match self.active_session(item)? {
-            Some(s) => To::Session(s.id),
-            None => To::Decision {
-                live: None,
-                item: Some(item.into()),
-            },
+        let Some(to) = self.steve_to(item)? else {
+            /* its session is in error: nothing would take the message, a card for you instead */
+            return self.fail(
+                item,
+                &format!(
+                    "Bot 的会话出错停下了，Steve 没有给它排消息：{}",
+                    text.trim_start_matches("（Steve）")
+                ),
+            );
         };
         self.db().timeline_add(
             item,
@@ -1237,6 +1542,41 @@ mod tests {
             };
             assert!(!p.mergeable_now(), "{extra}");
         }
+    }
+
+    #[test]
+    fn a_rebase_the_host_cannot_do_moves_on_to_the_next_allowed_method() {
+        let all = ["--rebase", "--squash", "--merge"];
+        assert_eq!(methods_for(&all, Some(false)), ["--squash", "--merge"]);
+        assert_eq!(methods_for(&all, None), all);
+        assert_eq!(methods_for(&all, Some(true)), all);
+        assert!(methods_for(&["--rebase"], Some(false)).is_empty());
+        assert!(method_refused(
+            "GraphQL: This branch can't be rebased (mergePullRequest)"
+        ));
+        assert!(method_refused(
+            "GraphQL: Squash merges are not allowed on this repository. (mergePullRequest)"
+        ));
+        assert!(!method_refused(
+            "GraphQL: Head branch was modified. Review and try the merge again."
+        ));
+    }
+
+    #[test]
+    fn the_commit_a_merge_made_is_read() {
+        let Look::Found(p) = read(&json!([pr(json!({"state": "MERGED",
+            "mergeCommit": {"oid": "9c68b6ad6a601c22801d637833b00ca2c0fcc1a9"}}))]))
+        else {
+            panic!()
+        };
+        assert_eq!(
+            p.merge_commit.as_deref(),
+            Some("9c68b6ad6a601c22801d637833b00ca2c0fcc1a9")
+        );
+        let Look::Found(p) = read(&json!([pr(json!({"mergeCommit": null}))])) else {
+            panic!()
+        };
+        assert_eq!(p.merge_commit, None);
     }
 
     #[test]

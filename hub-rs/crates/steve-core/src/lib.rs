@@ -155,6 +155,10 @@ pub(crate) struct State {
     build_checked: HashMap<String, i64>,
     /// When each followed pull request was last looked at (`pull`), by its operation.
     pr_checked: HashMap<String, i64>,
+    /// Closings whose worktree moved while the pull request they are followed on was open: since
+    /// when each waits for the host to say whether it merged before the result is void (`pull`), by
+    /// the release operation.
+    pr_verify: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
     /// Items handing over to a new session while the old one's release is on its way: the

@@ -1544,3 +1544,66 @@ fn accept_and_release_with_a_rebase_conflict_sends_the_agent_to_steve_publish_on
         "not_released"
     );
 }
+
+/* ── only a person's input voids a completion; your Finish wins over Steve's automation (#347) ── */
+
+/// Puts a message in the session's queue, as a session that can't take it now holds it.
+fn queue(k: &Kit, sid: &str, text: &str, via: &str) {
+    k.db().store().queued().add(sid, text, via, &[]).unwrap();
+}
+
+#[test]
+fn a_queued_steve_message_and_your_finish_complete_the_item() {
+    let k = Kit::new();
+    let x = k.delivered(false);
+    // the session went into error and Steve's takeover message waits in its queue
+    k.db()
+        .session_patch(&x.session, patch![status: "error"])
+        .unwrap();
+    queue(
+        &k,
+        &x.session,
+        "（Steve）你上一次的交付已经作废：冻结之后结果又变了：工作区不见了，需要重新交付。",
+        crate::cycle::STEVE_VIA,
+    );
+    k.finish(&x.id).unwrap();
+    assert_eq!(k.phase(&x.id), "closed", "{:?}", k.timeline_texts(&x.id));
+    let i = k.db().item(&x.id).unwrap().unwrap();
+    assert_eq!(i.outcome.as_deref(), Some("completed"));
+    let t = k.timeline_texts(&x.id);
+    assert!(!t.iter().any(|l| l.contains("收到新的消息")), "{t:?}");
+    assert!(
+        t.iter()
+            .any(|l| l == "你标记了完成，Steve 排队给 Bot 的 1 条消息不再发送"),
+        "{t:?}"
+    );
+    assert!(k.db().queued(&x.session).unwrap().is_empty());
+}
+
+#[test]
+fn only_a_persons_queued_message_voids_the_accepted_result() {
+    // Steve's own follow-up waiting in the queue: the acceptance closes, the follow-up goes with it
+    let k = Kit::new();
+    let x = k.delivered(false);
+    queue(
+        &k,
+        &x.session,
+        "（Steve）PR 还没开。",
+        crate::cycle::STEVE_VIA,
+    );
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    assert_eq!(k.phase(&x.id), "closed");
+    assert!(k.db().queued(&x.session).unwrap().is_empty());
+    // a message of yours waiting there: new input, the closing is void
+    let k = Kit::new();
+    let x = k.delivered(false);
+    queue(&k, &x.session, "再改一下标题", "me");
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    assert_eq!(k.phase(&x.id), "active");
+    assert!(
+        k.timeline_texts(&x.id)
+            .iter()
+            .any(|l| l == "收尾作废：收到新的消息")
+    );
+    assert_eq!(k.db().queued(&x.session).unwrap().len(), 1, "yours stays");
+}

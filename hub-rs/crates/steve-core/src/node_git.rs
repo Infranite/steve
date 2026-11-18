@@ -25,7 +25,7 @@ use crate::cycle::{CLOSING, COMPLETE, OP_RELEASE, closing_of, fingerprint_head, 
 use crate::error::Result;
 use crate::orchestrator::To;
 use crate::repo::Item;
-use crate::upstream::{DONE_TAG, Probe};
+use crate::upstream::{DONE_TAG, Probe, unread};
 use crate::util::now;
 use crate::{Core, Tx, detach};
 
@@ -322,7 +322,7 @@ pub(crate) async fn probe(port: &dyn NodeGit, item: &str, rule: &str) -> (Option
         .await
     {
         Ok(f) => f,
-        Err(e) => return (None, missing(format!("核对不了远端：{}", e.safe_detail))),
+        Err(e) => return (None, unread(format!("核对不了远端：{}", e.safe_detail))),
     };
     let head = f.head.clone();
     if f.dirty {
@@ -351,7 +351,7 @@ pub(crate) async fn probe(port: &dyn NodeGit, item: &str, rule: &str) -> (Option
         Err(e) => {
             return (
                 Some(head),
-                missing(format!("取不到远端的最新状态：{}", e.safe_detail)),
+                unread(format!("取不到远端的最新状态：{}", e.safe_detail)),
             );
         }
     };
@@ -427,9 +427,9 @@ pub(crate) fn probe_now(port: &dyn NodeGit, item: &str, rule: &str) -> (Option<S
     block_on(async {
         tokio::time::timeout(GATHER_DEADLINE, probe(port, item, rule))
             .await
-            .unwrap_or_else(|_| (None, missing("核对不了远端：超时")))
+            .unwrap_or_else(|_| (None, unread("核对不了远端：超时")))
     })
-    .unwrap_or_else(|| (None, missing("核对不了远端")))
+    .unwrap_or_else(|| (None, unread("核对不了远端")))
 }
 
 /// The tag on `origin` closest after `commit` that contains it (`(name, tag commit)`), as

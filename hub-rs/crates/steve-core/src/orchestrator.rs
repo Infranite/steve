@@ -974,6 +974,43 @@ impl Tx<'_> {
             .rfind(|s| s.status != "ended"))
     }
 
+    /// Where a follow-up of Steve's own for the item goes (its live session, else a new one), or
+    /// `None` when its live session is in error: a message would only wait in that session's queue,
+    /// so the caller shows a card for you instead (#347).
+    pub(crate) fn steve_to(&self, item: &str) -> Result<Option<To>> {
+        Ok(match self.active_session(item)? {
+            Some(s) if s.status == "error" => None,
+            Some(s) => Some(To::Session(s.id)),
+            None => Some(To::Decision {
+                live: None,
+                item: Some(item.into()),
+            }),
+        })
+    }
+
+    /// Steve's own messages still queued for the item's sessions are taken back: your Finish wins
+    /// over Steve's automation for the item, and a closed item needs none of them (#347). Your
+    /// messages stay. How many went.
+    pub(crate) fn drop_steve_queued(&mut self, item: &str) -> Result<usize> {
+        let mut n = 0;
+        for s in self.db().sessions_of_item(item)? {
+            for q in self.db().queued(&s.id)? {
+                if q.via != crate::cycle::STEVE_VIA {
+                    continue;
+                }
+                if self.db().queue_remove(&s.id, &q.id)?.is_some() {
+                    self.db().event_add(
+                        &s.id,
+                        "queued_removed",
+                        json!({"id": q.id, "text": q.text, "by": "steve"}),
+                    )?;
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
     fn accept_of(&self, i: &Item) -> Result<String> {
         if let Some(m) = i
             .accept_mode
@@ -3996,6 +4033,18 @@ impl Tx<'_> {
                 self.st.marked_done.insert(id.into(), MarkedDone { busy });
                 self.db()
                     .timeline_add(id, actor, "me", action.label(), None)?;
+                /* your Finish wins: what Steve still had queued for the agent (a continue, a
+                 * follow-up about the release) is not run, and does not void it (#347) */
+                let dropped = self.drop_steve_queued(id)?;
+                if dropped > 0 {
+                    self.db().timeline_add(
+                        id,
+                        "steve",
+                        "sys",
+                        &format!("你标记了完成，Steve 排队给 Bot 的 {dropped} 条消息不再发送"),
+                        None,
+                    )?;
+                }
                 /* you are the acceptor; the running turn is stopped (outside the lock) and the close
                  * waits until it has */
                 if let Some(turn) = s

@@ -17,10 +17,12 @@ use crate::repo::PlanStep;
 use crate::testkit::Kit;
 use crate::upstream;
 
-/// A `gh` that answers `pr list` with what `pr.json` holds and `api repos/…` with `repo.json` (by
-/// default what the real `gh api` answered for a repository the account may write to), takes every
-/// `pr merge` unless `merge.fail` holds why not, fails `pr list` while `list.fail` exists, and writes
-/// each call to `calls`.
+/// A `gh` that answers `pr list` with what `pr.json` holds, `pr view` with `view.json` (fails without
+/// it, as for a pull request it can't find), `api repos/…/pulls/…` with `pull.json` (by default the
+/// host has not worked out whether it can rebase) and `api repos/…` with `repo.json` (by default what
+/// the real `gh api` answered for a repository the account may write to), takes every `pr merge`
+/// unless `merge.fail` holds why not (a rebase merge also unless `rebase.fail` does), fails `pr list`
+/// while `list.fail` exists, and writes each call to `calls`.
 struct Gh {
     _dir: tempfile::TempDir,
     dir: PathBuf,
@@ -35,7 +37,7 @@ impl Gh {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nd='{}'\necho \"$@\" >> \"$d/calls\"\ncase \"$1 $2\" in\n  'pr list') if [ -f \"$d/list.fail\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi; cat \"$d/pr.json\" ;;\n  'api repos/'*) cat \"$d/repo.json\" ;;\n  'pr merge') if [ -f \"$d/merge.fail\" ]; then cat \"$d/merge.fail\" >&2; exit 1; fi ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\nd='{}'\necho \"$@\" >> \"$d/calls\"\ncase \"$1 $2\" in\n  'pr list') if [ -f \"$d/list.fail\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi; cat \"$d/pr.json\" ;;\n  'pr view') if [ -f \"$d/view.json\" ]; then cat \"$d/view.json\"; else echo 'no pull requests found' >&2; exit 1; fi ;;\n  'api repos/'*'/pulls/'*) if [ -f \"$d/pull.json\" ]; then cat \"$d/pull.json\"; else echo '{{\"rebaseable\": null}}'; fi ;;\n  'api repos/'*) cat \"$d/repo.json\" ;;\n  'pr merge') case \"$*\" in *--rebase*) if [ -f \"$d/rebase.fail\" ]; then cat \"$d/rebase.fail\" >&2; exit 1; fi ;; esac; if [ -f \"$d/merge.fail\" ]; then cat \"$d/merge.fail\" >&2; exit 1; fi ;;\n  *) exit 1 ;;\nesac\n",
                 d.display()
             ),
         )
@@ -56,6 +58,26 @@ impl Gh {
     }
     fn prs(&self, v: Value) {
         std::fs::write(self.dir.join("pr.json"), v.to_string()).unwrap();
+    }
+    /// What `gh pr view` answers for the pull request a result is followed on.
+    fn view(&self, v: Value) {
+        std::fs::write(self.dir.join("view.json"), v.to_string()).unwrap();
+    }
+    /// What `gh api repos/…/pulls/…` answers (`rebaseable`).
+    fn pull(&self, v: Value) {
+        std::fs::write(self.dir.join("pull.json"), v.to_string()).unwrap();
+    }
+    /// The repository as `gh api repos/…` answers it, with `allow` changed.
+    fn repo(&self, allow: Value) {
+        let mut r: Value = serde_json::from_str(include_str!("fixtures/gh-api-repo.json")).unwrap();
+        for (k, v) in allow.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        std::fs::write(self.dir.join("repo.json"), r.to_string()).unwrap();
+    }
+    /// A rebase merge is refused with `why` (every other method is taken).
+    fn rebase_fails(&self, why: &str) {
+        std::fs::write(self.dir.join("rebase.fail"), why).unwrap();
     }
     fn merge_fails(&self, why: Option<&str>) {
         let f = self.dir.join("merge.fail");
@@ -360,7 +382,11 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
             "pr merge 7 --repo acme/app --rebase --match-head-commit {h}"
         )]
     );
-    assert_eq!(gh.calls("api"), ["api repos/acme/app"]);
+    // the methods, then whether the branch can be rebased (the first one allowed)
+    assert_eq!(
+        gh.calls("api"),
+        ["api repos/acme/app", "api repos/acme/app/pulls/7"]
+    );
     assert!(
         k.wait(|| k.phase(&x.item) == "closed"),
         "{:?}",
@@ -371,9 +397,9 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
         t.iter().any(|l| l.contains("Steve 已按验收的版本")),
         "{t:?}"
     );
+    // Steve merged it at the accepted head: that is the evidence, no look at the remote needed
     assert!(
-        t.iter()
-            .any(|l| l.starts_with("Steve 核对：提交已合并到 origin/main")),
+        t.iter().any(|l| l.starts_with("Steve 核对：PR #7 已合并")),
         "{t:?}"
     );
     assert!(k.open_fails(&x.item).is_empty());
@@ -979,4 +1005,202 @@ fn a_merge_that_ran_while_its_result_went_void_is_said_marked_and_yours() {
     gh.prs(json!([{"number": 7, "state": "MERGED", "url": "https://github.com/acme/app/pull/7", "headRefOid": h}]));
     accepted_again(&k, &x);
     assert_eq!(prompts_with(&k, &x, "按这个项目的约定"), told + 1);
+}
+
+/* ── a pull request merged on the host with its branch deleted (#347), the merge method (#316) ── */
+
+/// The worktree is cleaned up (as it is once its branch is gone).
+fn remove_worktree(x: &Remote) {
+    g(
+        &x.repo,
+        &["worktree", "remove", "--force", &x.wt.to_string_lossy()],
+    );
+    assert!(!x.wt.exists());
+}
+
+/// The pull request #7 as `gh pr view` answers it once it was squash-merged at `head`.
+fn squash_merged(head: &str) -> Value {
+    json!({"number": 7, "state": "MERGED", "url": "https://github.com/acme/app/pull/7",
+        "headRefOid": head, "isDraft": false, "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN",
+        "autoMergeRequest": null, "statusCheckRollup": [],
+        "mergeCommit": {"oid": "f00dfacef00dfacef00dfacef00dfacef00dface"}})
+}
+
+#[test]
+fn a_pull_request_merged_with_its_branch_deleted_completes_the_item_without_its_worktree() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    assert_eq!(release_op(&k, &x).evidence["pr_state"], "OPEN");
+    // squash-merged on GitHub with "delete branch": the branch lists nothing any more, the pull
+    // request by its number is merged; then the worktree is cleaned up
+    gh.prs(json!([]));
+    gh.view(squash_merged(&h));
+    remove_worktree(&x);
+    // the next closing pass sees the worktree gone: the host is asked first, and the merge decides
+    k.core.tx().lc_try_close(&x.item).unwrap();
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?} {:?}",
+        k.status(&x.item),
+        k.timeline_texts(&x.item)
+    );
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    assert_eq!(i.outcome.as_deref(), Some("completed"));
+    let t = k.timeline_texts(&x.item);
+    assert!(!t.iter().any(|l| l.starts_with("收尾作废")), "{t:?}");
+    assert!(
+        t.iter()
+            .any(|l| l.starts_with("Steve 核对：PR #7 已合并（合并提交 f00dfac）")),
+        "{t:?}"
+    );
+    assert_eq!(release_op(&k, &x).status, "succeeded");
+    assert!(k.open_fails(&x.item).is_empty());
+    assert!(gh.merges().is_empty());
+    assert_eq!(
+        gh.calls("pr view").first().map(String::as_str),
+        Some(
+            format!(
+                "pr view 7 --repo acme/app --json {}",
+                crate::pull::PR_FIELDS
+            )
+            .as_str()
+        )
+    );
+    // nothing of Steve's was told to the agent to redeliver
+    assert_eq!(prompts_with(&k, &x, "你上一次的交付已经作废"), 0);
+}
+
+#[test]
+fn a_merged_pull_request_seen_before_the_worktree_went_completes_on_any_pass() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    // merged with the branch deleted while a turn still runs: seen merged, the close waits for it
+    gh.prs(json!([]));
+    gh.view(squash_merged(&h));
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    k.db()
+        .session_patch(&s.id, crate::patch![status: "running"])
+        .unwrap();
+    look(&k);
+    assert_eq!(release_op(&k, &x).evidence["pr_merged"], true);
+    assert_eq!(k.phase(&x.item), "closing");
+    // the worktree is cleaned up, then the turn ends: completed, not void
+    remove_worktree(&x);
+    k.db()
+        .session_patch(&s.id, crate::patch![status: "idle"])
+        .unwrap();
+    k.core.lifecycle_tick().unwrap();
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.timeline_texts(&x.item)
+    );
+    assert!(
+        !k.timeline_texts(&x.item)
+            .iter()
+            .any(|l| l.starts_with("收尾作废"))
+    );
+}
+
+#[test]
+fn a_worktree_gone_while_its_pull_request_is_still_open_voids_the_result_as_before() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    remove_worktree(&x);
+    // held until the host answered after the move
+    k.core.tx().lc_try_close(&x.item).unwrap();
+    assert_eq!(k.phase(&x.item), "closing", "the host is asked first");
+    look(&k);
+    // it answered: still open, so the moved result is void
+    assert!(k.wait(|| {
+        k.core.tx().lc_try_close(&x.item).unwrap();
+        k.phase(&x.item) == "active"
+    }));
+    let t = k.timeline_texts(&x.item);
+    assert!(
+        t.iter()
+            .any(|l| l == "收尾作废：冻结之后结果又变了：工作区不见了，需要重新交付"),
+        "{t:?}"
+    );
+}
+
+#[test]
+fn a_branch_github_cannot_rebase_is_squashed_without_trying_the_rebase() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    gh.pull(json!({"rebaseable": false}));
+    let h = head(&x.wt);
+    merge_and_tag(&x, None);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    assert_eq!(
+        gh.merges(),
+        [format!(
+            "pr merge 7 --repo acme/app --squash --match-head-commit {h}"
+        )]
+    );
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.status(&x.item)
+    );
+    assert!(k.open_fails(&x.item).is_empty());
+}
+
+#[test]
+fn a_rebase_github_refuses_falls_back_to_a_squash_with_one_merge_and_no_card() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    // the host had not worked out whether it can rebase: the rebase is asked for, and refused
+    gh.rebase_fails("GraphQL: This branch can't be rebased (mergePullRequest)");
+    let h = head(&x.wt);
+    merge_and_tag(&x, None);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    assert_eq!(
+        gh.merges(),
+        [
+            format!("pr merge 7 --repo acme/app --rebase --match-head-commit {h}"),
+            format!("pr merge 7 --repo acme/app --squash --match-head-commit {h}"),
+        ]
+    );
+    assert!(
+        k.wait(|| k.phase(&x.item) == "closed"),
+        "{:?}",
+        k.status(&x.item)
+    );
+    assert!(k.open_fails(&x.item).is_empty());
+    let o = release_op(&k, &x);
+    assert_eq!(o.evidence["pr_merged_by"], "steve");
+    assert_eq!(o.evidence["pr_merge_failures"], 0);
+    let m = pr_marks(&k, &x);
+    assert_eq!(m.len(), 1, "one merge: {m:?}");
+}
+
+#[test]
+fn when_no_allowed_method_can_merge_the_card_says_why_at_once() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    gh.repo(json!({"allow_squash_merge": false, "allow_merge_commit": false}));
+    gh.pull(json!({"rebaseable": false}));
+    gh.prs(open_pr(&head(&x.wt), json!({})));
+    look(&k);
+    assert!(gh.merges().is_empty(), "nothing it could merge with");
+    let fails = k.open_fails(&x.item);
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(
+        fails[0].contains("合并方式都不行") && fails[0].contains("不能 rebase"),
+        "{fails:?}"
+    );
+    assert_eq!(release_op(&k, &x).evidence["pr_problem"], "merge_method");
+    assert_eq!(k.phase(&x.item), "closing");
 }
