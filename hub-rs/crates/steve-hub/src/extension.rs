@@ -725,7 +725,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     crate::app::boot(&st).await?;
 
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     crate::upgrades::spawn_auto_check((*cfg).clone());
     crate::upgrades::signing::spawn_migrate(cfg.home.clone());

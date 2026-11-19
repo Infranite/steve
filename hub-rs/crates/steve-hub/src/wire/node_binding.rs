@@ -1045,7 +1045,7 @@ mod host_tests {
         .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
-            job.await;
+            job.spawn().await;
         }
         let b = binding_for(&store, "s1", None, &|p| node.allows(p)).unwrap();
         rt.bind(&b).unwrap();
@@ -1132,7 +1132,7 @@ mod host_tests {
         .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
         for job in jobs {
-            job.await;
+            job.spawn().await;
         }
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),

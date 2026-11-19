@@ -82,7 +82,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     );
     if node_host.is_some() {
         // the local roots follow projects and knowledge folders, with no restart
-        node_jobs.push(Job::new("workspaces.follow", 
+        node_jobs.push(Job::new("workspaces.follow",
             workspaces.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_))))),
         ));
     }

@@ -788,7 +788,7 @@ mod tests {
             let w = wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
             assert_eq!(w.node.is_some(), mode != Some("off"));
             for job in w.jobs {
-                tokio::spawn(job);
+                job.start(w.domain.background_tasks().unwrap().as_ref());
             }
             let p = w
                 .core
@@ -938,9 +938,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(prompted, "queued");
-        let mut handles = Vec::new();
         for job in std::mem::take(&mut w2.jobs) {
-            handles.push(tokio::spawn(job));
+            job.start(w2.domain.background_tasks().unwrap().as_ref());
         }
         let ans = w2
             .core
@@ -987,9 +986,6 @@ mod tests {
             "model jobs run on local-jobs"
         );
         w2.domain.shutdown().await;
-        for handle in handles {
-            handle.abort();
-        }
         drop(w2);
 
         // 3. Holding `<data>/node/node.lock` and `<data>/node/host-tools.lock` (as a detached

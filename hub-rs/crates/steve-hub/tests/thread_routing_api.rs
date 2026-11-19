@@ -134,7 +134,7 @@ async fn start() -> Env {
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
-        tokio::spawn(job);
+        job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {

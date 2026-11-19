@@ -779,9 +779,8 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
     let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    let handles: Vec<_> = w.jobs.into_iter().map(tokio::spawn).collect();
-    for handle in handles {
-        handle.await.unwrap();
+    for job in w.jobs {
+        job.start(&st.jobs);
     }
     expected.extend([
         "hub.device",

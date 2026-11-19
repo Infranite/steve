@@ -1,11 +1,10 @@
 use super::*;
 
-install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, mut jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces, yolo] => [] {
+install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces, yolo] => [] {
     let history = local_runtime.as_ref()
         .map(|r| r.node() as Arc<dyn steve_node_api::Discovery>)
         .or_else(|| local_node.clone().map(|n| n as Arc<dyn steve_node_api::Discovery>));
     let tasks = Arc::new(crate::jobs::Tasks::default());
-    for job in &mut jobs { job.bind(&tasks); }
     reg.wired = Some(Wired {
         history,
         backend,

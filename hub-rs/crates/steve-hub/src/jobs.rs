@@ -261,7 +261,7 @@ mod tests {
         jobs.start("period", || panic!("duplicate registration must not spawn"));
         let dropped = Arc::new(AtomicUsize::new(0));
         let d = dropped.clone();
-        let mut job = Job::spawned("children", move || {
+        let job = Job::spawned("children", move || {
             (0..2)
                 .map(|_| {
                     let dropped = Dropped(d.clone());
@@ -272,8 +272,7 @@ mod tests {
                 })
                 .collect()
         });
-        job.bind(&jobs);
-        tokio::spawn(job).await.unwrap();
+        job.start(&jobs);
         settle().await;
         assert_eq!(jobs.names(), ["period", "children"]);
         assert_eq!(runs.load(Ordering::SeqCst), 1);
