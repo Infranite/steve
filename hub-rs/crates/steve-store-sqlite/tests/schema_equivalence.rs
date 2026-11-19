@@ -4,23 +4,11 @@ use common::*;
 use rusqlite::{Connection, types::Value};
 use std::collections::BTreeMap;
 
-fn structure(c: &Connection, exclude_contract: bool) -> Vec<Vec<Value>> {
-    // rootpage, rowid and sqlite_stat* belong to the physical/optimizer layout.
-    let mut schema = rows(
-        c,
-        "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name",
-    );
-    if exclude_contract {
-        schema.retain(
-            |row| !matches!(&row[2], Value::Text(t) if CONTRACT_TABLES.contains(&t.as_str()) || LEGACY_TABLES.contains(&t.as_str())),
-        );
-    }
-    for row in &mut schema {
-        if let Value::Text(sql) = &mut row[3] {
-            *sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-        }
-    }
-    schema
+fn structure(
+    c: &Connection,
+    exclude_contract: bool,
+) -> Vec<steve_store_sqlite::schema::SchemaObject> {
+    steve_store_sqlite::schema::normalized_structure(c, exclude_contract).unwrap()
 }
 
 fn seed_rows(c: &Connection, table: &str) -> Vec<String> {
@@ -48,11 +36,8 @@ fn seed_rows(c: &Connection, table: &str) -> Vec<String> {
 }
 
 fn equivalent(a: &Connection, b: &Connection, exclude_contract: bool) {
-    assert_eq!(
-        structure(a, exclude_contract),
-        structure(b, exclude_contract),
-        "sqlite_schema differs"
-    );
+    let differences = steve_store_sqlite::schema::differences(a, b, exclude_contract).unwrap();
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
     let tables = strings(
         a,
         "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_stat%' ORDER BY name",
@@ -60,21 +45,6 @@ fn equivalent(a: &Connection, b: &Connection, exclude_contract: bool) {
     for t in tables {
         if exclude_contract && LEGACY_TABLES.contains(&t.as_str()) {
             continue;
-        }
-        for pragma in ["table_info", "index_list", "foreign_key_list"] {
-            let sql = format!("PRAGMA {pragma}({})", ident(&t));
-            let normalized = |c| {
-                let mut r = rows(c, &sql);
-                if pragma == "index_list" {
-                    // seq is SQLite's enumeration order, not index identity or semantics.
-                    for row in &mut r {
-                        row.remove(0);
-                    }
-                }
-                r.sort_by_key(|r| format!("{r:?}"));
-                r
-            };
-            assert_eq!(normalized(a), normalized(b), "{pragma}({t}) differs");
         }
         if !shadows(a).contains(&t) {
             assert_eq!(

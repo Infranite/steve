@@ -255,13 +255,27 @@ pub fn final_structure(conn: &Connection) -> Result<()> {
             "legacy baseline requires an empty database".into(),
         ));
     }
-    migrate(conn, 0)
+    migrate(conn, 0, |_| Ok(()))
 }
 
 /// Replay pending migrations using the old runner's schema semantics.
 /// Structural fingerprint verification belongs to the converter's following verification phase.
 /// No historical support window is imposed; an unstamped empty database starts at zero.
 pub fn migrate_to_head(conn: &Connection) -> Result<()> {
+    migrate_to_head_with(conn, |_| Ok(()))
+}
+
+/// Conversion may validate structure before the existing migration transaction commits.
+/// A rejected older schema then retains its original bytes as well as its version.
+pub(crate) fn migrate_to_head_with(
+    conn: &Connection,
+    check: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
+    migrate(conn, version(conn)?, check)
+}
+
+/// Read and validate the legacy version and minimum reader without any writes.
+pub fn version(conn: &Connection) -> Result<i64> {
     let present: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_version')",
         [],
@@ -284,7 +298,7 @@ pub fn migrate_to_head(conn: &Connection) -> Result<()> {
             "cannot migrate legacy schema {cur} with head {SCHEMA_VERSION}"
         )));
     }
-    migrate(conn, cur)
+    Ok(cur)
 }
 
 fn minimum_reader(c: &Connection, fallback: i64) -> Result<i64> {
@@ -304,7 +318,7 @@ fn minimum_reader(c: &Connection, fallback: i64) -> Result<i64> {
     }
 }
 
-fn migrate(c: &Connection, cur: i64) -> Result<()> {
+fn migrate(c: &Connection, cur: i64, check: impl FnOnce(&Connection) -> Result<()>) -> Result<()> {
     // The caller must not already own a transaction: foreign_keys cannot change within one.
     if !c.is_autocommit() {
         return Err(rusqlite::Error::InvalidParameterName(
@@ -315,21 +329,23 @@ fn migrate(c: &Connection, cur: i64) -> Result<()> {
     if cur != SCHEMA_VERSION {
         c.pragma_update(None, "foreign_keys", "OFF")?;
     }
-    let ran = (|| {
-        // Keep the old metadata DDL, including its sqlite_schema spelling.
-        c.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
-        )?;
-        run_pending(c, cur)
-    })();
+    let ran = run_pending(c, cur, check);
     let restored = c.pragma_update(None, "foreign_keys", fks);
     ran?;
     restored
 }
 
-fn run_pending(c: &Connection, cur: i64) -> Result<()> {
+fn run_pending(
+    c: &Connection,
+    cur: i64,
+    check: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
     let tx = Transaction::new_unchecked(c, TransactionBehavior::Immediate)?;
+    // Metadata belongs to the same transaction as migrations, including on an empty DB.
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
+    )?;
     for m in MIGRATIONS.iter().skip(cur.max(0) as usize) {
         tx.execute_batch(m)?;
     }
@@ -376,6 +392,7 @@ fn run_pending(c: &Connection, cur: i64) -> Result<()> {
             broken.join(", ")
         )));
     }
+    check(&tx)?;
     if cur == 0 {
         tx.execute(
             "INSERT INTO schema_version (v) VALUES (?)",
