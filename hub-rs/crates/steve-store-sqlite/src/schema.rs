@@ -93,8 +93,9 @@ fn whitespace(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Ordinary table equality ignores physical column order, and nothing inside a
-/// column declaration. Constraints remain ordered; virtual tables stay strict.
+/// Ordinary table equality ignores physical column order. Every declaration uses
+/// the same whitespace normalization as the header/suffix and other objects.
+/// Constraints remain ordered; virtual tables stay strict.
 /// This is comparison data, not SQL to execute or a request to rebuild a table.
 fn table_identity(sql: &str) -> Option<String> {
     let tokens = ddl_tokens(sql)?;
@@ -140,7 +141,7 @@ fn table_identity(sql: &str) -> Option<String> {
                 .iter()
                 .any(|word| first.text.eq_ignore_ascii_case(word))
         {
-            constraints.push(declaration);
+            constraints.push(whitespace(declaration));
         } else {
             let name = if first.quoted {
                 let quote = first.text.chars().next()?;
@@ -150,7 +151,7 @@ fn table_identity(sql: &str) -> Option<String> {
             } else {
                 first.text.to_owned()
             };
-            if columns.insert(name, declaration).is_some() {
+            if columns.insert(name, whitespace(declaration)).is_some() {
                 return None;
             }
         }
@@ -166,9 +167,9 @@ fn table_identity(sql: &str) -> Option<String> {
     )
 }
 
-/// Tables compare complete declarations by name, preserving all literal bytes,
-/// comments and internal whitespace. Other objects retain the original strict
-/// whitespace-normalized comparison. sql is a comparison representation only.
+/// Tables compare complete whitespace-normalized declarations by name. Columns,
+/// constraints, header, suffix and other objects share one normalization rule.
+/// sql is a comparison representation only.
 /// Excluding contracts also excludes their indexes and both retired version tables.
 pub fn normalized_structure(
     conn: &Connection,
@@ -217,6 +218,14 @@ fn pragma_rows(conn: &Connection, pragma: &str, table: &str) -> rusqlite::Result
         // Enumeration position / physical cid is not logical schema identity.
         for row in &mut rows {
             row.remove(0);
+        }
+    }
+    if pragma == "foreign_key_list" {
+        for row in &mut rows {
+            // SQLite assigns FK ids in declaration order. Compare the actual
+            // target/columns/actions instead; retain composite-column sequence.
+            row.remove(0);
+            row.rotate_left(1); // table, from, to, actions, match, seq
         }
     }
     rows.sort_by_key(|r| match (pragma, r.first()) {
