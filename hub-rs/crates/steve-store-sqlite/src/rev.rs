@@ -12,6 +12,26 @@ struct Range {
 }
 pub struct RevAllocator(Mutex<Range>);
 impl RevAllocator {
+    /// Import runs under the same writer grant as issuance. Persist its floor before
+    /// applying rows, then discard the lower part of the in-memory reservation. A failed
+    /// import may leave a gap; a crash must never allow an imported revision to be reused.
+    pub fn advance_past(&self, c: &Connection, imported: Rev) -> Result<(), CommitError> {
+        if !c.is_autocommit() || imported.0 > i64::MAX as u64 {
+            return Err(failure(
+                steve_types::Code::Invalid,
+                "invalid import revision floor",
+            ));
+        }
+        let mut r = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let tx =
+            Transaction::new_unchecked(c, TransactionBehavior::Immediate).map_err(sql_error)?;
+        let end = upper(&tx)?.max(r.end).max(imported.0);
+        tx.execute("INSERT INTO meta(domain,key,value) VALUES('core','rev_reserved',?1) ON CONFLICT(domain,key) DO UPDATE SET value=excluded.value", [end.to_string()]).map_err(sql_error)?;
+        tx.commit().map_err(sql_error)?;
+        r.next = r.next.max(imported.0 + 1);
+        r.end = end;
+        Ok(())
+    }
     /// One allocator per physical writer. Reopening deliberately skips the previous reserved tail.
     pub fn open(c: &Connection) -> Result<Self, CommitError> {
         let end = upper(c)?;
