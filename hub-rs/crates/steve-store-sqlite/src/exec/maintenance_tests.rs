@@ -92,7 +92,10 @@ fn setup(admin: bool, policy: MaintenancePolicy) -> Setup {
         || false,
     )
     .unwrap();
-    assert_eq!(ticks.recv().unwrap().0, Duration::ZERO);
+    assert_eq!(
+        ticks.recv_timeout(Duration::from_secs(10)).unwrap().0,
+        Duration::ZERO
+    );
     Setup {
         _dir: dir,
         engine,
@@ -105,7 +108,7 @@ fn setup(admin: bool, policy: MaintenancePolicy) -> Setup {
 }
 fn until(s: &Setup, ms: u64) -> (Duration, bool, Option<Duration>) {
     loop {
-        let tick = s.ticks.recv().unwrap();
+        let tick = s.ticks.recv_timeout(Duration::from_secs(10)).unwrap();
         if tick.0 == Duration::from_millis(ms) {
             return tick;
         }
@@ -161,12 +164,29 @@ fn held_grant_blocks_maintenance_pressure_runs_at_gap_and_busy_retries_then_trun
         )
         .unwrap();
     s.time.advance(1000);
-    s.exec.wake();
+    // Synchronize with the worker actually observing busy, rather than reading
+    // a counter immediately after wake before the worker has had a turn.
+    let shared = s.exec.shared();
+    let mut state = lock(&shared.state);
+    let observed = state.busy_waits;
+    shared.changed.notify_all();
+    while state.busy_waits == observed {
+        let (next, timeout) = shared
+            .changed
+            .wait_timeout(state, Duration::from_secs(10))
+            .unwrap();
+        state = next;
+        assert!(
+            !timeout.timed_out(),
+            "worker did not observe the held grant"
+        );
+    }
     assert_eq!(
         s.checkpoints.load(Ordering::SeqCst),
         0,
-        "held writer grant forbids maintenance"
+        "worker observed the held writer grant without performing maintenance"
     );
+    drop(state);
     // Another caller queues behind the grant; submitting on this thread would
     // correctly fail UowInsideGrant before it ever reaches the queue.
     let queued = std::thread::scope(|scope| {
@@ -277,4 +297,51 @@ fn optimize_failure_retries_on_virtual_deadline_instead_of_waiting_another_hour(
     drop(grant);
     until(&s, 3_601_000);
     assert_eq!(s.optimizes.load(Ordering::SeqCst), 2);
+}
+
+fn wal_bytes(s: &Setup) -> u64 {
+    std::fs::metadata(s.engine.path().with_extension("sqlite3-wal"))
+        .unwrap()
+        .len()
+}
+fn commit_at(s: &Setup, advance_ms: u64) {
+    let grant = s.exec.grant(Lane::Admin).unwrap();
+    s.engine
+        .writer_conn()
+        .unwrap()
+        .execute("INSERT INTO maintained(payload) VALUES(x'01')", [])
+        .unwrap();
+    s.time.advance(advance_ms);
+    drop(grant);
+    let tick = until(s, s.time.now().as_millis() as u64);
+    assert!(!tick.1, "returning a writer alone is not an idle deadline");
+}
+#[test]
+fn isolated_commits_do_not_immediately_truncate_wal() {
+    let s = setup(false, MaintenancePolicy::default());
+    commit_at(&s, 1000);
+    let first = wal_bytes(&s);
+    assert!(first > 0);
+    commit_at(&s, 1000);
+    assert!(wal_bytes(&s) > first);
+    assert_eq!(s.checkpoints.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn idle_deadline_truncates_wal_after_commits_stop() {
+    let s = setup(false, MaintenancePolicy::default());
+    commit_at(&s, 1000);
+    s.time.advance(28_999);
+    s.exec.wake();
+    // A grant round trip synchronizes the worker before the deadline.
+    let grant = s.exec.grant(Lane::Admin).unwrap();
+    drop(grant);
+    until(&s, 29_999);
+    assert_eq!(s.checkpoints.load(Ordering::SeqCst), 0);
+    assert!(wal_bytes(&s) > 0);
+    s.time.advance(1);
+    s.exec.wake();
+    let tick = until(&s, 30_000);
+    assert!(tick.1, "empty queue at the due deadline permits TRUNCATE");
+    assert_eq!(s.checkpoints.load(Ordering::SeqCst), 1);
+    assert_eq!(wal_bytes(&s), 0);
 }
