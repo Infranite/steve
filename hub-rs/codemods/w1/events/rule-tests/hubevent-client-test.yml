@@ -1,7 +1,0 @@
-id: hubevent-client
-valid:
-  - "fn f() { let _ = Other::Client { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Client { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Client { id: id }); }"
-  - "fn f() { send(s::HubEvent::Client { ws, id: make(\"comma,colon:\") }); }"

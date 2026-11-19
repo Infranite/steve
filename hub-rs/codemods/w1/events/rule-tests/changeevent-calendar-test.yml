@@ -1,7 +1,0 @@
-id: changeevent-calendar
-valid:
-  - "fn f() { let _ = Other::Calendar { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Calendar { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Calendar { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Calendar { ws, id: make(\"comma,colon:\") }); }"

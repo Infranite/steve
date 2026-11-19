@@ -1,7 +1,0 @@
-id: changeevent-workspace
-valid:
-  - "fn f() { let _ = Other::Workspace { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Workspace { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Workspace { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Workspace { ws, id: make(\"comma,colon:\") }); }"

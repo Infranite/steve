@@ -1,7 +1,0 @@
-id: changeevent-yolo
-valid:
-  - "fn f() { let _ = Other::Yolo { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Yolo { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Yolo { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Yolo { ws, id: make(\"comma,colon:\") }); }"

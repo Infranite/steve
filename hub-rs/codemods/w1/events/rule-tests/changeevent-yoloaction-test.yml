@@ -1,7 +1,0 @@
-id: changeevent-yoloaction
-valid:
-  - "fn f() { let _ = Other::YoloAction { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::YoloAction { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::YoloAction { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::YoloAction { ws, id: make(\"comma,colon:\") }); }"

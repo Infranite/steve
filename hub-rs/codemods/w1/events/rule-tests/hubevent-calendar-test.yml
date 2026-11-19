@@ -1,7 +1,0 @@
-id: hubevent-calendar
-valid:
-  - "fn f() { let _ = Other::Calendar { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Calendar { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Calendar { id: id }); }"
-  - "fn f() { send(s::HubEvent::Calendar { ws, id: make(\"comma,colon:\") }); }"

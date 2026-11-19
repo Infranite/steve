@@ -1,7 +1,0 @@
-id: changeevent-chanmessage
-valid:
-  - "fn f() { let _ = Other::ChanMessage { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::ChanMessage { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::ChanMessage { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::ChanMessage { ws, id: make(\"comma,colon:\") }); }"

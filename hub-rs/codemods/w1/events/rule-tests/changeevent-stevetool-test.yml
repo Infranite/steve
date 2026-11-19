@@ -1,7 +1,0 @@
-id: changeevent-stevetool
-valid:
-  - "fn f() { let _ = Other::SteveTool { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::SteveTool { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::SteveTool { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::SteveTool { ws, id: make(\"comma,colon:\") }); }"

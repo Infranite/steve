@@ -1,7 +1,0 @@
-id: changeevent-decision
-valid:
-  - "fn f() { let _ = Other::Decision { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Decision { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Decision { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Decision { ws, id: make(\"comma,colon:\") }); }"

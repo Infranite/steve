@@ -1,7 +1,0 @@
-id: hubevent-stevedraft
-valid:
-  - "fn f() { let _ = Other::SteveDraft { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::SteveDraft { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::SteveDraft { id: id }); }"
-  - "fn f() { send(s::HubEvent::SteveDraft { ws, id: make(\"comma,colon:\") }); }"

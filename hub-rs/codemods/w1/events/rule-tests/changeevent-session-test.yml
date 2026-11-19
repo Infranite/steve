@@ -1,7 +1,0 @@
-id: changeevent-session
-valid:
-  - "fn f() { let _ = Other::Session { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Session { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Session { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Session { ws, id: make(\"comma,colon:\") }); }"

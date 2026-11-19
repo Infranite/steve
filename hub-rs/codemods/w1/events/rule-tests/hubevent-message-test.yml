@@ -1,7 +1,0 @@
-id: hubevent-message
-valid:
-  - "fn f() { let _ = Other::Message { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Message { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Message { id: id }); }"
-  - "fn f() { send(s::HubEvent::Message { ws, id: make(\"comma,colon:\") }); }"

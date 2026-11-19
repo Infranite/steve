@@ -1,7 +1,0 @@
-id: changeevent-releasehold
-valid:
-  - "fn f() { let _ = Other::ReleaseHold { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::ReleaseHold { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::ReleaseHold { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }); }"

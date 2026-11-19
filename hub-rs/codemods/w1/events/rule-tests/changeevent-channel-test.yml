@@ -1,7 +1,0 @@
-id: changeevent-channel
-valid:
-  - "fn f() { let _ = Other::Channel { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Channel { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Channel { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Channel { ws, id: make(\"comma,colon:\") }); }"

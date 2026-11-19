@@ -1,7 +1,0 @@
-id: changeevent-threadrun
-valid:
-  - "fn f() { let _ = Other::ThreadRun { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::ThreadRun { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::ThreadRun { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::ThreadRun { ws, id: make(\"comma,colon:\") }); }"

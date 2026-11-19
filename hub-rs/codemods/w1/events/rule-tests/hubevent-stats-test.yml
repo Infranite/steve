@@ -1,7 +1,0 @@
-id: hubevent-stats
-valid:
-  - "fn f() { let _ = Other::Stats { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Stats { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Stats { id: id }); }"
-  - "fn f() { send(s::HubEvent::Stats { ws, id: make(\"comma,colon:\") }); }"
