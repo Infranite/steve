@@ -572,6 +572,54 @@ async fn your_own_account_always_drafts_and_sends_the_edited_text_after_the_dela
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn messages_still_inside_their_delay_do_not_starve_a_due_one() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let me = h.me.clone();
+    let r = push(&h, &me, msg("C_DEV", "d1", "ulilei", "@你 在吗", true))
+        .await
+        .response
+        .unwrap();
+    let (m, d) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
+    decide(&h, &d, "yes", "").expect("approve");
+    // 60 approved messages, older than it and not due for an hour: more than one batch of 50
+    exec(
+        &h,
+        &format!(
+            "CREATE TEMP TABLE m0 AS SELECT * FROM chan_messages WHERE id = '{m}';
+             CREATE TEMP TABLE d0 AS SELECT * FROM decisions WHERE id = '{d}';"
+        ),
+    );
+    let later = steve_modules::Clock::now(&*h.env.clock) + 3_600_000;
+    for i in 0..60 {
+        exec(
+            &h,
+            &format!(
+                "UPDATE m0 SET id = 'later{i}', decision_id = 'dlater{i}', created = created - 1000 - {i};
+                 INSERT INTO chan_messages SELECT * FROM m0;
+                 UPDATE d0 SET id = 'dlater{i}', subject_id = 'later{i}',
+                   result = json_set(result, '$.send_at', {at});
+                 INSERT INTO decisions SELECT * FROM d0;",
+                at = later
+            ),
+        );
+    }
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE status = 'pending' AND direction = 'out'",
+            &[]
+        ),
+        61
+    );
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1, "the due one goes out");
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn undo_within_the_delay_puts_the_draft_back() {
     let h = setup().await;
     checks_pass(&h);

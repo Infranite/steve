@@ -3177,29 +3177,22 @@ impl Outbox {
             Err(e) => tracing::warn!("drafts to rewrite: {e}"),
         }
         let now = ch.now();
+        // B3: only due messages are selected before the LIMIT, so approved ones still inside their
+        // delay can't fill the batch and starve those that are due
         let due = ch.store().reader(|c| -> ChannelResult<Vec<(String, String)>> {
             let mut st = c.prepare_cached(
-                "SELECT m.id, d.id, d.result FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
-                  WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?)
-                    AND d.status = 'resolved' AND d.subject_type = ? AND d.subject_id = m.id
+                "SELECT m.id, d.id FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
+                  WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?1)
+                    AND d.status = 'resolved' AND d.subject_type = ?2 AND d.subject_id = m.id
+                    AND json_extract(d.result, '$.send_at') <= ?3
                   ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
                     JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
-            let rows = st
-                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok(st
+                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE, now], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows
-                .into_iter()
-                .filter(|(_, _, res)| {
-                    serde_json::from_str::<Value>(res)
-                        .ok()
-                        .and_then(|v| v["send_at"].as_i64())
-                        .is_some_and(|t| t <= now)
-                })
-                .map(|(m, d, _)| (m, d))
-                .collect())
+                .collect::<rusqlite::Result<Vec<_>>>()?)
         });
         let due = match due {
             Ok(d) => d,
