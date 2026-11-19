@@ -3,8 +3,9 @@ name: CI rerun
 # step run ("The job was not acquired by Runner of type hosted even after multiple attempts"), and the CI
 # gate fails without having tested anything. When a CI push run on main fails, scripts/rerun-unacquired.py
 # reruns its failed jobs, but only if every failure is such an unacquired job (or the gate and `rust`
-# jobs that merely report on it), and at most three times per run. A job that ran and failed is a result,
-# never rerun. cut-release.py takes a run's latest attempt.
+# jobs that merely report on it), at most three times per run, and only while no newer push run exists (a
+# rerun re-enters the ci-main group and would cancel that run's pending place). A job that ran and failed is
+# a result, never rerun. cut-release.py takes a run's latest attempt.
 on:
   workflow_run:
     workflows: [CI]

@@ -92,11 +92,15 @@ class Decide(unittest.TestCase):
 
 
 class Main(unittest.TestCase):
-    def calls(self, jobs, notes):
+    def calls(self, jobs, notes, numbers=(7,)):
         asked = []
 
         def call(path, method="GET"):
             asked.append((method, path))
+            if path.startswith("actions/runs/") and path.count("/") == 2:
+                return {"id": int(path.rsplit("/", 1)[1]), "workflow_id": 99, "run_number": 7}
+            if path.startswith("actions/workflows/99/runs"):
+                return {"workflow_runs": [{"id": n, "run_number": n, "html_url": f"run/{n}"} for n in numbers]}
             if "/jobs?" in path:
                 return {"total_count": len(jobs), "jobs": jobs}
             if path.startswith("check-runs/"):
@@ -120,6 +124,14 @@ class Main(unittest.TestCase):
             self.assertEqual(rerun.main(["44562771299", "1"], env={}, call=call), 0)
         self.assertNotIn("POST", [m for m, _ in asked])
         self.assertIn("Not rerun: web ran and ended failure", out.getvalue())
+
+    def test_a_newer_push_run_is_not_displaced(self):
+        # a rerun re-enters the ci-main group and would cancel the newer push's pending run
+        asked, call = self.calls(run_44562771299(), dict(NOTES), numbers=(7, 8))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(rerun.main(["44562771299", "1"], env={}, call=call), 0)
+        self.assertNotIn("POST", [m for m, _ in asked])
+        self.assertIn("a newer push run exists (run/8)", out.getvalue())
 
     def test_an_unanswered_question_is_not_a_rerun(self):
         def call(path, method="GET"):

@@ -12,6 +12,10 @@ It reruns only when every failed or cancelled job of that attempt is either such
 step and that annotation) or one that only reports on others: the `CI gate`, and a platform's `rust`
 job when one of that platform's `rust-test` shards went unacquired. A job that ran any step and failed
 (a test, a build, a check) is never rerun: that is a result to investigate, not a missing runner.
+
+A rerun goes back into the `ci-main` concurrency group, where GitHub cancels the group's pending run to
+make room: rerunning an older run would cancel the pending run of a newer push. So a run is rerun only
+when no newer CI push run on main exists; a newer one tests newer code anyway.
 The exit code is 0 either way; the decision is printed.
 """
 import argparse
@@ -57,6 +61,14 @@ def decide(jobs, annotations, attempt):
     return f"only unacquired jobs failed ({names})", None
 
 
+def newer_run(call, run):
+    """A CI push run on main started after `run`, if any (any status)."""
+    this = call(f"actions/runs/{run}")
+    found = call(f"actions/workflows/{this['workflow_id']}/runs?branch=main&event=push&per_page=20")
+    return next((r for r in found.get("workflow_runs") or []
+                 if (r.get("run_number") or 0) > this["run_number"]), None)
+
+
 def api(repository, token, base, *, tries=3, sleep=time.sleep, opener=urllib.request.urlopen):
     def call(path, method="GET"):
         request = urllib.request.Request(f"{base}/repos/{repository}/{path}", method=method, headers={
@@ -96,6 +108,9 @@ def main(argv=None, env=os.environ, call=None):
                        env.get("GITHUB_API_URL", "https://api.github.com"))
     try:
         jobs = jobs_of(call, args.run, args.attempt)
+        if newer := newer_run(call, args.run):
+            print(f"Not rerun: a newer push run exists ({newer.get('html_url', newer.get('id'))})")
+            return 0
         why, refusal = decide(jobs, lambda j: [a.get("message", "") for a in
                                                call(f"check-runs/{j['id']}/annotations") or []], args.attempt)
     except (OSError, ValueError, KeyError) as error:
