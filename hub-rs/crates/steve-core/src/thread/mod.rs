@@ -31,7 +31,7 @@ pub use research::{
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
-use crate::repo::{FileRef, HubEvent, ItemExt, Message};
+use crate::repo::{FileRef, ItemExt, Message};
 use crate::util::{js_head, now};
 use regex::Regex;
 use rusqlite::OptionalExtension;
@@ -927,9 +927,15 @@ impl Core {
             Some(Ok(j)) => j,
         };
         if released {
-            self.store()
-                .store()
-                .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+            self.store().store().publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Message {
+                    ws: ws.into(),
+                    id: {
+                        let value: String = mid.into();
+                        steve_types::MessageId::from(value)
+                    },
+                },
+            ));
         }
         serde_json::from_str(&raw)
             .map(Some)
@@ -969,9 +975,15 @@ impl Core {
             Ok(true)
         })?;
         if done {
-            self.store()
-                .store()
-                .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+            self.store().store().publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Message {
+                    ws: ws.into(),
+                    id: {
+                        let value: String = mid.into();
+                        steve_types::MessageId::from(value)
+                    },
+                },
+            ));
         }
         Ok(done)
     }
@@ -1011,9 +1023,15 @@ impl Core {
             Ok(Some(job))
         })?;
         let Some(job) = job else { return Ok(None) };
-        self.store()
-            .store()
-            .publish(steve_store::ChangeEvent::Message { id: mid.into() });
+        self.store().store().publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Message {
+                ws: ws.into(),
+                id: {
+                    let value: String = mid.into();
+                    steve_types::MessageId::from(value)
+                },
+            },
+        ));
         Ok(Some((job.text, job.files)))
     }
 
@@ -1210,11 +1228,16 @@ impl Core {
                     tracing::error!(message = %mid, "routing a message in {w} failed: {e}");
                     lock(&core.0.thread.inflight).remove(&key);
                     if !guest {
-                        core.store().publish(HubEvent::SteveThinking {
-                            on: false,
-                            ws: Some(w.clone()),
-                            phase: None,
-                        });
+                        core.store().store().publish(steve_types::LiveEvent::from(
+                            steve_types::WorkLiveEvent::SteveThinking {
+                                on: false,
+                                ws: {
+                                    let value: String = w.clone();
+                                    value.into()
+                                },
+                                phase: None,
+                            },
+                        ));
                     }
                 }
                 lock(&core.0.thread.admitted).remove(&mid);
@@ -1488,11 +1511,16 @@ impl Core {
 
     /// `steve.thinking` with the phase of the message being handled; `on: true` repeats per phase like TS.
     fn phase(&self, ws: &str, phase: &str) {
-        self.store().publish(HubEvent::SteveThinking {
-            on: true,
-            ws: Some(ws.into()),
-            phase: Some(phase.into()),
-        });
+        self.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveThinking {
+                on: true,
+                ws: {
+                    let value: String = ws.into();
+                    value.into()
+                },
+                phase: Some(phase.into()),
+            },
+        ));
     }
 
     /// The conversation before message `mid`, as the router and answers see it. An open offer on a

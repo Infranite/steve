@@ -9,7 +9,7 @@ use super::{DRAFT_EVERY, Steps, lane_key, lock, meta_of};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{self, Offer, Said};
-use crate::repo::{Bot, FileRef, HubEvent, Project};
+use crate::repo::{Bot, FileRef, Project};
 use crate::util::{js_head, now};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -301,12 +301,23 @@ impl<'a> Drafts<'a> {
         }
         if wait <= 0 {
             l.sent = now();
-            self.core.store().publish(HubEvent::SteveDraft {
-                ws: self.ws.into(),
-                mid: self.mid.into(),
-                thought: l.thought.clone(),
-                text: l.text.clone(),
-            });
+            self.core
+                .store()
+                .store()
+                .publish(steve_types::LiveEvent::from(
+                    steve_types::WorkLiveEvent::SteveDraft {
+                        ws: {
+                            let value: String = self.ws.into();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                        mid: {
+                            let value: String = self.mid.into();
+                            steve_types::MessageId::from(value)
+                        },
+                        thought: l.thought.clone(),
+                        text: l.text.clone(),
+                    },
+                ));
             return;
         }
         l.pending = true;
@@ -325,12 +336,20 @@ impl<'a> Drafts<'a> {
                 return;
             }
             l.sent = now();
-            core.store().publish(HubEvent::SteveDraft {
-                ws,
-                mid,
-                thought: l.thought.clone(),
-                text: l.text.clone(),
-            });
+            core.store().store().publish(steve_types::LiveEvent::from(
+                steve_types::WorkLiveEvent::SteveDraft {
+                    ws: {
+                        let value: String = ws;
+                        steve_types::WorkspaceId::from(value)
+                    },
+                    mid: {
+                        let value: String = mid;
+                        steve_types::MessageId::from(value)
+                    },
+                    thought: l.thought.clone(),
+                    text: l.text.clone(),
+                },
+            ));
         });
     }
 }
@@ -378,38 +397,60 @@ impl ResearchSink for Sink<'_> {
         if d.quiet {
             return;
         }
-        d.core.store().publish(HubEvent::SteveTool {
-            ws: d.ws.into(),
-            mid: d.mid.into(),
-            run: self.run.into(),
-            name: t.name.clone(),
-            brief: t.brief.clone(),
-            ok: t.ok,
-            kind: t.kind.clone(),
-            running: false,
-            call: t.call,
-            started_at: Some(self.t0),
-            at: Some(now()),
-        });
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveTool {
+                ws: {
+                    let value: String = d.ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+                mid: {
+                    let value: String = d.mid.into();
+                    steve_types::MessageId::from(value)
+                },
+                run: {
+                    let value: String = self.run.into();
+                    steve_types::ThreadRunId::from(value)
+                },
+                name: t.name.clone(),
+                brief: t.brief.clone(),
+                ok: t.ok,
+                kind: t.kind.clone(),
+                running: false,
+                call: t.call,
+                started_at: (Some(self.t0)).map(steve_types::Millis),
+                at: (Some(now())).map(steve_types::Millis),
+            },
+        ));
     }
     fn tool_running(&self, call: Option<u32>, name: &str, kind: &str, brief: &str) {
         let d = &self.drafts;
         if d.quiet {
             return;
         }
-        d.core.store().publish(HubEvent::SteveTool {
-            ws: d.ws.into(),
-            mid: d.mid.into(),
-            run: self.run.into(),
-            name: name.into(),
-            brief: brief.into(),
-            ok: true,
-            kind: kind.into(),
-            running: true,
-            call,
-            started_at: Some(self.t0),
-            at: Some(now()),
-        });
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveTool {
+                ws: {
+                    let value: String = d.ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+                mid: {
+                    let value: String = d.mid.into();
+                    steve_types::MessageId::from(value)
+                },
+                run: {
+                    let value: String = self.run.into();
+                    steve_types::ThreadRunId::from(value)
+                },
+                name: name.into(),
+                brief: brief.into(),
+                ok: true,
+                kind: kind.into(),
+                running: true,
+                call: call,
+                started_at: (Some(self.t0)).map(steve_types::Millis),
+                at: (Some(now())).map(steve_types::Millis),
+            },
+        ));
     }
 }
 
@@ -545,10 +586,18 @@ impl Core {
             },
         )?;
         self.unmark_queued(&r.message_id)?;
-        self.store().publish(HubEvent::ThreadRun {
-            id: run.into(),
-            ws: ws.into(),
-        });
+        self.store().store().publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::ThreadRun {
+                id: {
+                    let value: String = run.into();
+                    steve_types::ThreadRunId::from(value)
+                },
+                ws: {
+                    let value: String = ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        ));
         Ok(())
     }
 
@@ -657,10 +706,18 @@ impl Core {
             {
                 a.run = Some(r.id.clone());
             }
-            self.store().publish(HubEvent::ThreadRun {
-                id: r.id.clone(),
-                ws: ws.into(),
-            });
+            self.store().store().publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::ThreadRun {
+                    id: {
+                        let value: String = r.id.clone();
+                        steve_types::ThreadRunId::from(value)
+                    },
+                    ws: {
+                        let value: String = ws.into();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                },
+            ));
             job.run = Some(r.id);
         }
         if queued {
@@ -817,11 +874,16 @@ impl Core {
             }
         };
         if j.space == super::MAIN {
-            self.store().publish(HubEvent::SteveThinking {
-                on: false,
-                ws: Some(ws.into()),
-                phase: None,
-            });
+            self.store().store().publish(steve_types::LiveEvent::from(
+                steve_types::WorkLiveEvent::SteveThinking {
+                    on: false,
+                    ws: {
+                        let value: String = ws.into();
+                        value.into()
+                    },
+                    phase: None,
+                },
+            ));
         }
         r
     }
@@ -1066,10 +1128,18 @@ impl Core {
                 ..Default::default()
             },
         )?;
-        db.publish(HubEvent::ThreadRun {
-            id: run.clone(),
-            ws: ws.into(),
-        });
+        db.store().publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::ThreadRun {
+                id: {
+                    let value: String = run.clone();
+                    steve_types::ThreadRunId::from(value)
+                },
+                ws: {
+                    let value: String = ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        ));
         if j.space == super::MAIN {
             self.phase(ws, "research");
         }
@@ -1282,10 +1352,18 @@ impl Core {
                 ..Default::default()
             },
         )?;
-        db.publish(HubEvent::ThreadRun {
-            id: run,
-            ws: ws.into(),
-        });
+        db.store().publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::ThreadRun {
+                id: {
+                    let value: String = run;
+                    steve_types::ThreadRunId::from(value)
+                },
+                ws: {
+                    let value: String = ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        ));
         if let Some((provider, c)) = &cx
             && out.end == RunEnd::Done
             && let Err(e) = self.chat_done(ws, *provider, c, &id, &text)
@@ -1407,6 +1485,7 @@ mod mention_tests {
 #[cfg(test)]
 mod draft_tests {
     use super::*;
+    use crate::repo::HubEvent;
     use crate::repo::WS;
     use crate::testkit::Kit;
 

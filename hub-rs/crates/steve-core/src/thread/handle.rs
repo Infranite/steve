@@ -9,7 +9,7 @@ use super::{AT, Job, Steps, lock, route_step};
 use crate::Core;
 use crate::error::Result;
 use crate::gateway::{Route, Said};
-use crate::repo::{FileRef, HubEvent, ItemExt};
+use crate::repo::{FileRef, ItemExt};
 use crate::util::{js_head, now};
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -76,11 +76,16 @@ impl Core {
             || (j.direct && self.main_busy_besides(ws))
             || (j.ahead.is_some() && self.answering(ws));
         if !quiet {
-            self.store().publish(HubEvent::SteveThinking {
-                on: true,
-                ws: Some(ws.into()),
-                phase: None,
-            });
+            self.store().store().publish(steve_types::LiveEvent::from(
+                steve_types::WorkLiveEvent::SteveThinking {
+                    on: true,
+                    ws: {
+                        let value: String = ws.into();
+                        value.into()
+                    },
+                    phase: None,
+                },
+            ));
         }
         /* what Steve did for this message, kept on the reply as meta.steps so the conversation can show it folded */
         let steps = Mutex::new(Steps::default());
@@ -142,11 +147,16 @@ impl Core {
         }
         lock(&self.0.thread.inflight).remove(&lane);
         if !quiet {
-            self.store().publish(HubEvent::SteveThinking {
-                on: false,
-                ws: Some(ws.into()),
-                phase: None,
-            });
+            self.store().store().publish(steve_types::LiveEvent::from(
+                steve_types::WorkLiveEvent::SteveThinking {
+                    on: false,
+                    ws: {
+                        let value: String = ws.into();
+                        value.into()
+                    },
+                    phase: None,
+                },
+            ));
         }
     }
 
