@@ -209,7 +209,10 @@ impl RuntimeReports {
                             }
                         }
                     }
-                    None => Vec::new(),
+                    None => {
+                        self.invalidate(id);
+                        return Err(ReportError::Unavailable);
+                    }
                 };
                 if self.caches.generation(&tag) != version {
                     return Err(ReportError::Superseded);
