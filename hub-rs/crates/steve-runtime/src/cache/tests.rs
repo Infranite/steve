@@ -278,18 +278,30 @@ async fn stale_grace_keeps_one_readable_value_while_refresh_is_held() {
     tokio::time::advance(GRACE.ttl + GRACE.stale_for).await;
     assert!(cache.peek(&"a".into()).await.is_none());
 }
-// The card explicitly permits a minimal real wait to catch the two-clock regression.
-// Logical-time tests above additionally cover the exact grace-end boundary without waiting.
-#[tokio::test]
-async fn production_clock_retains_a_value_after_its_fresh_ttl() {
-    let cache = caches(CacheMode::Memory).space(&GRACE);
+static FOREVER: CacheSpace<String, usize> = CacheSpace {
+    name: "forever",
+    ttl: Duration::from_secs(1),
+    stale_for: Duration::MAX,
+    share_pct: 50,
+    tags: |key| vec![Tag::of("forever", key)],
+    weigh: |_| 1,
+};
+/// Reclaim is moka's, on its own clock: it must be told ttl + stale_for (checked above), or
+/// nothing when that saturates. Staleness stays ours, on the tokio stamp.
+#[tokio::test(start_paused = true)]
+async fn an_unbounded_grace_sets_no_reclaim_ttl_and_still_turns_stale() {
+    let registry = caches(CacheMode::Memory);
+    let cache = registry.space(&FOREVER);
+    assert_eq!(cache.cache.as_ref().unwrap().policy().time_to_live(), None);
     cache
         .get_or_load("a".into(), || async { Ok::<_, ()>(1) })
         .await
         .unwrap();
-    tokio::time::sleep(GRACE.ttl + Duration::from_millis(5)).await;
-    assert_eq!(*cache.peek(&"a".into()).await.unwrap().0, 1);
-    assert!(!cache.peek(&"a".into()).await.unwrap().1);
+    assert!(cache.peek(&"a".into()).await.unwrap().1);
+    tokio::time::advance(FOREVER.ttl).await;
+    let (old, fresh) = cache.peek(&"a".into()).await.unwrap();
+    assert_eq!(*old, 1);
+    assert!(!fresh);
 }
 #[tokio::test]
 async fn a_post_write_reader_uses_its_own_uncached_load_at_the_retry_limit() {
