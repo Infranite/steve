@@ -1218,14 +1218,17 @@ fn set_aside(home: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(home.join(".setup.lock"))?;
     lock.try_lock().context(t!("install.setup.receipt.busy"))?;
-    /* the label is the one that installation registered, whatever this run was given */
-    let mut service = crate::service::Service::new(component, home, None)?;
-    for action in ["stop", "uninstall"] {
-        let report = service
-            .dispatch(action, None, 30)
-            .context(t!("install.setup.aside.still_running"))?;
-        if report["ok"] == false {
-            bail!("{}", t!("install.setup.aside.still_running"));
+    // setup.json precedes service registration: an interrupted setup has no service to stop.
+    if exists(&home.join("services").join(format!("{component}.json"))) {
+        /* the label is the one that installation registered, whatever this run was given */
+        let mut service = crate::service::Service::new(component, home, None)?;
+        for action in ["stop", "uninstall"] {
+            let report = service
+                .dispatch(action, None, 30)
+                .context(t!("install.setup.aside.still_running"))?;
+            if report["ok"] == false {
+                bail!("{}", t!("install.setup.aside.still_running"));
+            }
         }
     }
     let stamp = stamp();
