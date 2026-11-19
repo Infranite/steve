@@ -3,6 +3,11 @@
 # Syntax scan of earliest() calls; timer loops count once per function.
 # file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count
 # Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard
+# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its
+# private sleep_until wrapper; this guard does not follow helper calls.
+# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does
+# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and
+# same-function interval construction plus unknown loop tick receivers are recognized.
 steve-acp/src/oneshot.rs	timer-loop	oneshot::drive_prompt	1
 steve-acp/src/usage.rs	timer-loop	usage::Sampler::finish	1
 steve-calendar/src/sync.rs	timer-loop	sync::Calendar::run	1

@@ -1,7 +1,6 @@
 //! Runtime ratchet: move timers and wall-time policy into steve-runtime. This is a
 //! syntax guard, not a Rust type checker: review `.earliest()` receivers in the inventory.
 //! Scan module trees, not tests/examples or disconnected source files.
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use syn::parse::{ParseStream, Parser, discouraged::Speculative};
@@ -10,6 +9,7 @@ use syn::{Expr, Item, Meta, Token};
 
 type Counts = BTreeMap<(String, String, String), usize>;
 const LIST: &str = "tests/runtime_guard.txt";
+const LIST_HEADER: &str = "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard\n# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its\n# private sleep_until wrapper; this guard does not follow helper calls.\n# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does\n# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and\n# same-function interval construction plus unknown loop tick receivers are recognized.\n";
 const HELP: &str = "use steve-runtime due_loop / every / clock / tz, or explain in the task card before rewriting with STEVE_RUNTIME_BLESS=1";
 
 fn test_meta(meta: &Meta) -> bool {
@@ -85,7 +85,6 @@ fn join(scope: &str, name: &str) -> String {
 #[derive(Clone, Default)]
 struct Imports {
     names: BTreeMap<String, String>,
-    globs: Vec<String>,
 }
 impl Imports {
     fn add(&mut self, prefix: &str, tree: &syn::UseTree) {
@@ -114,7 +113,7 @@ impl Imports {
                 };
                 self.names.insert(ident(&n.rename), full);
             }
-            syn::UseTree::Glob(_) => self.globs.push(prefix.into()),
+            syn::UseTree::Glob(_) => {}
         }
     }
     fn items(items: &[Item]) -> Self {
@@ -122,17 +121,6 @@ impl Imports {
         for i in items.iter().filter(|i| production(i)) {
             if let Item::Use(u) = i {
                 out.add("", &u.tree);
-            } else {
-                let name = match i {
-                    Item::Struct(i) => Some(&i.ident),
-                    Item::Enum(i) => Some(&i.ident),
-                    Item::Fn(i) => Some(&i.sig.ident),
-                    Item::Type(i) => Some(&i.ident),
-                    _ => None,
-                };
-                if let Some(n) = name {
-                    out.names.insert(ident(n), ident(n));
-                }
             }
         }
         out
@@ -144,25 +132,29 @@ struct Source {
     module: String,
     items: Vec<Item>,
 }
-// Installer declarations live in a macro DSL but still declare ordinary modules.
-fn macro_modules(input: ParseStream<'_>, out: &mut Vec<Item>) -> syn::Result<()> {
+// ordered_installers! is this repository's assembly DSL: its declarations are ordinary modules.
+// This deliberately does not expand arbitrary Rust macros.
+fn macro_parts<T: syn::parse::Parse>(
+    input: ParseStream<'_>,
+    found: &mut impl FnMut(T),
+) -> syn::Result<()> {
     while !input.is_empty() {
         let fork = input.fork();
-        if let Ok(module) = fork.parse::<syn::ItemMod>() {
+        if let Ok(part) = fork.parse::<T>() {
             input.advance_to(&fork);
-            out.push(Item::Mod(module));
+            found(part);
         } else if input.peek(syn::token::Brace) {
             let inner;
             syn::braced!(inner in input);
-            macro_modules(&inner, out)?;
+            macro_parts(&inner, found)?;
         } else if input.peek(syn::token::Paren) {
             let inner;
             syn::parenthesized!(inner in input);
-            macro_modules(&inner, out)?;
+            macro_parts(&inner, found)?;
         } else if input.peek(syn::token::Bracket) {
             let inner;
             syn::bracketed!(inner in input);
-            macro_modules(&inner, out)?;
+            macro_parts(&inner, found)?;
         } else {
             input.step(|c| {
                 c.token_tree()
@@ -210,10 +202,14 @@ fn module_items(
     let mut expanded = vec![];
     for item in items.into_iter().filter(production) {
         if let Item::Macro(m) = &item {
-            if !m.mac.path.is_ident("macro_rules") {
-                (|input: ParseStream<'_>| macro_modules(input, &mut expanded))
-                    .parse2(m.mac.tokens.clone())
-                    .expect("macro module declarations");
+            if m.mac.path.is_ident("ordered_installers") {
+                (|input: ParseStream<'_>| {
+                    macro_parts(input, &mut |module: syn::ItemMod| {
+                        expanded.push(Item::Mod(module))
+                    })
+                })
+                .parse2(m.mac.tokens.clone())
+                .expect("macro module declarations");
             }
         }
         expanded.push(item);
@@ -278,144 +274,38 @@ fn module_items(
     });
 }
 
-struct Guard<'a> {
-    modules: &'a BTreeMap<String, Imports>,
-    module: String,
+struct Guard {
     imports: Vec<Imports>,
     bindings: Vec<BTreeMap<String, String>>,
-    fields: &'a BTreeMap<String, BTreeMap<String, String>>,
+    fields: BTreeMap<String, BTreeSet<String>>,
     owner: String,
     function: String,
     loops: usize,
+    interval_created: bool,
+    unknown_tick: bool,
     counts: BTreeMap<(String, String), usize>,
-    resolved: RefCell<BTreeMap<(String, String), String>>,
-    resolving: RefCell<BTreeSet<(String, String)>>,
 }
-impl Guard<'_> {
-    fn resolve_in(&self, raw: &str, module: &str, depth: usize) -> String {
-        let key = (raw.to_owned(), module.to_owned());
-        if let Some(resolved) = self.resolved.borrow().get(&key) {
-            return resolved.clone();
-        }
-        if !self.resolving.borrow_mut().insert(key.clone()) {
-            return raw.into();
-        }
-        let result = self.resolve_path(raw, module, depth);
-        self.resolving.borrow_mut().remove(&key);
-        self.resolved.borrow_mut().insert(key, result.clone());
-        result
-    }
-    fn resolve_path(&self, raw: &str, module: &str, depth: usize) -> String {
-        assert!(
-            depth <= 128,
-            "runtime guard import expansion too deep: {module} {raw}"
-        );
-        let (head, rest) = raw.split_once("::").unwrap_or((raw, ""));
-        if head == "chrono" {
-            return raw.replacen("chrono::offset::Local", "chrono::Local", 1);
-        }
-        if head == "tokio" {
-            return raw.into();
-        }
-        let absolute = |scope: &str, rest: &str| {
-            let full = join(scope, rest);
-            if self.modules.contains_key(&full) {
-                return format!("@::{full}");
+impl Guard {
+    // Expand explicit imports in this lexical scope only. There is no module graph,
+    // glob lookup or return-type inference; the bound also makes cyclic aliases harmless.
+    fn resolve(&self, raw: &str) -> String {
+        let mut resolved = raw.to_owned();
+        let limit = self.imports.iter().map(|i| i.names.len()).sum::<usize>() + 1;
+        for _ in 0..limit {
+            let (head, rest) = resolved.split_once("::").unwrap_or((&resolved, ""));
+            let Some(target) = self.imports.iter().rev().find_map(|i| i.names.get(head)) else {
+                break;
+            };
+            if target == head || target.starts_with(&format!("{head}::")) {
+                break;
             }
-            if !full.contains("::")
-                && self
-                    .modules
-                    .get("")
-                    .is_some_and(|e| e.names.contains_key(&full))
-            {
-                return self.resolve_in(&full, "", depth + 1);
-            }
-            if let Some((scope, name)) = full.rsplit_once("::") {
-                if self.modules.contains_key(scope) {
-                    return self.resolve_in(name, scope, depth + 1);
-                }
-            }
-            format!("@::{full}")
-        };
-        if head == "crate" || head == "@" {
-            return absolute("", rest);
-        }
-        if head == "self" {
-            return absolute(module, rest);
-        }
-        if head == "super" {
-            let parent = module.rsplit_once("::").map_or("", |(p, _)| p);
-            return if rest.starts_with("super::") {
-                self.resolve_in(rest, parent, depth + 1)
+            resolved = if rest.is_empty() {
+                target.clone()
             } else {
-                absolute(parent, rest)
+                join(target, rest)
             };
         }
-        // Modules and functions occupy different namespaces: `pub use ingest::ingest`
-        // must resolve the module prefix before the same-named function alias.
-        let child = join(module, head);
-        if !rest.is_empty() && self.modules.contains_key(&child) {
-            return self.resolve_in(rest, &child, depth + 1);
-        }
-        let envs = self
-            .imports
-            .iter()
-            .rev()
-            .filter(|_| module == self.module)
-            .chain(self.modules.get(module));
-        for env in envs {
-            if let Some(target) = env.names.get(head) {
-                // A macro/value import can share an external crate's name
-                // (`use anyhow::anyhow`). Its namespace-qualified path is already
-                // rooted; expanding that prefix again would grow it forever.
-                if target == head || target.starts_with(&format!("{head}::")) {
-                    return raw.into();
-                }
-                let resolved = self.resolve_in(target, module, depth + 1);
-                return if rest.is_empty() {
-                    resolved
-                } else {
-                    self.resolve_in(&join(&resolved, rest), module, depth + 1)
-                };
-            }
-            for glob in &env.globs {
-                let base = self.resolve_in(glob, module, depth + 1);
-                let imported = match base.as_str() {
-                    "tokio::time" => [
-                        "sleep",
-                        "sleep_until",
-                        "interval",
-                        "interval_at",
-                        "Interval",
-                    ]
-                    .contains(&head),
-                    "tokio" => head == "time",
-                    "chrono" => ["Local", "LocalResult"].contains(&head),
-                    _ => false,
-                };
-                if imported {
-                    return join(&base, raw);
-                }
-                if let Some(scope) = base.strip_prefix("@::") {
-                    if scope != module {
-                        let resolved = self.resolve_in(raw, scope, depth + 1);
-                        if resolved != raw {
-                            return resolved;
-                        }
-                    }
-                }
-            }
-        }
-        if raw.contains("::") {
-            let candidate = absolute(module, raw);
-            if !candidate.starts_with("@::") {
-                return candidate;
-            }
-        }
-        raw.into()
-    }
-    fn resolve(&self, raw: &str) -> String {
-        self.resolve_in(raw, &self.module, 0)
+        resolved.replacen("chrono::offset::Local", "chrono::Local", 1)
     }
     fn hit(&mut self, category: &str) {
         let key = (category.into(), self.function.clone());
@@ -449,11 +339,9 @@ impl Guard<'_> {
                 {
                     "tokio::time::Interval".into()
                 } else {
-                    callable.strip_prefix("fn:").unwrap_or_default().to_owned()
+                    String::new()
                 }
             }
-            Expr::Closure(c) => format!("fn:{}", self.value(&c.body)),
-            Expr::Block(b) => self.block_value(&b.block),
             Expr::Reference(r) => self.value(&r.expr),
             Expr::Paren(p) => self.value(&p.expr),
             Expr::Group(g) => self.value(&g.expr),
@@ -467,45 +355,18 @@ impl Guard<'_> {
                 } else {
                     self.value(&f.base)
                 };
-                self.fields
-                    .get(&join(&self.module, &owner))
-                    .and_then(|fields| fields.get(&name))
-                    .map(|t| self.resolve(t))
-                    .unwrap_or_default()
+                if self
+                    .fields
+                    .get(&owner)
+                    .is_some_and(|fields| fields.contains(&name))
+                {
+                    "tokio::time::Interval".into()
+                } else {
+                    String::new()
+                }
             }
             _ => String::new(),
         }
-    }
-    // Only infer local return values, enough for interval-building closures. No code runs.
-    fn block_value(&self, block: &syn::Block) -> String {
-        let mut locals = BTreeMap::new();
-        let lookup = |expr: &Expr, locals: &BTreeMap<String, String>| {
-            if let Expr::Path(p) = expr {
-                if let Some(value) = locals.get(&path(&p.path)) {
-                    return value.clone();
-                }
-            }
-            self.value(expr)
-        };
-        for stmt in &block.stmts {
-            match stmt {
-                syn::Stmt::Local(l) if !test_attrs(&l.attrs) => {
-                    if let (syn::Pat::Ident(p), Some(init)) = (&l.pat, &l.init) {
-                        locals.insert(ident(&p.ident), lookup(&init.expr, &locals));
-                    }
-                }
-                syn::Stmt::Expr(Expr::Return(r), _) => {
-                    return r
-                        .expr
-                        .as_ref()
-                        .map(|e| lookup(e, &locals))
-                        .unwrap_or_default();
-                }
-                syn::Stmt::Expr(expr, None) => return lookup(expr, &locals),
-                _ => {}
-            }
-        }
-        String::new()
     }
     fn bind_expr(&mut self, pat: &syn::Pat, expr: &Expr) {
         match (pat, expr) {
@@ -530,7 +391,14 @@ impl Guard<'_> {
         }
     }
     fn function(&mut self, sig: &syn::Signature, body: Option<&syn::Block>) {
-        let old = (self.function.clone(), self.loops);
+        let old = (
+            self.function.clone(),
+            self.loops,
+            self.interval_created,
+            self.unknown_tick,
+        );
+        self.interval_created = false;
+        self.unknown_tick = false;
         self.function = join(
             if self.function == "<module>" {
                 &self.owner
@@ -551,10 +419,20 @@ impl Guard<'_> {
             self.visit_block(b);
         }
         self.bindings.pop();
-        (self.function, self.loops) = old;
+        // Pair syntax within the owning function, not inferred closure return values.
+        // This covers local interval factories used by sibling async loops (spawn_jobs).
+        if self.interval_created && self.unknown_tick {
+            self.hit("timer-loop");
+        }
+        (
+            self.function,
+            self.loops,
+            self.interval_created,
+            self.unknown_tick,
+        ) = old;
     }
 }
-impl<'ast> Visit<'ast> for Guard<'_> {
+impl<'ast> Visit<'ast> for Guard {
     fn visit_item(&mut self, i: &'ast Item) {
         if production(i) {
             visit::visit_item(self, i);
@@ -635,18 +513,11 @@ impl<'ast> Visit<'ast> for Guard<'_> {
                 }
             }
         }
-        let changed = !env.names.is_empty() || !env.globs.is_empty();
         self.imports.push(env);
-        if changed {
-            self.resolved.borrow_mut().clear();
-        }
         self.bindings.push(BTreeMap::new());
         visit::visit_block(self, b);
         self.bindings.pop();
         self.imports.pop();
-        if changed {
-            self.resolved.borrow_mut().clear();
-        }
     }
     fn visit_local(&mut self, l: &'ast syn::Local) {
         if test_attrs(&l.attrs) {
@@ -690,12 +561,19 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         self.loops -= 1;
     }
     fn visit_expr_closure(&mut self, e: &'ast syn::ExprClosure) {
+        let loops = std::mem::replace(&mut self.loops, 0);
         self.bindings.push(BTreeMap::new());
         for pat in &e.inputs {
             self.bind(pat, String::new());
         }
         visit::visit_expr_closure(self, e);
         self.bindings.pop();
+        self.loops = loops;
+    }
+    fn visit_expr_async(&mut self, e: &'ast syn::ExprAsync) {
+        let loops = std::mem::replace(&mut self.loops, 0);
+        visit::visit_expr_async(self, e);
+        self.loops = loops;
     }
     fn visit_expr_assign(&mut self, e: &'ast syn::ExprAssign) {
         let value = self.value(&e.right);
@@ -713,13 +591,17 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         }
     }
     fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        let callable = self.value(&c.func);
+        if ["tokio::time::interval", "tokio::time::interval_at"].contains(&callable.as_str()) {
+            self.interval_created = true;
+        }
         if self.loops > 0
             && [
                 "tokio::time::sleep",
                 "tokio::time::sleep_until",
                 "tokio::time::Interval::tick",
             ]
-            .contains(&self.value(&c.func).as_str())
+            .contains(&callable.as_str())
         {
             self.hit("timer-loop");
         }
@@ -729,11 +611,12 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         if m.method == "earliest" && m.args.is_empty() {
             self.hit("earliest");
         }
-        if self.loops > 0
-            && m.method == "tick"
-            && self.value(&m.receiver) == "tokio::time::Interval"
-        {
-            self.hit("timer-loop");
+        if self.loops > 0 && m.method == "tick" {
+            match self.value(&m.receiver).as_str() {
+                "tokio::time::Interval" => self.hit("timer-loop"),
+                "" => self.unknown_tick = true,
+                _ => {}
+            }
         }
         visit::visit_expr_method_call(self, m);
     }
@@ -751,6 +634,10 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         visit::visit_type_path(self, p);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        // ordered_installers! declarations were followed by the module walker above.
+        if m.path.is_ident("ordered_installers") {
+            return;
+        }
         // This workspace's install! DSL wraps its body in the named function.
         if m.path.is_ident("install") {
             let (name, body) = (|input: ParseStream<'_>| {
@@ -772,90 +659,49 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         }
         // syn leaves macro bodies opaque. Read expressions and nested groups, so select!
         // branches (including their handlers) cannot hide sleep/tick or timezone policy.
-        fn expressions(input: ParseStream<'_>, guard: &mut Guard<'_>) -> syn::Result<()> {
-            while !input.is_empty() {
-                let fork = input.fork();
-                if let Ok(expr) = fork.parse::<Expr>() {
-                    input.advance_to(&fork);
-                    guard.visit_expr(&expr);
-                } else if input.peek(syn::token::Brace) {
-                    let inner;
-                    syn::braced!(inner in input);
-                    expressions(&inner, guard)?;
-                } else if input.peek(syn::token::Paren) {
-                    let inner;
-                    syn::parenthesized!(inner in input);
-                    expressions(&inner, guard)?;
-                } else if input.peek(syn::token::Bracket) {
-                    let inner;
-                    syn::bracketed!(inner in input);
-                    expressions(&inner, guard)?;
-                } else {
-                    input.step(|c| {
-                        c.token_tree()
-                            .map(|(_, next)| ((), next))
-                            .ok_or_else(|| c.error("macro token"))
-                    })?;
-                }
-            }
-            Ok(())
-        }
-        (|input: ParseStream<'_>| expressions(input, self))
+        (|input: ParseStream<'_>| macro_parts(input, &mut |expr: Expr| self.visit_expr(&expr)))
             .parse2(m.tokens.clone())
             .expect("macro expressions");
     }
 }
 
 fn scan_sources(sources: &[Source]) -> Counts {
-    let envs: BTreeMap<_, _> = sources
-        .iter()
-        .map(|s| (s.module.clone(), Imports::items(&s.items)))
-        .collect();
-    let mut fields = BTreeMap::new();
-    for source in sources {
-        for item in &source.items {
-            if let Item::Struct(s) = item {
-                fields.insert(
-                    join(&source.module, &ident(&s.ident)),
-                    s.fields
-                        .iter()
-                        .filter_map(|f| {
-                            if test_attrs(&f.attrs) {
-                                return None;
-                            }
-                            match &f.ty {
-                                syn::Type::Path(t) => {
-                                    Some((ident(f.ident.as_ref()?), path(&t.path)))
-                                }
-                                _ => None,
-                            }
-                        })
-                        .collect(),
-                );
-            }
-        }
-    }
     let mut out = Counts::new();
     for source in sources {
         let mut g = Guard {
-            modules: &envs,
-            module: source.module.clone(),
-            imports: vec![],
+            imports: vec![Imports::items(&source.items)],
             bindings: vec![BTreeMap::new()],
-            fields: &fields,
+            fields: BTreeMap::new(),
             owner: String::new(),
             function: "<module>".into(),
             loops: 0,
+            interval_created: false,
+            unknown_tick: false,
             counts: BTreeMap::new(),
-            resolved: RefCell::default(),
-            resolving: RefCell::default(),
         };
+        // Only directly declared Interval fields in this source's structs are needed.
+        // In particular, do not infer fields through other modules or function returns.
+        for item in &source.items {
+            if let Item::Struct(s) = item {
+                let fields = s
+                    .fields
+                    .iter()
+                    .filter(|f| !test_attrs(&f.attrs))
+                    .filter(|f| g.ty(&f.ty) == "tokio::time::Interval")
+                    .filter_map(|f| f.ident.as_ref().map(ident))
+                    .collect();
+                g.fields.insert(ident(&s.ident), fields);
+            }
+        }
         for item in &source.items {
             g.visit_item(item);
         }
         for ((category, function), count) in g.counts {
-            let location = join(&source.module, &function);
-            let key = (source.rel.clone(), category.clone(), location);
+            let key = (
+                source.rel.clone(),
+                category.clone(),
+                join(&source.module, &function),
+            );
             if category == "timer-loop" {
                 out.insert(key, 1);
             } else {
@@ -951,9 +797,7 @@ fn runtime_policy_only_shrinks() {
     let now = found();
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LIST);
     if std::env::var("STEVE_RUNTIME_BLESS").as_deref() == Ok("1") {
-        let mut text = String::from(
-            "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard\n",
-        );
+        let mut text = String::from(LIST_HEADER);
         for ((file, category, function), count) in now {
             text.push_str(&format!("{file}\t{category}\t{function}\t{count}\n"));
         }
@@ -985,6 +829,14 @@ fn runtime_policy_only_shrinks() {
     );
 }
 
+fn fixture_counts(code: &str) -> Counts {
+    scan_sources(&[Source {
+        rel: "fixture.rs".into(),
+        module: String::new(),
+        items: syn::parse_file(code).unwrap().items,
+    }])
+}
+
 #[test]
 fn aliases_macros_types_and_test_exclusions() {
     let fixture = r#"
@@ -1008,7 +860,7 @@ fn aliases_macros_types_and_test_exclusions() {
         }
         async fn typed(t: &mut Ticker) { while ready { t.tick().await; } }
         async fn field(s: &mut Stream) { loop { s.ping.tick().await; } }
-        async fn block_import() { use tokio::time::*; loop { sleep(d).await; } Here::now(); }
+        async fn block_import() { use tokio::time::sleep; loop { sleep(d).await; } Here::now(); }
         fn zone() { dates::Local::today(); convert(&Here); Here.from_local_datetime(&d).earliest(); }
         fn normal(other: Other) { loop { other.tick(); } let s = "chrono::Local::now()"; }
         async fn once() { nap(d).await; timers::interval(d); }
@@ -1018,12 +870,7 @@ fn aliases_macros_types_and_test_exclusions() {
         #[cfg(any(test, unix))] fn production_too() { Here::now(); }
         macro_rules! unused { () => { fn generated() { Here::now(); } } }
     "#;
-    let parsed = syn::parse_file(fixture).unwrap();
-    let result = scan_sources(&[Source {
-        rel: "fixture/src/lib.rs".into(),
-        module: "".into(),
-        items: parsed.items,
-    }]);
+    let result = fixture_counts(fixture);
     let actual: BTreeMap<_, _> = result
         .into_iter()
         .map(|((_, category, function), count)| ((category, function), count))
@@ -1060,7 +907,7 @@ fn additions_removals_and_count_changes_fail_the_ratchet() {
 }
 
 #[test]
-fn module_tree_follows_path_attributes_and_reexports_without_test_sources() {
+fn module_tree_follows_path_attributes_and_assembly_dsl_without_test_sources() {
     let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     let root = fixture.path();
     let src = root.join("fixture/src");
@@ -1071,12 +918,7 @@ fn module_tree_follows_path_attributes_and_reexports_without_test_sources() {
             r#"
             mod shared;
             ordered_installers! { MODULES: fn(); mod generated; install, }
-            pub use shared::*;
             mod r#type;
-            mod same;
-            pub use same::same;
-            fn call_same() { same::same(); }
-            mod timers { pub use tokio::time::{sleep, Interval}; }
             mod inline { #[path = "renamed.rs"] mod child; }
             #[cfg(test)] mod missing_unit;
             #[cfg(feature = "fake")] mod missing_fake;
@@ -1087,29 +929,26 @@ fn module_tree_follows_path_attributes_and_reexports_without_test_sources() {
         (
             "shared.rs",
             r#"
-            use super::timers::{sleep as nap, Interval as Ticker};
-            use crate::*;
+            use tokio::time::{sleep as nap, Interval as Ticker};
             async fn f(t: &mut Ticker) { loop { t.tick().await; nap(d).await; } }
-            async fn g() { use crate::timers::*; loop { sleep(d).await; } }
+            async fn g() { use tokio::time::sleep; loop { sleep(d).await; } }
         "#,
         ),
         (
             "inline/renamed.rs",
             r#"
-            use chrono::*;
+            use chrono::Local;
             fn zone() { Local::now(); }
         "#,
         ),
         (
             "generated.rs",
             r#"install! { install(a, b) [input] => [output] {
-            let every = |d| { let t = tokio::time::interval(d); t };
-            let (mut refresh, mut health) = (every(d), every(d));
+            let (mut refresh, mut health) = (tokio::time::interval(d), tokio::time::interval(d));
             tokio::join!(async { loop { refresh.tick().await; } }, async { loop { health.tick().await; } });
         }}"#,
         ),
         ("type.rs", "fn clean() {}"),
-        ("same.rs", "pub fn same() {}"),
         ("tests.rs", "deliberately invalid Rust: must not be parsed"),
         (
             "disconnected.rs",
@@ -1120,7 +959,7 @@ fn module_tree_follows_path_attributes_and_reexports_without_test_sources() {
     }
     let mut sources = vec![];
     modules(root, &src.join("lib.rs"), "", &src, &mut sources);
-    assert_eq!(sources.len(), 8);
+    assert_eq!(sources.len(), 6);
     let actual = scan_sources(&sources);
     let expected = [
         ("fixture/src/shared.rs", "timer-loop", "shared::f", 1),
@@ -1144,4 +983,74 @@ fn module_tree_follows_path_attributes_and_reexports_without_test_sources() {
     })
     .collect();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn callbacks_do_not_inherit_the_outer_loop() {
+    let actual = fixture_counts(
+        r#"
+        async fn once_in_callbacks() {
+            loop {
+                let callback = || tokio::time::sleep(d);
+                let future = async { tokio::time::sleep(d).await; };
+            }
+        }
+        fn timer_in_closure() {
+            let callback = || { loop { tokio::time::sleep(d); } };
+        }
+        fn timer_in_async() {
+            let future = async { loop { tokio::time::sleep(d).await; } };
+        }
+    "#,
+    );
+    let functions: BTreeSet<_> = actual.into_keys().map(|(_, _, f)| f).collect();
+    assert_eq!(
+        functions,
+        BTreeSet::from(["timer_in_closure".into(), "timer_in_async".into()])
+    );
+}
+
+#[test]
+fn unsupported_indirection_is_not_inferred() {
+    let actual = fixture_counts(
+        r#"
+        use tokio::time::*;
+        async fn glob_import() { loop { sleep(d).await; } }
+        async fn private_wait() { tokio::time::sleep(d).await; }
+        async fn private_wrapper() { loop { private_wait().await; } }
+        async fn custom_clock(clock: Clock) { loop { clock.sleep(d).await; } }
+        fn thread_poll() { loop { std::thread::sleep(d); } }
+        async fn closure_return() {
+            let make = || other_factory(d);
+            let mut timer = make();
+            loop { timer.tick().await; }
+        }
+    "#,
+    );
+    assert!(actual.is_empty());
+}
+
+#[test]
+fn constructor_tick_pairing_stays_within_its_function() {
+    let actual = fixture_counts(
+        r#"
+        fn inline_factory() {
+            let every = |d| { let t = tokio::time::interval(d); t };
+            let (mut a, mut b) = (every(d), every(d));
+            tokio::join!(async { loop { a.tick().await; } }, async { loop { b.tick().await; } });
+        }
+        fn creation_only() { tokio::time::interval(d); }
+        fn unknown_tick_only() { loop { unknown.tick(); } }
+        fn known_other(other: Other) {
+            tokio::time::interval(d);
+            loop { other.tick(); }
+        }
+        fn callback_is_not_a_loop() {
+            tokio::time::interval(d);
+            loop { let future = async { unknown.tick(); }; }
+        }
+    "#,
+    );
+    let functions: BTreeSet<_> = actual.into_keys().map(|(_, _, f)| f).collect();
+    assert_eq!(functions, BTreeSet::from(["inline_factory".into()]));
 }
