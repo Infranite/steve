@@ -165,7 +165,7 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>, wake: Arc<tokio::sync::Notify>) 
 
 /// Queue/configuration and ordinary schedule completion can all make a Bot runnable.
 pub fn wakes(event: &steve_types::BusEvent) -> bool {
-    use steve_types::{AutomationEvent, ChannelsEvent, ConfigEvent, DomainEvent};
+    use steve_types::{AutomationEvent, ChannelsEvent, ConfigEvent, DomainEvent, WorkEvent};
     matches!(
         event.as_domain(),
         Some(DomainEvent::Channels(
@@ -176,7 +176,7 @@ pub fn wakes(event: &steve_types::BusEvent) -> bool {
             ConfigEvent::Settings { .. } | ConfigEvent::Workspace { .. }
         )) | Some(DomainEvent::Automation(
             AutomationEvent::Flow { .. } | AutomationEvent::Run { .. }
-        )) | Some(DomainEvent::Work(_))
+        )) | Some(DomainEvent::Work(WorkEvent::Item { .. }))
     )
 }
 
@@ -289,6 +289,18 @@ mod tests {
         ] {
             assert!(wakes(&BusEvent::from(event)));
         }
+        assert!(wakes(&BusEvent::from(DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                id: "item".into(),
+                ws: WS.into(),
+            }
+        ))));
+        assert!(!wakes(&BusEvent::from(DomainEvent::from(
+            steve_types::WorkEvent::Message {
+                id: "message".into(),
+                ws: WS.into(),
+            }
+        ))));
         assert!(!wakes(&BusEvent::from(DomainEvent::from(
             ChannelsEvent::ChanMessage {
                 id: "m".into(),
