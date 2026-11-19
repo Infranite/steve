@@ -1087,7 +1087,9 @@ mod tests {
             Arc::new(steve_runtime::cache::Caches::new(Default::default())),
         );
 
-        rt.set_node(steve_node_api::testkit::FakeNode::new("local"));
+        let node = steve_node_api::testkit::FakeNode::new("local");
+        node.set_harnesses(vec![]);
+        rt.set_node(node);
         rt.reports.seed("local", vec![ready_fixture()], None).await;
         tokio::time::advance(RUNTIMES_MAX_AGE).await;
         // the expired list comes back at once; a background probe replaces it
