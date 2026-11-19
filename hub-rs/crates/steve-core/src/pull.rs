@@ -458,9 +458,16 @@ pub fn merge(gh_cli: &Path, slug: &str, number: u64, head: &str, method: &str) -
 /// How long to wait after `failures` merge failures in a row.
 pub fn merge_retry_ms(failures: i64) -> i64 {
     let doublings = (failures - 1).clamp(0, 30) as u32;
-    MERGE_RETRY_MS
-        .saturating_mul(1_i64 << doublings)
-        .min(MERGE_RETRY_MAX_MS)
+    steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((MERGE_RETRY_MS) as u64),
+        max: std::time::Duration::from_millis((MERGE_RETRY_MAX_MS) as u64),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay(doublings, &mut rand::rng())
+    .as_millis() as i64
 }
 
 /// A followed pull request due for a look.
@@ -1835,5 +1842,21 @@ mod tests {
         assert_eq!(merge_retry_ms(2), 2 * MERGE_RETRY_MS);
         assert_eq!(merge_retry_ms(3), 4 * MERGE_RETRY_MS);
         assert_eq!(merge_retry_ms(100), MERGE_RETRY_MAX_MS);
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_merge_backoff_sequence() {
+        for (n, delay) in [
+            (0, super::MERGE_RETRY_MS),
+            (1, super::MERGE_RETRY_MS),
+            (2, 2 * super::MERGE_RETRY_MS),
+            (3, 4 * super::MERGE_RETRY_MS),
+            (100, super::MERGE_RETRY_MAX_MS),
+        ] {
+            assert_eq!(super::merge_retry_ms(n), delay);
+        }
     }
 }

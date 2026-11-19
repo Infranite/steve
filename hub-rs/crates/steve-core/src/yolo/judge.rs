@@ -632,9 +632,19 @@ pub fn answer_text(answer: &str, reason: &str) -> String {
 
 /// Back-off before continuing after a session error: 1 / 5 / 15 minutes, from 5 after a restart.
 pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
-    const STEPS: [u64; 3] = [60, 300, 900];
-    let i = attempts as usize + usize::from(restart);
-    STEPS[i.min(STEPS.len() - 1)]
+    steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((60_000) as u64),
+        max: std::time::Duration::from_millis((900_000) as u64),
+        factor: 5,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay(
+        attempts.min(2).saturating_add(u32::from(restart)),
+        &mut rand::rng(),
+    )
+    .as_secs()
 }
 
 /// The stored frame of the reason YOLO gives when a message it already resent still did not go out.
@@ -1360,5 +1370,22 @@ pub fn subject_from_row(
         | ("confirm", "mem" | "attr_value" | "attr_def" | "steward")
         | ("propose", "party_merge") => Subject::Muted,
         _ => Subject::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_yolo_error_backoff_sequence() {
+        for (n, normal, restarted) in [
+            (0, 60, 300),
+            (1, 300, 900),
+            (2, 900, 900),
+            (3, 900, 900),
+            (u32::MAX, 900, 900),
+        ] {
+            assert_eq!(super::error_backoff_s(n, false), normal);
+            assert_eq!(super::error_backoff_s(n, true), restarted);
+        }
     }
 }

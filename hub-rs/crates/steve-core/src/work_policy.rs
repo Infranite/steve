@@ -266,8 +266,16 @@ impl WorkPolicy {
     pub fn judge_retry_after(&self, failures: i64) -> i64 {
         let base = self.get("judge_retry");
         let doublings = u32::try_from(failures.saturating_sub(1).clamp(0, 30)).unwrap_or(0);
-        base.saturating_mul(1_i64 << doublings)
-            .min(self.get("judge_retry_max"))
+        steve_runtime::policy::Backoff {
+            base: std::time::Duration::from_millis((base) as u64),
+            max: std::time::Duration::from_millis((self.get("judge_retry_max")) as u64),
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::None,
+            attempts: None,
+            reset_after: None,
+        }
+        .delay(doublings, &mut rand::rng())
+        .as_millis() as i64
     }
     pub fn judge_timeout(&self) -> i64 {
         self.get("judge_timeout")
@@ -341,5 +349,25 @@ mod tests {
             p.ignored,
             vec![("no_such".to_string(), 5), ("wait_min".to_string(), -1)]
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_judge_backoff_sequence() {
+        let p = super::WorkPolicy::default();
+        for (n, minutes) in [
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 4),
+            (4, 8),
+            (5, 10),
+            (100, 10),
+        ] {
+            assert_eq!(p.judge_retry_after(n), minutes * 60_000);
+        }
     }
 }

@@ -22,9 +22,6 @@ const TENANT_FAMILY: &str = "feishu_tenant";
 const EXTERNAL_ORG: &str = "外部组织";
 /// The Feishu scope that names the own organization.
 pub const TENANT_SCOPE: &str = "tenant:tenant:readonly";
-/// Retry delays after a lookup that left gaps, by attempt (the last repeats).
-pub const RETRY_MS: [i64; 4] = [3_600_000, 6 * 3_600_000, 24 * 3_600_000, 72 * 3_600_000];
-
 /// Has a person (not a sync) ever set this party's name? A revision whose `after` names a `name`
 /// without `"source": "sync"`.
 pub fn name_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
@@ -407,7 +404,7 @@ impl Gap {
 }
 
 /// Records one lookup of `account` at `now`: where the answer came from and the gaps it left. No gaps
-/// clears the retry; gaps schedule the next one ([`RETRY_MS`], by attempt).
+/// clears the retry; gaps schedule the next one (1 h, 6 h, 24 h, then 72 h).
 pub fn record_lookup(
     tx: &Tx,
     ws: &str,
@@ -446,8 +443,7 @@ pub fn record_lookup(
         .iter()
         .any(|(_, x)| !matches!(x.reason.as_str(), "external"));
     let (attempts, next) = if retry {
-        let i = (attempts as usize).min(RETRY_MS.len() - 1);
-        (attempts + 1, Some(now + RETRY_MS[i]))
+        (attempts + 1, Some(now + retry_after_ms(attempts)))
     } else {
         (0, None)
     };
@@ -621,4 +617,40 @@ pub fn valid_address_fact(key: &str, value: &str) -> bool {
         && v["name"]
             .as_str()
             .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 80)
+}
+
+/// Profile lookups keep their explicit third wait; other attempts use a capped backoff.
+fn retry_after_ms(attempts: i64) -> i64 {
+    use steve_runtime::policy::Retry;
+    let attempt = u32::try_from(attempts).unwrap_or(u32::MAX).min(3);
+    let policy = steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((3_600_000) as u64),
+        max: std::time::Duration::from_millis((72 * 3_600_000) as u64),
+        factor: 6,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    };
+    // The third wait is explicitly 24 h rather than the exponential 36 h.
+    let retry = if attempt == 2 {
+        Retry::After(std::time::Duration::from_secs(24 * 3600))
+    } else {
+        Retry::Backoff
+    };
+    let delay = if let Retry::After(delay) = retry {
+        delay
+    } else {
+        policy.delay(attempt, &mut rand::rng())
+    };
+    delay.as_millis() as i64
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_profile_backoff_sequence() {
+        for (attempt, hours) in [(0, 1), (1, 6), (2, 24), (3, 72), (4, 72), (100, 72)] {
+            assert_eq!(super::retry_after_ms(attempt), hours * 3_600_000);
+        }
+    }
 }

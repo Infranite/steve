@@ -59,8 +59,16 @@ const FAILS_TO_ERROR: i64 = 3;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn backoff(fails: i64) -> i64 {
-    let shift = (fails.max(1) - 1).min(10) as u32;
-    (BACKOFF_BASE_MS << shift).min(BACKOFF_MAX_MS)
+    steve_runtime::policy::Backoff {
+        base: std::time::Duration::from_millis((BACKOFF_BASE_MS) as u64),
+        max: std::time::Duration::from_millis((BACKOFF_MAX_MS) as u64),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay((fails.max(1) - 1).min(10) as u32, &mut rand::rng())
+    .as_millis() as i64
 }
 
 // ---------------------------------------------------------------- config, usage
@@ -2814,5 +2822,24 @@ mod tests {
     #[test]
     fn error_location_is_encoded() {
         assert_eq!(error_location("a b&c"), "/#/accounts?error=a+b%26c");
+    }
+}
+
+#[cfg(test)]
+mod runtime_policy_sequence {
+    #[test]
+    fn r7_connection_backoff_sequence() {
+        for (attempt, minutes) in [
+            (0, 15),
+            (1, 15),
+            (2, 30),
+            (3, 60),
+            (4, 120),
+            (5, 240),
+            (6, 360),
+            (100, 360),
+        ] {
+            assert_eq!(super::backoff(attempt), minutes * 60_000);
+        }
     }
 }
