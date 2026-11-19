@@ -1,9 +1,7 @@
 use super::*;
 
-install! { scopes(reg, _cx) [mut registry] => [registry] {
-    // C1: `space:<id>` visibility scopes of the spaces a viewer sees
-    registry.viewer_scopes(Box::new(steve_channels::spaces::SpaceScopes));
-}}
+// G2-T7: the installer list still names this step; no visibility providers remain.
+install! { scopes(_reg, _cx) [] => [] {} }
 
 install! { prepare(reg, _cx) [mut registry] => [registry] {
     // C8: the `space`, `persona` and `channel` draft targets; capi: the “新群” card

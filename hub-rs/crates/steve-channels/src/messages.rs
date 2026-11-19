@@ -476,11 +476,11 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 pub fn page(
     c: &Connection,
     space: &str,
-    me: &str,
+    _me: &str,
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask(c, space, me)?;
+    let mask = crate::spaces::viewer_mask();
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
             AND (m.seen_by = 0 OR (m.seen_by & ?4) <> 0)
@@ -500,11 +500,11 @@ pub fn page(
 pub fn page_before(
     c: &Connection,
     space: &str,
-    me: &str,
+    _me: &str,
     before: Option<(i64, &str)>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask(c, space, me)?;
+    let mask = crate::spaces::viewer_mask();
     let (at, id) = match before {
         Some((at, id)) => (Some(at), Some(id)),
         None => (None, None),

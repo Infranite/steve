@@ -326,10 +326,12 @@ impl KnowledgeStore for OpenViking {
         } else {
             Vec::new()
         };
-        let found = self.find(&scope.ws, text, &tags, limit).map_err(|e| {
-            self.failed();
-            unavailable(self.id(), e)
-        })?;
+        let found = self
+            .find(&scope.viewer.ws, text, &tags, limit)
+            .map_err(|e| {
+                self.failed();
+                unavailable(self.id(), e)
+            })?;
         let mut best: HashMap<(String, String, i64), f64> = HashMap::new();
         for (uri, score) in found {
             if let Some(k) = parse_uri(&uri) {

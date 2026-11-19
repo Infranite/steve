@@ -996,7 +996,10 @@ fn single_user_mail_reference_reads_do_not_need_membership_scopes() {
             VALUES ('team_mail', 'default', 'scoped_mail_conn', 'team', 'Team subject', 'team:team1', 'usr_other', 1, 1, 1),
                    ('space_mail', 'default', 'scoped_mail_conn', 'space', 'Space subject', 'space:s1', 'usr_other', 1, 1, 1);")?;
         let bare = Viewer::bare(WS, ME);
-        let scoped = bare.clone().with_scopes(["team:team1".into(), "space:s1".into()]);
+        let scoped = Viewer {
+            scopes: vec!["team:team1".into(), "space:s1".into()],
+            ..bare.clone()
+        };
         for id in ["team_mail", "space_mail"] {
             let r = ObjRef::new("mail_thread", id);
             assert!(repo::ref_exists_for(c, &bare, &r)?);

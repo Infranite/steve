@@ -925,8 +925,6 @@ async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
             )?);
             assert!(!steve_channels::spaces::visible(c, &viewer, "missing")?);
             assert!(steve_channels::spaces::visible_ids(c, &viewer)?.contains(&r.space_id));
-            let provider = steve_channels::spaces::SpaceScopes;
-            assert!(steve_modules::ViewerScopes::scopes(&provider, c, &viewer)?.is_empty());
             Ok(())
         })
         .unwrap();

@@ -389,8 +389,10 @@ async fn single_user_reads_private_events_without_crossing_workspaces_or_connect
                     "UPDATE ext_events SET connection_id = NULL, visibility = ? WHERE id = ?",
                     params![visibility, pid],
                 )?;
-                let viewer = steve_store::base::Viewer::bare(WS, ME)
-                    .with_scopes(["team:extra".into(), "space:extra".into()]);
+                let viewer = steve_store::base::Viewer {
+                    scopes: vec!["team:extra".into(), "space:extra".into()],
+                    ..steve_store::base::Viewer::bare(WS, ME)
+                };
                 let found = signals::list(c, &viewer, &signals::Filter::default()).unwrap();
                 assert_eq!(found["stats"]["total"], 2);
                 assert_eq!(signals::own(c, &viewer, pid).unwrap()["id"], pid);

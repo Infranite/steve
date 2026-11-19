@@ -166,7 +166,8 @@ impl DecisionKind {
 /// The options of every `confirm` decision.
 pub const CONFIRM_OPTIONS: [&str; 2] = ["yes", "no"];
 
-/// The caller's workspace and identity. Read visibility is unconditional in single-user mode.
+/// The caller's workspace and identity. Personal read visibility is unconditional in single-user mode;
+/// service callers may read only workspace-level objects.
 /// Legacy scope parameters remain until their query call sites are removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Viewer {
@@ -191,17 +192,8 @@ impl Viewer {
         Ok(Self::bare(ws, user))
     }
 
-    /// Keeps explicitly supplied legacy SQL scope bindings unique.
-    pub fn with_scopes(mut self, extra: impl IntoIterator<Item = String>) -> Self {
-        for s in extra {
-            if !self.scopes.contains(&s) {
-                self.scopes.push(s);
-            }
-        }
-        self
-    }
-
-    /// Service principals have no personal audience, including when the requester is absent.
+    /// An absent identity (empty user) is treated as a service, as is a `svc:*` principal.
+    /// Neither has a personal audience, even for private objects it created itself.
     pub fn is_service(&self) -> bool {
         self.user.is_empty() || self.user.starts_with("svc:")
     }

@@ -24,11 +24,8 @@ use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 /// card), so callers never write their own conditions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scope {
-    pub ws: String,
-    /// Caller identity retained for shared scope DTOs and SQL bindings.
-    pub user: String,
-    /// Legacy scope codes retained for the shared SQL bindings.
-    pub scopes: Vec<String>,
+    /// Workspace, caller identity and legacy bindings shared by both filtering paths.
+    pub viewer: Viewer,
     /// Only `workspace` objects (service audiences, or shared-workspace main-thread chat).
     pub workspace_only: bool,
     /// Only these source kinds (`notes`, `folder`, `mems` …).
@@ -60,9 +57,7 @@ impl Scope {
             }
         }
         Ok(Self {
-            ws: viewer.ws.clone(),
-            user: viewer.user.clone(),
-            scopes: viewer.scopes.clone(),
+            viewer: viewer.clone(),
             workspace_only,
             kinds: kinds.map(|k| k.iter().map(|s| s.to_string()).collect()),
             paused_docs,
@@ -77,12 +72,7 @@ impl Scope {
         if c.level == Level::Never {
             return false;
         }
-        let viewer = Viewer {
-            ws: self.ws.clone(),
-            user: self.user.clone(),
-            scopes: self.scopes.clone(),
-        };
-        let visible = viewer.sees(&c.visibility, &c.created_by);
+        let visible = self.viewer.sees(&c.visibility, &c.created_by);
         // Service and shared-conversation audiences are independent of member read access.
         let audience_ok = !self.workspace_only || c.visibility == Visibility::Workspace;
         let kind_ok = self
@@ -96,16 +86,11 @@ impl Scope {
 
     /// The `WHERE` tail on `kb_chunks c` for [`SqliteStore`].
     fn sql(&self) -> (String, Vec<Sql>) {
-        let v = Viewer {
-            ws: self.ws.clone(),
-            user: self.user.clone(),
-            scopes: self.scopes.clone(),
-        };
-        let vis = v.sql("c");
+        let vis = self.viewer.sql("c");
         let mut sql = format!("c.workspace_id = ? AND c.level <> 'never' AND {}", vis.sql);
-        let mut p = vec![Sql::Text(self.ws.clone())];
+        let mut p = vec![Sql::Text(self.viewer.ws.clone())];
         p.extend(vis.params);
-        if self.workspace_only && !v.is_service() {
+        if self.workspace_only && !self.viewer.is_service() {
             sql.push_str(" AND c.visibility = 'workspace'");
         }
         if let Some(kinds) = &self.kinds {
@@ -315,9 +300,11 @@ mod tests {
 
     fn scope(user: &str, scopes: &[&str], workspace_only: bool) -> Scope {
         Scope {
-            ws: "default".into(),
-            user: user.into(),
-            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            viewer: Viewer {
+                ws: "default".into(),
+                user: user.into(),
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            },
             workspace_only,
             kinds: None,
             paused_docs: Vec::new(),
@@ -379,6 +366,12 @@ mod tests {
             "usr_me",
             Level::Public
         )));
+        for user in ["", "svc:default"] {
+            // Even without an extra audience flag, the shared Viewer rejects its own private data.
+            let service = scope(user, &["team:t1"], false);
+            assert!(!service.admits(&cand(Visibility::Private, user, Level::Reasoning)));
+            assert!(service.admits(&cand(Visibility::Workspace, user, Level::Reasoning)));
+        }
     }
     #[test]
     fn source_and_disclosure_constraints_are_independent_of_member_visibility() {

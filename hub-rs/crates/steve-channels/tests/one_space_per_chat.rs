@@ -268,10 +268,7 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
     h.env
         .store()
         .reader(|c| -> steve_modules::ApiResult<()> {
-            assert_eq!(
-                steve_channels::spaces::viewer_mask(c, &spaces[0], "someone_else")?,
-                -1
-            );
+            assert_eq!(steve_channels::spaces::viewer_mask(), -1);
             let page = messages::page_before(c, &spaces[0], "someone_else", None, 50)?;
             assert_eq!(page.len(), 2);
             let older = messages::page_before(

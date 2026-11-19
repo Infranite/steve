@@ -301,13 +301,53 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
 }
 
 #[test]
+fn service_cannot_read_its_own_private_memory_candidates() {
+    let t = setup();
+    for user in ["", "svc:default"] {
+        let create = |visibility| {
+            tx(&t.store, |tx| {
+                mems::create(
+                    tx,
+                    "default",
+                    &mems::NewMem {
+                        text: "Service-proposed memory".into(),
+                        status: "candidate".into(),
+                        visibility,
+                        created_by: user.into(),
+                        ..Default::default()
+                    },
+                )
+            })
+        };
+        let private = create(Visibility::Private);
+        let shared = create(Visibility::Workspace);
+        t.store
+            .reader(|c| {
+                let viewer = Viewer::bare("default", user);
+                assert!(mems::visible(c, &viewer, &private.id)?.is_none());
+                assert!(mems::visible(c, &viewer, &shared.id)?.is_some());
+                let listed = mems::all(c, &viewer, &mems::MemFilter::default())?;
+                assert!(!listed.iter().any(|m| m.id == private.id));
+                assert!(listed.iter().any(|m| m.id == shared.id));
+                assert!(mems::visible(c, &Viewer::bare("default", A), &private.id)?.is_some());
+                assert!(mems::visible(c, &Viewer::bare("w2", A), &private.id)?.is_none());
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn service_audiences_remain_workspace_only_with_legacy_bindings() {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch("CREATE TABLE objects (visibility TEXT, created_by TEXT);
         INSERT INTO objects VALUES ('workspace', NULL), ('private', ''), ('private', 'svc:default'), ('team:t1', 'usr_a'), (NULL, NULL);")
         .unwrap();
     for user in ["", "svc:default"] {
-        let viewer = Viewer::bare("default", user).with_scopes(["team:t1".into()]);
+        let viewer = Viewer {
+            scopes: vec!["team:t1".into()],
+            ..Viewer::bare("default", user)
+        };
         assert!(viewer.is_service());
         assert!(viewer.sees(&Visibility::Workspace, A));
         assert!(!viewer.sees(&Visibility::Private, user));
@@ -342,11 +382,10 @@ fn single_user_visibility_keeps_bindings_and_does_not_load_team_scopes() {
     // Loading no longer needs any team or party schema at all.
     let c = Connection::open_in_memory().unwrap();
     assert_eq!(Viewer::load(&c, "default", B).unwrap(), viewer);
-    let viewer = viewer.with_scopes([
-        "team:tm_top".into(),
-        "space:spc_1".into(),
-        "team:tm_top".into(),
-    ]);
+    let viewer = Viewer {
+        scopes: vec!["team:tm_top".into(), "space:spc_1".into()],
+        ..viewer
+    };
     for code in [
         "workspace",
         "private",

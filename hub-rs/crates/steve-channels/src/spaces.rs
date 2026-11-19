@@ -732,8 +732,8 @@ pub(crate) fn reached_own_sql(m: &str, cs: &str) -> String {
 
 /// G2-T7: all receipt bits are readable, including legacy bits whose identity is gone.
 /// Keep the page query's mask binding without changing stored `seen_by` or outbound identity.
-pub fn viewer_mask(_c: &Connection, _space: &str, _me: &str) -> ChannelResult<i64> {
-    Ok(-1)
+pub fn viewer_mask() -> i64 {
+    -1
 }
 
 /// Single-user read visibility, retaining the old predicate's bindings (G2-T7).
@@ -847,15 +847,6 @@ pub fn visible_ids(c: &Connection, viewer: &Viewer) -> ChannelResult<Vec<String>
         .query_map(params![viewer.ws, viewer.user], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
-}
-
-/// Legacy registration retained until scope call sites are removed in wave 4.
-pub struct SpaceScopes;
-
-impl steve_modules::ViewerScopes for SpaceScopes {
-    fn scopes(&self, _c: &Connection, _viewer: &Viewer) -> ChannelResult<Vec<String>> {
-        Ok(Vec::new())
-    }
 }
 
 /// `GET /spaces?connection=&q=`: newest activity first.

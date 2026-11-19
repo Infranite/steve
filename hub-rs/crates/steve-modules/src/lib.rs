@@ -99,11 +99,6 @@ pub trait DigestNotes: Send + Sync {
     fn take(&self, ws: &str) -> Vec<String>;
 }
 
-/// Legacy scope provider API. Single-user viewers do not load visibility scopes.
-pub trait ViewerScopes: Send + Sync {
-    fn scopes(&self, c: &rusqlite::Connection, viewer: &Viewer) -> ApiResult<Vec<String>>;
-}
-
 impl Registry {
     pub fn new() -> Self {
         Self::default()
@@ -191,11 +186,6 @@ impl Registry {
     pub fn outbound_check(&mut self, c: Box<dyn outbound::OutboundCheck>) -> &mut Self {
         assert!(self.outbound.is_none(), "outbound check registered twice");
         self.outbound = Some(c);
-        self
-    }
-
-    /// G2-T7: compatibility for installers still registering the unused scope provider.
-    pub fn viewer_scopes(&mut self, _s: Box<dyn ViewerScopes>) -> &mut Self {
         self
     }
 

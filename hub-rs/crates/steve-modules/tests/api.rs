@@ -476,18 +476,9 @@ async fn store_errors_map_to_codes() {
     assert_eq!(e.to_string(), "参数不对：a、b.0");
 }
 
-// A registered scope provider is no longer a source of queries or visibility grants.
-struct UnusedScopes;
-impl steve_modules::ViewerScopes for UnusedScopes {
-    fn scopes(&self, _: &rusqlite::Connection, _: &base::Viewer) -> ApiResult<Vec<String>> {
-        panic!("single-user viewers must not load registered scopes")
-    }
-}
 #[test]
-fn single_user_viewer_preserves_identity_without_loading_providers() {
-    let t = TestEnv::new(|r| {
-        r.viewer_scopes(Box::new(UnusedScopes));
-    });
+fn single_user_viewer_preserves_identity_without_loading_scopes() {
+    let t = TestEnv::new(|_| {});
     let who = caller(WS, OTHER);
     let viewer = t.modules.viewer(&who).unwrap();
     assert_eq!(viewer.ws, WS);
