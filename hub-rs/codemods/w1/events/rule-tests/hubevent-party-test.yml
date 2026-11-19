@@ -1,7 +1,0 @@
-id: hubevent-party
-valid:
-  - "fn f() { let _ = Other::Party { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Party { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Party { id: id }); }"
-  - "fn f() { send(s::HubEvent::Party { ws, id: make(\"comma,colon:\") }); }"

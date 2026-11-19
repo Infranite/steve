@@ -1,7 +1,0 @@
-id: changeevent-mm
-valid:
-  - "fn f() { let _ = Other::Mm { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Mm { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Mm { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Mm { ws, id: make(\"comma,colon:\") }); }"

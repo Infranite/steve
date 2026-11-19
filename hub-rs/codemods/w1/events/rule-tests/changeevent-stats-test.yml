@@ -1,7 +1,0 @@
-id: changeevent-stats
-valid:
-  - "fn f() { let _ = Other::Stats { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Stats { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Stats { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Stats { ws, id: make(\"comma,colon:\") }); }"

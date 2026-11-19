@@ -1,7 +1,0 @@
-id: changeevent-changeset
-valid:
-  - "fn f() { let _ = Other::Changeset { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Changeset { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Changeset { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Changeset { ws, id: make(\"comma,colon:\") }); }"

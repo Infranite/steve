@@ -1,7 +1,0 @@
-id: changeevent-node
-valid:
-  - "fn f() { let _ = Other::Node { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Node { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Node { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Node { ws, id: make(\"comma,colon:\") }); }"

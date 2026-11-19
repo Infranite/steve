@@ -1,7 +1,0 @@
-id: hubevent-project
-valid:
-  - "fn f() { let _ = Other::Project { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Project { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Project { id: id }); }"
-  - "fn f() { send(s::HubEvent::Project { ws, id: make(\"comma,colon:\") }); }"

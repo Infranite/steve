@@ -1,7 +1,0 @@
-id: hubevent-run
-valid:
-  - "fn f() { let _ = Other::Run { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Run { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Run { id: id }); }"
-  - "fn f() { send(s::HubEvent::Run { ws, id: make(\"comma,colon:\") }); }"

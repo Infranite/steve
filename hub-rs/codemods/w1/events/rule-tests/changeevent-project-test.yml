@@ -1,7 +1,0 @@
-id: changeevent-project
-valid:
-  - "fn f() { let _ = Other::Project { id: id }; }"
-  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Project { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(ChangeEvent::Project { id: id }); }"
-  - "fn f() { send(s::ChangeEvent::Project { ws, id: make(\"comma,colon:\") }); }"

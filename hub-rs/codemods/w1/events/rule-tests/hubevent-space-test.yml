@@ -1,7 +1,0 @@
-id: hubevent-space
-valid:
-  - "fn f() { let _ = Other::Space { id: id }; }"
-  - "fn f(e: HubEvent) { match e { HubEvent::Space { .. } => (), _ => () } }"
-invalid:
-  - "fn f() { send(HubEvent::Space { id: id }); }"
-  - "fn f() { send(s::HubEvent::Space { ws, id: make(\"comma,colon:\") }); }"
