@@ -170,3 +170,48 @@ async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     })
     .unwrap();
 }
+
+/// Service/Off model jobs use local-jobs; a Hub without a model Node must only
+/// wait for the linked Nodes it actually has, rather than a fictitious local one.
+#[tokio::test]
+async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent() {
+    let (_d, s) = store();
+    let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+    for model in [Some("local-jobs"), None] {
+        let reports = crate::system::RuntimeReports::new(Arc::new(
+            steve_runtime::cache::Caches::new(cfg.cache),
+        ));
+        if let Some(node) = model {
+            reports.bind_model_node(node);
+        }
+        let hs = crate::harnesses::HubHarnesses::of(&cfg, reports.clone());
+        let node = model.unwrap_or("remote");
+        let p = preflight_of(&hs, vec![node.into()]);
+        let svc = Principal::Svc(WS.into());
+        let me = Principal::User("owner".into());
+        s.reader::<_, StoreError>(|c| {
+            assert_eq!(code(p.can_run(c, &svc, "writer")), None);
+            Ok(())
+        })
+        .unwrap();
+        reports
+            .seed(
+                node,
+                vec![cap("claude-code", Err("Authentication required"))],
+                None,
+            )
+            .await;
+        s.reader::<_, StoreError>(|c| {
+            for who in [&svc, &me] {
+                let b = p.can_run(c, who, "writer").unwrap_err();
+                assert_eq!((b.code, b.fix), ("harness_not_ready", "devices"));
+            }
+            assert_eq!(
+                code(p.can_run_schedule(c, WS, None, "writer")),
+                Some("harness_not_ready")
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+}

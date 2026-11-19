@@ -134,13 +134,13 @@ impl RuntimeReports {
     pub(crate) fn bind_model_node(&self, id: &str) {
         let _ = self.model_node.set(id.to_owned());
     }
-    pub(crate) fn model_node(&self) -> &str {
-        self.model_node.get().map_or("local", String::as_str)
+    pub(crate) fn model_node(&self) -> Option<&str> {
+        self.model_node.get().map(String::as_str)
     }
     fn invalidate_local(&self) {
         self.invalidate("local");
-        if self.model_node() != "local" {
-            self.invalidate(self.model_node());
+        if let Some(node) = self.model_node().filter(|node| *node != "local") {
+            self.invalidate(node);
         }
     }
     pub(crate) fn on_update(&self, callback: impl Fn() + Send + Sync + 'static) {
@@ -223,6 +223,10 @@ impl RuntimeReports {
                         return Err(ReportError::Unavailable);
                     }
                 };
+                // Cached permits the reader that started a load before invalidation to
+                // finish with its old result. Devices has a stronger contract: even an
+                // already waiting HTTP request must observe an accepted installation.
+                // Reject that result here; reload makes at most one subsequent read.
                 if self.caches.generation(&tag) != version {
                     return Err(ReportError::Superseded);
                 }

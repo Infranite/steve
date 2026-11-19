@@ -99,8 +99,11 @@ impl HubHarnesses {
         out
     }
     pub fn readiness(&self, linked: &[String]) -> Vec<(String, String, Option<bool>)> {
-        let pending =
-            self.report("local").is_none() || linked.iter().any(|node| self.report(node).is_none());
+        let pending = self
+            .reports
+            .model_node()
+            .is_some_and(|node| self.report(node).is_none())
+            || linked.iter().any(|node| self.report(node).is_none());
         self.list()
             .into_iter()
             .map(|h| {
@@ -114,6 +117,7 @@ impl HubHarnesses {
     }
     #[cfg(test)]
     pub(crate) async fn update(&self, caps: Vec<HarnessCapability>) {
+        self.reports.bind_model_node("local");
         self.reports.seed("local", caps, None).await;
     }
     pub fn on_update(&self, f: impl Fn() + Send + Sync + 'static) {
@@ -209,6 +213,10 @@ impl HubHarnesses {
         })
     }
 
+    // Until Cached supports an ordered refresh of a still-fresh entry, revoke
+    // before probing. An unconditional same-generation put could restore an older
+    // ready report after a newer unavailable answer; get_or_load alone would skip
+    // the 60s probe while its 300s entry is fresh.
     pub async fn refresh(&self, node: &dyn steve_node_api::Node, fresh: bool) {
         self.reports.bind_model_node(node.id().as_str());
         let _ = self
@@ -232,8 +240,8 @@ impl HubHarnesses {
         self.reports.retain_nodes(&linked);
         if let Some(node) = local {
             self.refresh(node, fresh).await;
-        } else {
-            self.reports.invalidate(self.reports.model_node());
+        } else if let Some(node) = self.reports.model_node() {
+            self.reports.invalidate(node);
         }
         if let Some(svc) = svc {
             let asks = svc

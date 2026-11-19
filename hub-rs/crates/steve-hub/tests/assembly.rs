@@ -791,11 +791,14 @@ async fn an_extension_declares_its_own_handle_systems() {
 #[tokio::test]
 async fn all_hub_jobs_are_named_owned_and_stopped_together() {
     let h = home();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
     let mut names: Vec<_> = w.jobs.iter().map(|j| j.name).collect();
     names.sort_unstable();
     let mut expected = vec![
+        "cache.gauges",
         "calendar.sync",
         "channels.notifications",
         "channels.trigger_report",
@@ -896,7 +899,9 @@ async fn shutdown_stops_app_tasks_when_domain_has_no_task_bag() {
     }
 
     let h = home();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
     let running = Arc::new(AtomicBool::new(false));
     let domain = Arc::new(NoTasks(running.clone()));

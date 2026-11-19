@@ -639,20 +639,22 @@ pub fn wire_assembly(
     let mut wired = registry.finish();
     // The host owns and stops metric sampling alongside its other background jobs.
     let caches = bus.caches().clone();
-    wired.jobs.push(Box::pin(async move {
-        use futures::StreamExt;
-        let mut timer = tokio::time::interval(std::time::Duration::from_secs(15));
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let ticks = futures::stream::unfold(timer, |mut timer| async move {
-            timer.tick().await;
-            Some(((), timer))
-        });
-        ticks
-            .for_each(move |()| {
+    let clock = wired
+        .modules
+        .as_ref()
+        .map(|modules| modules.clock.clone())
+        .unwrap_or_else(|| Arc::new(steve_runtime::SystemClock));
+    wired.jobs.push(modules::Job::task("cache.gauges", move || {
+        steve_runtime::jobs::every(
+            "cache.gauges",
+            clock,
+            std::time::Duration::from_secs(15),
+            steve_runtime::FirstRun::AfterPeriod,
+            move || {
                 caches.sample_gauges();
-                futures::future::ready(())
-            })
-            .await;
+                std::future::ready(())
+            },
+        )
     }));
     Ok(wired)
 }
