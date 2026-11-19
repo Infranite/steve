@@ -26,7 +26,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use steve_toolchains::ITEM_BUILD_DIR;
+pub use steve_toolchains::ITEM_BUILD_DIR;
 
 use crate::error::Result;
 use crate::git;
@@ -51,6 +51,18 @@ fn cache_names() -> &'static [String] {
             .map(String::from)
             .collect()
     })
+}
+
+/// Whether one real directory contains only regenerable toolchain/cache data.
+/// Both reclamation and backup traversal use this predicate; traversal depth is the caller's choice.
+/// Children of the toolchains' build namespace are disposable even without a cache marker.
+pub fn is_disposable_dir(dir: &Path) -> bool {
+    fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        && (dir.parent().is_some_and(|p| p.ends_with(ITEM_BUILD_DIR))
+            || cache_names()
+                .iter()
+                .any(|n| dir.file_name().is_some_and(|name| name == n.as_str()))
+            || dir.join("CACHEDIR.TAG").is_file())
 }
 
 /// How deep caches are looked for (`hub-rs/target`, `web/node_modules`).
@@ -164,7 +176,6 @@ pub fn scratch_cache_dirs(dir: &Path) -> Vec<PathBuf> {
 /// toolchain's own output directory in [`ITEM_BUILD_DIR`] (a moved `target`, say, has neither),
 /// sorted; neither `.git` nor the caches themselves are looked into.
 fn marked_caches(wt: &Path) -> Vec<PathBuf> {
-    let build = wt.join(ITEM_BUILD_DIR);
     let mut found = vec![];
     let mut todo = vec![(wt.to_path_buf(), 0)];
     while let Some((dir, depth)) = todo.pop() {
@@ -176,10 +187,7 @@ fn marked_caches(wt: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let p = e.path();
-            if dir == build
-                || cache_names().iter().any(|n| e.file_name() == n.as_str())
-                || p.join("CACHEDIR.TAG").is_file()
-            {
+            if is_disposable_dir(&p) {
                 found.push(p);
             } else if depth + 1 < CACHE_DEPTH {
                 todo.push((p, depth + 1));
