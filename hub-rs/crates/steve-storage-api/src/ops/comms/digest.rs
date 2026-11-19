@@ -1,4 +1,4 @@
-//! Digest operation contracts. Backend triggers are provenance, not contract requirements.
+//! Digest membership contract, covered by the reference implementation and semantic test.
 use crate::{
     Domain,
     registry::{EntryKind, RegistryEntry},
@@ -11,18 +11,6 @@ pub const SYNC_PENDING_MEMBERSHIP: RegistryEntry = RegistryEntry {
     kind: EntryKind::Operation,
     parameter_type: "SyncPendingMembership",
     semantics: "Synchronize digest pending membership, receipt acknowledgement and per-conversation count/bounds atomically.",
-    implemented: false,
-    triggers: &[
-        "digest_pending_insert",
-        "digest_pending_delete",
-        "digest_receipt_ack",
-        "digest_chan_messages_insert",
-        "digest_chan_messages_update",
-        "digest_chan_messages_delete",
-        "digest_mail_messages_insert",
-        "digest_mail_messages_update",
-        "digest_mail_messages_delete",
-    ],
 };
 
 use crate::{Error, uow::Op};

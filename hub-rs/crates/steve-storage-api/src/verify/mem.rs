@@ -253,7 +253,6 @@ impl MemStore {
                     features.insert("export".into());
                 }
                 if domain == Domain::Comms
-                    && crate::ops::comms::digest::SYNC_PENDING_MEMBERSHIP.implemented
                     && super::digest::descriptors()
                         .iter()
                         .all(|entity| descriptions.get(&entity.name) == Some(entity))
