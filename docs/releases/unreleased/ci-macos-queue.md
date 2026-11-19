@@ -1,0 +1,1 @@
+- CI no longer fails a push to `main` while its macOS jobs are still waiting for a runner. GitHub counts that wait against a job's time limit, so macOS jobs now limit their steps instead. The web checks run on Linux only, and the macOS release-script checks moved into the first macOS Rust shard. A push to `main` now needs three macOS runners instead of five.
