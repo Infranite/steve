@@ -2,7 +2,7 @@
 //! The connection moves between the scheduler and a thread-local Rc lease. No Send/Sync
 //! implementation or connection pointer is needed, even for a Send + !Sync SQLite connection.
 #[cfg(test)]
-mod maintenance;
+mod maintenance_tests;
 mod schedule;
 pub use schedule::{Head, LANES, Lane, Scheduler, index, name, target};
 
@@ -48,7 +48,9 @@ pub trait BatchRunner<C>: Send + Sync + 'static {
     fn run(&self, conn: &C, jobs: Vec<Self::Job>) -> Vec<Result<Self::Output, CommitError>>;
     /// Runs exclusively at writer gaps, including idle clock deadlines. Return the
     /// next monotonic deadline, strictly after now. Never acquire another grant here.
-    /// The default does no maintenance and schedules no idle wakeups.
+    /// idle is true only on a due maintenance deadline with no queued work; a
+    /// newly returned writer alone never permits truncation. The default does no
+    /// maintenance and schedules no idle wakeups.
     fn maintenance(&self, _conn: &C, _now: Duration, _idle: bool) -> Option<Duration> {
         None
     }
@@ -90,6 +92,9 @@ struct State<C, R: BatchRunner<C>> {
     next_ticket: u64,
     maintenance_requested: bool,
     maintenance_at: Option<Duration>,
+    // Test handshake: the worker has observed an active writer and will wait.
+    #[cfg(test)]
+    busy_waits: usize,
     queues: [VecDeque<Queued<C, R>>; 4],
     admitted: [usize; 4], // queued units and slices; a yielding slice keeps its admission slot
     scheduler: Scheduler,
@@ -259,6 +264,8 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
                 next_ticket: 0,
                 maintenance_requested: true,
                 maintenance_at: None,
+                #[cfg(test)]
+                busy_waits: 0,
                 queues: std::array::from_fn(|_| VecDeque::new()),
                 admitted: [0; 4],
                 scheduler: Scheduler::default(),
@@ -445,13 +452,20 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
             return;
         }
         if s.busy {
+            #[cfg(test)]
+            {
+                s.busy_waits += 1;
+                shared.changed.notify_all();
+            }
             drop(shared.changed.wait(s).unwrap_or_else(|e| e.into_inner()));
             continue;
         }
         let now = shared.clock.now();
-        if s.maintenance_requested || s.maintenance_at.is_some_and(|at| at <= now) {
+        let maintenance_due = s.maintenance_at.is_some_and(|at| at <= now);
+        if s.maintenance_requested || maintenance_due {
             s.maintenance_requested = false;
-            let idle = s.queues.iter().all(VecDeque::is_empty);
+            // A momentarily empty queue after a commit is not an idle deadline.
+            let idle = maintenance_due && s.queues.iter().all(VecDeque::is_empty);
             let connection = s.connection.take().unwrap();
             s.busy = true;
             drop(s);
@@ -467,7 +481,7 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
                 Ok(next) => next.map(|at| at.max(now.saturating_add(Duration::from_millis(1)))),
                 Err(_) => {
                     tracing::warn!(file=%shared.file, "storage maintenance panicked; retrying");
-                    Some(now.saturating_add(Duration::from_secs(1)))
+                    Some(now.saturating_add(crate::checkpoint::RETRY_INTERVAL))
                 }
             };
             drop(s);
