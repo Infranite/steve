@@ -1021,6 +1021,7 @@ pub(crate) static ORIGIN_SPACE: steve_runtime::cache::CacheSpace<String, bool> =
     steve_runtime::cache::CacheSpace {
         name: "origins",
         ttl: ORIGIN_TTL,
+        stale_for: Duration::ZERO,
         share_pct: 2,
         tags: |origin| vec![steve_runtime::cache::Tag::of("origin", origin)],
         weigh: |_| 1,
@@ -1035,8 +1036,7 @@ async fn origin_allowed(st: &AppState, origin: &str) -> bool {
         return false;
     };
     let o = origin.to_string();
-    *st.caches
-        .space(&ORIGIN_SPACE)
+    *st.origins
         .get_or_load(o.clone(), || async move {
             tokio::task::spawn_blocking(move || {
                 store
@@ -2382,3 +2382,8 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
 }
 
 pub(crate) const CACHE_SPEC: (&str, u8) = (ORIGIN_SPACE.name, ORIGIN_SPACE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&ORIGIN_SPACE);
+}

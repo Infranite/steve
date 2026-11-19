@@ -636,7 +636,25 @@ pub fn wire_assembly(
     };
     let mut registry = install::hub::HubRegistry::default();
     registry.install(&cx)?;
-    Ok(registry.finish())
+    let mut wired = registry.finish();
+    // The host owns and stops metric sampling alongside its other background jobs.
+    let caches = bus.caches().clone();
+    wired.jobs.push(Box::pin(async move {
+        use futures::StreamExt;
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(15));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let ticks = futures::stream::unfold(timer, |mut timer| async move {
+            timer.tick().await;
+            Some(((), timer))
+        });
+        ticks
+            .for_each(move |()| {
+                caches.sample_gauges();
+                futures::future::ready(())
+            })
+            .await;
+    }));
+    Ok(wired)
 }
 
 // Keep the existing Node boundary entry here; installers select it only for an inert copy.

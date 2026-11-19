@@ -99,7 +99,7 @@ impl AppState {
     ) -> Self {
         let caches = bus.caches().clone();
         let origins = caches.space(&crate::access::ORIGIN_SPACE);
-        let runtimes = Runtimes::new(cfg.clone(), caches.clone());
+        let runtimes = Runtimes::from_reports(cfg.clone(), bus.reports());
         let node_harnesses = node_harnesses::Inventory::new(caches.clone());
         let catalog = crate::catalog::Catalog::of(&cfg);
         AppState(Arc::new(Inner {
@@ -985,3 +985,6 @@ mod tests {
 }
 
 pub(crate) use node_harnesses::CACHE_SPEC as NODE_CACHE_SPEC;
+
+#[cfg(test)]
+pub(crate) use node_harnesses::register_cache_spaces as register_node_cache_spaces;

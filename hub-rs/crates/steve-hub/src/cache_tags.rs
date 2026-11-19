@@ -196,17 +196,13 @@ mod tests {
     fn all_spaces_register_from_the_startup_catalogue() {
         validate_spaces(SPACES).unwrap();
         assert_eq!(SPACES.len(), 8);
-        let caches = steve_runtime::cache::Caches::new(Default::default());
-        for &(name, share_pct) in SPACES {
-            let definition = Box::leak(Box::new(steve_runtime::cache::CacheSpace::<(), ()> {
-                name,
-                share_pct,
-                ttl: std::time::Duration::from_secs(1),
-                tags: |_| vec![],
-                weigh: |_| 1,
-            }));
-            let _handle = caches.space(definition);
-        }
+        let caches = std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default()));
+        crate::access::register_cache_spaces(&caches);
+        crate::system::register_cache_spaces(&caches);
+        crate::api::stats::register_cache_spaces(&caches);
+        crate::api::register_node_cache_spaces(&caches);
+        crate::wire::library_mcp::register_cache_spaces(&caches);
+        steve_github::register_cache_spaces_for_test(caches);
         assert!(validate_spaces(&[("same", 1), ("same", 1)]).is_err());
         assert!(validate_spaces(&[("a", 60), ("b", 60)]).is_err());
     }

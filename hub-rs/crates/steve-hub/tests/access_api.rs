@@ -1420,3 +1420,24 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     assert_eq!(s, 200);
     assert!(watching.ends(5).await, "the token's clients' streams end");
 }
+
+#[tokio::test]
+async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
+    let e = start().await;
+    for _ in 0..3 {
+        let response = e
+            .http
+            .get(format!("{}/api/state", e.base))
+            .header("origin", "https://cache-regression.example.test")
+            .send()
+            .await
+            .expect("CORS response");
+        assert!(!response.status().is_server_error());
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+    }
+}

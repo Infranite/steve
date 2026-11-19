@@ -363,3 +363,9 @@ impl GitHub {
 
 /// The registered GitHub cache budgets, included in the Hub startup catalogue.
 pub const CACHE_SPACES: [(&str, u8); 2] = [api::ETAG_SPEC, repos::AVAILABLE_SPEC];
+
+#[cfg(feature = "fake")]
+pub fn register_cache_spaces_for_test(caches: Arc<steve_runtime::cache::Caches>) {
+    let _ = EtagCache::new(caches.clone());
+    let _ = repos::available_cache(&caches);
+}

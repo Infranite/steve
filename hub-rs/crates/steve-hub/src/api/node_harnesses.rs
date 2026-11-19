@@ -44,6 +44,8 @@ static INVENTORY_SPACE: steve_runtime::cache::CacheSpace<String, ProbedReport> =
     steve_runtime::cache::CacheSpace {
         name: "node-harnesses",
         ttl: MAX_AGE,
+        // Preserve the last report during a slow/offline refresh; never use it for admission.
+        stale_for: Duration::from_secs(300),
         share_pct: 10,
         tags: |key| {
             vec![
@@ -333,3 +335,8 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
 }
 
 pub(crate) const CACHE_SPEC: (&str, u8) = (INVENTORY_SPACE.name, INVENTORY_SPACE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&INVENTORY_SPACE);
+}

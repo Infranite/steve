@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicUsize;
 static SPACE: CacheSpace<String, usize> = CacheSpace {
     name: "contract",
     ttl: Duration::from_secs(5),
+    stale_for: Duration::ZERO,
     share_pct: 50,
     tags: |k| vec![Tag::of("entity", k)],
     weigh: |_| 64,
@@ -90,7 +91,7 @@ async fn ttl_uses_the_tokio_clock_and_invalidated_stale_values_are_hidden() {
         1
     );
     tokio::time::advance(Duration::from_millis(1)).await;
-    assert!(!cache.peek(&"a".into()).await.unwrap().1);
+    assert!(cache.peek(&"a".into()).await.is_none());
     assert_eq!(
         *cache
             .get_or_load("a".into(), || async { Ok::<_, ()>(2) })
@@ -138,6 +139,7 @@ async fn off_has_no_moka_and_errors_are_not_cached() {
 static SMALL: CacheSpace<String, usize> = CacheSpace {
     name: "small",
     ttl: Duration::from_secs(5),
+    stale_for: Duration::ZERO,
     share_pct: 25,
     tags: |_| vec![],
     weigh: |n| *n as u32,
@@ -161,8 +163,6 @@ async fn byte_budget_and_administrative_registry_do_not_erase_types() {
     assert_eq!(admin[0].name(), "small");
     assert_eq!(admin[0].share(), 25);
     assert!(admin[0].usage().1 <= 262144);
-    admin[0].clear();
-    assert!(small.peek(&"19".into()).await.is_none());
 }
 #[tokio::test]
 async fn table_rollover_and_conditional_responses_cannot_revalidate_revoked_values() {
@@ -187,6 +187,7 @@ static TAG_CALLS: AtomicUsize = AtomicUsize::new(0);
 static HOT: CacheSpace<String, usize> = CacheSpace {
     name: "hot",
     ttl: Duration::from_secs(5),
+    stale_for: Duration::ZERO,
     share_pct: 50,
     tags: |k| {
         TAG_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -221,4 +222,114 @@ async fn hits_do_not_rebuild_tags_and_constant_invalidation_finishes_the_request
         .unwrap();
     assert_eq!(*value, 2);
     assert!(cache.peek(&key).await.is_none());
+}
+
+#[test]
+#[should_panic(expected = "registered twice during assembly")]
+fn duplicate_space_is_rejected_before_serving_requests() {
+    let registry = caches(CacheMode::Memory);
+    let _first = registry.space(&SPACE);
+    let _second = registry.space(&SPACE);
+}
+static GRACE: CacheSpace<String, usize> = CacheSpace {
+    name: "grace",
+    ttl: Duration::from_millis(20),
+    stale_for: Duration::from_secs(60),
+    share_pct: 50,
+    tags: |key| vec![Tag::of("grace", key)],
+    weigh: |_| 1,
+};
+#[tokio::test(start_paused = true)]
+async fn stale_grace_keeps_one_readable_value_while_refresh_is_held() {
+    let registry = caches(CacheMode::Memory);
+    let cache = registry.space(&GRACE);
+    assert_eq!(
+        cache.cache.as_ref().unwrap().policy().time_to_live(),
+        Some(GRACE.ttl + GRACE.stale_for)
+    );
+    cache
+        .get_or_load("a".into(), || async { Ok::<_, ()>(1) })
+        .await
+        .unwrap();
+    tokio::time::advance(GRACE.ttl).await;
+    let (old, fresh) = cache.peek(&"a".into()).await.unwrap();
+    assert_eq!(*old, 1);
+    assert!(!fresh);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (c, e, r) = (cache.clone(), entered.clone(), release.clone());
+    let refresh = tokio::spawn(async move {
+        c.get_or_load("a".into(), || async {
+            e.notify_one();
+            r.notified().await;
+            Ok::<_, ()>(2)
+        })
+        .await
+        .unwrap()
+    });
+    entered.notified().await;
+    assert_eq!(
+        *cache.peek(&"a".into()).await.unwrap().0,
+        1,
+        "refresh must not remove the only display value"
+    );
+    release.notify_one();
+    assert_eq!(*refresh.await.unwrap(), 2);
+    tokio::time::advance(GRACE.ttl + GRACE.stale_for).await;
+    assert!(cache.peek(&"a".into()).await.is_none());
+}
+// The card explicitly permits a minimal real wait to catch the two-clock regression.
+// Logical-time tests above additionally cover the exact grace-end boundary without waiting.
+#[tokio::test]
+async fn production_clock_retains_a_value_after_its_fresh_ttl() {
+    let cache = caches(CacheMode::Memory).space(&GRACE);
+    cache
+        .get_or_load("a".into(), || async { Ok::<_, ()>(1) })
+        .await
+        .unwrap();
+    tokio::time::sleep(GRACE.ttl + Duration::from_millis(5)).await;
+    assert_eq!(*cache.peek(&"a".into()).await.unwrap().0, 1);
+    assert!(!cache.peek(&"a".into()).await.unwrap().1);
+}
+#[tokio::test]
+async fn a_post_write_reader_uses_its_own_uncached_load_at_the_retry_limit() {
+    let registry = caches(CacheMode::Memory);
+    let cache = registry.space(&SPACE);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (c, e, r) = (cache.clone(), entered.clone(), release.clone());
+    let first = tokio::spawn(async move {
+        c.get_or_load("a".into(), || async {
+            e.notify_one();
+            r.notified().await;
+            Ok::<_, ()>(1)
+        })
+        .await
+        .unwrap()
+    });
+    entered.notified().await;
+    registry.invalidate(&[Tag::of("entity", "a")]);
+    let called = AtomicUsize::new(0);
+    // One remaining attempt exercises the terminal branch without relying on the
+    // timing of three initializer-pool turnovers between these two readers.
+    let second = cache.load_miss(
+        "a".into(),
+        || async {
+            called.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(9)
+        },
+        1,
+    );
+    futures::pin_mut!(second);
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    registry.invalidate(&[Tag::of("entity", "a")]);
+    registry.invalidate(&[Tag::of("entity", "a")]);
+    release.notify_one();
+    assert_eq!(*first.await.unwrap(), 1);
+    assert_eq!(*second.await.unwrap(), 9);
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert!(
+        cache.peek(&"a".into()).await.is_none(),
+        "terminal fallback must not publish"
+    );
 }

@@ -34,6 +34,7 @@ static CACHE: steve_runtime::cache::CacheSpace<StatsKey, Value> =
     steve_runtime::cache::CacheSpace {
         name: "stats",
         ttl: FRESH,
+        stale_for: Duration::ZERO,
         share_pct: 15,
         tags: |key| vec![steve_runtime::cache::Tag::of("stats", &key.ws)],
         weigh: |v| serde_json::to_vec(v).map_or(1, |b| b.len().min(u32::MAX as usize) as u32),
@@ -1000,3 +1001,8 @@ mod tests {
 }
 
 pub(crate) const CACHE_SPEC: (&str, u8) = (CACHE.name, CACHE.share_pct);
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&CACHE);
+}

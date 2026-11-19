@@ -64,19 +64,22 @@ fn preflight_of(hs: &Arc<crate::harnesses::HubHarnesses>, linked: Vec<String>) -
 /// signed in there, nothing has to be configured at the Hub. A harness the Node reports as not
 /// signed in (its scratch session refused: "Authentication required") stops every principal's Bot
 /// alike, pointing at the Devices page where the harness is signed in, never at a provider setting.
-#[test]
-fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devices() {
+#[tokio::test]
+async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devices() {
     let (_d, s) = store();
     let home = tempfile::tempdir().unwrap();
-    let cfg = crate::config::Config::from_vars(|k| {
-        (k == "STEVE_HOME").then(|| home.path().display().to_string())
-    })
-    .unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
+        let cfg = crate::config::Config::from_vars(|k| {
+            (k == "STEVE_HOME").then(|| home.path().display().to_string())
+        }).unwrap();
+    let hs = crate::harnesses::HubHarnesses::of(
+        &cfg,
+        crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
+    );
     hs.update(vec![
         cap("codex", Ok(())),
         cap("claude-code", Err("Authentication required")),
-    ]);
+    ])
+    .await;
     let p = preflight_of(&hs, vec![]);
     let svc = Principal::Svc(WS.into());
     let me = Principal::User("owner".into());
@@ -106,7 +109,8 @@ fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devic
     })
     .unwrap();
     // once the harness is signed in on the device, the same Bot runs
-    hs.update(vec![cap("codex", Ok(())), cap("claude-code", Ok(()))]);
+    hs.update(vec![cap("codex", Ok(())), cap("claude-code", Ok(()))])
+        .await;
     s.reader::<_, StoreError>(|c| {
         assert_eq!(code(p.can_run(c, &svc, "writer")), None);
         Ok(())
@@ -124,15 +128,17 @@ fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devic
 /// #234: the Hub's own Node says Claude Code is not ready, and a second Node linked but has not
 /// answered yet. The second Node may well have it, so the Bot is not refused; once every linked
 /// Node has answered and none has it ready, it is.
-#[test]
-fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
+#[tokio::test]
+async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     let (_d, s) = store();
     let home = tempfile::tempdir().unwrap();
-    let cfg = crate::config::Config::from_vars(|k| {
-        (k == "STEVE_HOME").then(|| home.path().display().to_string())
-    })
-    .unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
+        let cfg = crate::config::Config::from_vars(|k| {
+            (k == "STEVE_HOME").then(|| home.path().display().to_string())
+        }).unwrap();
+    let hs = crate::harnesses::HubHarnesses::of(
+        &cfg,
+        crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
+    );
     hs.update(vec![steve_node_api::HarnessCapability {
         name: "claude-code".into(),
         version: String::new(),
@@ -146,7 +152,8 @@ fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
         enforcement: vec![],
         setup: None,
         adapter: None,
-    }]);
+    }])
+    .await;
     let linked = Arc::new(std::sync::Mutex::new(vec!["n_second".to_string()]));
     let readiness: Readiness = {
         let (hs, linked) = (hs.clone(), linked.clone());

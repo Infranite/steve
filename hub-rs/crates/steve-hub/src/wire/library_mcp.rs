@@ -66,6 +66,8 @@ static LIST_SPACE: steve_runtime::cache::CacheSpace<ListingKey, ToolList> =
     steve_runtime::cache::CacheSpace {
         name: "library-mcp",
         ttl: FRESH,
+        // A temporary listing failure must not erase the last tool directory.
+        stale_for: Duration::from_secs(600),
         share_pct: 9,
         tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
         weigh: |list| {
@@ -82,6 +84,7 @@ static FAILURE_SPACE: steve_runtime::cache::CacheSpace<ListingKey, String> =
     steve_runtime::cache::CacheSpace {
         name: "library-mcp-failures",
         ttl: RETRY,
+        stale_for: Duration::ZERO,
         share_pct: 1,
         tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
         weigh: |error| error.len().min(u32::MAX as usize) as u32,
@@ -1031,3 +1034,9 @@ pub(crate) const CACHE_SPECS: [(&str, u8); 2] = [
     (LIST_SPACE.name, LIST_SPACE.share_pct),
     (FAILURE_SPACE.name, FAILURE_SPACE.share_pct),
 ];
+
+#[cfg(test)]
+pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
+    let _ = caches.space(&LIST_SPACE);
+    let _ = caches.space(&FAILURE_SPACE);
+}

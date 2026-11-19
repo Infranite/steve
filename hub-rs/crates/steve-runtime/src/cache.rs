@@ -1,5 +1,8 @@
 //! Typed process-local caches with synchronous, bounded dependency invalidation.
-use moka::{future::Cache, ops::compute::Op};
+use moka::{
+    future::Cache,
+    ops::compute::{CompResult, Op},
+};
 use std::{
     collections::HashMap,
     future::Future,
@@ -46,6 +49,8 @@ pub type Tags = Vec<Tag>;
 pub struct CacheSpace<K, V> {
     pub name: &'static str,
     pub ttl: Duration,
+    /// Display grace after ttl; zero for values that must never be served stale.
+    pub stale_for: Duration,
     pub share_pct: u8,
     pub tags: fn(&K) -> Tags,
     pub weigh: fn(&V) -> u32,
@@ -121,7 +126,6 @@ pub trait SpaceAdmin: Send + Sync {
     fn name(&self) -> &'static str;
     fn share(&self) -> u8;
     fn usage(&self) -> (u64, u64);
-    fn clear(&self);
 }
 struct Inner {
     cfg: CacheConfig,
@@ -131,38 +135,36 @@ struct Inner {
 pub struct Caches(Arc<Inner>);
 impl Caches {
     /// The composition root validates its space catalogue and positive budget first.
-    /// Off (and a zero budget) allocates no moka cache.
+    /// Off allocates no moka cache; the composition root rejects a zero budget.
     pub fn new(cfg: CacheConfig) -> Self {
         let inner = Arc::new(Inner {
             cfg,
             kinds: RwLock::default(),
             spaces: RwLock::default(),
         });
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let weak = Arc::downgrade(&inner);
-            rt.spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(15));
-                loop {
-                    tick.tick().await;
-                    let Some(inner) = weak.upgrade() else { break };
-                    for space in inner.spaces.read().unwrap().iter() {
-                        let (entries, bytes) = space.usage();
-                        metrics::gauge!("steve_cache_entries", "space" => space.name())
-                            .set(entries as f64);
-                        metrics::gauge!("steve_cache_bytes", "space" => space.name())
-                            .set(bytes as f64);
-                    }
-                }
-            });
-        }
         Self(inner)
+    }
+    pub fn sample_gauges(&self) {
+        for space in self.0.spaces.read().unwrap().iter() {
+            let (entries, bytes) = space.usage();
+            metrics::gauge!("steve_cache_entries", "space" => space.name()).set(entries as f64);
+            metrics::gauge!("steve_cache_bytes", "space" => space.name()).set(bytes as f64);
+        }
     }
     pub fn space<K, V>(&self, space: &'static CacheSpace<K, V>) -> Cached<K, V>
     where
         K: Hash + Eq + Clone + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let cache = if self.0.cfg.mode == CacheMode::Off || self.0.cfg.memory_mb == 0 {
+        let mut spaces = self.0.spaces.write().unwrap();
+        assert!(
+            !spaces
+                .iter()
+                .any(|registered| registered.name() == space.name),
+            "cache space registered twice during assembly: {}",
+            space.name
+        );
+        let cache = if self.0.cfg.mode == CacheMode::Off {
             None
         } else {
             let capacity =
@@ -170,8 +172,9 @@ impl Caches {
             let mut builder = Cache::builder()
                 .max_capacity(capacity)
                 .weigher(|_: &K, value: &Arc<Stamped<V>>| value.weight);
-            if space.ttl != Duration::MAX {
-                builder = builder.time_to_live(space.ttl);
+            let retention = space.ttl.saturating_add(space.stale_for);
+            if retention != Duration::MAX {
+                builder = builder.time_to_live(retention);
             }
             Some(builder.build())
         };
@@ -179,13 +182,11 @@ impl Caches {
             cache,
             owner: self.0.clone(),
             space,
-            epoch: Arc::default(),
         };
-        self.0.spaces.write().unwrap().push(Box::new(Admin {
+        spaces.push(Box::new(Admin {
             cache: cached.cache.clone(),
             name: space.name,
             share: space.share_pct,
-            epoch: cached.epoch.clone(),
         }));
         cached
     }
@@ -242,7 +243,6 @@ struct Admin<K, V> {
     cache: Option<Cache<K, Arc<Stamped<V>>>>,
     name: &'static str,
     share: u8,
-    epoch: Arc<AtomicU64>,
 }
 impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> SpaceAdmin
     for Admin<K, V>
@@ -258,18 +258,11 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Spa
             .as_ref()
             .map_or((0, 0), |c| (c.entry_count(), c.weighted_size()))
     }
-    fn clear(&self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
-        if let Some(c) = &self.cache {
-            c.invalidate_all();
-        }
-    }
 }
 pub struct Cached<K: 'static, V: 'static> {
     cache: Option<Cache<K, Arc<Stamped<V>>>>,
     owner: Arc<Inner>,
     space: &'static CacheSpace<K, V>,
-    epoch: Arc<AtomicU64>,
 }
 impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clone
     for Cached<K, V>
@@ -279,7 +272,6 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clo
             cache: self.cache.clone(),
             owner: self.owner.clone(),
             space: self.space,
-            epoch: self.epoch.clone(),
         }
     }
 }
@@ -288,20 +280,21 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cac
         value.version.current() && value.at.elapsed() < self.space.ttl
     }
     /// O(1) observation: value plus TTL freshness; invalid dependencies are never exposed.
-    /// Moka's TTL can make an entry unreadable before physical reclamation;
-    /// there is no independent stale-value store.
+    /// Freshness and grace use the tokio stamp; moka reclaims after ttl + stale_for.
+    /// The same entry remains readable during a refresh, without a display copy.
     pub async fn peek(&self, key: &K) -> Option<(Arc<V>, bool)> {
         self.cache
             .as_ref()?
             .get(key)
             .await
-            .filter(|v| v.version.current())
+            .filter(|v| {
+                v.version.current()
+                    && v.at.elapsed() < self.space.ttl.saturating_add(self.space.stale_for)
+            })
             .map(|v| (v.value.clone(), self.valid(&v)))
     }
     pub fn version(&self, key: &K) -> Version {
-        let mut version = self.owner.version((self.space.tags)(key));
-        version.0.push(Stamp::new(self.epoch.clone()));
-        version
+        self.owner.version((self.space.tags)(key))
     }
     /// The sole exceptional write path, for network conditional responses. A revoked
     /// dependency snapshot can neither be written nor exposed by a later reader.
@@ -341,37 +334,81 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cac
             return Ok(value.value.clone());
         }
         metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "miss").increment(1);
+        self.load_miss(key, load, LOAD_ATTEMPTS).await
+    }
+    async fn load_miss<E, F>(
+        &self,
+        key: K,
+        load: impl FnOnce() -> F,
+        attempts: usize,
+    ) -> Result<Arc<V>, E>
+    where
+        E: Clone + Send + Sync + 'static,
+        F: Future<Output = Result<V, E>>,
+    {
+        let cache = self.cache.as_ref().expect("memory miss");
         let mut load = Some(load);
-        for attempt in 0..LOAD_ATTEMPTS {
-            cache
-                .entry(key.clone())
-                .and_compute_with(|entry| async {
-                    match entry {
-                        Some(e) if !self.valid(e.value()) => Op::Remove,
-                        _ => Op::Nop,
-                    }
-                })
-                .await;
-            let value = cache
-                .try_get_with(key.clone(), async {
-                    let version = self.version(&key);
-                    let value = self
-                        .load(load.take().expect("single initializer")())
-                        .await?;
-                    Ok::<_, E>(Arc::new(Stamped {
-                        weight: (self.space.weigh)(&value).max(1),
-                        value: Arc::new(value),
-                        at: Instant::now(),
-                        version,
-                    }))
-                })
-                .await
-                .map_err(|e| e.as_ref().clone())?;
-            if self.valid(&value) || load.is_none() || attempt + 1 == LOAD_ATTEMPTS {
-                return Ok(value.value.clone());
+        for attempt in 0..attempts {
+            if cache.get(&key).await.is_some() {
+                // Keep the old value in this same slot while a stale refresh awaits I/O.
+                let mut loaded = None;
+                let result = cache
+                    .entry(key.clone())
+                    .and_try_compute_with(|entry| async {
+                        if let Some(entry) = entry
+                            && self.valid(entry.value())
+                        {
+                            return Ok::<_, E>(Op::Nop);
+                        }
+                        let version = self.version(&key);
+                        let value = self.load(load.take().expect("one initializer")()).await?;
+                        let value = Arc::new(Stamped {
+                            weight: (self.space.weigh)(&value).max(1),
+                            value: Arc::new(value),
+                            at: Instant::now(),
+                            version,
+                        });
+                        loaded = Some(value.clone());
+                        Ok(Op::Put(value))
+                    })
+                    .await?;
+                let value = match result {
+                    CompResult::Inserted(entry)
+                    | CompResult::ReplacedWith(entry)
+                    | CompResult::Unchanged(entry) => entry.into_value(),
+                    _ => loaded.expect("compute retained or loaded a value"),
+                };
+                if self.valid(&value) || load.is_none() {
+                    return Ok(value.value.clone());
+                }
+            } else {
+                let value = cache
+                    .try_get_with(key.clone(), async {
+                        let version = self.version(&key);
+                        let value = self.load(load.take().expect("one initializer")()).await?;
+                        Ok::<_, E>(Arc::new(Stamped {
+                            weight: (self.space.weigh)(&value).max(1),
+                            value: Arc::new(value),
+                            at: Instant::now(),
+                            version,
+                        }))
+                    })
+                    .await
+                    .map_err(|e| e.as_ref().clone())?;
+                if self.valid(&value) || load.is_none() {
+                    return Ok(value.value.clone());
+                }
+            }
+            if attempt + 1 == attempts {
+                // A post-write reader must never return an obsolete borrowed load.
+                // Use its own initializer once and do not publish through the cache.
+                return self
+                    .load(load.take().expect("unused fallback initializer")())
+                    .await
+                    .map(Arc::new);
             }
         }
-        unreachable!("bounded attempts always return")
+        unreachable!("nonzero bounded attempts")
     }
     async fn load<E, F: Future<Output = Result<V, E>>>(&self, future: F) -> Result<V, E> {
         let start = Instant::now();

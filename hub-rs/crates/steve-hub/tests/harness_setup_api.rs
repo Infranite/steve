@@ -373,6 +373,14 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
         node.entered.notified().await;
         // All reads and retries remain Offline, including after the old follower is released.
         node.disconnect(code);
+        // A pending refresh has invalidated the sole report: synchronous readers are
+        // unknown immediately. A second probe shares that slot until it is released.
+        assert_eq!(
+            e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
+            json!([])
+        );
+        node.gate.add_permits(1);
+        old.await.unwrap();
         for path in ["/api/devices?fresh=1", "/api/state"] {
             let (status, body) = e.call("GET", path, None).await;
             assert_eq!(status, 200);
@@ -384,8 +392,6 @@ async fn persistent_disconnect_revokes_independent_follower_through_http() {
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
             json!([])
         );
-        node.gate.add_permits(1);
-        old.await.unwrap();
         assert_eq!(
             e.call("GET", "/api/system/models?harness=pi", None).await.1["models"],
             json!([])

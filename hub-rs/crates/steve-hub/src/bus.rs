@@ -74,8 +74,6 @@ pub const TAP_OVERFLOW_MAX: usize = 512;
 
 const TAP_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const TAP_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(test)]
-const WS_GENERATION_MAX: usize = 10_000;
 
 /// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
 /// the id of the last frame seen. On the wire it is `<epoch>:<n>`.
@@ -294,6 +292,7 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
 
 struct Inner {
     caches: Arc<steve_runtime::cache::Caches>,
+    reports: Arc<crate::system::RuntimeReports>,
     tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Delivery>>,
@@ -338,8 +337,10 @@ impl Bus {
         {
             tracing::error!("bus dispatcher: {e}");
         }
+        let reports = crate::system::RuntimeReports::new(caches.clone());
         Self(Arc::new(Inner {
             caches,
+            reports,
             tx,
             revision: Mutex::new(0),
             out,
@@ -382,6 +383,9 @@ impl Bus {
     }
     pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
         &self.0.caches
+    }
+    pub(crate) fn reports(&self) -> Arc<crate::system::RuntimeReports> {
+        self.0.reports.clone()
     }
     /// Published state events, independent of dispatcher coalescing.
     pub fn generation(&self) -> u64 {
@@ -705,7 +709,7 @@ mod tests {
             (2, 2)
         );
         let before = (state_generation(&bus, "a"), state_generation(&bus, "b"));
-        for i in 0..WS_GENERATION_MAX + 50 {
+        for i in 0..10_050 {
             bus.publish(memory("m", &format!("w-{i}")));
         }
         // Bounded generation compaction is tested by steve-runtime/cache.

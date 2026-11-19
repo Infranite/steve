@@ -153,6 +153,7 @@ static AVAILABLE_SPACE: steve_runtime::cache::CacheSpace<String, Vec<Available>>
     steve_runtime::cache::CacheSpace {
         name: "github-repositories",
         ttl: std::time::Duration::from_millis(AVAILABLE_TTL_MS as u64),
+        stale_for: std::time::Duration::ZERO,
         share_pct: 10,
         tags: |id| {
             vec![

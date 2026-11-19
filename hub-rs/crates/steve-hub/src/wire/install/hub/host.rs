@@ -32,5 +32,5 @@ install! { install(reg, cx) [db] => [core_cfg, db, harnesses, host, mode, model_
         )?)
     };
     // the harness adapters this Hub knows, with what the Nodes say of them (kept fresh)
-    let harnesses = crate::harnesses::HubHarnesses::of(cfg, cx.bus.caches().clone());
+    let harnesses = crate::harnesses::HubHarnesses::of(cfg, cx.bus.reports());
 }}

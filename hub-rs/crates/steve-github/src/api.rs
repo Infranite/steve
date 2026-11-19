@@ -297,6 +297,7 @@ static ETAG_SPACE: steve_runtime::cache::CacheSpace<(String, String), (String, V
     steve_runtime::cache::CacheSpace {
         name: "github-etags",
         ttl: Duration::MAX,
+        stale_for: Duration::ZERO,
         share_pct: 5,
         tags: |(id, _)| vec![steve_runtime::cache::Tag::of("connection", id)],
         weigh: |(e, v)| (e.len() + v.to_string().len()).min(u32::MAX as usize) as u32,

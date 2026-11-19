@@ -1875,13 +1875,20 @@ budget is reserved for future spaces. TTLs and shares are defined in code in thi
 Committed changes invalidate dependency generations synchronously. A cache entry retains
 its dependency generations in its value; a later read rejects obsolete values without
 creating another key. Concurrent reads share loading, and loader errors are not retained as
-values. MCP listing failures use a separate 60-second failure space. A last observation is available only while moka still returns that entry; its normal TTL
-expiry or eviction produces a cold read. Failed Node probes can carry a prior payload if
+values. MCP listing failures use a separate 60-second failure space. Runtime reports have a further 300-second display grace, Node harness reports 300 seconds,
+and MCP tool lists 10 minutes. Other spaces have no grace. Freshness uses tokio's monotonic
+stamp; moka reclaims entries after the fresh TTL plus grace. A refresh keeps the same entry
+readable in that window, with `fresh=false`; dependency invalidation always hides it. Failed Node probes can carry a prior payload if
 it was available when the probe began; that payload is not admission evidence. There is
-no separate retained display copy. Changing cache mode
+no separate retained display copy. Model selection and dispatch read the same capability
+reports and require recent, fresh evidence; display grace never authorizes execution. Changing cache mode
 or budget requires a restart; caches never persist across a process restart.
 
 Prometheus reports `steve_cache_requests_total{space,result}`,
 `steve_cache_load_seconds{space}`, `steve_cache_entries{space}`, `steve_cache_bytes{space}`,
 and `steve_cache_invalidations_total{kind}`. Entry counts and bytes describe the cache's
 weighted allocation sampled every 15 seconds. Startup and `--check-config` reject duplicate space names, zero shares and total shares above 100 percent.
+
+With `STEVE_CACHE=off`, direct diagnostic probes still return their responses, but no runtime
+report is retained for synchronous model/dispatch readers. Those readers conservatively
+report unknown; use `memory` for normal operation.
