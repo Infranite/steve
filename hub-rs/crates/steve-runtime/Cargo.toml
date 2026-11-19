@@ -7,7 +7,7 @@ description = "Steve's runtime facilities: clock, time zones, schedules, retry a
 
 # A Node binary takes only what it needs (clock, policy); the Hub enables everything.
 [features]
-default = []
+default = ["tz", "schedule", "policy"]
 tz = ["dep:chrono", "dep:chrono-tz", "dep:iana-time-zone"]
 schedule = ["tz", "dep:croner"]
 policy = ["dep:backon", "dep:governor", "dep:rand"]
