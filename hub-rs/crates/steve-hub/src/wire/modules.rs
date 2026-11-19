@@ -217,7 +217,12 @@ pub(crate) fn knowledge(
     let kb_bus = bus.clone();
     let kb = steve_knowledge::Knowledge::with_loaders(
         move |e: steve_knowledge::KbEvent| {
-            kb_bus.publish_value(serde_json::json!({ "type": "kb", "id": e.id, "ws": e.ws }));
+            kb_bus.publish(steve_types::DomainEvent::from(
+                steve_types::KnowledgeEvent::Kb {
+                    id: e.id,
+                    ws: e.ws.into(),
+                },
+            ));
         },
         vec![
             // E6: mail threads added to the knowledge base are `files` documents too, so this

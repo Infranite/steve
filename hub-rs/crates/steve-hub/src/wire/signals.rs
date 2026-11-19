@@ -11,7 +11,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Router};
-use serde_json::json;
 use steve_flow::{
     AdapterError, Batch, EventAdapter, EventTypeDef, FlowCx, IngestMode, PushRequest, RawEvent,
     ScopeDef,
@@ -178,22 +177,25 @@ pub struct Notices {
     pub bus: Bus,
 }
 
-impl Notices {
-    fn send(&self, ty: &str, ws: &str, id: &str) {
-        self.bus
-            .publish_value(json!({ "type": ty, "id": id, "ws": ws }));
-    }
-}
-
 impl steve_github::events::GhNotifier for Notices {
     fn gh(&self, ws: &str, id: &str) {
-        self.send("gh", ws, id);
+        self.bus.publish(steve_types::DomainEvent::from(
+            steve_types::IntegrationsEvent::Gh {
+                id: id.into(),
+                ws: ws.into(),
+            },
+        ));
     }
 }
 
 impl steve_mail::MailNotify for Notices {
     fn thread(&self, ws: &str, thread_id: &str) {
-        self.send("mail", ws, thread_id);
+        self.bus.publish(steve_types::DomainEvent::from(
+            steve_types::IntegrationsEvent::Mail {
+                id: thread_id.into(),
+                ws: ws.into(),
+            },
+        ));
     }
 }
 

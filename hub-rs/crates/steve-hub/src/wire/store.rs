@@ -63,9 +63,10 @@ pub struct BusPublisher(pub Bus);
 
 impl s::Publisher for BusPublisher {
     fn publish(&self, e: s::ChangeEvent) {
-        if let Ok(v) = serde_json::to_value(&e) {
-            self.0.publish_value(v);
-        }
+        self.0.publish_batch(vec![s::Published::Legacy(e)]);
+    }
+    fn publish_batch(&self, events: Vec<s::Published>) {
+        self.0.publish_batch(events);
     }
 }
 

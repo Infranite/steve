@@ -1,6 +1,8 @@
 //! Cache invalidation contract before S1, plus the explicitly pending S1 contract.
 //! These use only public Bus APIs; generation changes are synchronous, not dispatcher timing.
 use serde_json::{Value, json};
+mod bus_cases;
+use bus_cases::typed;
 use steve_hub::bus::{Bus, HubEvent};
 
 #[derive(Clone, Copy, Debug)]
@@ -171,7 +173,6 @@ fn current_invalid_ws_never_invalidates_a_state_cache() {
 }
 
 #[test]
-#[ignore = "W1.3a: enable when events carry ws"]
 fn s1_workspace_events_only_invalidate_their_workspace() {
     for &(ty, _, _) in CURRENT {
         if matches!(
@@ -188,33 +189,29 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
             continue;
         }
         let bus = Bus::new();
-        bus.publish_value(frame(ty, true));
+        bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), (1, 1, 0, 0), "{ty}");
-        let mut other = frame(ty, true);
-        other["ws"] = json!("b");
-        bus.publish_value(other);
+        bus.publish(typed(ty, "b"));
         assert_eq!(counts(&bus), (2, 1, 1, 0), "{ty}");
     }
 }
 
 #[test]
-#[ignore = "W1.3a: enable when events carry ws"]
 fn s1_hub_and_user_events_invalidate_globally() {
     // Client presence is stateless even though its audience is User.
     for ty in ["device", "release.hold", "node"] {
         let bus = Bus::new();
-        bus.publish_value(frame(ty, false));
+        bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), (1, 1, 1, 0), "{ty}");
     }
 }
 
 #[test]
-#[ignore = "W1.3a: enable when events carry ws"]
 fn s1_stateless_events_never_invalidate_state() {
     // Thinking remains in /api/state and is covered by the workspace invalidation test.
     for ty in ["event", "steve.draft", "steve.tool", "stats", "client"] {
         let bus = Bus::new();
-        bus.publish_value(frame(ty, ty != "client"));
+        bus.publish(typed(ty, "a"));
         assert_eq!(bus.generation_for("a"), 0, "{ty}");
         assert_eq!(bus.generation_for("b"), 0, "{ty}");
         assert_eq!(bus.stats_generation(), u64::from(ty == "stats"), "{ty}");
