@@ -1,7 +1,4 @@
 # Remaining production legacy publications. Shrink per crate; remove with the last legacy path.
-steve-calendar/src/api.rs	ChangeEvent::	1
-steve-calendar/src/sync.rs	ChangeEvent::	5
-steve-calendar/src/tools.rs	ChangeEvent::	2
 steve-channels/src/bindings.rs	ChangeEvent::	2
 steve-channels/src/channel_accounts.rs	ChangeEvent::	2
 steve-channels/src/cleanup.rs	ChangeEvent::	2

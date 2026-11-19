@@ -5483,6 +5483,7 @@ dependencies = [
  "steve-i18n",
  "steve-modules",
  "steve-store",
+ "steve-types",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

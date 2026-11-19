@@ -27,7 +27,6 @@ use serde::Serialize;
 use steve_modules::accounts::connections::{ConnCx, Health, repo as crepo};
 use steve_modules::vault::VaultError;
 use steve_modules::{ApiError, ApiResult};
-use steve_store::ChangeEvent;
 
 use crate::profile::{
     Busy, Changes, RemoteCalendar, RemoteEvent, SourceError, When, Window, feature,
@@ -458,10 +457,12 @@ impl Calendar {
                 self.0.m.store.transaction(|tx| {
                     for c in repo::of_connection(tx, conn)? {
                         repo::set_failed(tx, &c.id, &msg, now)?;
-                        tx.publish(ChangeEvent::Calendar {
-                            id: c.id,
-                            ws: ws.into(),
-                        });
+                        tx.publish(steve_types::DomainEvent::from(
+                            steve_types::AutomationEvent::Calendar {
+                                id: c.id.into(),
+                                ws: ws.into(),
+                            },
+                        ));
                     }
                     Ok::<_, ApiError>(())
                 })?;
@@ -511,10 +512,12 @@ impl Calendar {
                     let msg = source_text(&e);
                     self.0.m.store.transaction(|tx| {
                         repo::set_failed(tx, &cal.id, &msg, self.now())?;
-                        tx.publish(ChangeEvent::Calendar {
-                            id: cal.id.clone(),
-                            ws: ws.into(),
-                        });
+                        tx.publish(steve_types::DomainEvent::from(
+                            steve_types::AutomationEvent::Calendar {
+                                id: cal.id.clone().into(),
+                                ws: ws.into(),
+                            },
+                        ));
                         Ok::<_, ApiError>(())
                     })?;
                     report.errors.push((cal.name.clone(), msg));
@@ -677,18 +680,22 @@ impl Calendar {
                 };
                 // pages hear of a calendar only when something about it changed
                 if differs {
-                    tx.publish(ChangeEvent::Calendar {
-                        id: cal.id.clone(),
-                        ws: ws.into(),
-                    });
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::AutomationEvent::Calendar {
+                            id: cal.id.clone().into(),
+                            ws: ws.into(),
+                        },
+                    ));
                 }
             }
             for h in have.iter().filter(|h| !h.gone && !seen.contains(&h.ext_id)) {
                 repo::set_gone(tx, &h.id, now)?;
-                tx.publish(ChangeEvent::Calendar {
-                    id: h.id.clone(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::AutomationEvent::Calendar {
+                        id: h.id.clone().into(),
+                        ws: ws.into(),
+                    },
+                ));
             }
             Ok(repo::of_connection(tx, conn)?)
         })
@@ -758,10 +765,12 @@ impl Calendar {
             repo::set_synced(tx, &cal.id, cursor.as_deref(), full, now)?;
             // a sync that found nothing new is not news, unless the calendar was failing or never synced
             if changed + deleted > 0 || cal.sync_state != "ok" {
-                tx.publish(ChangeEvent::Calendar {
-                    id: cal.id.clone(),
-                    ws: ws.clone(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::AutomationEvent::Calendar {
+                        id: cal.id.clone().into(),
+                        ws: ws.clone().into(),
+                    },
+                ));
             }
             Ok((changed, deleted))
         })
