@@ -24,6 +24,7 @@ import yolo from "./yolo.ts"
 import misc from "./misc.ts"
 import todos from "./todos.ts"
 import calendar from "./calendar.ts"
+import reason from "./reason.ts"
 import common from "./common.ts"
 
-export default { hub, device, devices, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, todos, calendar, common }
+export default { hub, device, devices, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, todos, calendar, reason, common }

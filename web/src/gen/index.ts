@@ -65,3 +65,5 @@ export type { WorkEvent } from "./WorkEvent";
 export type { WorkLiveEvent } from "./WorkLiveEvent";
 export type { WorkspaceId } from "./WorkspaceId";
 export type { YoloActionId } from "./YoloActionId";
+export { REASONS } from "./reasons";
+export type { KnownReason } from "./reasons";

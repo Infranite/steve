@@ -30,7 +30,7 @@ import { initReactI18next, useTranslation } from "react-i18next"
 import zhCN from "./locales/zh-CN/index.ts"
 import en from "./locales/en/index.ts"
 
-export const NAMESPACES = ["hub", "device", "devices", "accounts", "api", "views", "manage", "core", "pages", "shell", "auto", "channels", "github", "integrations", "knowledge", "caps", "mail", "people", "stats", "thread", "vault", "yolo", "misc", "todos", "calendar", "common"] as const
+export const NAMESPACES = ["hub", "device", "devices", "accounts", "api", "views", "manage", "core", "pages", "shell", "auto", "channels", "github", "integrations", "knowledge", "caps", "mail", "people", "stats", "thread", "vault", "yolo", "misc", "todos", "calendar", "reason", "common"] as const
 export type Namespace = (typeof NAMESPACES)[number]
 export const LANGS = ["zh-CN", "en"] as const
 export type Lang = (typeof LANGS)[number]
@@ -88,6 +88,7 @@ export function setLang(l: Lang) {
 }
 
 export { t } from "i18next"
+export { reasonText } from "./reason.ts"
 /** `t` for a component: takes any "<ns>:<key>" and re-renders the component when the language changes */
 export const useT = () => useTranslation(NAMESPACES).t
 export default i18n

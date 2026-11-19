@@ -214,3 +214,20 @@ fn stream_controls_match_the_existing_sse_bytes() {
     }
     assert!(serde_json::from_str::<StreamControl>(r#"{"type":"ping"}"#).is_err());
 }
+
+#[test]
+fn reason_error_body_matches_golden_bytes() {
+    reasons! {
+        enum GitReason = "git" {
+            BranchMoved = branch_moved [Stale] (branch, now),
+        }
+        retired { }
+    }
+    let body = GitReason::branch_moved("main", "a1b2c3d", "the branch moved").to_http();
+    let bytes = br#"{"error":"the branch moved","code":"stale","retry":{"kind":"never"},"reason":"git.branch_moved","params":{"branch":"main","now":"a1b2c3d"}}"#;
+    assert_eq!(serde_json::to_vec(&body).unwrap(), bytes);
+    assert_eq!(
+        serde_json::from_slice::<HttpErrorBody>(bytes).unwrap(),
+        body
+    );
+}
