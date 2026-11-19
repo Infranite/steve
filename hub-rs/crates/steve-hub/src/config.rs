@@ -514,6 +514,7 @@ impl Config {
     }
 
     /// Builds the config from any variable source (tests pass a map); touches no directories.
+    /// The source must provide STEVE_HOME or HOME; the process cannot supply a missing Hub home.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         if let Some(&var) = REMOVED.iter().find(|&&var| get(var).is_some()) {
             return Err(ConfigError::Invalid {
@@ -522,10 +523,18 @@ impl Config {
             });
         }
         let env = |k: &str, d: &str| get(k).unwrap_or_else(|| d.to_string());
-        let home_default = home_dir().join(".steve");
-        let home = resolve(Path::new(
-            &get("STEVE_HOME").unwrap_or_else(|| home_default.to_string_lossy().into_owned()),
-        ));
+        let home = get("STEVE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                get("HOME")
+                    .filter(|h| !h.is_empty())
+                    .map(|h| PathBuf::from(h).join(".steve"))
+            })
+            .ok_or_else(|| ConfigError::Invalid {
+                var: "STEVE_HOME",
+                msg: "set STEVE_HOME or HOME in the configuration variables".into(),
+            })?;
+        let home = resolve(&home);
 
         let port_raw = env("STEVE_PORT", "8440");
         let port_n = port_raw
@@ -804,6 +813,11 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let dir = tempfile::tempdir().unwrap();
+        if !m.contains_key("HOME") {
+            m.entry("STEVE_HOME".into())
+                .or_insert_with(|| dir.path().display().to_string());
+        }
         // keep tests away from `npm root -g`
         m.entry("STEVE_ADAPTER_CLAUDE".into())
             .or_insert("/x/claude.js".into());
@@ -813,6 +827,37 @@ mod tests {
             m.entry(var.into()).or_insert("/x/adapter".into());
         }
         Config::from_vars(|k| m.get(k).cloned()).expect("config")
+    }
+
+    #[test]
+    fn home_comes_only_from_the_variable_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().display().to_string();
+        assert_eq!(
+            cfg(&[("HOME", &home)]).home,
+            resolve(&dir.path().join(".steve"))
+        );
+        let explicit = dir.path().join("hub").display().to_string();
+        assert_eq!(
+            cfg(&[("HOME", &home), ("STEVE_HOME", &explicit)]).home,
+            resolve(&dir.path().join("hub")),
+        );
+        assert_eq!(
+            cfg(&[("STEVE_HOME", &explicit)]).home,
+            resolve(&dir.path().join("hub"))
+        );
+        for home in [None, Some("")] {
+            let error =
+                Config::from_vars(|k| (k == "HOME").then_some(home).flatten().map(str::to_string))
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::Invalid {
+                    var: "STEVE_HOME",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -922,8 +967,10 @@ mod tests {
         assert_eq!(l("0.0.0.0").local_host(), "127.0.0.1");
         assert_eq!(l("::").local_host(), "[::1]");
 
+        let dir = tempfile::tempdir().unwrap();
         for any in ["0.0.0.0", "127.0.0.1,0.0.0.0", "::", "[::]"] {
             let e = Config::from_vars(|k| match k {
+                "STEVE_HOME" => Some(dir.path().display().to_string()),
                 "STEVE_HOST" => Some(any.into()),
                 v if v.starts_with("STEVE_ADAPTER_") => Some("/x".into()),
                 _ => None,
@@ -1007,8 +1054,10 @@ mod tests {
 
     #[test]
     fn bad_port_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(
             Config::from_vars(|k| match k {
+                "STEVE_HOME" => Some(dir.path().display().to_string()),
                 "STEVE_PORT" => Some("abc".into()),
                 v if v.starts_with("STEVE_ADAPTER_") => Some("x".into()),
                 _ => None,

@@ -749,7 +749,11 @@ mod tests {
 
     #[tokio::test]
     async fn failed_node_refresh_revokes_local_readiness_without_erasing_remote_evidence() {
-        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| {
+            (k == "STEVE_HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
         let hs = HubHarnesses::of(&cfg);
         let node = steve_node_api::testkit::FakeNode::new("probe-test");
         node.refuse_next(
@@ -795,7 +799,11 @@ mod tests {
     /// answered yet may have it, so it is unknown (not refused) until every linked Node answered.
     #[tokio::test]
     async fn a_linked_node_not_heard_from_leaves_a_harness_unknown() {
-        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| {
+            (k == "STEVE_HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
         let hs = HubHarnesses::of(&cfg);
         let ready_of = |linked: &[String], id: &str| {
             hs.readiness(linked)
@@ -845,7 +853,11 @@ mod tests {
 
     #[test]
     fn bot_selection_uses_target_node_and_stale_or_missing_offers_stay_unknown() {
-        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_vars(|k| {
+            (k == "STEVE_HOME").then(|| home.path().display().to_string())
+        })
+        .unwrap();
         let hs = HubHarnesses::of(&cfg);
         let offer = |model: &str| AdapterOffer {
             modes: vec![PermissionMode::Ask],

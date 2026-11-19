@@ -930,7 +930,10 @@ mod tests {
 
     #[tokio::test]
     async fn expired_runtimes_are_served_while_refreshing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().display().to_string();
         let vars = [
+            ("STEVE_HOME", home.as_str()),
             ("CLAUDE_CODE_EXECUTABLE", "/nonexistent/claude"),
             ("STEVE_ADAPTER_CLAUDE", "/x/claude.js"),
             ("STEVE_ADAPTER_CODEX", "/x/codex"),
@@ -1001,7 +1004,9 @@ mod tests {
         let claude = dir.path().join("claude.js");
         std::fs::write(&claude, "").unwrap();
         let claude = claude.to_string_lossy().into_owned();
+        let home = dir.path().display().to_string();
         let vars = [
+            ("STEVE_HOME", home.as_str()),
             ("STEVE_ADAPTER_CLAUDE", claude.as_str()),
             ("STEVE_ADAPTER_CODEX", "/nonexistent/codex"),
         ];
