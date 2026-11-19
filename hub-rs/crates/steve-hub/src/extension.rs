@@ -681,7 +681,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .context("the sockets the Hub was started with")?;
     let cfg = Arc::new(cfg);
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
-    let supervised_domain: Arc<std::sync::Mutex<Option<Arc<dyn crate::backend::Domain>>>> =
+    let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {
         let expected: i32 = std::env::var("STEVE_SUPERVISOR_PID")
@@ -691,16 +691,16 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             expected > 1 && unsafe { libc::getppid() } == expected,
             "managed child lost its supervisor before boot"
         );
-        let domain = supervised_domain.clone();
+        let state = supervised_state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if unsafe { libc::getppid() } != expected {
-                    let domain = domain.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    if let Some(domain) = domain {
+                    let state = state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(state) = state {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(15),
-                            domain.shutdown(),
+                            state.shutdown(),
                         )
                         .await;
                     }
@@ -713,7 +713,6 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     let bus = Bus::new();
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
-    *supervised_domain.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.domain.clone());
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone())
@@ -721,14 +720,23 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_node(w.node)
         .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
+    *supervised_state.lock().unwrap_or_else(|e| e.into_inner()) = Some(st.clone());
     st.runtimes.set_harnesses(w.harnesses);
     crate::app::boot(&st).await?;
 
     for job in w.jobs {
         job.start(&st.jobs);
     }
-    crate::upgrades::spawn_auto_check((*cfg).clone());
-    crate::upgrades::signing::spawn_migrate(cfg.home.clone());
+    Job::new(
+        "upgrades.check",
+        crate::upgrades::run_auto_check((*cfg).clone()),
+    )
+    .start(&st.jobs);
+    Job::new(
+        "signing.migrate",
+        crate::upgrades::signing::migrate_background(cfg.home.clone()),
+    )
+    .start(&st.jobs);
     let app = crate::app::own_cookies(
         crate::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes),
         cfg.listen.port,
@@ -749,7 +757,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     println!("steve hub {} on {}", cfg.version, cfg.listen.urls());
 
     // SIGINT/SIGTERM: stop the adapters and exit at once; in-flight turns are not drained (as in TS)
-    let domain = st.domain.clone();
+    let state = st.clone();
     tokio::spawn(async move {
         let mut term =
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -764,7 +772,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             _ = term.recv() => {}
         }
         crate::nodes::tailcat::shutdown();
-        domain.shutdown().await;
+        state.shutdown().await;
         std::process::exit(0);
     });
 

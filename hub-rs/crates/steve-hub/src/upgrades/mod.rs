@@ -234,7 +234,7 @@ pub fn available(cfg: &Config) -> Option<String> {
 /// Checks for a newer release shortly after start and then every six hours, so the page can say so
 /// without anyone opening Settings. Off in debug builds unless STEVE_UPDATE_CHECK=1; STEVE_UPDATE_CHECK=0
 /// turns it off. Uses the same cache and lock as a check from the page.
-pub fn spawn_auto_check(cfg: Config) {
+pub async fn run_auto_check(cfg: Config) {
     let on = match std::env::var("STEVE_UPDATE_CHECK").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
@@ -243,19 +243,17 @@ pub fn spawn_auto_check(cfg: Config) {
     if !on {
         return;
     }
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        loop {
-            match Updates::new(&cfg) {
-                Ok(u) => match u.check().await {
-                    Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
-                    Err(e) => tracing::info!("update check: {e:#}"),
-                },
-                Err(e) => tracing::warn!("update check: {e:#}"),
-            }
-            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        match Updates::new(&cfg) {
+            Ok(u) => match u.check().await {
+                Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
+                Err(e) => tracing::info!("update check: {e:#}"),
+            },
+            Err(e) => tracing::warn!("update check: {e:#}"),
         }
-    });
+        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+    }
 }
 
 impl Updates {

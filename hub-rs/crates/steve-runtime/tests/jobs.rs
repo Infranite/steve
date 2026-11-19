@@ -88,8 +88,18 @@ async fn dropping_tasks_cancels_the_current_run_and_future_ticks() {
 
 #[derive(Clone, Default)]
 struct Recorder {
+    panics: Arc<AtomicUsize>,
     runs: Arc<AtomicUsize>,
     durations: Arc<Mutex<Vec<f64>>>,
+}
+struct Panics(Arc<AtomicUsize>);
+impl metrics::CounterFn for Panics {
+    fn increment(&self, n: u64) {
+        self.0.fetch_add(n as usize, Ordering::SeqCst);
+    }
+    fn absolute(&self, n: u64) {
+        self.0.store(n as usize, Ordering::SeqCst);
+    }
 }
 impl metrics::CounterFn for Recorder {
     fn increment(&self, n: u64) {
@@ -127,6 +137,13 @@ impl metrics::Recorder for Recorder {
     ) {
     }
     fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        if key.name() == "steve_job_panics_total"
+            && key
+                .labels()
+                .any(|l| l.key() == "job" && l.value() == "metric")
+        {
+            return metrics::Counter::from_arc(Arc::new(Panics(self.panics.clone())));
+        }
         if key.name() == "steve_job_runs_total"
             && key
                 .labels()
@@ -183,9 +200,35 @@ async fn spawn_and_each_period_record_runs_and_duration_including_cancellation()
     task.stop();
     task.await;
     assert_eq!(recorder.runs.load(Ordering::SeqCst), 4);
-    let durations = recorder.durations.lock().unwrap();
-    assert_eq!(durations.len(), 4);
-    assert!(durations.iter().all(|d| d.is_finite() && *d >= 0.0));
+    {
+        let durations = recorder.durations.lock().unwrap();
+        assert_eq!(durations.len(), 4);
+        assert!(durations.iter().all(|d| d.is_finite() && *d >= 0.0));
+    }
+    let panic = spawn("metric", async {
+        panic!("named task panic");
+    });
+    settle().await;
+    assert_eq!(
+        recorder.panics.load(Ordering::SeqCst),
+        1,
+        "panic is observable before joining the task"
+    );
+    panic.await;
+    assert_eq!(
+        recorder.panics.load(Ordering::SeqCst),
+        1,
+        "poll does not double count a recorded panic"
+    );
+    every(
+        "metric",
+        Arc::new(FakeClock::new(0)),
+        Duration::from_secs(1),
+        FirstRun::Immediate,
+        || async { panic!("periodic panic") },
+    )
+    .await;
+    assert_eq!(recorder.panics.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

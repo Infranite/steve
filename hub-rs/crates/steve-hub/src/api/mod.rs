@@ -119,6 +119,12 @@ impl AppState {
         }))
     }
 
+    /// Stop domain resources first, then every Hub-owned task (including domains without a bag).
+    pub async fn shutdown(&self) {
+        self.domain.shutdown().await;
+        self.jobs.stop().await;
+    }
+
     /// The same state with the new modules attached.
     pub fn with_modules(self, modules: Option<steve_modules::Modules>) -> Self {
         match Arc::try_unwrap(self.0) {

@@ -798,11 +798,61 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
     let mut running = st.jobs.names();
     running.sort_unstable();
     assert_eq!(running, expected);
-    st.domain.shutdown().await;
+    st.shutdown().await;
     assert!(st.jobs.names().is_empty());
     // Shutdown is idempotent, and no late startup can revive the Hub's tasks.
-    st.domain.shutdown().await;
+    st.shutdown().await;
     st.jobs.start("late", || {
         panic!("a stopped Hub must not start another task")
     });
+}
+
+#[tokio::test]
+async fn shutdown_stops_app_tasks_when_domain_has_no_task_bag() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use steve_hub::backend::Domain;
+
+    struct NoTasks(Arc<AtomicBool>);
+    #[async_trait::async_trait]
+    impl Domain for NoTasks {
+        async fn shutdown(&self) {
+            assert!(
+                self.0.load(Ordering::SeqCst),
+                "consumers outlive domain shutdown"
+            );
+        }
+    }
+    struct Running(Arc<AtomicBool>);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    let h = home();
+    let bus = Bus::new();
+    let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
+    let running = Arc::new(AtomicBool::new(false));
+    let domain = Arc::new(NoTasks(running.clone()));
+    assert!(domain.background_tasks().is_none());
+    let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, domain, bus);
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let flag = running.clone();
+    st.jobs.start("app.consumer", || {
+        steve_runtime::spawn("app.consumer", async move {
+            let _running = Running(flag.clone());
+            flag.store(true, Ordering::SeqCst);
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        })
+    });
+    ready.await.unwrap();
+    st.shutdown().await;
+    assert!(
+        !running.load(Ordering::SeqCst),
+        "shutdown awaited cancellation"
+    );
+    assert!(st.jobs.names().is_empty());
+    st.jobs
+        .start("late", || panic!("shutdown must reject late tasks"));
 }
