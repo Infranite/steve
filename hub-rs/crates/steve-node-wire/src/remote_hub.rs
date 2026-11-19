@@ -35,11 +35,22 @@ impl HubLink {
         self.slot.lock().unwrap().clone()
     }
 
+    /// The authenticated socket, also available to the permanent upgrade archive reader.
+    fn live_conn(&self) -> ApiResult<Arc<Conn>> {
+        self.current()
+            .filter(|c| !c.is_closed())
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "hub not connected"))
+    }
+
     fn conn(&self) -> ApiResult<Arc<Conn>> {
-        match self.current() {
-            Some(c) if !c.is_closed() && !c.is_upgrade() => Ok(c),
-            _ => Err(ApiError::new(ErrorCode::Offline, "hub not connected")),
+        let conn = self.live_conn()?;
+        if conn.is_upgrade() {
+            return Err(ApiError::new(
+                ErrorCode::Offline,
+                "ordinary protocol unavailable while upgrading",
+            ));
         }
+        Ok(conn)
     }
 
     async fn go<A: Serialize, R: DeserializeOwned>(
@@ -174,7 +185,7 @@ impl HubFiles for RemoteFiles {
             };
             let value = self
                 .0
-                .conn()?
+                .live_conn()?
                 .call_upgrade(upgrade_v1::BLOB_FETCH, to_value(&request)?, None)
                 .await
                 .map_err(ApiError::from)?;
