@@ -1,5 +1,6 @@
 //! Static transition tables. Check a table's structure before using its pure `step` function.
 //! Domain input classification, persistence and side effects belong to the caller.
+//! This API is provisional until the first real orchestration transition table is validated.
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
