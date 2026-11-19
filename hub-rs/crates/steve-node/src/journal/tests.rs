@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use steve_runtime::testkit::eventually_sync;
 
 fn subject() -> Subject {
     Subject::Session {
@@ -37,8 +38,8 @@ fn journal() -> (tempfile::TempDir, Journal) {
     (dir, j)
 }
 
-#[test]
-fn one_window_publishes_only_after_commit_and_polling_does_not_flush() {
+#[tokio::test]
+async fn one_window_publishes_only_after_commit_and_polling_does_not_flush() {
     let (_dir, j) = journal();
     let before = j.metrics.commits.load(Ordering::Relaxed);
     j.call(|w| {
@@ -49,11 +50,7 @@ fn one_window_publishes_only_after_commit_and_polling_does_not_flush() {
     })
     .unwrap();
     // The writer's real timer, with no subsequent event or explicit flush.
-    let until = Instant::now() + Duration::from_secs(3);
-    while events(&j).is_empty() {
-        assert!(Instant::now() < until, "window never committed");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    eventually_sync("window committed", || !events(&j).is_empty()).await;
     assert_eq!(j.metrics.commits.load(Ordering::Relaxed), before + 1);
     let out = events(&j);
     assert_eq!(out.len(), 1);
@@ -748,19 +745,15 @@ fn admission_hysteresis_does_not_stop_work_that_still_fits() {
     assert_eq!(events(&j).len(), 1);
 }
 
-#[test]
-fn timer_failure_is_reported_by_the_shared_alarm() {
+#[tokio::test]
+async fn timer_failure_is_reported_by_the_shared_alarm() {
     let (_dir, j) = journal();
     j.call(|w| {
         w.storage.free_space = Some(Arc::new(|| panic!("timer observer fixture")));
         Ok(())
     })
     .unwrap();
-    let until = Instant::now() + Duration::from_secs(3);
-    while !j.failed() {
-        assert!(Instant::now() < until, "timer exit was not reported");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    eventually_sync("timer exit reported", || j.failed()).await;
     // The connection is still owned by the mutex and poison remains recoverable.
     assert!(j.read(|t| t.heads()).unwrap().is_empty());
 }
