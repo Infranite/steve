@@ -840,9 +840,6 @@ impl steve_runtime::due::DueSource for NotificationDue {
     fn name(&self) -> &'static str {
         "channels.notifications"
     }
-    fn max_sleep(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(10)
-    }
     async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
         self.channels
             .store()
@@ -882,18 +879,15 @@ fn recovery_backoff() -> steve_runtime::policy::Backoff {
 
 pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
     let clock = ch.modules().clock.clone();
+    let wake = ch
+        .store()
+        .commit_wake(&["personal_notifications", "notification_policies"]);
     let source = Arc::new(NotificationDue {
         channels: ch,
         outbox,
     });
-    // Existing transactional intake writers need no new coupling to a task handle; keep their 10s recovery bound.
-    steve_runtime::due::due_loop(
-        source,
-        clock,
-        Arc::new(tokio::sync::Notify::new()),
-        recovery_backoff(),
-    )
-    .await;
+    // Store commits cover intake, alarms, starred messages and external notification producers.
+    steve_runtime::due::due_loop(source, clock, wake, recovery_backoff()).await;
 }
 
 // ---------------------------------------------------------------- a starred contact's message

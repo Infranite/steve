@@ -250,31 +250,17 @@ async fn more_due_work_than_a_batch_runs_at_once() {
 }
 
 #[tokio::test]
-async fn a_source_can_keep_a_shorter_recovery_bound() {
-    struct Short(Arc<Table>);
-    impl DueSource for Short {
-        fn name(&self) -> &'static str {
-            "short"
-        }
-        fn max_sleep(&self) -> Duration {
-            Duration::from_secs(10)
-        }
-        async fn next_due(&self) -> Result<Option<i64>, DueError> {
-            self.0.next_due().await
-        }
-        async fn run_due(&self, now: i64) -> Result<(), DueError> {
-            self.0.run_due(now).await
-        }
-    }
+async fn a_wake_before_waiting_is_kept_and_new_work_runs_without_advancing_time() {
     let clock = Arc::new(FakeClock::new(T0));
     let table = Arc::new(Table::default());
+    let wake = Arc::new(Notify::new());
     let task = tokio::spawn(due_loop(
-        Arc::new(Short(table.clone())),
-        clock.clone(),
-        Arc::new(Notify::new()),
+        table.clone(),
+        clock,
+        wake.clone(),
         Backoff {
             base: Duration::from_secs(1),
-            max: Duration::from_secs(60),
+            max: FALLBACK,
             factor: 2,
             jitter: Jitter::None,
             attempts: None,
@@ -283,11 +269,11 @@ async fn a_source_can_keep_a_shorter_recovery_bound() {
     ));
     settle().await;
     table.add(T0, false);
-    clock.advance(9999);
+    wake.notify_one();
     settle().await;
-    assert_eq!(table.batches(), 0);
-    clock.advance(1);
-    settle().await;
-    assert_eq!(table.batches(), 1);
+    assert_eq!(table.done().len(), 1);
     task.abort();
+    let before = Arc::new(Notify::new());
+    before.notify_one();
+    assert!(futures::FutureExt::now_or_never(before.notified()).is_some());
 }

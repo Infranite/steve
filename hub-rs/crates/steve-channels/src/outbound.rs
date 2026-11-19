@@ -3526,6 +3526,14 @@ impl Outbox {
         });
         let clock = ch.modules().clock.clone();
         let weak = ch.downgrade();
+        let wake = ch.store().commit_wake(&[
+            "chan_messages",
+            "decisions",
+            "chan_send_state",
+            "personal_notifications",
+            "notification_policies",
+            "output_deliveries",
+        ]);
         steve_runtime::spawn("channels.send", async move {
             struct Scope(Arc<Outbox>);
             impl Drop for Scope {
@@ -3550,7 +3558,7 @@ impl Outbox {
             steve_runtime::due::due_loop(
                 source,
                 clock,
-                Arc::new(tokio::sync::Notify::new()),
+                wake,
                 steve_runtime::policy::Backoff {
                     base: QUEUE_EVERY,
                     max: QUEUE_EVERY,
@@ -4578,9 +4586,6 @@ pub struct QueueDue {
 impl steve_runtime::due::DueSource for QueueDue {
     fn name(&self) -> &'static str {
         "channels.send"
-    }
-    fn max_sleep(&self) -> Duration {
-        QUEUE_EVERY
     }
     async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
         self.channels

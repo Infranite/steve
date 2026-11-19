@@ -7496,3 +7496,23 @@ async fn notification_deadlines_filter_approved_batches_before_the_limit() {
     assert_eq!(f.done(), vec![due]);
     assert_eq!(f.source.next_due().await.unwrap(), Some(now + 10_000));
 }
+
+#[tokio::test]
+async fn committed_approval_wakes_the_idle_send_loop_without_advancing_time() {
+    use steve_runtime::due::contract::Fixture;
+    let f = QueueFixture::new().await;
+    let task = f.h.outbox.clone().spawn_queue(&f.h.ch);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let id = f.add(f.h.ch.now(), false);
+    for _ in 0..1000 {
+        if f.done().contains(&id) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(f.done().contains(&id));
+    task.stop();
+    task.await;
+}

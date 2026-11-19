@@ -142,3 +142,25 @@ async fn unknown_topics_advance_and_obey_the_shared_contract() {
     assert!(!f.done().contains(&poison));
     contract::check(new, NOW, 32).await;
 }
+
+#[tokio::test]
+async fn committed_notification_intake_wakes_the_idle_loop_without_advancing_time() {
+    let f = Notifications::new();
+    let task = tokio::spawn(steve_channels::notifications::run(
+        f.source.channels.clone(),
+        f.source.outbox.clone(),
+    ));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let id = f.add(NOW, false);
+    for _ in 0..1000 {
+        if f.done().contains(&id) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(f.done().contains(&id));
+    task.abort();
+    let _ = task.await;
+}

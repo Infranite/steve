@@ -371,3 +371,43 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
     assert_eq!(store_b.items().list(WS, false).unwrap().len(), 1);
     assert_eq!(events_b.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn commit_listeners_wake_independently_only_after_outer_commit() {
+    use std::future::Future;
+    fn ready(wake: &tokio::sync::Notify) -> bool {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        std::pin::pin!(wake.notified())
+            .as_mut()
+            .poll(&mut cx)
+            .is_ready()
+    }
+    let (_dir, store, _) = open_tracked();
+    let a = store.commit_wake(&["settings"]);
+    let b = store.commit_wake(&["settings"]);
+    let unrelated = store.commit_wake(&["items"]);
+    store
+        .atomic(|| -> steve_store::Result<()> {
+            store.transaction(|tx| -> steve_store::Result<()> {
+            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+            Ok(())
+        })?;
+            assert!(!ready(&a));
+            assert!(!ready(&b));
+            Ok(())
+        })
+        .unwrap();
+    assert!(ready(&a));
+    assert!(ready(&b));
+    assert!(!ready(&unrelated));
+    let rolled_back: steve_store::Result<()> = store.atomic(|| {
+        store.transaction(|tx| -> steve_store::Result<()> {
+            tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,'commit-wake','true',0) ON CONFLICT(workspace_id,key) DO UPDATE SET value='false'", [WS])?;
+            Ok(())
+        })?;
+        Err(StoreError::Hook("rollback".into()))
+    });
+    assert!(rolled_back.is_err());
+    assert!(!ready(&a));
+    assert!(!ready(&b));
+}

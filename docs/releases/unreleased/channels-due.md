@@ -1,3 +1,4 @@
-No user-visible changes are intended. Channel retry waits, provider retry hints,
-rate limits and periodic maintenance intervals retain their existing behavior
-while deadline handling and retry calculations use the shared runtime facilities.
+Queued channel sends and personal notifications wake after their database changes
+commit, with a shared recovery fallback. Unknown notification topics and deferred
+sends no longer keep the queue busy or hold back other due work. Provider retry
+limits, retry hints, authorization checks and rate limits retain their behavior.

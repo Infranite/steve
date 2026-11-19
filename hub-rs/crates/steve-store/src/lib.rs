@@ -137,7 +137,14 @@ struct Inner {
     item_deleted: std::sync::OnceLock<Box<ItemDeletedHook>>,
     /// Notified after a commit that emitted an outbox event ([`outbox`]).
     outbox_wake: Arc<tokio::sync::Notify>,
+    commit_wakes: Arc<Mutex<CommitWakes>>,
     diagnostics: std::sync::OnceLock<diagnostics::Recorder>,
+}
+
+#[derive(Default)]
+struct CommitWakes {
+    listeners: Vec<(Vec<&'static str>, std::sync::Weak<tokio::sync::Notify>)>,
+    changed: std::collections::BTreeSet<String>,
 }
 
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
@@ -227,9 +234,31 @@ impl Store {
                 path,
                 item_deleted: std::sync::OnceLock::new(),
                 outbox_wake: Arc::new(tokio::sync::Notify::new()),
+                commit_wakes: Arc::default(),
                 diagnostics: std::sync::OnceLock::new(),
             }),
         };
+        let wakes = store.inner.commit_wakes.clone();
+        store
+            .lock()
+            .update_hook(Some(move |_, _: &str, table: &str, _| {
+                let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
+                if wakes
+                    .listeners
+                    .iter()
+                    .any(|(tables, _)| tables.contains(&table))
+                {
+                    wakes.changed.insert(table.to_owned());
+                }
+            }))?;
+        let wakes = store.inner.commit_wakes.clone();
+        store.lock().rollback_hook(Some(move || {
+            wakes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .changed
+                .clear();
+        }))?;
         if !admin
             && let Some(recorder) =
                 diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
@@ -250,6 +279,43 @@ impl Store {
 
     pub(crate) fn item_deleted_hook(&self) -> Option<&ItemDeletedHook> {
         self.inner.item_deleted.get().map(|b| b.as_ref())
+    }
+
+    /// Wakes one worker after a successful outermost transaction changes any watched table.
+    /// Each subscriber has its own permit; dropped handles unsubscribe without keeping workers alive.
+    /// SQLite observes writes even in transaction-only producers and triggers. Notifications are
+    /// advisory: a rolled-back savepoint can cause an extra wake if its outer transaction commits.
+    pub fn commit_wake(&self, tables: &[&'static str]) -> Arc<tokio::sync::Notify> {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut wakes = self
+            .inner
+            .commit_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        wakes.listeners.retain(|(_, w)| w.strong_count() > 0);
+        wakes
+            .listeners
+            .push((tables.to_vec(), Arc::downgrade(&wake)));
+        wake
+    }
+
+    fn notify_committed(&self) {
+        let mut wakes = self
+            .inner
+            .commit_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let changed = std::mem::take(&mut wakes.changed);
+        wakes.listeners.retain(|(tables, w)| {
+            if let Some(wake) = w.upgrade() {
+                if tables.iter().any(|t| changed.contains(*t)) {
+                    wake.notify_one();
+                }
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Wakes the outbox dispatcher: notified (one permit) after each commit that emitted an event.
@@ -288,7 +354,11 @@ impl Store {
             return f(&W { c, store: self });
         }
         let c = self.lock();
-        f(&W { c: &c, store: self })
+        let result = f(&W { c: &c, store: self });
+        if c.is_autocommit() {
+            self.notify_committed();
+        }
+        result
     }
 
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -318,7 +388,11 @@ impl Store {
             return f(c);
         }
         let c = self.lock();
-        f(&c)
+        let result = f(&c);
+        if c.is_autocommit() {
+            self.notify_committed();
+        }
+        result
     }
 }
 
