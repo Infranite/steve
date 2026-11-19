@@ -631,9 +631,14 @@ fn shared_disposable_predicate_preserves_reclaimer_depth_and_never_follows_links
     let named = root.path().join(&name);
     let marked = root.path().join("marked");
     let tool_output = root.path().join(ITEM_BUILD_DIR).join("custom-tool");
+    let nested_output = root
+        .path()
+        .join("nested")
+        .join(ITEM_BUILD_DIR)
+        .join("custom-tool");
     let deep = root.path().join("a/b/c/d/e/marked");
     let user = root.path().join("user-output");
-    for path in [&named, &marked, &tool_output, &deep, &user] {
+    for path in [&named, &marked, &tool_output, &nested_output, &deep, &user] {
         fs::create_dir_all(path).unwrap();
     }
     for path in [&marked, &deep] {
@@ -642,10 +647,19 @@ fn shared_disposable_predicate_preserves_reclaimer_depth_and_never_follows_links
     let link = root.path().join("cache-link");
     std::os::unix::fs::symlink(&marked, &link).unwrap();
     for path in [&named, &marked, &tool_output, &deep] {
-        assert!(workspace::is_disposable_dir(path), "{}", path.display());
+        assert!(
+            workspace::is_disposable_dir(path, None),
+            "{}",
+            path.display()
+        );
     }
-    assert!(!workspace::is_disposable_dir(&user));
-    assert!(!workspace::is_disposable_dir(&link));
+    assert!(workspace::is_disposable_dir(&nested_output, None));
+    assert!(!workspace::is_disposable_dir(
+        &nested_output,
+        Some(root.path())
+    ));
+    assert!(!workspace::is_disposable_dir(&user, None));
+    assert!(!workspace::is_disposable_dir(&link, None));
     let found = workspace::scratch_cache_dirs(root.path());
     for path in [&named, &marked, &tool_output] {
         assert!(found.contains(path));
@@ -655,4 +669,8 @@ fn shared_disposable_predicate_preserves_reclaimer_depth_and_never_follows_links
         "reclamation retains its depth limit"
     );
     assert!(!found.contains(&link));
+    assert!(
+        !found.contains(&nested_output),
+        "only the workspace root's build namespace is reclaimed"
+    );
 }

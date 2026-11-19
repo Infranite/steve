@@ -217,7 +217,7 @@ fn report_skipped(skipped: &[SkippedDir]) {
     let mut bytes = 0u64;
     for entry in skipped {
         bytes = bytes.saturating_add(entry.bytes);
-        tracing::info!(path = %entry.path.display(), bytes = entry.bytes,
+        tracing::debug!(path = %entry.path.display(), bytes = entry.bytes,
             "daily backup: skipped regenerable directory");
     }
     tracing::info!(
@@ -233,42 +233,61 @@ fn append(
     home: &Path,
     relative: &Path,
     skipped: &mut Vec<SkippedDir>,
-    write: bool,
-) -> std::io::Result<u64> {
+    top_level: bool,
+) -> std::io::Result<()> {
     let path = home.join(relative);
-    let metadata = fs::symlink_metadata(&path)?;
-    if write && relative == Path::new("signing").join(NOT_COPIED) {
-        return Ok(0);
+    let metadata = if top_level {
+        fs::metadata(&path)?
+    } else {
+        fs::symlink_metadata(&path)?
+    };
+    if relative == Path::new("signing").join(NOT_COPIED) {
+        return Ok(());
     }
-    if write && metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path) {
-        let bytes = append(archive, home, relative, skipped, false)?;
+    if metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path, None) {
         skipped.push(SkippedDir {
             path: relative.to_owned(),
-            bytes,
+            bytes: logical_bytes(&path),
         });
-        return Ok(0);
+        return Ok(());
     }
     // Keep the original archive's signing layout (its children, without a root entry).
-    if write && !(metadata.is_dir() && relative == Path::new("signing")) {
+    if metadata.is_dir() {
+        if relative != Path::new("signing") {
+            archive.append_dir(relative, &path)?;
+        }
+        for entry in fs::read_dir(&path)? {
+            append(
+                archive,
+                home,
+                &relative.join(entry?.file_name()),
+                skipped,
+                false,
+            )?;
+        }
+    } else {
         archive.append_path_with_name(&path, relative)?;
     }
+    Ok(())
+}
+
+/// Logging only: disappearing or unreadable cache entries contribute zero and never fail a backup.
+/// Do not follow links while measuring a skipped directory.
+fn logical_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
     let mut bytes = if metadata.is_file() {
         metadata.len()
     } else {
         0
     };
     if metadata.is_dir() {
-        for entry in fs::read_dir(&path)? {
-            bytes = bytes.saturating_add(append(
-                archive,
-                home,
-                &relative.join(entry?.file_name()),
-                skipped,
-                write,
-            )?);
+        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+            bytes = bytes.saturating_add(logical_bytes(&entry.path()));
         }
     }
-    Ok(bytes)
+    bytes
 }
 
 /// Removes the daily copies in `out` last written more than [`KEEP_DAYS`] before `now`; nothing
@@ -312,8 +331,7 @@ pub fn status(home: &Path, db: &Path, on: bool) -> Value {
             let files_bytes =
                 fs::metadata(out.join(tar_name(day_of(&name)?))).map_or(0, |files| files.len());
             Some(json!({"name": name, "at": at.as_millis() as u64,
-                "bytes": m.len().saturating_add(files_bytes),
-                "database_bytes": m.len(), "files_bytes": files_bytes}))
+                "bytes": m.len(), "files_bytes": files_bytes}))
         });
     json!({
         "database": db.to_string_lossy(),

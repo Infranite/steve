@@ -55,13 +55,16 @@ fn cache_names() -> &'static [String] {
 
 /// Whether one real directory contains only regenerable toolchain/cache data.
 /// Both reclamation and backup traversal use this predicate; traversal depth is the caller's choice.
-/// Children of the toolchains' build namespace are disposable even without a cache marker.
-pub fn is_disposable_dir(dir: &Path) -> bool {
+/// Reclamation supplies its workspace root: only that root's build namespace is disposable.
+/// Backups pass `None` to recognize build namespaces at any depth.
+pub fn is_disposable_dir(dir: &Path, workspace_root: Option<&Path>) -> bool {
     fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
-        && (dir.parent().is_some_and(|p| p.ends_with(ITEM_BUILD_DIR))
-            || cache_names()
-                .iter()
-                .any(|n| dir.file_name().is_some_and(|name| name == n.as_str()))
+        && (dir.parent().is_some_and(|p| match workspace_root {
+            Some(root) => p == root.join(ITEM_BUILD_DIR),
+            None => p.ends_with(ITEM_BUILD_DIR),
+        }) || cache_names()
+            .iter()
+            .any(|n| dir.file_name().is_some_and(|name| name == n.as_str()))
             || dir.join("CACHEDIR.TAG").is_file())
 }
 
@@ -187,7 +190,7 @@ fn marked_caches(wt: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let p = e.path();
-            if is_disposable_dir(&p) {
+            if is_disposable_dir(&p, Some(wt)) {
                 found.push(p);
             } else if depth + 1 < CACHE_DEPTH {
                 todo.push((p, depth + 1));

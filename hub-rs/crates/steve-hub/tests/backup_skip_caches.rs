@@ -46,11 +46,13 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     write(home.path(), &format!("{prefix}/build/user.txt"), "user");
     for path in [&tagged, &named, &tool] {
         assert!(steve_core::workspace::is_disposable_dir(
-            &home.path().join(path)
+            &home.path().join(path),
+            None
         ));
     }
     assert!(!steve_core::workspace::is_disposable_dir(
-        &home.path().join(prefix).join("build")
+        &home.path().join(prefix).join("build"),
+        None
     ));
     std::os::unix::fs::symlink(
         home.path().join(&tagged),
@@ -68,7 +70,7 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
         .with_ansi(false)
         .without_time()
         .with_target(false)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .with_writer(move || LogWriter(output.clone()))
         .finish();
     let made = tracing::subscriber::with_default(subscriber, || {
@@ -110,13 +112,17 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
         (&tool, 4),
     ] {
         assert!(
-            logs.lines()
-                .any(|line| line.contains(&format!("path={path}"))
-                    && line.contains(&format!("bytes={bytes}"))),
+            logs.lines().any(|line| line.contains("DEBUG")
+                && line.contains(&format!("path={path}"))
+                && line.contains(&format!("bytes={bytes}"))),
             "{logs}"
         );
     }
-    assert!(logs.contains("skipped_dirs=3"), "{logs}");
+    assert!(
+        logs.lines()
+            .any(|line| line.contains("INFO") && line.contains("skipped_dirs=3")),
+        "{logs}"
+    );
     assert!(
         logs.contains(&format!(
             "skipped_bytes={}",
@@ -128,11 +134,64 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     let database_bytes = fs::metadata(&made.database).unwrap().len();
     let files_bytes = fs::metadata(&archive_path).unwrap().len();
     let status = daily_backup::status(home.path(), &db, true);
-    assert_eq!(status["last"]["database_bytes"], database_bytes);
+    assert!(status["last"].get("database_bytes").is_none());
     assert_eq!(status["last"]["files_bytes"], files_bytes);
-    assert_eq!(status["last"]["bytes"], database_bytes + files_bytes);
+    assert_eq!(status["last"]["bytes"], database_bytes);
     fs::remove_file(archive_path).unwrap();
     let status = daily_backup::status(home.path(), &db, true);
     assert_eq!(status["last"]["files_bytes"], 0);
     assert_eq!(status["last"]["bytes"], database_bytes);
+}
+
+#[test]
+fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_password() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    write(external.path(), "item/outputs/report.md", "report");
+    write(external.path(), "item/node_modules/cache", "unreadable");
+    let cache = external.path().join("item/node_modules");
+    symlink(external.path(), home.path().join("workspaces")).unwrap();
+    symlink(&cache, external.path().join("item/cache-link")).unwrap();
+    // Also exercise the special signing layout when its PARTS root is a link.
+    let signing = tempfile::tempdir().unwrap();
+    write(signing.path(), "keys/id", "key");
+    write(signing.path(), "keychain-pass", "secret");
+    symlink(signing.path(), home.path().join("signing")).unwrap();
+    let db = home.path().join("database.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE evidence(v);")
+        .unwrap();
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(fs::read_dir(&cache).is_err(), "fixture must be unreadable");
+    let made = daily_backup::make(home.path(), &db, "20261120");
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut archive = tar::Archive::new(fs::File::open(made.unwrap().files.unwrap()).unwrap());
+    let entries: BTreeMap<_, _> = archive
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_end_matches('/')
+                    .to_owned(),
+                entry.header().entry_type(),
+            )
+        })
+        .collect();
+    assert!(entries["workspaces"].is_dir());
+    assert!(entries["workspaces/item/outputs/report.md"].is_file());
+    assert!(entries["workspaces/item/cache-link"].is_symlink());
+    assert!(entries["signing/keys/id"].is_file());
+    assert!(
+        !entries
+            .keys()
+            .any(|p| p.starts_with("workspaces/item/node_modules"))
+    );
+    assert!(!entries.contains_key("signing/keychain-pass"));
 }
