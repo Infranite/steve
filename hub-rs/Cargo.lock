@@ -6106,10 +6106,9 @@ dependencies = [
 name = "steve-store-sqlite"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "rusqlite",
- "steve-storage-api",
- "steve-types",
+ "sha2 0.11.1",
+ "steve-store",
 ]
 
 [[package]]
