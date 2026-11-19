@@ -3,6 +3,8 @@
 //! The conformance feature remains test-only without changing the production manifest.
 #![allow(unexpected_cfgs)]
 #![cfg(sqlite_conformance)]
+#[path = "digest_fixture.rs"]
+mod digest_fixture;
 #[path = "uow_support.rs"]
 mod support;
 use std::{
@@ -83,6 +85,25 @@ impl Harness for Lifecycle {
         let store = self.load(dir.path());
         self.dirs.lock().unwrap().push(dir);
         Ok(store)
+    }
+    fn digest_fixture(
+        &self,
+        _store: Arc<dyn DomainStore>,
+    ) -> Result<Box<dyn verify::digest::Fixture>, String> {
+        // A separate real-schema namespace avoids advertising generic export for
+        // production tables whose codecs are intentionally not registered.
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        prepare_layout(dir.path(), self.split);
+        let mut registry = Registry::default();
+        registry.register_digest().map_err(|e| e.to_string())?;
+        let store = Arc::new(open_store(
+            dir.path(),
+            Arc::new(registry),
+            self.time.clone(),
+        ));
+        let fixture = digest_fixture::NativeFixture::new(store);
+        self.dirs.lock().unwrap().push(dir);
+        Ok(Box::new(fixture))
     }
     fn now(&self) -> Millis {
         self.time.now()
@@ -275,6 +296,11 @@ fn run_suite(split: bool) {
     assert_eq!(
         steve_store_sqlite::domains::fixtures::descriptors(),
         verify::entities::descriptors()
+            .into_iter()
+            .filter(|e| !verify::digest::descriptors()
+                .iter()
+                .any(|d| d.name == e.name))
+            .collect::<Vec<_>>()
     );
     let harness = Lifecycle::new(split);
     let report = verify::run_with_named(&harness, &verify::digest::named_checks());
