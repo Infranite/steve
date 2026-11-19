@@ -23,6 +23,20 @@ impl NodeRuntime {
         }
     }
 
+    /// Poll no later than one second, shortened to a known future retry deadline. The shared
+    /// Clock sleep is a full elapsed wait; it does not promise an early wake on wall changes.
+    pub(super) fn sender_delay(&self) -> std::time::Duration {
+        let now = self.clock.now();
+        let next=self.store.reader::<_,StoreError>(|c| Ok(c.query_row(
+            "SELECT min(retry_at) FROM node_commands WHERE node_id=?1 AND state='pending' AND retry_at>?2",
+            rusqlite::params![self.node_id.as_str(),now],|r|r.get::<_,Option<i64>>(0)
+        )?)).unwrap_or(None);
+        let ms = next.map_or(1_000, |at| {
+            at.saturating_sub(self.clock.now()).clamp(0, 1_000)
+        });
+        std::time::Duration::from_millis(ms as u64)
+    }
+
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
         let lease = match self.send_tx(|tx| {

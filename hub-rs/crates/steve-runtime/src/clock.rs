@@ -8,11 +8,6 @@ use tokio::sync::watch;
 pub trait Clock: Send + Sync {
     fn now(&self) -> i64;
     fn sleep(&self, d: Duration) -> BoxFuture<'_, ()>;
-    /// Retry polling may wake early on a wall-clock change; callers recheck durable deadlines.
-    /// System time has no change signal, so its normal timer remains the fallback.
-    fn sleep_or_change(&self, d: Duration) -> BoxFuture<'_, ()> {
-        self.sleep(d)
-    }
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
@@ -85,41 +80,29 @@ impl FakeClock {
     pub fn observed(&self, at: i64) -> bool {
         self.sleeping_at.load(Ordering::SeqCst) == at
     }
-    /// Wake on any advance, including before the first poll (old ManualClock behavior).
-    pub fn changed(&self) -> BoxFuture<'_, ()> {
-        self.wait(None)
-    }
-    fn wait(&self, d: Option<Duration>) -> BoxFuture<'_, ()> {
+    fn wait(&self, d: Duration) -> BoxFuture<'_, ()> {
         let mut rx = self.time.subscribe();
-        let deadline = d.map(|d| self.time.borrow().elapsed.saturating_add(d.as_millis()));
+        let deadline = self.time.borrow().elapsed.saturating_add(d.as_millis());
         Box::pin(async move {
             loop {
                 let now = *rx.borrow();
-                if deadline.is_some_and(|at| now.elapsed >= at)
-                    || (deadline.is_none() && rx.has_changed().unwrap_or(true))
-                {
+                if now.elapsed >= deadline {
                     return;
                 }
                 self.sleeping_at.store(now.wall, Ordering::SeqCst);
                 if rx.changed().await.is_err() {
                     return;
                 }
-                if deadline.is_none() {
-                    return;
-                }
             }
         })
     }
 }
-impl Clock for FakeClock {
-    fn sleep_or_change(&self, _: Duration) -> BoxFuture<'_, ()> {
-        self.changed()
-    }
 
+impl Clock for FakeClock {
     fn now(&self) -> i64 {
         self.time.borrow().wall
     }
     fn sleep(&self, d: Duration) -> BoxFuture<'_, ()> {
-        self.wait(Some(d))
+        self.wait(d)
     }
 }

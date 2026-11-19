@@ -629,13 +629,13 @@ impl NodeRuntime {
                     Err(e) => tracing::warn!("node {}: reconcile: {e}; trying again", me.node_id),
                 }
                 drop(me);
-                clock.sleep_or_change(Duration::from_secs(5)).await;
+                clock.sleep(Duration::from_secs(5)).await;
             }
             loop {
                 let Some(me) = weak.upgrade() else { return };
-                // Prepare before sending so a clock advance during the transaction is observed.
+                // Prepare before sending; use the persisted retry deadline within the one-second fallback.
                 // The system timer still starts after the send. Do not retain the runtime asleep.
-                let tick = clock.sleep_or_change(Duration::from_secs(1));
+                let tick = clock.sleep(me.sender_delay());
                 let sent = me.send_one().await;
                 drop(me);
                 if !sent {
