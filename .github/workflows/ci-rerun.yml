@@ -1,0 +1,29 @@
+name: CI rerun
+# GitHub's hosted macOS arm64 runners are sometimes all taken; GitHub then cancels a waiting job with no
+# step run ("The job was not acquired by Runner of type hosted even after multiple attempts"), and the CI
+# gate fails without having tested anything. When a CI push run on main fails, scripts/rerun-unacquired.py
+# reruns its failed jobs, but only if every failure is such an unacquired job (or the gate and `rust`
+# jobs that merely report on it), and at most three times per run. A job that ran and failed is a result,
+# never rerun. cut-release.py takes a run's latest attempt.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  actions: write
+  checks: read
+  contents: read
+jobs:
+  rerun:
+    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Rerun failed jobs that never got a runner
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: python3 scripts/rerun-unacquired.py "$RUN_ID" "$ATTEMPT"
