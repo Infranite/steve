@@ -199,9 +199,9 @@ impl Recorder {
                     epoch.fetch_add(1, Ordering::AcqRel);
                     let result: Result<u64> = store.write(|w| {
                         let tx = w.tx()?;
-                        prune_expired(&tx, now())?;
+                        let mut retention_budget = 200;
                         for event in &batch {
-                            persist(&tx, event)?;
+                            persist(&tx, event, &mut retention_budget)?;
                         }
                         let pending = losses.load(Ordering::Relaxed);
                         tx.execute(
@@ -560,7 +560,7 @@ fn capture_view(c: &Connection, item: &str, at: i64) -> Result<Value> {
     })
 }
 
-fn persist(c: &Connection, p: &Pending) -> Result<()> {
+fn persist(c: &Connection, p: &Pending, remaining: &mut u32) -> Result<()> {
     let r = &p.record;
     let session = match &r.session_id {
         Some(s) => c
@@ -666,6 +666,50 @@ fn persist(c: &Connection, p: &Pending) -> Result<()> {
         )?;
         return Ok(());
     }
+    // Critical facts may evict old metadata, but the entire writer transaction shares
+    // one 200-candidate allowance. Drop a new record rather than exceed either hard cap.
+    if item_bytes.saturating_add(bytes) > MAX_ITEM_BYTES
+        || total.saturating_add(bytes) > MAX_TOTAL_BYTES
+    {
+        if *remaining > 0 {
+            use steve_store_sqlite::retention::{
+                self as retention, Budget,
+                policies::{Kind, TablePolicy},
+            };
+            let mut policy = TablePolicy::new(Kind::DiagnosticCapacity);
+            policy.reserve = Some((item.clone(), bytes));
+            let report = retention::run_slice(
+                c,
+                &policy,
+                p.at,
+                Budget {
+                    rows: *remaining,
+                    target_ms: 20,
+                },
+                None,
+            )?;
+            *remaining = remaining.saturating_sub(report.inspected);
+        }
+        let own: i64 = c.query_row(
+            "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
+            [&item],
+            |r| r.get(0),
+        )?;
+        let total: i64 = c.query_row(
+            "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
+            [],
+            |r| r.get(0),
+        )?;
+        if own.saturating_add(bytes) > MAX_ITEM_BYTES
+            || total.saturating_add(bytes) > MAX_TOTAL_BYTES
+        {
+            c.execute(
+                "UPDATE diagnostic_item_stats SET dropped=dropped+1 WHERE item_id=?",
+                [&item],
+            )?;
+            return Ok(());
+        }
+    }
     let severity = match r.severity {
         Severity::Info => "info",
         Severity::Warning => "warning",
@@ -682,8 +726,6 @@ fn persist(c: &Connection, p: &Pending) -> Result<()> {
             params![bytes, item],
         )?;
     }
-    prune_capacity(c, Some(&item), MAX_ITEM_BYTES)?;
-    prune_capacity(c, None, MAX_TOTAL_BYTES)?;
     Ok(())
 }
 
@@ -695,61 +737,85 @@ pub(crate) fn active_until(c: &Connection) -> Result<i64> {
     )?)
 }
 
-fn remove(c: &Connection, rows: &[(i64, String, i64)]) -> Result<()> {
-    for (seq, item, bytes) in rows {
-        c.execute("DELETE FROM diagnostic_events WHERE seq=?", [seq])?;
-        c.execute("UPDATE diagnostic_item_stats SET bytes=max(0,bytes-?),removed_through=max(removed_through,?) WHERE item_id=?",params![bytes,seq,item])?;
-    }
-    Ok(())
-}
-
-fn prune_expired(c: &Connection, at: i64) -> Result<()> {
-    let mut st = c.prepare(
-        "SELECT seq,item_id,bytes FROM diagnostic_events WHERE at<? ORDER BY seq LIMIT 500",
-    )?;
-    let rows = st
-        .query_map([at - KEEP_MS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    remove(c, &rows)
-}
-
-fn prune_capacity(c: &Connection, item: Option<&str>, max: i64) -> Result<()> {
-    let total: i64 = match item {
-        Some(item) => c.query_row(
-            "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
-            [item],
-            |r| r.get(0),
-        )?,
-        None => c.query_row(
-            "SELECT COALESCE(sum(bytes),0) FROM diagnostic_item_stats",
-            [],
-            |r| r.get(0),
-        )?,
-    };
-    if total <= max {
-        return Ok(());
-    }
-    let mut st=c.prepare("SELECT seq,item_id,bytes FROM diagnostic_events WHERE (?1 IS NULL OR item_id=?1) ORDER BY seq")?;
-    let mut query = st.query([item])?;
-    let mut rows = vec![];
-    let mut removed = 0;
-    while let Some(r) = query.next()? {
-        let bytes: i64 = r.get(2)?;
-        rows.push((r.get(0)?, r.get(1)?, bytes));
-        removed += bytes;
-        if total - removed <= max {
-            break;
-        }
-    }
-    drop(query);
-    drop(st);
-    remove(c, &rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn critical_facts_share_a_200_candidate_budget_and_never_break_the_hard_cap() {
+        for global in [false, true] {
+            let c = Connection::open_in_memory().unwrap();
+            steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
+            c.pragma_update(None, "foreign_keys", false).unwrap();
+            c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+            c.execute(
+                "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES('i',?)",
+                [if global { 0 } else { MAX_ITEM_BYTES }],
+            )
+            .unwrap();
+            let owner = if global { "other0" } else { "i" };
+            let insert = |item: &str, bytes: i64| {
+                c.execute("INSERT INTO diagnostic_events(workspace_id,item_id,at,kind,reason_code,severity,detail,data,bytes) VALUES('default',?,0,'event','reason','info',0,'{}',?)",params![item,bytes]).unwrap();
+            };
+            for _ in 0..600 {
+                insert(owner, 1);
+            }
+            insert(owner, MAX_ITEM_BYTES - 600);
+            if global {
+                for n in 0..10 {
+                    let id = format!("other{n}");
+                    c.execute(
+                        "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES(?,?)",
+                        params![id, MAX_ITEM_BYTES],
+                    )
+                    .unwrap();
+                    if n > 0 {
+                        insert(&id, MAX_ITEM_BYTES);
+                    }
+                }
+            }
+            let before: i64 = c
+                .query_row("SELECT count(*) FROM diagnostic_events", [], |r| r.get(0))
+                .unwrap();
+            let p = Pending {
+                at: 1,
+                record: Record {
+                    workspace_id: crate::WS.into(),
+                    item_id: Some("i".into()),
+                    kind: "turn.ended".into(),
+                    reason_code: "fixture".into(),
+                    ..Default::default()
+                },
+            };
+            c.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let mut remaining = 200;
+            persist(&c, &p, &mut remaining).unwrap();
+            persist(&c, &p, &mut remaining).unwrap();
+            c.execute_batch("COMMIT").unwrap();
+            let (max,total,dropped):(i64,i64,i64)=c.query_row("SELECT max(bytes),sum(bytes),(SELECT dropped FROM diagnostic_item_stats WHERE item_id='i') FROM diagnostic_item_stats",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            let (rows, sum): (i64, i64) = c
+                .query_row(
+                    "SELECT count(*),sum(bytes) FROM diagnostic_events",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                before - rows <= 200,
+                "one writer transaction never evicts more than 200 rows"
+            );
+            assert_eq!(
+                dropped, 2,
+                "insufficient bounded eviction drops incoming facts (global={global})"
+            );
+            assert_eq!(total, sum);
+            assert!(
+                max <= MAX_ITEM_BYTES && total <= MAX_TOTAL_BYTES,
+                "both caps remain hard limits"
+            );
+        }
+    }
 
     #[test]
     fn a_precommit_snapshot_keeps_pending_and_marks_crossed_loss_transfers() {

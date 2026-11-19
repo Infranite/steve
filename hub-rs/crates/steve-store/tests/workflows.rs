@@ -1102,6 +1102,11 @@ fn a_turn_end_is_recorded_once_and_a_pause_mark_is_kept() {
     for n in 0..100 {
         s.turn_ended(sid, &format!("b{n}"), "end_turn").unwrap();
     }
+    retain(
+        &t.store,
+        steve_store_sqlite::retention::policies::Kind::Turns,
+        steve_store::now(),
+    );
     assert!(s.turn_ended(sid, "a0", "end_turn").unwrap(), "long gone");
     assert!(!s.turn_ended(sid, "b99", "end_turn").unwrap());
 }

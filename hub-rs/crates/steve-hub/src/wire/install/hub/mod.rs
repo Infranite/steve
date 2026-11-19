@@ -27,6 +27,7 @@ ordered_installers! { MODULES: fn(&mut HubRegistry, &HubEnv<'_>) -> Result<(), B
     mod stats; install,
     mod backup; install,
     mod admin; install,
+    mod retention; install,
     stats::routes,
     yolo::routes,
     mod handles; install,

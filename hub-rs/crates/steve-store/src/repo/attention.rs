@@ -233,9 +233,8 @@ pub fn feed_page(
     })
 }
 
-/// Cleanup once per API request; expiry index keeps unrelated live capabilities out of the scan.
-pub fn cleanup(tx: &Tx, now: i64) -> Result<()> {
-    tx.execute("DELETE FROM attention_windows WHERE expires<=?", [now])?;
+/// Compatibility entry for API callers. Expiry is now background retention, never read-side DML.
+pub fn cleanup(_tx: &Tx, _now: i64) -> Result<()> {
     Ok(())
 }
 

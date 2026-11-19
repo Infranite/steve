@@ -1,4 +1,5 @@
 //! Independent review probes of the outbox (written by the review worker on an isolated snapshot).
+mod common;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -88,7 +89,7 @@ fn paused_delivery_survives_prune_and_can_resume() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(outbox::prune(&s, ev.created + 100, 0).unwrap(), 0);
+    assert_eq!(common::prune_outbox(&s, ev.created + 100, 0).unwrap(), 0);
     assert_eq!(d.pump(&s, 10).unwrap().done, 0);
     s.with_conn(|c| {
         c.execute("UPDATE outbox_consumers SET enabled=1", [])?;
@@ -96,7 +97,7 @@ fn paused_delivery_survives_prune_and_can_resume() {
     })
     .unwrap();
     assert_eq!(d.pump(&s, 10).unwrap().done, 1);
-    assert_eq!(outbox::prune(&s, ev.created + 100, 0).unwrap(), 1);
+    assert_eq!(common::prune_outbox(&s, ev.created + 100, 0).unwrap(), 1);
 }
 #[test]
 fn consumer_topic_change_is_rejected_without_mutating_registration() {

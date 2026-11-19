@@ -204,7 +204,7 @@ fn a_failing_apply_rolls_back_and_backs_off_until_it_has_failed_for_a_day() {
     let st = t.store.reader(outbox::stats).unwrap();
     assert_eq!((st.pending, st.dead), (1, 1));
     assert_eq!(
-        outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(),
+        common::prune_outbox(&t.store, i64::MAX / 2, 0).unwrap(),
         0,
         "dead is never pruned"
     );
@@ -335,7 +335,7 @@ fn a_paused_consumer_keeps_what_it_owes_through_prune() {
     emit(&t.store, "default", 1);
     assert_eq!(d.pump(&t.store, 1).unwrap().done, 1, "only a");
     assert_eq!(
-        outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(),
+        common::prune_outbox(&t.store, i64::MAX / 2, 0).unwrap(),
         0,
         "b still owes it"
     );
@@ -346,7 +346,7 @@ fn a_paused_consumer_keeps_what_it_owes_through_prune() {
     assert_eq!(d.pump(&t.store, 2).unwrap().done, 1);
     assert_eq!(b.n(), 1);
     assert_eq!(
-        outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(),
+        common::prune_outbox(&t.store, i64::MAX / 2, 0).unwrap(),
         1,
         "now fully delivered"
     );
@@ -365,11 +365,11 @@ fn prune_keeps_recent_events() {
     let e = emit(&t.store, "default", 1);
     d.pump(&t.store, 1).unwrap();
     assert_eq!(
-        outbox::prune(&t.store, e.created + 10, outbox::KEEP_MS).unwrap(),
+        common::prune_outbox(&t.store, e.created + 10, outbox::KEEP_MS).unwrap(),
         0
     );
     assert_eq!(
-        outbox::prune(&t.store, e.created + outbox::KEEP_MS + 1, outbox::KEEP_MS).unwrap(),
+        common::prune_outbox(&t.store, e.created + outbox::KEEP_MS + 1, outbox::KEEP_MS).unwrap(),
         1
     );
 }
@@ -477,7 +477,10 @@ fn prune_removes_more_than_one_batch() {
         .unwrap();
     while d.pump(&t.store, 1).unwrap().done > 0 {}
     emit(&t.store, "default", 1);
-    assert_eq!(outbox::prune(&t.store, i64::MAX / 2, 0).unwrap(), 1201);
+    assert_eq!(
+        common::prune_outbox(&t.store, i64::MAX / 2, 0).unwrap(),
+        1201
+    );
     assert_eq!(
         one::<i64>(&t.store, "SELECT count(*) FROM outbox_events"),
         1

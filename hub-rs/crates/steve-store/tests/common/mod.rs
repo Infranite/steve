@@ -84,3 +84,59 @@ pub fn keys(v: &impl serde::Serialize) -> Vec<String> {
 pub fn count(c: &Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
 }
+
+/// Drive the production outbox declaration through the unique slice core.
+pub fn prune_outbox(store: &Store, now: i64, keep: i64) -> steve_store::Result<usize> {
+    use steve_store_sqlite::retention::{
+        self as r, Budget, KeepFrom,
+        policies::{Kind, TablePolicy},
+    };
+    let mut policy = TablePolicy::new(Kind::Outbox);
+    policy.definition.keep_from = KeepFrom::Fixed {
+        millis: keep.max(0) as u64,
+    };
+    let mut after = None;
+    let mut total = 0;
+    loop {
+        let report = store.with_conn(|c| {
+            Ok(r::run_slice(
+                c,
+                &policy,
+                now,
+                Budget {
+                    rows: 500,
+                    target_ms: 20,
+                },
+                after.as_ref(),
+            )?)
+        })?;
+        assert_eq!(report.failures, 0);
+        total += report.affected as usize;
+        after = report.next;
+        if after.is_none() {
+            return Ok(total);
+        }
+    }
+}
+
+/// Drain a background declaration, releasing the writer between slices.
+pub fn retain(store: &Store, kind: steve_store_sqlite::retention::policies::Kind, now: i64) -> u64 {
+    let mut after = None;
+    let mut total = 0;
+    loop {
+        let report = store
+            .retention_slice(
+                kind,
+                now,
+                steve_store_sqlite::retention::Budget::default(),
+                after,
+            )
+            .unwrap();
+        assert_eq!(report.failures, 0);
+        total += report.affected;
+        after = report.next;
+        if after.is_none() {
+            return total;
+        }
+    }
+}

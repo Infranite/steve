@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod open;
 pub mod pragmas;
 pub mod publish;
+pub mod retention;
 pub mod rev;
 pub mod scan;
 pub mod schema;

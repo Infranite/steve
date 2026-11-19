@@ -73,7 +73,7 @@ pub fn day_of(ms: i64) -> i64 {
 }
 
 /// Counts `searched` appearances in a search and `called` calls of each tool for `bot` on `day`;
-/// rows older than [`KEEP_DAYS`] go.
+/// background retention removes rows older than [`KEEP_DAYS`].
 pub fn record(
     c: &Connection,
     bot: &str,
@@ -90,7 +90,6 @@ pub fn record(
     for t in tools {
         st.execute(params![bot, t, day, searched, called])?;
     }
-    c.execute("DELETE FROM tool_usage WHERE day < ?", [day - KEEP_DAYS])?;
     Ok(())
 }
 

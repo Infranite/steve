@@ -260,8 +260,22 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(old, 0, "older than 90 days: dropped");
+            assert_eq!(old, 1, "recording no longer prunes under the writer");
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
+    retain(
+        &t.store,
+        steve_store_sqlite::retention::policies::Kind::Tools,
+        1_700_000_000_000,
+    );
+    assert_eq!(
+        t.store
+            .reader(|c| Ok::<_, steve_store::StoreError>(count(
+                c,
+                "SELECT count(*) FROM tool_usage WHERE tool='old'"
+            )))
+            .unwrap(),
+        0
+    );
 }
