@@ -17,12 +17,6 @@ steve-core/src/thread/handle.rs	HubEvent::	2
 steve-core/src/thread/mod.rs	ChangeEvent::	3
 steve-core/src/thread/mod.rs	HubEvent::	2
 steve-core/src/thread/research.rs	HubEvent::	9
-steve-flow/src/drafts/source.rs	ChangeEvent::	1
-steve-flow/src/flows.rs	ChangeEvent::	1
-steve-flow/src/runs.rs	ChangeEvent::	2
-steve-flow/src/schedules.rs	ChangeEvent::	3
-steve-flow/src/signals.rs	ChangeEvent::	2
-steve-flow/src/sources.rs	ChangeEvent::	2
 steve-github/src/accept.rs	ChangeEvent::	2
 steve-github/src/link.rs	ChangeEvent::	2
 steve-github/src/sync.rs	ChangeEvent::	3

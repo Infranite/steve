@@ -4,7 +4,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 
@@ -192,15 +192,19 @@ pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
 
 /// `{type:"run"}` and `{type:"flow"}` (the schedule list shows the last run).
 pub fn publish(tx: &Tx, ws: &str, flow_id: &str, run_id: &str) {
-    tx.publish(ChangeEvent::Run {
-        id: run_id.into(),
-        flow_id: flow_id.into(),
-        ws: ws.into(),
-    });
-    tx.publish(ChangeEvent::Flow {
-        id: flow_id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Run {
+            id: run_id.into(),
+            flow_id: flow_id.into(),
+            ws: ws.into(),
+        },
+    ));
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Flow {
+            id: flow_id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 /// One step of a run.

@@ -35,6 +35,7 @@ edge	steve-digest	steve-types
 edge	steve-flow	steve-i18n
 edge	steve-flow	steve-modules
 edge	steve-flow	steve-store
+edge	steve-flow	steve-types
 edge	steve-flow	steve-work-api
 edge	steve-github	steve-flow
 edge	steve-github	steve-i18n

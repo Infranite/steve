@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_store::base::Viewer;
-use steve_store::{ChangeEvent, Store, Tx};
+use steve_store::{Store, Tx};
 
 use crate::FlowResult;
 use crate::cron::{DEFAULT_TZ, parse_tz};
@@ -56,10 +56,12 @@ pub struct SignalDebounce(Arc<Mutex<HashMap<String, String>>>);
 impl SignalDebounce {
     pub fn signal(&self, store: &Store, ws: &str, id: &str) {
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            store.publish(ChangeEvent::Signal {
-                id: id.into(),
-                ws: ws.into(),
-            });
+            store.publish(steve_types::DomainEvent::from(
+                steve_types::AutomationEvent::Signal {
+                    id: id.into(),
+                    ws: ws.into(),
+                },
+            ));
             return;
         };
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -76,7 +78,12 @@ impl SignalDebounce {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&ws);
                 if let Some(id) = last {
-                    store.publish(ChangeEvent::Signal { id, ws });
+                    store.publish(steve_types::DomainEvent::from(
+                        steve_types::AutomationEvent::Signal {
+                            id: id.into(),
+                            ws: ws.into(),
+                        },
+                    ));
                 }
             });
         }

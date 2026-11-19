@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 use crate::cron::{CronExpr, parse_tz};
@@ -428,10 +428,12 @@ pub fn insert(
             params![uid("ftr"), ws, id, spec.cron, spec.tz, next_at, spec.missed.as_str(), enabled],
         )?;
     }
-    tx.publish(ChangeEvent::Flow {
-        id: id.clone(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Flow {
+            id: id.clone().into(),
+            ws: ws.into(),
+        },
+    ));
     Ok(id)
 }
 
@@ -522,10 +524,12 @@ fn write_update(
         "UPDATE flow_triggers SET cron = ?, tz = ?, missed = ?, enabled = ?, next_at = ? WHERE flow_id = ? AND kind = 'time'",
         params![spec.cron, spec.tz, spec.missed.as_str(), enabled, next_at, old.id],
     )?;
-    tx.publish(ChangeEvent::Flow {
-        id: old.id.clone(),
-        ws: old.workspace_id.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Flow {
+            id: old.id.clone().into(),
+            ws: old.workspace_id.clone().into(),
+        },
+    ));
     Ok(())
 }
 
@@ -536,10 +540,12 @@ pub fn delete(tx: &Tx, s: &Schedule, now: i64) -> FlowResult<()> {
         params![now.max(s.updated + 1), s.id],
     )?;
     tx.execute("DELETE FROM flow_triggers WHERE flow_id = ?", [&s.id])?;
-    tx.publish(ChangeEvent::Flow {
-        id: s.id.clone(),
-        ws: s.workspace_id.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Flow {
+            id: s.id.clone().into(),
+            ws: s.workspace_id.clone().into(),
+        },
+    ));
     Ok(())
 }
 

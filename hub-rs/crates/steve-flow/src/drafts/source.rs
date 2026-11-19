@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde_json::{Map, Value, json};
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Registry};
+use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
-use steve_store::{ChangeEvent, Tx};
 
 use super::{bot_name, find_bot, parse_bool, text_of, unrecognized, unrecognized_value};
 use crate::LateFlow;
@@ -390,10 +390,12 @@ impl ChangeOp for PatchOp {
             s.scopes = serde_json::from_value::<Vec<ScopeSetting>>(b["scopes"].clone())
                 .unwrap_or_default();
             sources::save(tx, &s, now)?;
-            tx.publish(ChangeEvent::Connection {
-                id: id.into(),
-                ws: cx.ws.into(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ChannelsEvent::Connection {
+                    id: id.into(),
+                    ws: cx.ws.into(),
+                },
+            ));
         }
         steve_store::base::audit(
             tx,
