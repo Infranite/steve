@@ -460,3 +460,80 @@ async fn bootstrap_owner_uses_the_cli_environment_instead_of_the_services_enviro
     assert_eq!(hub.store.access().owner().unwrap().unwrap().name, expected);
     hub.stop().await;
 }
+
+#[tokio::test]
+async fn backup_command_uses_the_live_socket_and_management_inventory() {
+    let hub = Hub::start(false);
+    let result = hub.cli(&["backup", "--reason", "diagnostic"]).await;
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let manifest: steve_store_sqlite::backup::Manifest =
+        serde_json::from_str(&result.stdout).unwrap();
+    assert!(manifest.completed && manifest.database_path().is_file());
+    assert!(matches!(
+        manifest.reason,
+        steve_store_sqlite::backup::Reason::Diagnostic
+    ));
+    let path = access::admin_socket_path(&hub.cfg.home).unwrap();
+    let usage = tokio::task::spawn_blocking(move || {
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .write_all(b"GET /admin/v1/backup HTTP/1.0\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        serde_json::from_str::<serde_json::Value>(response.split_once("\r\n\r\n").unwrap().1)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(usage["diagnostic"]["count"], 1);
+    let bad = hub.cli(&["backup", "--reason", "daily"]).await;
+    assert_eq!(bad.code, 2);
+    assert_eq!(
+        steve_store_sqlite::backup::list(&hub.cfg.home.join("backups"))
+            .unwrap()
+            .len(),
+        1
+    );
+    hub.stop().await;
+}
+#[test]
+fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let (cfg, _) = config(temp.path());
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
+    c.execute_batch("CREATE TABLE schema_version(v INT); INSERT INTO schema_version VALUES(50); CREATE TABLE old_record(v); INSERT INTO old_record VALUES('old');").unwrap();
+    drop(c);
+    let before = std::fs::read(cfg.db_path()).unwrap();
+    let modified = std::fs::metadata(cfg.db_path())
+        .unwrap()
+        .modified()
+        .unwrap();
+    let args = vec!["backup".into(), "--reason".into(), "pre-upgrade".into()];
+    let result = access::command(&cfg, &args);
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let manifest: steve_store_sqlite::backup::Manifest =
+        serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(manifest.schema_version, Some(50));
+    assert_eq!(std::fs::read(cfg.db_path()).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(cfg.db_path())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+    let _lock = steve_hub::upgrades::instance_lock(&cfg).unwrap();
+    let refused = access::command(&cfg, &args);
+    assert_eq!(refused.code, 2);
+    assert_eq!(
+        steve_store_sqlite::backup::list(&cfg.home.join("backups"))
+            .unwrap()
+            .len(),
+        1
+    );
+}

@@ -61,23 +61,6 @@ fn read_only(path: &Path) -> Result<Connection> {
     Ok(c)
 }
 
-/// How often, and how far apart, a copy is tried again while a running Hub holds the database busy.
-const COPY_TRIES: u32 = 100;
-const COPY_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Every page of `src` into `dst` in one step, from one snapshot: a copy taken in pieces starts over
-/// whenever another connection (a running Hub) commits between two of them.
-fn copy_all(src: &Connection, dst: &mut Connection) -> Result<()> {
-    let backup = rusqlite::backup::Backup::new(src, dst)?;
-    for _ in 0..COPY_TRIES {
-        match backup.step(-1)? {
-            rusqlite::backup::StepResult::Done => return Ok(()),
-            _ => std::thread::sleep(COPY_PAUSE),
-        }
-    }
-    bail!("the database stayed busy; no copy was made")
-}
-
 /// The snapshot of `a`, as JSON.
 fn snapshot(a: &Args) -> Result<serde_json::Value> {
     if !a.db.is_file() {
@@ -99,9 +82,14 @@ fn snapshot(a: &Args) -> Result<serde_json::Value> {
             None => tempfile::tempdir(),
         }
         .context("cannot make a scratch directory for the migrated copy")?;
-        let copy = dir.path().join("snapshot.sqlite3");
-        let mut dst = Connection::open(&copy)?;
-        copy_all(&src, &mut dst)?;
+        let copy = steve_store_sqlite::backup::offline::backup_file(
+            &a.db,
+            dir.path(),
+            &steve_store_sqlite::backup::offline::CopyOptions::default(),
+            &|_| {},
+            &steve_store_sqlite::backup::CancelFlag::default(),
+        )?;
+        let dst = Connection::open(&copy.path)?;
         db::migrate(&dst).context("cannot migrate the copy")?;
         scratch = Some(dir);
         dst

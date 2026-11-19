@@ -1361,6 +1361,26 @@ pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<C
     ok(v)
 }
 
+/// An owner-requested diagnostic copy, using the same plan as daily/admin backups.
+pub async fn system_backup_now(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let cfg = st.cfg.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        crate::admin::client::backup::run(
+            &cfg.home,
+            &cfg.db_path(),
+            steve_store_sqlite::backup::Reason::Diagnostic,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(serde_json::to_value(manifest).map_err(|e| ApiError::internal(e.to_string()))?)
+}
+
 /// The outbox's store: only a Hub with its modules wired has one.
 fn outbox_store(st: &AppState) -> Result<steve_store::Store, ApiError> {
     st.modules
@@ -1697,7 +1717,10 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             "/system/workspaces/reclaim",
             post(misc::system_workspaces_reclaim),
         )
-        .route("/system/backup", get(misc::system_backup))
+        .route(
+            "/system/backup",
+            get(misc::system_backup).post(misc::system_backup_now),
+        )
         .route("/system/outbox", get(misc::system_outbox))
         .route("/system/outbox/revive", post(misc::system_outbox_revive))
 }

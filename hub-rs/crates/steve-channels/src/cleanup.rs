@@ -94,7 +94,7 @@ pub struct Summary {
     /// At most 200 of the kept things; `kept_count` is all of them.
     pub kept: Vec<Kept>,
     pub kept_count: usize,
-    /// The backup file name taken before a real cleanup (`pre-purge-<ms>-<id>.sqlite3`).
+    /// The backup file name taken before a real cleanup (`pre-purge-<UTC>-<id>/<database>`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
 }
@@ -692,28 +692,28 @@ fn backup_dir(db: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// A full copy of the database (`VACUUM INTO`, a consistent snapshot under the write lock) before
-/// anything is purged. Returns the file name. The copy is the owner's alone (0600 in a 0700
-/// directory), as the database is.
-fn backup(ch: &Channels, now: i64) -> ApiResult<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = backup_dir(ch.store().path());
-    std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
-        .map_err(|e| ApiError::Internal(format!("备份目录建不了：{e}")))?;
-    let name = format!("pre-purge-{now}-{}.sqlite3", steve_store::uid("backup"));
-    let file = dir.join(&name);
-    let path = file
-        .to_str()
-        .ok_or_else(|| ApiError::Internal("备份路径不是 UTF-8".into()))?
-        .to_string();
-    ch.store().with_conn(|c| {
-        c.execute("VACUUM INTO ?", [&path])?;
-        Ok(())
-    })?;
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| ApiError::Internal(format!("备份权限设不了：{e}")))?;
-    Ok(name)
+/// An independent read-only snapshot, deliberately outside Store::with_conn and its Mutex.
+fn backup(store: &steve_store::Store, _now: i64) -> ApiResult<String> {
+    let root = backup_dir(store.path());
+    let plan = steve_store_sqlite::backup::BackupPlan::new(
+        root.clone(),
+        steve_store_sqlite::backup::Reason::PreDestructive {
+            what: "purge".into(),
+        },
+    );
+    let manifest = steve_store_sqlite::backup::backup(
+        store.path(),
+        &plan,
+        &|_| {},
+        &steve_store_sqlite::backup::CancelFlag::default(),
+    )
+    .map_err(|e| ApiError::Internal(format!("备份失败：{e}")))?;
+    Ok(manifest
+        .database_path()
+        .strip_prefix(root)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Backup, then the cleanup in one transaction, audited.
@@ -730,7 +730,7 @@ pub async fn run(
         // fail before the backup when there is nothing to clean
         ch.store().reader(|c| plan(c, &v, &t, level).map(|_| ()))?;
         let now = ch.now();
-        let file = backup(&ch, now)?;
+        let file = backup(ch.store(), now)?;
         let mut out = ch.store().transaction(|tx| -> ApiResult<Summary> {
             let p = plan(tx, &v, &t, level)?;
             let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();
@@ -804,4 +804,42 @@ pub fn leftovers(c: &Connection, v: &Viewer) -> ChannelResult<Vec<Leftover>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod backup_tests {
+    #[test]
+    fn backup_finishes_while_the_store_writer_mutex_is_held() {
+        use std::{sync::mpsc, time::Duration};
+        let temp = tempfile::tempdir().unwrap();
+        let store = steve_store::Store::open(
+            temp.path().join("db.sqlite3"),
+            steve_store::FnPublisher(|_| {}),
+        )
+        .unwrap();
+        let (held, ready) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let locked = store.clone();
+        let owner = std::thread::spawn(move || {
+            locked.with_conn(|_| {
+                held.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(())
+            })
+        });
+        ready.recv().unwrap();
+        let (finished, result) = mpsc::channel();
+        let copying = store.clone();
+        let worker = std::thread::spawn(move || {
+            finished.send(super::backup(&copying, 0)).unwrap();
+        });
+        let completed = result.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap();
+        owner.join().unwrap().unwrap();
+        worker.join().unwrap();
+        let relative = completed
+            .expect("backup must not acquire Store's already-held writer mutex")
+            .unwrap();
+        assert!(temp.path().join("backups").join(relative).is_file());
+    }
 }
