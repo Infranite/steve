@@ -252,3 +252,51 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn reservation_table_preserves_debt_and_independent_keys() {
+        for rate in [5, 50] {
+            let limiter = Limiter::new();
+            for n in 1..=rate + 3 {
+                let expected = if n <= rate {
+                    0.0
+                } else {
+                    f64::from(n - rate) / f64::from(rate)
+                };
+                assert!((limiter.reserve(&[("app", rate)]).as_secs_f64() - expected).abs() < 1e-6);
+            }
+            assert_eq!(limiter.reserve(&[("another", rate)]), Duration::ZERO);
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert_eq!(limiter.reserve(&[("app", rate)]), Duration::ZERO);
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn retry_table_honours_hints_caps_and_counts() {
+        for (hint, cap, wait_ms) in [
+            (None, 10000, 1000),
+            (Some(20000), 10000, 10000),
+            (Some(2000), 500, 500),
+            (Some(0), 500, 0),
+        ] {
+            let started = Instant::now();
+            let calls = std::sync::atomic::AtomicU32::new(0);
+            let result = with_retries_capped(3, Duration::from_millis(cap), "test", || async {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < 2 {
+                    Err(FeishuError::RateLimited {
+                        code: 429,
+                        reset: hint.map(Duration::from_millis),
+                    })
+                } else {
+                    Ok(n)
+                }
+            })
+            .await;
+            assert_eq!(result, Ok((2, 2)));
+            assert_eq!(started.elapsed(), Duration::from_millis(2 * wait_ms));
+        }
+    }
+}

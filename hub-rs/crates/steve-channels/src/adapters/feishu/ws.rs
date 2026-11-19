@@ -527,11 +527,7 @@ impl<H: WsHandler> Inner<H> {
             if cfg.reconnect_count >= 0 && i64::from(attempts) >= cfg.reconnect_count {
                 return Err(WsError::ReconnectExhausted(cfg.reconnect_count));
             }
-            let delay = if attempts == 0 {
-                random_below(cfg.reconnect_nonce)
-            } else {
-                cfg.reconnect_interval
-            };
+            let delay = reconnect_wait(cfg, attempts);
             self.state.send_replace(WsState::Reconnecting {
                 attempt: attempts + 1,
                 last_error: failure.to_string(),
@@ -758,6 +754,14 @@ impl<H: WsHandler> Inner<H> {
     }
 }
 
+fn reconnect_wait(cfg: ClientConfig, attempts: u32) -> Duration {
+    if attempts == 0 {
+        random_below(cfg.reconnect_nonce)
+    } else {
+        cfg.reconnect_interval
+    }
+}
+
 /// Uniform in `[0, d)`, millisecond resolution; zero for zero.
 fn random_below(d: Duration) -> Duration {
     let ms = d.as_millis() as u64;
@@ -820,5 +824,35 @@ mod tests {
         assert!(handshake_error(&resp("514", "1")).retryable());
         assert!(!handshake_error(&resp("403", "")).retryable());
         assert!(handshake_error(&resp("", "")).retryable());
+    }
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[test]
+    fn reconnect_table_has_only_initial_half_open_jitter() {
+        let cfg = ClientConfig::default();
+        for attempt in [0, 1, 2, 20] {
+            for _ in 0..64 {
+                let wait = reconnect_wait(cfg.clone(), attempt);
+                if attempt == 0 {
+                    assert!(wait < cfg.reconnect_nonce);
+                    assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
+                } else {
+                    assert_eq!(wait, cfg.reconnect_interval);
+                }
+            }
+        }
+        assert_eq!(
+            reconnect_wait(
+                ClientConfig {
+                    reconnect_nonce: Duration::ZERO,
+                    ..cfg
+                },
+                0
+            ),
+            Duration::ZERO
+        );
     }
 }

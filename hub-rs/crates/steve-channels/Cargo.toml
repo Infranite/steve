@@ -82,7 +82,7 @@ rust-i18n = "=4.2.4"
 [dev-dependencies]
 axum = "=0.8.9"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }
 # Lets plain `cargo test -p steve-channels` build the fake for the integration tests.
 steve-channels = { path = ".", features = ["fake"] }
 # F1 tests: a store in a temp dir, the vault, the connection routes.

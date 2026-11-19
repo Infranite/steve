@@ -600,8 +600,10 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                     match start_run(&inner, &id, d.fp.clone(), d.state) {
                         Some(c) => current = Some(c),
                         None => {
-                            retry = Some((d.fp, Instant::now() + backoff));
-                            backoff = (backoff * 2).min(t.backoff_max);
+                            retry = Some((
+                                d.fp,
+                                Instant::now() + next_backoff(&mut backoff, t.backoff_max),
+                            ));
                         }
                     }
                 }
@@ -656,8 +658,7 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                     Some(h) => {
                         tracing::warn!(conn = id, "connection runtime: run failed: {h:?}");
                         c.cx.report(h).await;
-                        retry = Some((c.fp, Instant::now() + backoff));
-                        backoff = (backoff * 2).min(t.backoff_max);
+                        retry = Some((c.fp, Instant::now() + next_backoff(&mut backoff, t.backoff_max)));
                     }
                 }
             }
@@ -765,4 +766,32 @@ async fn stop_run(inner: &Inner, id: &str, mut c: Current, grace: Duration) {
     }
     lock(&inner.running).remove(id);
     tracing::info!(conn = id, "connection runtime: stopped");
+}
+
+// Returns this wait before advancing; reset remains tied to the run's lifetime/fingerprint.
+fn next_backoff(wait: &mut Duration, max: Duration) -> Duration {
+    let delay = *wait;
+    *wait = (*wait * 2).min(max);
+    delay
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[test]
+    fn lifecycle_wait_table_and_stable_reset() {
+        let mut wait = Duration::from_secs(5);
+        for seconds in [5, 10, 20, 40, 80, 160, 300, 300] {
+            assert_eq!(
+                next_backoff(&mut wait, Duration::from_secs(300)),
+                Duration::from_secs(seconds)
+            );
+        }
+        // supervise resets at >= backoff_max (also when the fingerprint changes or is disabled).
+        wait = Duration::from_secs(5);
+        assert_eq!(
+            next_backoff(&mut wait, Duration::from_secs(300)),
+            Duration::from_secs(5)
+        );
+    }
 }

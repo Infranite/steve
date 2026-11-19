@@ -66,6 +66,19 @@ struct Bucket {
     at: Instant,
 }
 
+impl Bucket {
+    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> Duration {
+        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * rate).min(burst);
+        self.at = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64((1.0 - self.tokens) / rate)
+        }
+    }
+}
+
 /// The live sessions of the feeds, by connection id, and each connection's write pacing.
 #[derive(Default)]
 pub(crate) struct Registry {
@@ -247,14 +260,11 @@ impl ExtWs {
                     tokens: burst,
                     at: now,
                 });
-                e.tokens = (e.tokens + now.duration_since(e.at).as_secs_f64() * rate).min(burst);
-                e.at = now;
-                if e.tokens >= 1.0 {
-                    e.tokens -= 1.0;
-                    return;
-                }
-                Duration::from_secs_f64((1.0 - e.tokens) / rate)
+                e.take(now, rate, burst)
             };
+            if wait.is_zero() {
+                return;
+            }
             tokio::time::sleep(wait).await;
         }
     }
@@ -291,8 +301,9 @@ impl ExtWs {
         if let Some(k) = key {
             params["idempotency_key"] = k.into();
         }
-        let mut backoff = Duration::from_secs(1);
+        let base = Duration::from_secs(1);
         for attempt in 0..=RETRIES {
+            let backoff = rpc_delay(base, Duration::from_secs(60), attempt as u32);
             self.pace(cx.id(), s).await;
             // A borrowed ConnCx and an earlier approval are not a grant: the switch or the
             // service policy may have changed during pacing/backoff. Never replay after denial.
@@ -305,7 +316,7 @@ impl ExtWs {
                         Some(Reason::RateLimited) => Some(match &e {
                             CallError::Rpc(r) => r
                                 .retry_after_ms()
-                                .map(|ms| Duration::from_millis(ms + jitter(ms / 5)))
+                                .map(|ms| hinted_wait(ms))
                                 .unwrap_or_else(|| full_jitter(backoff)),
                             _ => backoff,
                         }),
@@ -330,7 +341,6 @@ impl ExtWs {
                     match wait {
                         Some(w) if attempt < RETRIES => {
                             tokio::time::sleep(w).await;
-                            backoff = (backoff * 2).min(Duration::from_secs(60));
                         }
                         _ => return Err(write_err(e)),
                     }
@@ -374,16 +384,17 @@ impl ExtWs {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {
-        let mut backoff = Duration::from_millis(500);
+        let base = Duration::from_millis(500);
         let mut last = CallError::Timeout;
         for attempt in 0..=RETRIES {
+            let backoff = rpc_delay(base, Duration::from_secs(30), attempt as u32);
             match s.call(method, params.clone(), timeout).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     let wait = match (&e, e.reason()) {
                         (CallError::Rpc(r), Some(Reason::RateLimited)) => r
                             .retry_after_ms()
-                            .map(|ms| Duration::from_millis(ms + jitter(ms / 5)))
+                            .map(|ms| hinted_wait(ms))
                             .or(Some(full_jitter(backoff))),
                         (
                             _,
@@ -399,7 +410,6 @@ impl ExtWs {
                     match wait {
                         Some(w) if attempt < RETRIES && !s.is_closed() => {
                             tokio::time::sleep(w).await;
-                            backoff = (backoff * 2).min(Duration::from_secs(30));
                         }
                         _ => return Err(last),
                     }
@@ -522,6 +532,10 @@ impl Drop for Use {
     }
 }
 
+fn rpc_delay(base: Duration, max: Duration, attempt: u32) -> Duration {
+    (0..attempt).fold(base, |wait, _| (wait * 2).min(max))
+}
+
 /// `0..=max` ms.
 fn jitter(max: u64) -> u64 {
     if max == 0 {
@@ -529,6 +543,10 @@ fn jitter(max: u64) -> u64 {
     } else {
         rand::random_range(0..=max)
     }
+}
+
+fn hinted_wait(ms: u64) -> Duration {
+    Duration::from_millis(ms + jitter(ms / 5))
 }
 
 /// Full jitter: anywhere in `0..=d`.
@@ -1571,5 +1589,64 @@ impl ChannelAdapter for ExtWs {
 
     async fn recall(&self, _cx: &ConnCx, _ext_msg_id: &str) -> Result<(), AdapterError> {
         Err(ProviderError::Unsupported.into())
+    }
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    #[test]
+    fn rpc_wait_tables_keep_millisecond_jitter_and_server_hint() {
+        for (base, expected) in [(1000, [1000, 2000, 4000]), (500, [500, 1000, 2000])] {
+            for (attempt, max) in expected.into_iter().enumerate() {
+                let delay = rpc_delay(
+                    Duration::from_millis(base),
+                    Duration::from_secs(30),
+                    attempt as u32,
+                );
+                assert_eq!(delay, Duration::from_millis(max));
+                for _ in 0..64 {
+                    let wait = full_jitter(delay);
+                    assert!(wait <= Duration::from_millis(max));
+                    assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
+                }
+            }
+        }
+        for ms in [0, 1, 4, 5, 1000, 60000] {
+            for _ in 0..64 {
+                let wait = hinted_wait(ms);
+                assert!(wait >= Duration::from_millis(ms));
+                assert!(wait <= Duration::from_millis(ms + ms / 5));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pacing_sequence_tests {
+    use super::*;
+    #[test]
+    fn hello_pacing_table_preserves_rejected_tokens_and_reconfiguration() {
+        let now = Instant::now();
+        let mut bucket = Bucket {
+            tokens: 2.0,
+            at: now,
+        };
+        for expected in [0, 0, 500, 500] {
+            assert_eq!(bucket.take(now, 2.0, 2.0), Duration::from_millis(expected));
+        }
+        assert_eq!(
+            bucket.take(now + Duration::from_millis(250), 2.0, 2.0),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            bucket.take(now + Duration::from_millis(500), 2.0, 2.0),
+            Duration::ZERO
+        );
+        // A new hello changes replenishment/burst without refilling the existing connection.
+        assert_eq!(
+            bucket.take(now + Duration::from_millis(500), 4.0, 8.0),
+            Duration::from_millis(250)
+        );
     }
 }

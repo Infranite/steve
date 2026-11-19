@@ -121,19 +121,12 @@ impl ConnectionHook for ExtWsHook {
                     if failed >= 3 {
                         run.cx.report(Health::Failed(e.to_string())).await;
                     }
-                    let w = full_jitter(backoff);
-                    backoff = (backoff * 2).min(t.backoff_max);
-                    w
+                    feed_wait(&mut backoff, t, None)
                 }
                 End::Lost(why) => {
                     tracing::info!(conn, "ext_ws: session ended: {why}");
                     failed = 0;
-                    if started.elapsed() >= t.stable {
-                        backoff = t.backoff_min;
-                    }
-                    let w = full_jitter(backoff);
-                    backoff = (backoff * 2).min(t.backoff_max);
-                    w
+                    feed_wait(&mut backoff, t, Some(started.elapsed()))
                 }
             };
             tokio::select! {
@@ -142,6 +135,19 @@ impl ConnectionHook for ExtWsHook {
             }
         }
     }
+}
+
+fn feed_wait(
+    wait: &mut std::time::Duration,
+    timing: super::session::Timing,
+    ran: Option<std::time::Duration>,
+) -> std::time::Duration {
+    if ran.is_some_and(|ran| ran >= timing.stable) {
+        *wait = timing.backoff_min;
+    }
+    let delay = full_jitter(*wait);
+    *wait = (*wait * 2).min(timing.backoff_max);
+    delay
 }
 
 impl ExtWsHook {
@@ -1091,4 +1097,33 @@ fn gap(it: &Value, now: i64) -> Result<(Option<Vec<String>>, i64, i64), String> 
         return Err("a gap with a bad range".into());
     }
     Ok((list, from, to))
+}
+
+#[cfg(test)]
+mod retry_sequence_tests {
+    use super::*;
+    use std::time::Duration;
+    #[test]
+    fn feed_caps_and_stable_run_resets_the_wait() {
+        let t = super::super::session::Timing::default();
+        let mut backoff = t.backoff_min;
+        for _ in 0..32 {
+            let previous = backoff;
+            assert!(feed_wait(&mut backoff, t, None) <= previous);
+        }
+        assert_eq!(backoff, t.backoff_max);
+        for (ran, resets) in [
+            (Duration::from_secs(59), false),
+            (Duration::from_secs(60), true),
+        ] {
+            let mut wait = backoff;
+            let delay = feed_wait(&mut wait, t, Some(ran));
+            if resets {
+                assert!(delay <= t.backoff_min);
+                assert_eq!(wait, t.backoff_min * 2);
+            } else {
+                assert_eq!(wait, t.backoff_max);
+            }
+        }
+    }
 }
