@@ -177,6 +177,15 @@ pub fn me() -> Caller {
 
 pub async fn setup() -> H {
     let env = TestEnv::new(|r| steve_modules::accounts::connections::register(r));
+    // the tests' wall times are UTC+8: the workspace says so, not the host's zone (CI runs in UTC)
+    env.store()
+        .settings()
+        .set(
+            WS,
+            &serde_json::Map::from_iter([("tz".into(), "Asia/Shanghai".into())]),
+            ME,
+        )
+        .unwrap();
     env.store()
         .transaction(|tx| {
             for (id, label) in [

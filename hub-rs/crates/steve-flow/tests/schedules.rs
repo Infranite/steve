@@ -21,9 +21,19 @@ fn monday_8am() -> i64 {
         .timestamp_millis()
 }
 
+/// The tests' times are Taipei wall times: the workspace says so, not the host's zone (CI runs in UTC).
 fn env() -> FlowEnv {
     let e = FlowEnv::new();
     e.env.clock.set(monday_8am());
+    e.env
+        .store()
+        .settings()
+        .set(
+            WS,
+            &serde_json::Map::from_iter([("tz".into(), "Asia/Taipei".into())]),
+            ME,
+        )
+        .unwrap();
     e
 }
 
@@ -77,7 +87,7 @@ async fn create_computes_next_run_and_describe() {
     assert_eq!(s["cron"], "30 8 * * *");
     assert_eq!(s["describe"], "每天 08:30");
     assert_eq!(s["when"], "每天 08:30");
-    assert_eq!(s["tz"], steve_modules::zone::default_tz().name());
+    assert_eq!(s["tz"], "Asia/Taipei", "the workspace zone");
     assert_eq!(s["budget_usd"], 1.0);
     assert_eq!(s["missed"], "catch_up_once");
     assert_eq!(s["overlap"], "skip");
