@@ -287,7 +287,7 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
         .and_hms_opt(2, 30, 0)
         .unwrap();
     let ms = ny.instant(gap).unwrap();
-    assert_eq!(ny.show(ms).unwrap(), "2027-03-14T03:00:00-04:00");
+    assert_eq!(ny.show(ms).unwrap(), "2027-03-14T03:30:00-04:00");
     // a repeated hour takes its first occurrence
     let twice = chrono::NaiveDate::from_ymd_opt(2027, 11, 7)
         .unwrap()
@@ -315,7 +315,7 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
             // no policy: the workspace's zone (its default here)
             assert_eq!(
                 todo::Zone::of(c, WS, OTHER).unwrap().name(),
-                steve_modules::zone::DEFAULT_TZ
+                steve_modules::zone::default_tz().name()
             );
             Ok::<_, StoreError>(())
         })

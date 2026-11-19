@@ -130,33 +130,13 @@ fn text(v: &str) -> String {
     out
 }
 
-/// Windows zone names some exporters write as `TZID`, to their IANA zone.
-const WINDOWS_ZONES: &[(&str, &str)] = &[
-    ("China Standard Time", "Asia/Shanghai"),
-    ("Taipei Standard Time", "Asia/Taipei"),
-    ("Tokyo Standard Time", "Asia/Tokyo"),
-    ("Korea Standard Time", "Asia/Seoul"),
-    ("Singapore Standard Time", "Asia/Singapore"),
-    ("India Standard Time", "Asia/Kolkata"),
-    ("GMT Standard Time", "Europe/London"),
-    ("W. Europe Standard Time", "Europe/Berlin"),
-    ("Romance Standard Time", "Europe/Paris"),
-    ("Eastern Standard Time", "America/New_York"),
-    ("Central Standard Time", "America/Chicago"),
-    ("Mountain Standard Time", "America/Denver"),
-    ("Pacific Standard Time", "America/Los_Angeles"),
-    ("UTC", "UTC"),
-];
-
-/// An IANA zone from a `TZID` (quotes and a leading `/` dropped), or a known Windows name.
+/// An IANA zone or Windows TZID, resolved by the shared runtime.
 pub fn zone(name: &str) -> Option<Tz> {
-    let n = name.trim().trim_matches('"').trim_start_matches('/');
-    n.parse::<Tz>().ok().or_else(|| {
-        WINDOWS_ZONES
-            .iter()
-            .find(|(w, _)| w.eq_ignore_ascii_case(n))
-            .and_then(|(_, i)| i.parse().ok())
-    })
+    steve_runtime::tz::Zone::parse(name)
+        .ok()?
+        .name()
+        .parse()
+        .ok()
 }
 
 /// A date or time value.
@@ -190,7 +170,17 @@ fn datetime(p: &Prop) -> Option<Dt> {
     if utc {
         return Some(Dt::Utc(Utc.from_utc_datetime(&ndt)));
     }
-    Some(Dt::Local(ndt, p.param("TZID").and_then(zone)))
+    let tz = p.param("TZID").and_then(|name| {
+        let z = zone(name);
+        if z.is_none() {
+            tracing::warn!(
+                tzid = name,
+                "unknown calendar TZID; using calendar/connection zone, else system zone"
+            );
+        }
+        z
+    });
+    Some(Dt::Local(ndt, tz))
 }
 
 /// `EXDATE` may list several values.
@@ -209,15 +199,10 @@ fn datetimes(p: &Prop) -> Vec<Dt> {
 /// A wall time in `tz` as an instant: in a gap (spring forward) the time after it, when repeated
 /// (fall back) the first.
 pub fn local_ms(tz: Tz, t: NaiveDateTime) -> i64 {
-    for shift in [0, 30, 60, 90, 120] {
-        if let Some(d) = tz
-            .from_local_datetime(&(t + Duration::minutes(shift)))
-            .earliest()
-        {
-            return d.timestamp_millis();
-        }
-    }
-    Utc.from_utc_datetime(&t).timestamp_millis()
+    steve_runtime::tz::Zone::parse(tz.name())
+        .expect("IANA zone")
+        .instant(t)
+        .expect("calendar time in range")
 }
 
 impl Dt {
@@ -889,6 +874,28 @@ impl Ev {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(local_ms(name.parse().unwrap(), wall), ms);
+            let cal = Calendar::parse(&format!("BEGIN:VCALENDAR\nX-WR-TIMEZONE:{name}\nBEGIN:VEVENT\nUID:u\nDTSTART;TZID=Unknown/Zone:{}\nDURATION:PT1H\nEND:VEVENT\nEND:VCALENDAR", wall.format("%Y%m%dT%H%M%S"))).unwrap();
+            let out = cal.occurrences(
+                Window {
+                    from_ms: ms - 1,
+                    to_ms: ms + 3_600_000,
+                },
+                chrono_tz::UTC,
+            );
+            assert_eq!(out[0].start.ms, Some(ms));
+        }
+    }
+
     use super::*;
 
     const TZ: Tz = chrono_tz::Asia::Shanghai;

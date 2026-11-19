@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Days, Local, NaiveDate, TimeZone};
+use chrono::{Days, NaiveDate};
 use chrono_tz::Tz;
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -61,17 +61,7 @@ pub fn book_of<'c>(c: &'c Connection, ws: &str) -> Result<PriceBook<'c>> {
 pub fn day_start(day: &str, tz: Option<Tz>) -> Option<i64> {
     let d = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
     let midnight = d.and_hms_opt(0, 0, 0)?;
-    let ts = match tz {
-        Some(z) => z
-            .from_local_datetime(&midnight)
-            .earliest()?
-            .timestamp_millis(),
-        None => Local
-            .from_local_datetime(&midnight)
-            .earliest()?
-            .timestamp_millis(),
-    };
-    Some(ts)
+    crate::day::resolved(tz).instant(midnight).ok()
 }
 
 /// `[from 00:00, (to + 1) 00:00)` in Unix ms.

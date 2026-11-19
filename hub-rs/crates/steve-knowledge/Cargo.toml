@@ -6,6 +6,7 @@ publish.workspace = true
 description = "Knowledge base: sources, index, retrieval and citations"
 
 [dependencies]
+steve-runtime = { path = "../steve-runtime" }
 steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
 steve-i18n = { path = "../steve-i18n" }

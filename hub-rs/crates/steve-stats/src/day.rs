@@ -1,12 +1,18 @@
 //! Statistics cut days in the workspace's time zone (setting `stats.tz`, default the Hub's own zone), and a
 //! one-day range into its local hours (ST-43: “今天” is charted per hour).
 
-use chrono::{DateTime, Local, TimeZone, Timelike};
+use chrono::Timelike;
 use chrono_tz::Tz;
+use steve_runtime::tz::Zone;
 
 /// The zone named by `stats.tz`; `None` (use the Hub's local zone) when unset or not an IANA name.
 pub fn tz(setting: Option<&str>) -> Option<Tz> {
     setting.and_then(|s| s.trim().parse().ok())
+}
+
+pub(crate) fn resolved(tz: Option<Tz>) -> Zone {
+    tz.and_then(|z| Zone::parse(z.name()).ok())
+        .unwrap_or_else(Zone::system)
 }
 
 /// The local date `YYYY-MM-DD` of a Unix-millisecond timestamp in `tz`, or in the Hub's zone for `None`.
@@ -20,21 +26,14 @@ pub fn hour(ts_ms: i64, tz: Option<Tz>) -> String {
 }
 
 fn local(ts_ms: i64, tz: Option<Tz>, f: &str) -> String {
-    let Some(utc) = DateTime::from_timestamp_millis(ts_ms) else {
-        return String::new();
-    };
-    match tz {
-        Some(z) => z.from_utc_datetime(&utc.naive_utc()).format(f).to_string(),
-        None => utc.with_timezone(&Local).format(f).to_string(),
-    }
+    resolved(tz)
+        .local(ts_ms)
+        .map(|t| t.format(f).to_string())
+        .unwrap_or_default()
 }
 
 fn local_hour(ts_ms: i64, tz: Option<Tz>) -> Option<u32> {
-    let utc = DateTime::from_timestamp_millis(ts_ms)?;
-    Some(match tz {
-        Some(z) => z.from_utc_datetime(&utc.naive_utc()).hour(),
-        None => utc.with_timezone(&Local).hour(),
-    })
+    Some(resolved(tz).local(ts_ms).ok()?.hour())
 }
 
 /// Every UTC offset is a whole number of quarter hours, so local hours start on this grid from midnight.
@@ -66,6 +65,27 @@ pub fn hours(day: &str, tz: Option<Tz>) -> Option<Vec<(String, i64, i64)>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            let tz = Some(name.parse().unwrap());
+            assert_eq!(
+                day(ms, tz),
+                z.local(ms).unwrap().format("%Y-%m-%d").to_string()
+            );
+            assert_eq!(
+                crate::metrics::day_start(&day(ms, tz), tz),
+                Some(z.day(ms).unwrap().0)
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

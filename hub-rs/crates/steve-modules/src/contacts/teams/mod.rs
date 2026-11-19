@@ -9,7 +9,6 @@
 pub mod api;
 pub mod repo;
 
-use chrono::TimeZone;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -198,12 +197,8 @@ pub fn directory_note(s: &crate::contacts::sync::DirectoryState) -> Option<Strin
     }
 }
 
-fn local(ms: i64, fmt: &str) -> String {
-    chrono::Local
-        .timestamp_millis_opt(ms)
-        .single()
-        .map(|t| t.format(fmt).to_string())
-        .unwrap_or_default()
+fn local(ms: i64, fmt: &str, zone: crate::zone::Zone) -> String {
+    zone.format(ms, fmt)
 }
 
 fn sync_label(c: &Connection, ports: &Ports, ws: &str, conn: &str) -> ApiResult<String> {
@@ -222,7 +217,11 @@ fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiRes
             Some(t) => steve_i18n::t!(
                 "modules.teams.source.synced_at",
                 label = label,
-                at = local(t, "%m-%d %H:%M")
+                at = local(
+                    t,
+                    "%m-%d %H:%M",
+                    crate::zone::Zone::of_owner(c, &p.workspace_id)?
+                )
             ),
             None => label,
         });
@@ -236,7 +235,11 @@ fn source_label(c: &Connection, ports: &Ports, p: &Party, d: &Details) -> ApiRes
     Ok(steve_i18n::t!(
         "modules.teams.source.created_at",
         who = who,
-        at = local(p.created, "%m-%d")
+        at = local(
+            p.created,
+            "%m-%d",
+            crate::zone::Zone::of_owner(c, &p.workspace_id)?
+        )
     ))
 }
 

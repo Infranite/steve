@@ -7,6 +7,7 @@ description = "Calendars as data sources: the calendar.v1 profile, built-in ICS 
 
 [dependencies]
 steve-types = { path = "../steve-types" }
+steve-runtime = { path = "../steve-runtime" }
 steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
 steve-flow = { path = "../steve-flow" }

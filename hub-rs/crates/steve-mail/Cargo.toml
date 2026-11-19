@@ -10,6 +10,7 @@ description = "Email: accounts, sync, drafts and sending"
 fake = ["dep:rcgen"]
 
 [dependencies]
+steve-runtime = { path = "../steve-runtime" }
 steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }
 steve-knowledge = { path = "../steve-knowledge" }

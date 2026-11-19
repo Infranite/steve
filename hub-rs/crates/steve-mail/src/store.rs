@@ -8,7 +8,6 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use chrono::TimeZone;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -176,11 +175,9 @@ fn lookup(c: &Connection, ws: &str, addr: &str) -> MailResult<(Option<String>, O
     Ok((Some(acc), party))
 }
 
-fn local_day(ms: i64) -> String {
-    chrono::Local
-        .timestamp_millis_opt(ms)
-        .single()
-        .map(|d| d.format("%m-%d").to_string())
+fn local_day(ms: i64, zone: steve_runtime::tz::Zone) -> String {
+    zone.local(ms)
+        .map(|t| t.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }
 
@@ -196,7 +193,17 @@ impl StoreSink<'_> {
         let hints = Hints {
             display_name: (!a.name.is_empty()).then(|| a.name.clone()),
             signature_org: org.map(String::from),
-            source_label: Some(format!("邮件 · {}", local_day(date))),
+            source_label: Some(format!(
+                "邮件 · {}",
+                local_day(
+                    date,
+                    steve_runtime::tz::Zone::parse(
+                        steve_modules::zone::Zone::of(tx, &self.mailbox.ws, &self.mailbox.owner)?
+                            .name()
+                    )
+                    .expect("IANA zone")
+                )
+            )),
             ..Default::default()
         };
         match identify(
@@ -692,6 +699,22 @@ impl MailSink for OffloadSink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                local_day(ms, z),
+                z.local(ms).unwrap().format("%Y-%m-%d").to_string()
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

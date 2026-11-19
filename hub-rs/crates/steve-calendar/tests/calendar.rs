@@ -553,7 +553,7 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     )
     .unwrap();
     assert_eq!(titles(&out), ["Design review"]);
-    assert_eq!(out["range"]["tz"], "Asia/Taipei");
+    assert_eq!(out["range"]["tz"], steve_modules::zone::default_tz().name());
     let out: Value = serde_json::from_str(
         &tools::call(&h.cal, &cx, tools::SEARCH, &json!({"query": "design"}))
             .await

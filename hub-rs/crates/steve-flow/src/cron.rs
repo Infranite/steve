@@ -2,24 +2,21 @@
 //!
 //! We validate the syntax ourselves (so the error names the offending
 //! fragment and we only accept the subset the spec allows) and let `croner` walk the wall clock.
-//! The wall-clock result is then mapped to an instant with our own DST policy, because croner's
-//! policy depends on whether a pattern is "fixed time" and the spec wants one rule for all:
-//! a skipped local time runs at the first minute that exists after it, a repeated local time
-//! runs only on its first pass.
+//! The wall-clock result uses steve-runtime’s RFC 5545 gap/fold policy.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Duration, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
-use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 
 /// Workspace default (`SETTINGS.tz.def`).
 pub const DEFAULT_TZ: &str = steve_modules::zone::DEFAULT_TZ;
 
 /// Values offered by the `tz` setting (`SETTINGS.tz.values`). Tasks may still store any IANA name.
-pub const TZ_CHOICES: [&str; 7] = [
+pub const TZ_CHOICES: [&str; 8] = [
+    "system",
     "Asia/Taipei",
     "Asia/Shanghai",
     "Asia/Tokyo",
@@ -34,9 +31,6 @@ pub const MIN_INTERVAL_MS: i64 = 5 * 60 * 1000;
 
 /// How many upcoming runs the minimum-interval check looks at.
 const MIN_INTERVAL_WINDOW: usize = 20;
-
-/// Bound on wall-clock candidates skipped while resolving one next run (only DST folds skip any).
-const MAX_SKIPPED_CANDIDATES: usize = 10_000;
 
 /// Errors shown to the user as `400 <message>`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -53,6 +47,9 @@ pub enum CronError {
 
 /// Parses an IANA time zone name.
 pub fn parse_tz(name: &str) -> Result<Tz, CronError> {
+    if name.trim().is_empty() || name.trim() == "system" {
+        return Ok(steve_modules::zone::default_tz());
+    }
     name.trim()
         .parse::<Tz>()
         .map_err(|_| CronError::UnknownTz(name.to_string()))
@@ -123,7 +120,6 @@ const KINDS: [Kind; 5] = [Kind::Minute, Kind::Hour, Kind::Dom, Kind::Month, Kind
 pub struct CronExpr {
     expr: String,
     shapes: [Shape; 5],
-    cron: Cron,
 }
 
 impl PartialEq for CronExpr {
@@ -158,7 +154,7 @@ impl CronExpr {
         }
         let expr = canon.join(" ");
         // Vixie "or" semantics when both day fields are restricted, stated explicitly.
-        let cron = CronParser::builder()
+        let _ = CronParser::builder()
             .seconds(Seconds::Disallowed)
             .year(Year::Disallowed)
             .dom_and_dow(false)
@@ -168,7 +164,7 @@ impl CronExpr {
         let shapes: [Shape; 5] = shapes
             .try_into()
             .map_err(|_| CronError::Unsupported(trimmed.into()))?;
-        Ok(Self { expr, shapes, cron })
+        Ok(Self { expr, shapes })
     }
 
     /// The normalised expression, as stored in `flow_triggers.cron`.
@@ -178,19 +174,10 @@ impl CronExpr {
 
     /// First run strictly after `after`, computed on the wall clock of `tz`.
     pub fn next_after(&self, tz: Tz, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let mut wall = after.with_timezone(&tz).naive_local();
-        for _ in 0..MAX_SKIPPED_CANDIDATES {
-            let candidate = self.cron.find_next_occurrence(&wall, false).ok()?;
-            let at = resolve_wall(tz, candidate)?;
-            // Candidates that land at or before `after` are the second pass of a repeated hour
-            // (already run on the first pass) or extra minutes of a skipped hour collapsed onto
-            // the same instant: both run at most once.
-            if at > after {
-                return Some(at);
-            }
-            wall = candidate;
-        }
-        None
+        let zone = steve_runtime::tz::Zone::parse(tz.name()).ok()?;
+        steve_runtime::schedule::CronExpr::parse(&self.expr)
+            .ok()?
+            .next_after(&zone, after)
     }
 
     /// `next_after` in UTC milliseconds, the unit of `flow_triggers.next_at`.
@@ -269,26 +256,6 @@ pub fn validate(input: &str, tz: Tz, now: DateTime<Utc>) -> Result<CronExpr, Cro
     let expr = CronExpr::parse(input)?;
     expr.check_frequency(tz, now)?;
     Ok(expr)
-}
-
-/// Maps a local wall-clock time to the instant it runs at.
-fn resolve_wall(tz: Tz, wall: NaiveDateTime) -> Option<DateTime<Utc>> {
-    match tz.from_local_datetime(&wall) {
-        LocalResult::Single(t) => Some(t.with_timezone(&Utc)),
-        // Repeated hour: first pass only.
-        LocalResult::Ambiguous(first, _) => Some(first.with_timezone(&Utc)),
-        // Skipped hour: the first minute that exists after it. Real gaps are at most a few hours.
-        LocalResult::None => {
-            let mut probe = wall;
-            for _ in 0..(24 * 60) {
-                probe += Duration::minutes(1);
-                if let Some(t) = tz.from_local_datetime(&probe).earliest() {
-                    return Some(t.with_timezone(&Utc));
-                }
-            }
-            None
-        }
-    }
 }
 
 fn parse_field(raw: &str, kind: Kind) -> Result<(String, Shape), CronError> {
@@ -479,8 +446,28 @@ fn time_phrase(minute: &Shape, hour: &Shape, l: &str) -> Option<(String, bool)> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                CronExpr::parse(&wall.format("%M %H * * *").to_string())
+                    .unwrap()
+                    .next_after_ms(name.parse().unwrap(), ms - 1)
+                    .unwrap(),
+                ms
+            );
+        }
+    }
+
     use super::*;
     use chrono::NaiveDate;
+    use chrono::TimeZone;
 
     fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
@@ -491,7 +478,7 @@ mod tests {
     }
 
     fn taipei() -> Tz {
-        parse_tz(DEFAULT_TZ).unwrap()
+        parse_tz("Asia/Taipei").unwrap()
     }
 
     #[test]
@@ -659,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn dst_spring_forward_runs_once_at_the_first_existing_minute() {
+    fn dst_spring_forward_uses_the_pre_transition_offset() {
         // America/Los_Angeles 2027-03-14: 02:00 → 03:00.
         let la = parse_tz("America/Los_Angeles").unwrap();
         let e = CronExpr::parse("30 2 * * *").unwrap();
@@ -671,7 +658,7 @@ mod tests {
         assert_eq!(
             runs,
             [
-                "2027-03-14 03:00:00",
+                "2027-03-14 03:30:00",
                 "2027-03-15 02:30:00",
                 "2027-03-16 02:30:00"
             ]
@@ -683,8 +670,8 @@ mod tests {
             .into_iter()
             .map(|t| t.with_timezone(&la).naive_local().to_string())
             .collect();
-        assert_eq!(runs, ["2027-03-14 03:00:00", "2027-03-14 14:30:00"]);
-        // Every 15 minutes: the four skipped slots collapse onto one run at 03:00.
+        assert_eq!(runs, ["2027-03-14 03:30:00", "2027-03-14 14:30:00"]);
+        // Every 15 minutes: the gap slots retain their minute after the jump.
         let e = CronExpr::parse("*/15 * * * *").unwrap();
         let runs: Vec<_> = e
             .upcoming(la, local(la, 2027, 3, 14, 1, 40).with_timezone(&Utc), 3)

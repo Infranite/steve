@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -29,21 +29,23 @@ pub fn user_tz(c: &Connection, ws: &str, user: &str) -> ApiResult<Tz> {
     }
     let w = steve_flow::schedules::workspace_tz(c, ws)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(ics::zone(&w).unwrap_or(Tz::UTC))
+    Ok(ics::zone(&w).unwrap_or_else(steve_modules::zone::default_tz))
 }
 
 /// `ms` as local `YYYY-MM-DD HH:MM` in `tz`.
 pub fn local(ms: i64, tz: Tz) -> String {
-    tz.timestamp_millis_opt(ms)
-        .earliest()
+    steve_runtime::tz::Zone::parse(tz.name())
+        .ok()
+        .and_then(|z| z.local(ms).ok())
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
 }
 
 fn local_date(ms: i64, tz: Tz) -> NaiveDate {
-    tz.timestamp_millis_opt(ms)
-        .earliest()
-        .map(|d| d.date_naive())
+    steve_runtime::tz::Zone::parse(tz.name())
+        .ok()
+        .and_then(|z| z.local(ms).ok())
+        .map(|d| d.date())
         .unwrap_or_default()
 }
 
@@ -555,6 +557,26 @@ pub fn find_time(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                parse_time(text, name.parse().unwrap(), ms, false).unwrap(),
+                ms
+            );
+            assert_eq!(
+                local(ms, name.parse().unwrap()),
+                z.local(ms).unwrap().format("%Y-%m-%d %H:%M").to_string()
+            );
+        }
+    }
+
     use super::*;
 
     const TZ: Tz = chrono_tz::Asia::Shanghai;

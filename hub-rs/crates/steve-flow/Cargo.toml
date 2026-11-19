@@ -7,6 +7,7 @@ description = "Signals, automation flows and schedules"
 
 [dependencies]
 steve-types = { path = "../steve-types" }
+steve-runtime = { path = "../steve-runtime" }
 steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }
 # Work's published facts: `work.item.done` starts item-triggered flows (outbox consumer).

@@ -5,7 +5,7 @@
 //! `timeout_label` edge.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
@@ -113,9 +113,10 @@ pub fn parse_until(v: &Value, now: i64, tz: Tz) -> Option<i64> {
         }
         Some(_) => return None,
     };
-    tz.from_local_datetime(&date.and_time(t))
-        .earliest()
-        .map(|d| d.timestamp_millis())
+    steve_runtime::tz::Zone::parse(tz.name())
+        .ok()?
+        .instant(date.and_time(t))
+        .ok()
 }
 
 fn check_until(v: &Value) -> bool {
@@ -257,6 +258,7 @@ pub fn pass_label(g: &crate::graph::Graph, node: &crate::graph::Node) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn durations() {
