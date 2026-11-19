@@ -11,16 +11,15 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
         tools: built.tools.clone(),
         library: built.library.clone(),
     };
-    // connections to the library's MCP servers that no call used for a while close
+    // Periodic cleanup is an every callback, so each pass has its own run/duration metrics.
     {
         let library = built.library.clone();
-        jobs.push(Job::new("library.sweep", async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                tick.tick().await;
+        let clock = built.modules.clock.clone();
+        jobs.push(Job::task("library.sweep", move || {
+            steve_runtime::every("library.sweep", clock, std::time::Duration::from_secs(60), steve_runtime::FirstRun::Immediate, move || {
                 let library = library.clone();
-                let _ = tokio::task::spawn_blocking(move || library.sweep()).await;
-            }
+                async move { let _ = tokio::task::spawn_blocking(move || library.sweep()).await; }
+            })
         }));
     }
     let tool_service = Arc::new(tool_service::ToolService {

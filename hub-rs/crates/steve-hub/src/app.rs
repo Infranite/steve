@@ -524,14 +524,7 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     });
     // recover() reports a finished release first, as in TS
     boot_step("recover", st.domain.recover().await)?;
-    if !st.domain.spawn_background() {
-        st.jobs.start("hub.release", || {
-            crate::jobs::spawn_release_watcher(st.clone(), st.cfg.release_file())
-        });
-        st.jobs.start("hub.housekeeping", || {
-            crate::jobs::spawn_housekeeping(st.clone())
-        });
-    }
+    st.domain.spawn_background();
     // closings waiting for something the turn-end callback may never report (queued turns, the hold)
     st.jobs.start("hub.lifecycle", || {
         crate::jobs::spawn_lifecycle_tick(st.clone())

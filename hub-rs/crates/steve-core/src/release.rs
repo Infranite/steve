@@ -139,38 +139,44 @@ impl Core {
         t.report_rollback()
     }
 
-    /// Poll `releases/last.json` every 3 s and report when it changes (`fs.watchFile`). Runs forever.
-    pub async fn watch_releases(self) {
-        let f = self.config().releases_last();
+    /// The canonical release watcher: metadata changes and pending scripts, every three seconds.
+    pub fn watch_releases(
+        self,
+        clock: std::sync::Arc<dyn steve_runtime::Clock>,
+    ) -> steve_runtime::Task {
         fn one(f: &Path) -> Option<SystemTime> {
             std::fs::metadata(f).and_then(|m| m.modified()).ok()
         }
         fn stamp(f: &Path) -> (Option<SystemTime>, Option<SystemTime>) {
             (one(f), one(&f.with_file_name("rollback.json")))
         }
-        let mut last: (Option<SystemTime>, Option<SystemTime>) = stamp(&f);
-        let mut tick = tokio::time::interval(Duration::from_secs(3));
-        loop {
-            tick.tick().await;
-            /* the files are read and the result reported (the core's lock, the store) off the runtime's
-             * workers */
-            let (c, f, seen) = (self.clone(), f.clone(), last);
-            let looked = tokio::task::spawn_blocking(move || {
-                let cur = stamp(&f);
-                /* a pending result is looked at again on every tick: its script may die without touching the file */
-                if (cur != seen || pending(&f))
-                    && let Err(e) = c.report_release()
-                {
-                    tracing::error!("report release {e}");
+        let file = self.config().releases_last();
+        let last = std::sync::Arc::new(std::sync::Mutex::new(None));
+        steve_runtime::every(
+            "core.releases",
+            clock,
+            Duration::from_secs(3),
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let (c, file, last) = (self.clone(), file.clone(), last.clone());
+                async move {
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        let cur = stamp(&file);
+                        let seen = last.lock().unwrap_or_else(|e| e.into_inner()).replace(cur);
+                        // An unfinished script may exit without changing its result file.
+                        if (seen.is_some_and(|seen| seen != cur) || pending(&file))
+                            && let Err(e) = c.report_release()
+                        {
+                            tracing::error!("report release {e}");
+                        }
+                    })
+                    .await
+                    {
+                        tracing::error!("report release task {e}");
+                    }
                 }
-                cur
-            })
-            .await;
-            match looked {
-                Ok(cur) => last = cur,
-                Err(e) => tracing::error!("report release task {e}"),
-            }
-        }
+            },
+        )
     }
 }
 

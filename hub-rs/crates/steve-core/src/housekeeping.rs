@@ -100,19 +100,27 @@ impl Core {
         Ok(compact)
     }
 
-    /// At boot, then every hour. Runs forever.
-    pub async fn run_housekeeping(self) {
-        let mut tick = tokio::time::interval(Duration::from_secs(3600));
-        loop {
-            tick.tick().await;
-            /* it waits on the core's lock and writes the store: off the runtime's workers */
-            let c = self.clone();
-            match tokio::task::spawn_blocking(move || c.housekeeping()).await {
-                Ok(Err(e)) => tracing::error!("housekeeping {e}"),
-                Err(e) => tracing::error!("housekeeping task {e}"),
-                Ok(Ok(())) => {}
-            }
-        }
+    /// At boot, then hourly; the owner cancels the returned task.
+    pub fn run_housekeeping(
+        self,
+        clock: std::sync::Arc<dyn steve_runtime::Clock>,
+    ) -> steve_runtime::Task {
+        steve_runtime::every(
+            "core.housekeeping",
+            clock,
+            Duration::from_secs(3600),
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let c = self.clone();
+                async move {
+                    match tokio::task::spawn_blocking(move || c.housekeeping()).await {
+                        Ok(Err(e)) => tracing::error!("housekeeping {e}"),
+                        Err(e) => tracing::error!("housekeeping task {e}"),
+                        Ok(Ok(())) => {}
+                    }
+                }
+            },
+        )
     }
 }
 

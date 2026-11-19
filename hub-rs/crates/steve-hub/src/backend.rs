@@ -734,10 +734,8 @@ pub trait Domain: Send + Sync + 'static {
     fn background_tasks(&self) -> Option<std::sync::Arc<crate::jobs::Tasks>> {
         None
     }
-    /// Starts domain jobs; false asks the Hub to run its fallback release/housekeeping jobs.
-    fn spawn_background(&self) -> bool {
-        false
-    }
+    /// Starts the domain's maintenance jobs, when this domain provides them.
+    fn spawn_background(&self) {}
 
     // ── items ──
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {

@@ -1459,12 +1459,16 @@ impl Domain for CoreDomain {
     fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
         Some(self.jobs.clone())
     }
-    fn spawn_background(&self) -> bool {
+    fn spawn_background(&self) {
         self.jobs.start("core.releases", || {
-            steve_runtime::spawn("core.releases", self.core.clone().watch_releases())
+            self.core
+                .clone()
+                .watch_releases(Arc::new(steve_runtime::SystemClock))
         });
         self.jobs.start("core.housekeeping", || {
-            steve_runtime::spawn("core.housekeeping", self.core.clone().run_housekeeping())
+            self.core
+                .clone()
+                .run_housekeeping(Arc::new(steve_runtime::SystemClock))
         });
         self.jobs.start("core.workspaces", || {
             steve_runtime::spawn("core.workspaces", self.core.clone().run_workspace_watch())
@@ -1481,7 +1485,6 @@ impl Domain for CoreDomain {
         self.jobs.start("core.backfill", || {
             steve_runtime::spawn("core.backfill", self.core.clone().backfill_kinds_all())
         });
-        true
     }
 
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
