@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -709,6 +709,23 @@ pub(crate) fn usage() -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn changed_client_origin_is_visible_without_waiting_for_ttl() {
+        let cache = origins();
+        let key = "https://origin-cache.example.test".to_string();
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(false) })
+            .await
+            .unwrap();
+        forget_origin(&key);
+        assert!(
+            *cache
+                .get_or_load(key, || async { Ok::<_, ()>(true) })
+                .await
+                .unwrap()
+        );
+    }
+
     use super::*;
 
     fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
@@ -999,7 +1016,17 @@ fn open_path(path: &str) -> bool {
 
 /// How long whether an origin may call is remembered.
 const ORIGIN_TTL: Duration = Duration::from_secs(30);
-static ORIGINS: LazyLock<Mutex<HashMap<String, (Instant, bool)>>> = LazyLock::new(Default::default);
+static ORIGIN_SPACE: steve_runtime::cache::CacheSpace<String, bool> =
+    steve_runtime::cache::CacheSpace {
+        name: "origins",
+        ttl: ORIGIN_TTL,
+        share_pct: 2,
+        tags: |_| vec![steve_runtime::cache::Tag::global("hub")],
+        weigh: |_| 1,
+    };
+fn origins() -> steve_runtime::cache::Cached<String, bool> {
+    steve_runtime::cache::Caches::process().space(&ORIGIN_SPACE)
+}
 
 /// Whether a page on `origin` may call this Hub with its credentials: one of `STEVE_CLIENT_ORIGINS`,
 /// or the origin a live web client signed in from.
@@ -1007,36 +1034,28 @@ async fn origin_allowed(st: &AppState, origin: &str) -> bool {
     if st.cfg.client_origins.iter().any(|o| o == origin) {
         return true;
     }
-    if let Some((at, ok)) = ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(origin)
-        .copied()
-        && at.elapsed() < ORIGIN_TTL
-    {
-        return ok;
-    }
     let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) else {
         return false;
     };
     let o = origin.to_string();
-    let ok =
-        tokio::task::spawn_blocking(move || store.access().origin_signed_in(&o).unwrap_or(false))
+    *origins()
+        .get_or_load(o.clone(), || async move {
+            tokio::task::spawn_blocking(move || {
+                store
+                    .access()
+                    .origin_signed_in(&o)
+                    .map_err(|e| e.to_string())
+            })
             .await
-            .unwrap_or(false);
-    ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(origin.to_string(), (Instant::now(), ok));
-    ok
+            .map_err(|e| e.to_string())?
+        })
+        .await
+        .unwrap_or_else(|_| Arc::new(false))
 }
 
-/// Forgets what was decided about `origin` (a client signed in or out from it).
-fn forget_origin(origin: &str) {
-    ORIGINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(origin);
+/// A successful login/logout is visible before the next CORS decision, including in-flight reads.
+fn forget_origin(_origin: &str) {
+    steve_runtime::cache::Caches::process().invalidate(&[steve_runtime::cache::Tag::global("hub")]);
 }
 
 /// Cross-origin calls (A3): a web client served apart from the Hub calls it with its credentials.
@@ -1304,7 +1323,7 @@ pub async fn token_revoke(
     }
     let uid = c.me.clone();
     drop_pending_pairings(|p| p.user_id == uid && p.token_id.as_deref() == Some(id.as_str()));
-    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    forget_origin("");
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
@@ -1347,7 +1366,7 @@ pub async fn client_revoke(
     drop_pending_pairings(|p| {
         p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
     });
-    ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    forget_origin("");
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 

@@ -33,7 +33,7 @@ pub struct Report {
 #[derive(Default)]
 struct Observation {
     report: Report,
-    attempted: Option<Instant>,
+    published: Option<Instant>,
     generation: Option<u64>,
     fresh: bool,
 }
@@ -41,7 +41,6 @@ struct Observation {
 #[derive(Default)]
 struct Entry {
     value: Mutex<Observation>,
-    probing: tokio::sync::Mutex<()>,
 }
 
 struct Refreshing(Arc<Entry>);
@@ -51,8 +50,35 @@ impl Drop for Refreshing {
     }
 }
 
-#[derive(Default)]
-pub struct Inventory(Mutex<BTreeMap<String, Arc<Entry>>>);
+pub struct Inventory {
+    entries: Mutex<BTreeMap<String, Arc<Entry>>>,
+    cache: steve_runtime::cache::Cached<String, ProbedReport>,
+}
+#[derive(Clone)]
+struct ProbedReport {
+    report: Report,
+    generation: Option<u64>,
+    completed: Instant,
+    fresh: bool,
+}
+static INVENTORY_SPACE: steve_runtime::cache::CacheSpace<String, ProbedReport> =
+    steve_runtime::cache::CacheSpace {
+        name: "node-harnesses",
+        ttl: MAX_AGE,
+        share_pct: 10,
+        tags: |id| vec![steve_runtime::cache::Tag::of("node", id)],
+        weigh: |v| {
+            serde_json::to_vec(&v.report).map_or(1, |b| b.len().min(u32::MAX as usize) as u32)
+        },
+    };
+impl Default for Inventory {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::default(),
+            cache: steve_runtime::cache::Caches::process().space(&INVENTORY_SPACE),
+        }
+    }
+}
 
 struct Target {
     id: String,
@@ -110,7 +136,12 @@ fn harness(c: HarnessCapability) -> Value {
 
 impl Inventory {
     fn entry(&self, id: &str) -> Arc<Entry> {
-        self.0.lock().unwrap().entry(id.into()).or_default().clone()
+        self.entries
+            .lock()
+            .unwrap()
+            .entry(id.into())
+            .or_default()
+            .clone()
     }
 
     fn view(&self, t: &Target) -> Report {
@@ -122,11 +153,11 @@ impl Inventory {
         r.stale = r.checked_at.is_some()
             && (!linked
                 || v.generation != generation
-                || v.attempted.is_none_or(|at| at.elapsed() >= MAX_AGE)
+                || (self.cache.enabled() && self.cache.peek(&t.id).is_none())
                 || r.state != "reported");
         if !linked {
             r.state = "offline";
-        } else if v.generation != generation || v.attempted.is_none() {
+        } else if v.generation != generation || v.report.attempted_at.is_none() {
             r.state = "unreported";
         }
         r
@@ -136,54 +167,84 @@ impl Inventory {
         let Some(node) = &t.node else { return };
         let requested = Instant::now();
         let e = self.entry(&t.id);
-        let _single = e.probing.lock().await;
-        {
-            let mut v = e.value.lock().unwrap();
-            if !t.current()
-                || (v.generation == t.generation
-                    && v.attempted.is_some_and(|at| {
-                        (at >= requested && (!fresh || v.fresh))
-                            || (!fresh && at.elapsed() < MAX_AGE)
-                    }))
+        loop {
+            let result = self
+                .cache
+                .get_or_load_if(
+                    t.id.clone(),
+                    || async {
+                        if !t.current() {
+                            return Err(());
+                        }
+                        e.value.lock().unwrap().report.refreshing = true;
+                        let _refreshing = Refreshing(e.clone());
+                        let result = tokio::time::timeout(PROBE_TIMEOUT, node.probe(fresh)).await;
+                        let mut v = e.value.lock().unwrap();
+                        // A reconnect while a call is held must not certify the new connection.
+                        if !t.current() {
+                            return Err(());
+                        }
+                        v.generation = t.generation;
+                        v.fresh = fresh;
+                        let now = steve_store::now();
+                        v.report.attempted_at = Some(now);
+                        let (state, error) = match result {
+                            Ok(Ok(c)) if c.node.as_str() == t.id => {
+                                v.report.checked_at = Some(now);
+                                v.report.harnesses = c.harnesses.into_iter().map(harness).collect();
+                                ("reported", None)
+                            }
+                            Ok(Ok(_)) => (
+                                "failed",
+                                Some("probe returned a different Node identity".into()),
+                            ),
+                            Ok(Err(e)) => (
+                                if e.code == ErrorCode::Unsupported {
+                                    "unsupported"
+                                } else {
+                                    "failed"
+                                },
+                                Some(e.safe_detail),
+                            ),
+                            Err(_) => ("failed", Some("Node harness probe timed out".into())),
+                        };
+                        v.report.state = state;
+                        v.report.error = error;
+                        let completed = Instant::now();
+                        v.published = Some(completed);
+                        let mut report = v.report.clone();
+                        report.refreshing = false;
+                        Ok(ProbedReport {
+                            report,
+                            generation: t.generation,
+                            completed,
+                            fresh,
+                        })
+                    },
+                    |v| {
+                        v.generation == t.generation
+                            && (!fresh || (v.fresh && v.completed >= requested))
+                    },
+                )
+                .await;
+            if result.is_err() && t.current() {
+                continue;
+            }
+            if let Ok(result) = result
+                && t.current()
             {
-                return;
+                let mut v = e.value.lock().unwrap();
+                if v.published.is_none_or(|at| at < result.completed) {
+                    let refreshing = v.report.refreshing;
+                    v.report = result.report.clone();
+                    v.report.refreshing = refreshing;
+                    v.published = Some(result.completed);
+                    v.generation = result.generation;
+                    v.fresh = result.fresh;
+                }
             }
-            v.report.refreshing = true;
+            break;
         }
-        let _refreshing = Refreshing(e.clone());
-        let result = tokio::time::timeout(PROBE_TIMEOUT, node.probe(fresh)).await;
-        let mut v = e.value.lock().unwrap();
-        // A reconnect while a call is held must not certify the new connection.
-        if !t.current() {
-            return;
-        }
-        v.generation = t.generation;
-        v.attempted = Some(Instant::now());
-        v.fresh = fresh;
-        let now = steve_store::now();
-        v.report.attempted_at = Some(now);
-        let (state, error) = match result {
-            Ok(Ok(c)) if c.node.as_str() == t.id => {
-                v.report.checked_at = Some(now);
-                v.report.harnesses = c.harnesses.into_iter().map(harness).collect();
-                ("reported", None)
-            }
-            Ok(Ok(_)) => (
-                "failed",
-                Some("probe returned a different Node identity".into()),
-            ),
-            Ok(Err(e)) => (
-                if e.code == ErrorCode::Unsupported {
-                    "unsupported"
-                } else {
-                    "failed"
-                },
-                Some(e.safe_detail),
-            ),
-            Err(_) => ("failed", Some("Node harness probe timed out".into())),
-        };
-        v.report.state = state;
-        v.report.error = error;
     }
 }
 
@@ -246,8 +307,7 @@ pub async fn list(State(st): State<AppState>, caller: Caller) -> Result<Json<Val
             let v = e.value.lock().unwrap();
             t.node.is_some()
                 && !v.report.refreshing
-                && (v.generation != t.generation
-                    || v.attempted.is_none_or(|at| at.elapsed() >= MAX_AGE))
+                && (v.generation != t.generation || st.node_harnesses.cache.peek(&t.id).is_none())
         };
         nodes.insert(t.id.clone(), st.node_harnesses.view(&t));
         if due {
@@ -294,4 +354,40 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     Router::new()
         .route("/node-harnesses", get(node_harnesses::list))
         .route("/node-harnesses/{id}", get(node_harnesses::get))
+}
+
+#[cfg(test)]
+mod cache_contract {
+    use super::*;
+    #[tokio::test]
+    async fn changed_node_dependency_invalidates_the_report_immediately() {
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        let cache = caches.space(&INVENTORY_SPACE);
+        let key = "local".to_string();
+        let first = ProbedReport {
+            report: Report::default(),
+            generation: Some(1),
+            completed: Instant::now(),
+            fresh: false,
+        };
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(first) })
+            .await
+            .unwrap();
+        caches.invalidate(&[steve_runtime::cache::Tag::of("node", &key)]);
+        let next = ProbedReport {
+            report: Report::default(),
+            generation: Some(2),
+            completed: Instant::now(),
+            fresh: true,
+        };
+        assert_eq!(
+            cache
+                .get_or_load(key, || async { Ok::<_, ()>(next) })
+                .await
+                .unwrap()
+                .generation,
+            Some(2)
+        );
+    }
 }

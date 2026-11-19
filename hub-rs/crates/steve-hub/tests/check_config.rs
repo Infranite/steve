@@ -237,3 +237,21 @@ fn unknown_arguments_are_refused_before_a_hub_starts() {
         );
     }
 }
+
+#[test]
+fn cache_backend_and_budget_are_validated_by_the_binary() {
+    for (backend, budget, expected) in [
+        ("memory", "256", 0),
+        ("off", "1", 0),
+        ("redis://cache.example.test", "256", 2),
+        ("plugin:cache", "256", 2),
+        ("other", "256", 2),
+        ("memory", "0", 2),
+        ("memory", "bad", 2),
+    ] {
+        let (code, report, tmp) =
+            check(&[("STEVE_CACHE", backend), ("STEVE_CACHE_MEMORY_MB", budget)]);
+        assert_eq!(code, expected, "{report}");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+}

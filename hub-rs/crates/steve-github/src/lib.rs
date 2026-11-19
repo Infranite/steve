@@ -220,7 +220,7 @@ impl GitHub {
             queue: Default::default(),
             limiter,
             secrets: Default::default(),
-            available: Default::default(),
+            available: repos::available_cache(),
             core: RwLock::new(Arc::new(NoCore)),
             flow: RwLock::new(None),
             effect_wake: Default::default(),

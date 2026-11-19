@@ -56,9 +56,10 @@ const CURRENT: &[(&str, bool, Counter)] = &[
 fn counts(bus: &Bus) -> (u64, u64, u64, u64) {
     (
         bus.generation(),
-        bus.generation_for("a"),
-        bus.generation_for("b"),
-        bus.stats_generation(),
+        state_generation(bus, "a"),
+        state_generation(bus, "b"),
+        bus.caches()
+            .generation(&steve_runtime::cache::Tag::global("stats-events")),
     )
 }
 
@@ -140,9 +141,14 @@ fn s1_stateless_events_never_invalidate_state() {
     for ty in ["event", "steve.draft", "steve.tool", "stats", "client"] {
         let bus = Bus::new();
         bus.publish(typed(ty, "a"));
-        assert_eq!(bus.generation_for("a"), 0, "{ty}");
-        assert_eq!(bus.generation_for("b"), 0, "{ty}");
-        assert_eq!(bus.stats_generation(), u64::from(ty == "stats"), "{ty}");
+        assert_eq!(state_generation(&bus, "a"), 0, "{ty}");
+        assert_eq!(state_generation(&bus, "b"), 0, "{ty}");
+        assert_eq!(
+            bus.caches()
+                .generation(&steve_runtime::cache::Tag::global("stats-events")),
+            u64::from(ty == "stats"),
+            "{ty}"
+        );
     }
 }
 
@@ -152,6 +158,10 @@ fn an_event_without_a_workspace_never_invalidates_a_state_cache() {
         let bus = Bus::new();
         bus.publish(typed(ty, ""));
         assert_eq!(counts(&bus), (1, 0, 0, 0), "{ty}");
-        assert_eq!(bus.generation_for(""), 0, "{ty}");
+        assert_eq!(state_generation(&bus, ""), 0, "{ty}");
     }
+}
+
+fn state_generation(bus: &Bus, ws: &str) -> u64 {
+    bus.caches().generation(&steve_runtime::cache::Tag::of("state", ws))
 }

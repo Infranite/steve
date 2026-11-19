@@ -3,8 +3,6 @@
 //! on a connection ([`GhConn`]) one re-mint after a 401 before handing over to the connection's
 //! health (`reauth`). No octocrab: the dozen endpoints Steve uses are plain JSON.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::Method;
@@ -289,37 +287,42 @@ pub fn api_base_or<'a>(cx: &'a ConnCx, fallback: &'a str) -> &'a str {
 
 /// Cached bodies of conditional reads, per connection and path. Bounded; when full it starts over
 /// (a cold entry only costs one counted request).
-#[derive(Clone, Default)]
-pub struct EtagCache(Arc<Mutex<EtagMap>>);
-
-/// (connection, path) → (etag, body).
-type EtagMap = HashMap<(String, String), (String, Value)>;
-
-const ETAG_CACHE_MAX: usize = 2048;
-
+#[derive(Clone)]
+pub struct EtagCache(steve_runtime::cache::Cached<(String, String), (String, Value)>);
+static ETAG_SPACE: steve_runtime::cache::CacheSpace<(String, String), (String, Value)> =
+    steve_runtime::cache::CacheSpace {
+        name: "github-etags",
+        ttl: Duration::MAX,
+        share_pct: 5,
+        tags: |(id, _)| vec![steve_runtime::cache::Tag::of("connection", id)],
+        weigh: |(e, v)| (e.len() + v.to_string().len()).min(u32::MAX as usize) as u32,
+    };
+impl Default for EtagCache {
+    fn default() -> Self {
+        Self(steve_runtime::cache::Caches::process().space(&ETAG_SPACE))
+    }
+}
 impl EtagCache {
-    fn lock(&self) -> std::sync::MutexGuard<'_, EtagMap> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    async fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
+        self.0
+            .read(&(conn.into(), path.into()))
+            .await
+            .map(|v| v.as_ref().clone())
     }
-    fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
-        self.lock().get(&(conn.into(), path.into())).cloned()
+    async fn put(&self, conn: &str, path: &str, etag: String, body: Value, version: Vec<u64>) {
+        self.0
+            .put_if_current((conn.into(), path.into()), (etag, body), version)
+            .await;
     }
-    fn put(&self, conn: &str, path: &str, etag: String, body: Value) {
-        let mut m = self.lock();
-        if m.len() >= ETAG_CACHE_MAX {
-            m.clear();
-        }
-        m.insert((conn.into(), path.into()), (etag, body));
-    }
-    /// Drops a connection's entries (disconnect, new credential).
+    /// Credential changes revoke both lists and conditional bodies synchronously.
     pub fn forget(&self, conn: &str) {
-        self.lock().retain(|(c, _), _| c != conn);
+        self.0.invalidate(&(conn.into(), String::new()));
     }
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.0.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
     }
 }
 
@@ -403,7 +406,11 @@ impl GhConn {
 
     /// A read through the ETag cache: the cached body when GitHub answers 304.
     pub async fn get(&self, path: &str) -> Result<Value, GhError> {
-        let cached = self.etags.get(self.cx.id(), path);
+        let version = self
+            .etags
+            .0
+            .version(&(self.cx.id().to_owned(), path.to_owned()));
+        let cached = self.etags.get(self.cx.id(), path).await;
         let r = self
             .send(
                 Method::GET,
@@ -420,7 +427,9 @@ impl GhConn {
         if let Some(e) = r.etag
             && !r.body.is_null()
         {
-            self.etags.put(self.cx.id(), path, e, r.body.clone());
+            self.etags
+                .put(self.cx.id(), path, e, r.body.clone(), version)
+                .await;
         }
         Ok(r.body)
     }

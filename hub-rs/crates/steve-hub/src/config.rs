@@ -254,6 +254,8 @@ pub struct Models {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub home: PathBuf,
+    pub cache: steve_runtime::cache::CacheConfig,
+    pub caches: steve_runtime::cache::Caches,
     pub data_dir: PathBuf,
     pub worktrees: PathBuf,
     pub scratch: PathBuf,
@@ -498,7 +500,8 @@ fn validate_url(var: &'static str, value: &str) -> Result<(), ConfigError> {
 impl Config {
     /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let cfg = Self::from_vars(|k| std::env::var(k).ok())?;
+        let mut cfg = Self::from_vars(|k| std::env::var(k).ok())?;
+        cfg.caches = steve_runtime::cache::Caches::configure_process(cfg.cache);
         for d in [
             &cfg.data_dir,
             &cfg.worktrees,
@@ -691,7 +694,41 @@ impl Config {
             }
         })?;
 
+        let cache_mode = match get("STEVE_CACHE").as_deref() {
+            None | Some("memory") => steve_runtime::cache::CacheMode::Memory,
+            Some("off") => steve_runtime::cache::CacheMode::Off,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "STEVE_CACHE",
+                    msg: "this version does not support this backend; expected memory or off"
+                        .into(),
+                });
+            }
+        };
+        let memory_mb = get("STEVE_CACHE_MEMORY_MB")
+            .map(|s| s.parse::<u32>())
+            .transpose()
+            .map_err(|_| ConfigError::Invalid {
+                var: "STEVE_CACHE_MEMORY_MB",
+                msg: "expected a positive integer".into(),
+            })?
+            .unwrap_or(256);
+        if memory_mb == 0 {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_CACHE_MEMORY_MB",
+                msg: "expected a positive integer".into(),
+            });
+        }
+        let cache = steve_runtime::cache::CacheConfig {
+            mode: cache_mode,
+            memory_mb,
+        };
         Ok(Config {
+            caches: steve_runtime::cache::Caches::new(cache),
+            cache: steve_runtime::cache::CacheConfig {
+                mode: cache_mode,
+                memory_mb,
+            },
             data_dir: home.join("data"),
             worktrees: home.join("worktrees"),
             scratch: home.join("scratch"),

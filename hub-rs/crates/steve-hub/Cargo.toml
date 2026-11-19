@@ -13,7 +13,7 @@ name = "steve-hub"
 path = "src/main.rs"
 
 [dependencies]
-steve-runtime = { path = "../steve-runtime", features = ["jobs"] }
+steve-runtime = { path = "../steve-runtime", features = ["jobs", "cache"] }
 steve-types = { path = "../steve-types" }
 markdown = "=1.0.0"
 steve-install = { path = "../steve-install" }

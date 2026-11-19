@@ -74,6 +74,7 @@ pub const TAP_OVERFLOW_MAX: usize = 512;
 
 const TAP_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const TAP_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
 const WS_GENERATION_MAX: usize = 10_000;
 
 /// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
@@ -292,10 +293,7 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
 }
 
 struct Inner {
-    generation: AtomicU64,
-    global_generation: AtomicU64,
-    ws_generations: Mutex<HashMap<String, u64>>,
-    stats_generation: AtomicU64,
+    caches: std::sync::OnceLock<steve_runtime::cache::Caches>,
     tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Delivery>>,
@@ -318,6 +316,7 @@ impl Bus {
     pub fn new() -> Self {
         Self::with_window(RING_FRAMES, RING_BYTES)
     }
+
     pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let out = broadcast::channel(Self::CAPACITY).0;
@@ -335,10 +334,7 @@ impl Bus {
             tracing::error!("bus dispatcher: {e}");
         }
         Self(Arc::new(Inner {
-            generation: AtomicU64::new(0),
-            global_generation: AtomicU64::new(0),
-            ws_generations: Mutex::new(HashMap::new()),
-            stats_generation: AtomicU64::new(0),
+            caches: std::sync::OnceLock::new(),
             tx,
             revision: Mutex::new(0),
             out,
@@ -372,77 +368,25 @@ impl Bus {
             *revision += 1;
         }
         for event in events {
-            let stateless = matches!(
-                &event,
-                BusEvent::Domain(
-                    DomainEvent::Stats(_)
-                        | DomainEvent::Devices(steve_types::DevicesEvent::Client { .. })
-                ) | BusEvent::Live(LiveEvent::Work(
-                    steve_types::WorkLiveEvent::Event { .. }
-                        | steve_types::WorkLiveEvent::SteveDraft { .. }
-                        | steve_types::WorkLiveEvent::SteveTool { .. }
-                ))
-            );
-            if !stateless {
-                self.0.generation.fetch_add(1, Ordering::SeqCst);
-                match event.scope() {
-                    // No workspace: no state cache can hold it, so none is invalidated.
-                    Scope::Ws(ws) if ws.as_str().is_empty() => {}
-                    Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
-                    Scope::Hub | Scope::User(_) => {
-                        self.0.global_generation.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-            }
-            if matches!(&event, BusEvent::Domain(DomainEvent::Stats(_))) {
-                self.0.stats_generation.fetch_add(1, Ordering::SeqCst);
-            }
+            self.caches().invalidate(&crate::cache_tags::tags(&event));
             let _ = self.0.tx.send(Arc::new(Envelope {
                 event,
                 rev: Rev(*revision),
             }));
         }
     }
-    fn invalidate_workspace(&self, ws: &str) {
-        let mut map = self
-            .0
-            .ws_generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(g) = map.get_mut(ws) {
-            *g = g.wrapping_add(1);
-        } else {
-            if map.len() >= WS_GENERATION_MAX {
-                let max = map.values().copied().max().unwrap_or(0);
-                self.0.global_generation.fetch_add(max, Ordering::SeqCst);
-                map.clear();
-            }
-            map.insert(ws.into(), 1);
-        }
-    }
-    /// How many events were published so far.
-    pub fn generation(&self) -> u64 {
-        self.0.generation.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// State generation visible to `ws`: bumped by global state changes and changes scoped to `ws`,
-    /// while leaving other workspaces untouched.
-    pub fn generation_for(&self, ws: &str) -> u64 {
-        let map = self
-            .0
-            .ws_generations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let ws_gen = map.get(ws).copied().unwrap_or(0);
-        let global = self.0.global_generation.load(Ordering::SeqCst);
-        global.wrapping_add(ws_gen)
-    }
-
-    /// How many `stats` events were published so far (before coalescing).
-    pub fn stats_generation(&self) -> u64 {
+    pub fn caches(&self) -> &steve_runtime::cache::Caches {
         self.0
-            .stats_generation
-            .load(std::sync::atomic::Ordering::SeqCst)
+            .caches
+            .get_or_init(|| steve_runtime::cache::Caches::new(Default::default()))
+    }
+    pub fn use_caches(&self, caches: steve_runtime::cache::Caches) {
+        let _ = self.0.caches.set(caches);
+    }
+    /// Published state events, independent of dispatcher coalescing.
+    pub fn generation(&self) -> u64 {
+        self.caches()
+            .generation(&steve_runtime::cache::Tag::global("state-events"))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Delivery>> {
@@ -622,6 +566,11 @@ impl StatsThrottle {
 
 #[cfg(test)]
 mod tests {
+    fn state_generation(bus: &super::Bus, ws: &str) -> u64 {
+        bus.caches()
+            .generation(&steve_runtime::cache::Tag::of("state", ws))
+    }
+
     use super::*;
     use serde_json::Value;
     use std::time::Duration;
@@ -740,24 +689,30 @@ mod tests {
     fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
         let bus = Bus::new();
         bus.publish(item("a", "a"));
-        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (1, 0));
+        assert_eq!(
+            (state_generation(&bus, "a"), state_generation(&bus, "b")),
+            (1, 0)
+        );
         bus.publish(item("b", "b"));
         bus.publish(DomainEvent::from(DevicesEvent::Node {
             id: "n".into(),
             user: "u".into(),
         }));
-        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (2, 2));
-        let before = (bus.generation_for("a"), bus.generation_for("b"));
+        assert_eq!(
+            (state_generation(&bus, "a"), state_generation(&bus, "b")),
+            (2, 2)
+        );
+        let before = (state_generation(&bus, "a"), state_generation(&bus, "b"));
         for i in 0..WS_GENERATION_MAX + 50 {
             bus.publish(memory("m", &format!("w-{i}")));
         }
-        assert!(bus.0.ws_generations.lock().unwrap().len() <= WS_GENERATION_MAX);
-        assert!(bus.generation_for("a") >= before.0 && bus.generation_for("b") >= before.1);
-        let b = bus.generation_for("b");
-        let a = bus.generation_for("a");
+        // Bounded generation compaction is tested by steve-runtime/cache.
+        assert!(state_generation(&bus, "a") >= before.0 && state_generation(&bus, "b") >= before.1);
+        let b = state_generation(&bus, "b");
+        let a = state_generation(&bus, "a");
         bus.publish(memory("m", "a"));
-        assert_eq!(bus.generation_for("a"), a + 1);
-        assert_eq!(bus.generation_for("b"), b);
+        assert_eq!(state_generation(&bus, "a"), a + 1);
+        assert_eq!(state_generation(&bus, "b"), b);
     }
     #[tokio::test]
     async fn fan_out_in_order_with_scopes() {

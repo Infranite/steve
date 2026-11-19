@@ -1853,3 +1853,33 @@ Lock wait/hold histograms identify the lock (`store` or `core`) and a bounded so
 Request context follows synchronous handler work and closures dispatched through the Hub's `api::blocking` boundary. Reusing a connection inside a transaction adds no acquisition. Uncarried spawned tasks (including module-specific blocking workers), the legacy Hub's separate batch-read pool, raw SQL on an already borrowed connection, and work performed by a streaming body after headers are outside this count. It measures observed store acquisitions, not SQL statements or all process I/O. Use request-local counts alongside the independent store/core lock histograms and disk-write gauge.
 
 While enabled, a task on the existing Tokio runtime folds histogram samples into their in-memory distributions every five seconds, so an absent scraper does not leave samples accumulating indefinitely. It starts no extra OS thread and never polls disk I/O; the disk-write gauge still reads only during authenticated scrapes.
+
+## Process-local caches
+
+`STEVE_CACHE=memory` (the default) enables the Hub's process-local caches.
+`STEVE_CACHE=off` bypasses these registered spaces for diagnosis; it does not disable readiness observations,
+connection management or authoritative in-memory projections. There is no remote cache in
+this version: `redis://`, `rediss://`, `plugin:` and other backend values fail configuration
+validation. Both startup and `--check-config` validate the options.
+
+Other domain-specific caches retain their existing policies; these variables control the
+shared spaces listed below. The existing two-second `/api/state` body cache is retained.
+
+`STEVE_CACHE_MEMORY_MB` is a positive integer in MiB (1,048,576 bytes), default `256`. Registered spaces receive fixed
+shares of that byte budget and use estimated value weights. Statistics keep a 5-second TTL,
+client origins 30 seconds, runtime lists 300 seconds, Node harness reports 60 seconds,
+MCP tool lists 10 minutes, and GitHub repository lists 5 minutes. GitHub conditional bodies
+still require a network revalidation and are bounded by their space's capacity. Unassigned
+budget is reserved for future spaces. TTLs and shares are defined in code in this version.
+
+Committed changes invalidate dependency generations synchronously. A cache entry retains
+its dependency generations in its value; a later read rejects obsolete values without
+creating another key. Concurrent reads share loading, and errors are not retained as cache
+values. A last observation may remain visible while a refresh runs; it is not admission
+evidence. Failed MCP connections keep their existing retry deadlines. Changing cache mode
+or budget requires a restart; caches never persist across a process restart.
+
+Prometheus reports `steve_cache_requests_total{space,result}`,
+`steve_cache_load_seconds{space}`, `steve_cache_entries{space}`, `steve_cache_bytes{space}`,
+and `steve_cache_invalidations_total{kind}`. Entry counts and bytes describe the cache's
+weighted allocation, including observations awaiting replacement or eviction.

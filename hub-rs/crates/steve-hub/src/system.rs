@@ -4,11 +4,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 use crate::backend::{BResult, BackendError, ImportedSession, Repo};
 use crate::bus::Bus;
@@ -87,36 +86,48 @@ pub fn register_hub(r: &dyn Repo, name: &str, os: &str, version: &str) -> BResul
 /// How long a probe result counts as current; an older one is still served while a new probe runs.
 const RUNTIMES_MAX_AGE: Duration = Duration::from_secs(300);
 
-#[derive(Default)]
-struct RuntimeSnapshot {
-    generation: u64,
-    value: Option<(Instant, Value)>,
+static RUNTIME_SPACE: steve_runtime::cache::CacheSpace<(), Value> =
+    steve_runtime::cache::CacheSpace {
+        name: "runtimes",
+        ttl: RUNTIMES_MAX_AGE,
+        share_pct: 10,
+        tags: |_| {
+            vec![
+                steve_runtime::cache::Tag::global("runtime-cache"),
+                steve_runtime::cache::Tag::global("hub"),
+                steve_runtime::cache::Tag::of("node", "local"),
+            ]
+        },
+        weigh: |v| serde_json::to_vec(v).map_or(1, |v| v.len().min(u32::MAX as usize) as u32),
+    };
+#[derive(Clone)]
+struct ProbeMiss {
+    value: Value,
+    superseded: bool,
 }
-type RuntimesCache = Arc<std::sync::Mutex<RuntimeSnapshot>>;
-
-/// `runtimes(fresh)` with its 5-minute cache. The probe never blocks the async runtime, and once there is a
-/// result `/api/state` never waits for one: an expired result is served while a background probe replaces it.
+/// A stale display is an observation, never proof that a session can be admitted.
+#[derive(Clone)]
 pub struct Runtimes {
     cfg: Arc<Config>,
-    cache: RuntimesCache,
-    /// a background refresh is running
+    cache: steve_runtime::cache::Cached<(), Value>,
+    display: Arc<std::sync::Mutex<Option<(Vec<u64>, Value)>>>,
     refreshing: Arc<AtomicBool>,
-    /// callers that must wait for a probe (nothing cached yet, or `fresh`) probe one at a time
-    probing: Arc<Mutex<()>>,
-    /// The local Node (`STEVE_NODE_MODE=local`): it runs the harness binaries, not the Hub.
-    node: std::sync::OnceLock<Arc<dyn steve_node_api::Node>>,
-    observed: std::sync::OnceLock<Arc<crate::harnesses::HubHarnesses>>,
+    publication: Arc<std::sync::Mutex<()>>,
+    node: Arc<std::sync::OnceLock<Arc<dyn steve_node_api::Node>>>,
+    observed: Arc<std::sync::OnceLock<Arc<crate::harnesses::HubHarnesses>>>,
 }
 
 impl Runtimes {
     pub fn new(cfg: Arc<Config>) -> Self {
+        let cache = cfg.caches.space(&RUNTIME_SPACE);
         Runtimes {
             cfg,
-            cache: Arc::default(),
+            cache,
+            display: Arc::default(),
             refreshing: Arc::default(),
-            probing: Arc::default(),
-            node: std::sync::OnceLock::new(),
-            observed: std::sync::OnceLock::new(),
+            publication: Arc::default(),
+            node: Arc::default(),
+            observed: Arc::default(),
         }
     }
 
@@ -159,115 +170,103 @@ impl Runtimes {
         result.map(|_| ())
     }
 
-    pub fn generation(&self) -> u64 {
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .generation
-    }
-
     fn invalidate(&self) {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.generation += 1;
-        cache.value = None;
+        let _guard = self.publication.lock().unwrap();
+        self.cfg.caches.invalidate(&[
+            steve_runtime::cache::Tag::global("runtime-cache"),
+            steve_runtime::cache::Tag::global("runtime-evidence"),
+        ]);
+        *self.display.lock().unwrap() = None;
         if let Some(observed) = self.observed.get() {
             observed.invalidate();
         }
     }
-
-    fn cached(&self) -> Option<(Instant, Value)> {
-        self.cache
+    fn cached(&self) -> Option<Value> {
+        self.display
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .value
-            .clone()
+            .unwrap()
+            .as_ref()
+            .filter(|(version, _)| *version == self.cache.version(&()))
+            .map(|(_, value)| value.clone())
     }
-
-    /// Commit a probe as one generation-checked publication, including the model catalogue.
-    fn publish(
-        cache: &RuntimesCache,
-        generation: u64,
-        observed: Option<&crate::harnesses::HubHarnesses>,
-        observed_generation: u64,
-        result: &(Value, bool, Vec<steve_node_api::HarnessCapability>),
-    ) -> bool {
-        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.generation != generation {
-            return false;
-        }
-        if let Some(observed) = observed {
-            let caps = result.1.then(|| result.2.clone());
-            if !observed.update_if_current(observed_generation, caps) {
-                return false;
-            }
-        }
-        cache.generation += 1;
-        cache.value = result.1.then(|| (Instant::now(), result.0.clone()));
-        true
-    }
-
-    /// The harness list, its notes in the request's language (the cache keeps note codes).
     pub async fn get(&self, fresh: bool) -> Value {
         shown(self.list(fresh).await)
     }
-
+    async fn reload(&self, fresh: bool) -> Value {
+        loop {
+            let result = self
+                .cache
+                .get_or_load((), || async {
+                    let version = self.cache.version(&());
+                    let tag = steve_runtime::cache::Tag::global("runtime-evidence");
+                    let generation = self.cfg.caches.generation(&tag);
+                    let observed = self.observed.get();
+                    let evidence = steve_runtime::cache::Tag::global("harness-evidence");
+                    let observed_generation =
+                        observed.map_or(0, |h| h.caches().generation(&evidence));
+                    let result = probe(&self.cfg, self.node.get().map(|n| n.as_ref()), fresh).await;
+                    let _guard = self.publication.lock().unwrap();
+                    if self.cfg.caches.generation(&tag) != generation
+                        || observed.is_some_and(|h| {
+                            !h.update_if_current(
+                                observed_generation,
+                                result.1.then(|| result.2.clone()),
+                            )
+                        })
+                    {
+                        return Err(ProbeMiss {
+                            value: result.0,
+                            superseded: true,
+                        });
+                    }
+                    self.cfg.caches.invalidate(&[tag]);
+                    *self.display.lock().unwrap() = result.1.then(|| (version, result.0.clone()));
+                    if result.1 {
+                        Ok(result.0)
+                    } else {
+                        Err(ProbeMiss {
+                            value: result.0,
+                            superseded: false,
+                        })
+                    }
+                })
+                .await;
+            match result {
+                Ok(v) => return v.as_ref().clone(),
+                Err(e) if e.superseded => continue,
+                Err(e) => return e.value,
+            }
+        }
+    }
     async fn list(&self, fresh: bool) -> Value {
-        if !fresh && let Some((at, list)) = self.cached() {
-            if at.elapsed() >= RUNTIMES_MAX_AGE
-                && self
+        if !self.cache.enabled() {
+            return self.reload(fresh).await;
+        }
+        if fresh {
+            self.cfg
+                .caches
+                .invalidate(&[steve_runtime::cache::Tag::global("runtime-cache")]);
+        }
+        if !fresh {
+            if let Some(value) = self.cache.read(&()).await {
+                return value.as_ref().clone();
+            }
+            if let Some(value) = self.cached() {
+                if self
                     .refreshing
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
-            {
-                let (cfg, cache, refreshing, probing, node, observed) = (
-                    self.cfg.clone(),
-                    self.cache.clone(),
-                    self.refreshing.clone(),
-                    self.probing.clone(),
-                    self.node.get().cloned(),
-                    self.observed.get().cloned(),
-                );
-                tokio::spawn(async move {
-                    // A background probe must not restore an older ready result after a
-                    // forced refresh has already observed a disconnected Node.
-                    let _probing = probing.lock().await;
-                    let generation = cache.lock().unwrap_or_else(|e| e.into_inner()).generation;
-                    let observed_generation = observed.as_ref().map_or(0, |h| h.generation());
-                    let result = probe(&cfg, node.as_deref(), false).await;
-                    Self::publish(
-                        &cache,
-                        generation,
-                        observed.as_deref(),
-                        observed_generation,
-                        &result,
-                    );
-                    refreshing.store(false, Ordering::SeqCst);
-                });
+                {
+                    let me = self.clone();
+                    tokio::spawn(async move {
+                        me.reload(false).await;
+                        me.refreshing.store(false, Ordering::SeqCst);
+                    });
+                }
+                return value;
             }
-            return list;
         }
-        let _probing = self.probing.lock().await;
-        // another caller may have filled the cache while this one waited
-        if !fresh && let Some((_, list)) = self.cached() {
-            return list;
-        }
-        loop {
-            let generation = self.generation();
-            let observed = self.observed.get().map(|h| h.as_ref());
-            let observed_generation = observed.map_or(0, |h| h.generation());
-            let result = probe(&self.cfg, self.node.get().map(|n| n.as_ref()), fresh).await;
-            if Self::publish(
-                &self.cache,
-                generation,
-                observed,
-                observed_generation,
-                &result,
-            ) {
-                return result.0;
-            }
-            // Installation or a newer catalogue result crossed this probe. Ask the Node
-            // for the current state rather than returning or caching the obsolete snapshot.
-        }
+        self.reload(fresh).await
     }
 }
 
@@ -675,6 +674,38 @@ pub fn remove_imported(r: &dyn Repo, id: &str) -> BResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_changed_node_never_serves_the_previous_runtime_display() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(
+            Config::from_vars(|k| match k {
+                "HOME" | "STEVE_HOME" => Some(home.path().display().to_string()),
+                k if k.starts_with("STEVE_ADAPTER_") => Some("/usr/bin/false".into()),
+                _ => None,
+            })
+            .unwrap(),
+        );
+        let node = steve_node_api::testkit::FakeNode::new("local");
+        node.set_harnesses(vec![ready_fixture()]);
+        let rt = Runtimes::new(cfg.clone());
+        rt.set_node(node.clone());
+        rt.get(true).await;
+        let mut changed = ready_fixture();
+        changed.version = "2".into();
+        changed.adapter.as_mut().unwrap().version = Some("2".into());
+        node.set_harnesses(vec![changed]);
+        cfg.caches
+            .invalidate(&[steve_runtime::cache::Tag::of("node", "local")]);
+        let list = rt.get(false).await;
+        let pi = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == "pi")
+            .unwrap();
+        assert_eq!(pi["version"], "2");
+    }
+
     use super::*;
     use regex::Regex;
     use steve_node::history::{claude_rows as claude_events, codex_rows as codex_events};
@@ -723,8 +754,7 @@ mod tests {
             );
             node.arm();
             let in_flight = if background {
-                rt.cache.lock().unwrap().value.as_mut().unwrap().0 =
-                    Instant::now().checked_sub(RUNTIMES_MAX_AGE * 2).unwrap();
+                rt.cache.evict(&()).await;
                 rt.list(false).await;
                 None
             } else {
@@ -802,8 +832,7 @@ mod tests {
                     rt.get(true).await;
                     node.arm();
                     let old = if old_reader == "background" {
-                        rt.cache.lock().unwrap().value.as_mut().unwrap().0 =
-                            Instant::now().checked_sub(RUNTIMES_MAX_AGE * 2).unwrap();
+                        rt.cache.evict(&()).await;
                         rt.list(false).await;
                         None
                     } else {
@@ -946,16 +975,17 @@ mod tests {
         })
         .expect("config");
         let rt = Runtimes::new(Arc::new(cfg));
-        let old = Instant::now()
-            .checked_sub(RUNTIMES_MAX_AGE * 2)
-            .expect("instant");
-        rt.cache.lock().expect("cache").value = Some((old, json!("stale")));
+
+        *rt.display.lock().unwrap() = Some((rt.cache.version(&()), json!("stale")));
         // the expired list comes back at once; a background probe replaces it
         assert_eq!(rt.get(false).await, json!("stale"));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while rt.refreshing.load(Ordering::SeqCst) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while rt.refreshing.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background probe completed");
         let list = rt.get(false).await;
         let claude = list
             .as_array()
@@ -981,8 +1011,8 @@ mod tests {
             steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "node offline"),
         );
         rt.set_node(node);
-        let old = Instant::now().checked_sub(RUNTIMES_MAX_AGE * 2).unwrap();
-        rt.cache.lock().unwrap().value = Some((old, json!("stale")));
+
+        *rt.display.lock().unwrap() = Some((rt.cache.version(&()), json!("stale")));
         assert_eq!(rt.list(false).await, json!("stale"));
         tokio::time::timeout(Duration::from_secs(30), async {
             while rt.refreshing.load(Ordering::SeqCst) {

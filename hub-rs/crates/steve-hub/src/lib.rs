@@ -18,6 +18,7 @@ pub mod app;
 pub mod avatar;
 pub mod backend;
 pub mod bus;
+pub mod cache_tags;
 pub mod caps_api;
 pub mod catalog;
 pub mod check;

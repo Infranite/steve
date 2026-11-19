@@ -3,7 +3,6 @@
 //! (`GET /github`, PRs, issues, deliveries). Routes are relative to `/api`, behind the `Caller` layer.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -150,13 +149,24 @@ fn available_of(v: &Value) -> Option<Available> {
     })
 }
 
-#[derive(Default)]
-pub(crate) struct AvailableCache(Mutex<HashMap<String, (i64, Vec<Available>)>>);
-
-impl AvailableCache {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (i64, Vec<Available>)>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
+static AVAILABLE_SPACE: steve_runtime::cache::CacheSpace<String, Vec<Available>> =
+    steve_runtime::cache::CacheSpace {
+        name: "github-repositories",
+        ttl: std::time::Duration::from_millis(AVAILABLE_TTL_MS as u64),
+        share_pct: 10,
+        tags: |id| vec![steve_runtime::cache::Tag::of("connection", id)],
+        weigh: |v| {
+            v.iter()
+                .map(|r| {
+                    r.owner.len() + r.name.len() + r.full_name.len() + r.default_branch.len() + 128
+                })
+                .sum::<usize>()
+                .min(u32::MAX as usize) as u32
+        },
+    };
+pub(crate) type AvailableCache = steve_runtime::cache::Cached<String, Vec<Available>>;
+pub(crate) fn available_cache() -> AvailableCache {
+    steve_runtime::cache::Caches::process().space(&AVAILABLE_SPACE)
 }
 
 /// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`), lowercased.
@@ -265,7 +275,7 @@ impl GitHub {
     }
 
     pub(crate) fn forget_available(&self, connection: &str) {
-        self.0.available.lock().remove(connection);
+        self.0.available.invalidate(&connection.to_owned());
     }
 
     /// The repos a connection can see (cached 5 minutes unless `fresh`). App:
@@ -276,28 +286,29 @@ impl GitHub {
         connection: &str,
         fresh: bool,
     ) -> VaultResult<Vec<Available>> {
-        let now = self.now();
-        if !fresh
-            && let Some((at, list)) = self.0.available.lock().get(connection)
-            && now - at < AVAILABLE_TTL_MS
-        {
-            return Ok(list.clone());
+        let key = connection.to_owned();
+        if fresh {
+            self.0.available.invalidate(&key);
         }
-        let conn = self.conn(ws, connection)?;
-        let list = if conn.cx().adapter() == github_app::ID {
-            conn.get_all("/installation/repositories", Some("repositories"))
-                .await
-        } else {
-            conn.get_all("/user/repos?affiliation=owner,collaborator", None)
-                .await
-        }
-        .map_err(gh_err)?;
-        let list: Vec<Available> = list.iter().filter_map(available_of).collect();
-        self.0
+        let list = self
+            .0
             .available
-            .lock()
-            .insert(connection.into(), (now, list.clone()));
-        Ok(list)
+            .get_or_load(key, || async {
+                let conn = self.conn(ws, connection)?;
+                let list = if conn.cx().adapter() == github_app::ID {
+                    conn.get_all("/installation/repositories", Some("repositories"))
+                        .await
+                } else {
+                    conn.get_all("/user/repos?affiliation=owner,collaborator", None)
+                        .await
+                }
+                .map_err(gh_err)?;
+                Ok::<_, steve_modules::vault::VaultError>(
+                    list.iter().filter_map(available_of).collect(),
+                )
+            })
+            .await?;
+        Ok(list.as_ref().clone())
     }
 
     /// `GET /github`.
@@ -1039,6 +1050,31 @@ async fn deliveries(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn changed_connection_invalidates_available_repositories_immediately() {
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        let cache = caches.space(&AVAILABLE_SPACE);
+        let key = "connection".to_string();
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(vec![]) })
+            .await
+            .unwrap();
+        caches.invalidate(&[steve_runtime::cache::Tag::of("connection", &key)]);
+        let repo = Available {
+            gh_id: 1,
+            owner: "owner".into(),
+            name: "new".into(),
+            full_name: "owner/new".into(),
+            private: true,
+            default_branch: "main".into(),
+        };
+        let list = cache
+            .get_or_load(key, || async { Ok::<_, ()>(vec![repo]) })
+            .await
+            .unwrap();
+        assert_eq!(list[0].name, "new");
+    }
+
     use super::*;
 
     #[test]

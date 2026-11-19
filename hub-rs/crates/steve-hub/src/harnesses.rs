@@ -51,7 +51,6 @@ fn merge_cap_lists(
 
 #[derive(Default)]
 struct Probed {
-    generation: u64,
     caps: Vec<HarnessCapability>,
     remote: Vec<HarnessCapability>,
     /// The Hub's own Node did not answer its last probe (or an installation revoked the answer):
@@ -87,6 +86,7 @@ impl NodeReport {
 pub struct HubHarnesses {
     /// The adapters the Hub can start locally, by id.
     ids: Vec<String>,
+    caches: steve_runtime::cache::Caches,
     declared: BTreeMap<String, steve_acp::Declaration>,
     /// What the local Node reported last (none yet, or no Node).
     probed: RwLock<Probed>,
@@ -98,6 +98,7 @@ impl HubHarnesses {
     pub fn of(cfg: &crate::config::Config) -> Arc<HubHarnesses> {
         Arc::new(HubHarnesses {
             ids: cfg.harness_ids(),
+            caches: cfg.caches.clone(),
             declared: cfg.declared_adapters.clone(),
             probed: RwLock::new(Probed::default()),
             updated: std::sync::OnceLock::new(),
@@ -151,23 +152,23 @@ impl HubHarnesses {
             .collect()
     }
 
-    /// The local Node's answer.
-    pub fn update(&self, caps: Vec<HarnessCapability>) {
-        let generation = self.generation();
-        self.update_if_current(generation, Some(caps));
+    pub(crate) fn caches(&self) -> &steve_runtime::cache::Caches {
+        &self.caches
     }
 
-    pub(crate) fn generation(&self) -> u64 {
-        self.probed
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .generation
+    /// The local Node's answer.
+    pub fn update(&self, caps: Vec<HarnessCapability>) {
+        let generation = self
+            .caches
+            .generation(&steve_runtime::cache::Tag::global("harness-evidence"));
+        self.update_if_current(generation, Some(caps));
     }
 
     /// Installation revokes earlier readiness evidence, including any in-flight follow probe.
     pub(crate) fn invalidate(&self) {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
-        probed.generation += 1;
+        self.caches
+            .invalidate(&[steve_runtime::cache::Tag::global("harness-evidence")]);
         probed.caps.clear();
         probed.by_node.remove("local");
         probed.local_unknown = true;
@@ -181,13 +182,18 @@ impl HubHarnesses {
         caps: Option<Vec<HarnessCapability>>,
     ) -> bool {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
-        if probed.generation != generation {
+        if self
+            .caches
+            .generation(&steve_runtime::cache::Tag::global("harness-evidence"))
+            != generation
+        {
             return false;
         }
         // All publishers share this order: Devices, the independent follower, successful
         // probes and failures alike. Revoke older in-flight snapshots atomically with the
         // replacement; otherwise a held ready follower can resurrect models after disconnect.
-        probed.generation += 1;
+        self.caches
+            .invalidate(&[steve_runtime::cache::Tag::global("harness-evidence")]);
         probed.local_unknown = caps.is_none();
         probed.by_node.remove("local");
         if let Some(caps) = &caps {
@@ -315,7 +321,9 @@ impl HubHarnesses {
 
     /// Asks `node` now (`fresh`: its adapters again) and keeps the answer.
     pub async fn refresh(&self, node: &dyn steve_node_api::Node, fresh: bool) {
-        let generation = self.generation();
+        let generation = self
+            .caches
+            .generation(&steve_runtime::cache::Tag::global("harness-evidence"));
         let caps = match node.probe(fresh).await {
             Ok(c) => Some(c.harnesses),
             Err(e) => {
@@ -334,7 +342,9 @@ impl HubHarnesses {
         svc: Option<&crate::nodes::NodeService>,
         fresh: bool,
     ) {
-        let generation = self.generation();
+        let generation = self
+            .caches
+            .generation(&steve_runtime::cache::Tag::global("harness-evidence"));
         let mut remote_caps = Vec::new();
         let mut by_node = BTreeMap::new();
         let mut reported = BTreeSet::new();
@@ -394,10 +404,15 @@ impl HubHarnesses {
             }
         }
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
-        if probed.generation != generation {
+        if self
+            .caches
+            .generation(&steve_runtime::cache::Tag::global("harness-evidence"))
+            != generation
+        {
             return;
         }
-        probed.generation += 1;
+        self.caches
+            .invalidate(&[steve_runtime::cache::Tag::global("harness-evidence")]);
         probed.caps = combined;
         probed.remote = remote_caps;
         probed.local_unknown = local_unknown;
@@ -918,6 +933,7 @@ mod tests {
     fn every_answer_of_the_node_is_told() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let hs = HubHarnesses {
+            caches: steve_runtime::cache::Caches::new(Default::default()),
             ids: vec!["claude-code".into()],
             declared: BTreeMap::new(),
             probed: RwLock::new(Probed::default()),

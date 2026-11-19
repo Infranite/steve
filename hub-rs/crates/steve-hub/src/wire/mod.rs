@@ -628,6 +628,7 @@ pub fn wire_assembly(
     vars: Vars,
     asm: &crate::extension::Assembly,
 ) -> Result<Wired, BackendError> {
+    bus.use_caches(cfg.caches.clone());
     let cx = install::hub::HubEnv {
         cfg,
         bus,
