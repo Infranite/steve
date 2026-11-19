@@ -502,15 +502,16 @@ pub struct PluginEvents {
 }
 impl PluginEvents {
     pub async fn recv(&mut self) -> Option<Value> {
-        self.inner
-            .recv()
-            .await
-            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+        self.inner.recv().await.map(|event| {
+            serde_json::from_slice(&crate::api::stream::encode_event(&event))
+                .expect("plugin event frame")
+        })
     }
     pub fn try_recv(&mut self) -> Result<Value, tokio::sync::mpsc::error::TryRecvError> {
-        self.inner
-            .try_recv()
-            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+        self.inner.try_recv().map(|event| {
+            serde_json::from_slice(&crate::api::stream::encode_event(&event))
+                .expect("plugin event frame")
+        })
     }
 }
 impl BusTap {
@@ -834,6 +835,80 @@ mod tests {
             assert_eq!(event["ws"], "a");
             assert_eq!(event["rev"], 1);
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_transcript_reads_match_sse_slimming_and_keep_internal_taps_full() {
+        use steve_types::{RawJson, Seq, WorkLiveEvent};
+
+        let bus = Bus::new();
+        let mut plugin = BusTap(bus.clone()).tap(&["event"]);
+        let mut typed = bus.tap(|event| event.wire_type() == "event");
+        let mut sse = bus.subscribe();
+        let long = "😀".repeat(2500);
+        let diff = "line\n".repeat(5000);
+        let data = serde_json::json!({
+            "rawOutput": long,
+            "_meta": {"claudeCode": {"toolName": "Read", "toolResponse": "private"}},
+            "rawInput": {"command": "cat file", "timeout": 5},
+            "content": [
+                {"type": "image", "data": "base64", "mimeType": "image/png"},
+                {"type": "diff", "oldText": diff, "newText": diff}
+            ]
+        });
+        for seq in 1..=2 {
+            bus.live(
+                WorkLiveEvent::Event {
+                    session_id: "s".into(),
+                    seq: Seq(seq),
+                    kind: "tool".into(),
+                    data: RawJson::from_str(&data.to_string()).unwrap(),
+                    ws: "a".into(),
+                }
+                .into(),
+            );
+            let delivery = tokio::time::timeout(std::time::Duration::from_secs(5), sse.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let frame = crate::api::stream::Frame::from(delivery.as_ref());
+            let sse_json = &frame.bytes[6..frame.bytes.len() - 2];
+            // Bus dispatch delivers typed taps before broadcasting, so try_recv needs no polling.
+            let event = if seq == 1 {
+                plugin.recv().await.unwrap()
+            } else {
+                plugin.try_recv().unwrap()
+            };
+            assert_eq!(serde_json::to_vec(&event).unwrap(), sse_json);
+            assert_eq!(event["seq"], seq);
+            assert_eq!(event["ws"], "a");
+            assert_eq!(event["rev"], 0);
+            assert!(frame.id.is_none());
+            assert!(event["data"].get("_meta").is_none());
+            assert_eq!(event["data"]["tool"], "Read");
+            assert_eq!(
+                event["data"]["rawInput"],
+                serde_json::json!({"command": "cat file"})
+            );
+            assert_eq!(
+                event["data"]["content"][0],
+                serde_json::json!({"type": "image"})
+            );
+            assert_eq!(
+                event["data"]["rawOutput"],
+                format!("{}…", "😀".repeat(2000))
+            );
+            assert_eq!(event["data"]["content"][1]["oldText"], diff);
+            assert_eq!(event["data"]["content"][1]["newText"], diff);
+            assert_eq!(
+                serde_json::to_value(&*typed.recv().await.unwrap()).unwrap()["data"],
+                data
+            );
+        }
+        assert!(matches!(
+            plugin.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

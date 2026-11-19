@@ -9,13 +9,14 @@ use steve_types::*;
 mod bus_cases;
 
 async fn next(
-    rx: &mut tokio::sync::broadcast::Receiver<Arc<steve_hub::bus::Frame>>,
-) -> (Arc<steve_hub::bus::Frame>, Value) {
+    rx: &mut tokio::sync::broadcast::Receiver<Arc<steve_hub::bus::Delivery>>,
+) -> (Arc<steve_hub::bus::Delivery>, Value) {
     let frame = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
         .unwrap()
         .unwrap();
-    let value = serde_json::from_slice(&frame.bytes[6..frame.bytes.len() - 2]).unwrap();
+    let encoded = steve_hub::api::stream::Frame::from(frame.as_ref());
+    let value = serde_json::from_slice(&encoded.bytes[6..encoded.bytes.len() - 2]).unwrap();
     (frame, value)
 }
 fn item(id: &str) -> DomainEvent {
@@ -166,7 +167,7 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
             );
         }
         assert_eq!(
-            frame.scope,
+            frame.envelope.scope(),
             if hub {
                 Scope::Hub
             } else if personal {
@@ -187,7 +188,7 @@ async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
     let golden = include_str!("../../steve-types/tests/fixtures/wire/item.json");
     let golden = golden.trim_end();
     assert_eq!(
-        &frame.bytes[..],
+        &steve_hub::api::stream::Frame::from(frame.as_ref()).bytes[..],
         format!(
             "data: {},\"ws\":\"a\",\"rev\":1}}\n\n",
             &golden[..golden.len() - 1]

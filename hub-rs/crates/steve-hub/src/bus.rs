@@ -1,5 +1,4 @@
 //! Typed, ordered in-process notifications. Encoding belongs to SSE and plugin boundaries.
-use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,41 +7,6 @@ pub use steve_types::{BusEvent, Scope};
 use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
 
-#[derive(Debug)]
-struct Encoded {
-    json: String,
-    scope: Scope,
-    ty: String,
-}
-impl Encoded {
-    fn typed(event: &Envelope<BusEvent>) -> Self {
-        let scope = event.scope();
-        let ty = event.event.wire_type().to_owned();
-        // Taps keep the original opaque transcript. Slim a copy only at the SSE boundary.
-        let json = if matches!(
-            &event.event,
-            BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
-        ) {
-            let mut slim = event.clone();
-            if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event {
-                data, ..
-            })) = &mut slim.event
-            {
-                let value = crate::api::slim::ev_out(
-                    serde_json::to_value(&*data).expect("transcript JSON"),
-                );
-                *data = steve_types::RawJson::from_str(
-                    &serde_json::to_string(&value).expect("slim JSON"),
-                )
-                .expect("validated JSON");
-            }
-            serde_json::to_string(&slim).expect("SSE event")
-        } else {
-            serde_json::to_string(event).expect("SSE event")
-        };
-        Self { json, scope, ty }
-    }
-}
 /// Who a stream is for: the workspace it shows, and who is signed in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Viewer {
@@ -69,25 +33,21 @@ impl From<String> for Viewer {
     }
 }
 
-/// One event as it goes out on every SSE stream: serialized (and slimmed) once, with its audience.
+/// A typed notification in dispatcher order, with its optional replay position.
 #[derive(Debug)]
-pub struct Frame {
-    /// `data: <json>\n\n`
-    pub bytes: Bytes,
-    pub scope: Scope,
-    /// Position in the change log ([`Bus::replay`]), assigned by the dispatcher in send order; `None` for
-    /// frames that are not kept (see [`TRANSIENT`]) and frames nobody may see.
+pub struct Delivery {
+    pub envelope: Arc<Envelope<BusEvent>>,
+    /// Only retained notifications take a position in the change log.
     pub id: Option<u64>,
 }
 
-impl Frame {
-    /// Visible to a subscriber of workspace `ws` with nobody signed in.
+impl Delivery {
     pub fn visible_to(&self, ws: &str) -> bool {
         self.visible(&Viewer::from(ws))
     }
 
     pub fn visible(&self, v: &Viewer) -> bool {
-        match &self.scope {
+        match self.envelope.scope() {
             Scope::Hub => true,
             Scope::Ws(w) => w.as_str() == v.ws,
             Scope::User(u) => v.owner || (!u.as_str().is_empty() && u.as_str() == v.user),
@@ -145,16 +105,20 @@ impl std::fmt::Display for Cursor {
 pub enum Replay {
     /// Every kept frame after the cursor, oldest first (unfiltered: the caller applies `visible_to`), up to
     /// `head`.
-    Frames { frames: Vec<Arc<Frame>>, head: u64 },
+    Frames {
+        frames: Vec<Arc<Delivery>>,
+        head: u64,
+    },
     /// The cursor can't be continued (another epoch, ahead of the log, or older than what is retained): the
     /// client has to refetch everything; `head` is where it continues from.
     Reset { head: u64 },
 }
 
-/// The retained tail of the change log. Ids are contiguous: only kept frames take one.
+/// The retained tail of the change log. Ids are contiguous: only kept notifications take one.
+/// Keep typed envelopes so replay has no dependency on a transport encoder.
 #[derive(Debug)]
 struct Ring {
-    frames: VecDeque<Arc<Frame>>,
+    frames: VecDeque<(Arc<Delivery>, usize)>,
     bytes: usize,
     /// the highest id evicted so far (0: none)
     dropped: u64,
@@ -173,19 +137,37 @@ impl Ring {
         }
     }
 
-    fn push(&mut self, f: Arc<Frame>) {
-        self.bytes += f.bytes.len();
-        self.frames.push_back(f);
+    fn push(&mut self, f: Arc<Delivery>, bytes: usize) {
+        self.bytes += bytes;
+        self.frames.push_back((f, bytes));
         // the newest frame always stays, however large
         while self.frames.len() > 1
             && (self.frames.len() > self.max_frames || self.bytes > self.max_bytes)
         {
-            if let Some(old) = self.frames.pop_front() {
-                self.bytes -= old.bytes.len();
+            if let Some((old, bytes)) = self.frames.pop_front() {
+                self.bytes -= bytes;
                 self.dropped = old.id.unwrap_or(self.dropped);
             }
         }
     }
+}
+
+/// Retained events are never slimmed. Count their JSON without allocating or keeping an
+/// encoded copy, including the historical eight-byte per-entry allowance. Egress owns bytes.
+fn retained_size(event: &Envelope<BusEvent>) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(8);
+    serde_json::to_writer(&mut count, event).expect("typed event size");
+    count.0
 }
 
 /// The change log shared by the Bus and its dispatcher.
@@ -312,12 +294,12 @@ struct Inner {
     stats_generation: AtomicU64,
     tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
 }
 /// Publishing is synchronous under the store write lock; a dispatcher shares typed envelopes
-/// with internal taps and encodes each SSE frame once. Revisions are independent of cursors.
+/// with internal taps and the replay log; egress owns encoding. Revisions are independent of cursors.
 #[derive(Clone)]
 pub struct Bus(Arc<Inner>);
 impl Default for Bus {
@@ -457,7 +439,7 @@ impl Bus {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Frame>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Delivery>> {
         self.0.out.subscribe()
     }
 
@@ -484,9 +466,9 @@ impl Bus {
         // ids are contiguous, so the first one after the cursor is found by position; only Arcs are copied
         let from = ring
             .frames
-            .partition_point(|f| f.id.is_some_and(|id| id <= after.n));
+            .partition_point(|(f, _)| f.id.is_some_and(|id| id <= after.n));
         Replay::Frames {
-            frames: ring.frames.range(from..).cloned().collect(),
+            frames: ring.frames.range(from..).map(|(f, _)| f.clone()).collect(),
             head,
         }
     }
@@ -504,7 +486,7 @@ impl Bus {
 
 fn dispatch(
     rx: std::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     taps: Taps,
     log: Arc<Log>,
 ) {
@@ -554,40 +536,38 @@ fn dispatch(
             });
             tap_overflow = t.iter().any(|slot| !slot.overflow.is_empty());
         }
-        let frame = Encoded::typed(&event);
         if matches!(&event.event, BusEvent::Domain(DomainEvent::Stats(_))) {
-            if let Some(frame) = stats.offer(frame, now) {
+            if let Some(frame) = stats.offer(event, now) {
                 out.send(frame);
             }
         } else {
-            out.send(frame);
+            out.send(event);
         }
     }
 }
 /// The dispatcher's end: numbers, logs and broadcasts frames. Only the dispatcher thread holds it, so ids
 /// follow send order.
 struct Sender {
-    out: broadcast::Sender<Arc<Frame>>,
+    out: broadcast::Sender<Arc<Delivery>>,
     log: Arc<Log>,
     next_id: u64,
 }
 
 impl Sender {
-    fn send(&mut self, frame: Encoded) {
-        let Encoded { json, scope, ty } = frame;
-        let kept = !TRANSIENT.contains(&ty.as_str());
+    fn send(&mut self, event: Arc<Envelope<BusEvent>>) {
+        let kept = !TRANSIENT.contains(&event.event.wire_type());
         let id = kept.then(|| {
             self.next_id += 1;
             self.next_id
         });
-        let frame = Arc::new(Frame {
-            bytes: Bytes::from(format!("data: {json}\n\n")),
-            scope,
+        let frame = Arc::new(Delivery {
+            envelope: event,
             id,
         });
         if let Some(id) = id {
+            let bytes = retained_size(&frame.envelope);
             let mut ring = self.log.ring.lock().unwrap_or_else(|e| e.into_inner());
-            ring.push(frame.clone());
+            ring.push(frame.clone(), bytes);
             self.log.head.store(id, Ordering::SeqCst);
         }
         let _ = self.out.send(frame);
@@ -598,12 +578,16 @@ impl Sender {
 #[derive(Default)]
 struct StatsThrottle {
     last: HashMap<String, std::time::Instant>,
-    held: HashMap<String, Encoded>,
+    held: HashMap<String, Arc<Envelope<BusEvent>>>,
 }
 impl StatsThrottle {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
-    fn offer(&mut self, frame: Encoded, now: std::time::Instant) -> Option<Encoded> {
-        let Scope::Ws(ws) = &frame.scope else {
+    fn offer(
+        &mut self,
+        frame: Arc<Envelope<BusEvent>>,
+        now: std::time::Instant,
+    ) -> Option<Arc<Envelope<BusEvent>>> {
+        let Scope::Ws(ws) = frame.scope() else {
             unreachable!("statistics are workspace scoped")
         };
         let ws = ws.to_string();
@@ -629,7 +613,7 @@ impl StatsThrottle {
             .map(|at| *at + Self::WINDOW)
             .min()
     }
-    fn due(&mut self, now: std::time::Instant) -> Vec<Encoded> {
+    fn due(&mut self, now: std::time::Instant) -> Vec<Arc<Envelope<BusEvent>>> {
         let keys: Vec<_> = self
             .held
             .keys()
@@ -684,16 +668,16 @@ mod tests {
         }
         .into()
     }
-    fn encoded(e: BusEvent) -> Encoded {
-        Encoded::typed(&Envelope {
+    fn enveloped(e: BusEvent) -> Arc<Envelope<BusEvent>> {
+        Arc::new(Envelope {
             event: e,
             rev: Rev(1),
         })
     }
-    fn json(frame: &Frame) -> Value {
-        serde_json::from_slice(&frame.bytes[6..frame.bytes.len() - 2]).unwrap()
+    fn json(frame: &Delivery) -> Value {
+        serde_json::to_value(&*frame.envelope).unwrap()
     }
-    async fn next(rx: &mut broadcast::Receiver<Arc<Frame>>) -> Arc<Frame> {
+    async fn next(rx: &mut broadcast::Receiver<Arc<Delivery>>) -> Arc<Delivery> {
         tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
             .unwrap()
@@ -705,7 +689,7 @@ mod tests {
             .unwrap()
             .unwrap()
     }
-    fn frames(r: Replay) -> (Vec<Arc<Frame>>, u64) {
+    fn frames(r: Replay) -> (Vec<Arc<Delivery>>, u64) {
         match r {
             Replay::Frames { frames, head } => (frames, head),
             Replay::Reset { head } => panic!("unexpected reset {head}"),
@@ -717,7 +701,7 @@ mod tests {
             _ => panic!("expected reset"),
         }
     }
-    fn ids(f: &[Arc<Frame>]) -> Vec<u64> {
+    fn ids(f: &[Arc<Delivery>]) -> Vec<u64> {
         f.iter().filter_map(|f| f.id).collect()
     }
 
@@ -726,15 +710,15 @@ mod tests {
         let mut t = StatsThrottle::default();
         let at = std::time::Instant::now();
         let sec = Duration::from_secs(1);
-        assert!(t.offer(encoded(stats("a", "1")), at).is_some());
-        assert!(t.offer(encoded(stats("a", "2")), at + sec).is_none());
-        assert!(t.offer(encoded(stats("a", "3")), at + 2 * sec).is_none());
-        assert!(t.offer(encoded(stats("b", "1")), at + 2 * sec).is_some());
+        assert!(t.offer(enveloped(stats("a", "1")), at).is_some());
+        assert!(t.offer(enveloped(stats("a", "2")), at + sec).is_none());
+        assert!(t.offer(enveloped(stats("a", "3")), at + 2 * sec).is_none());
+        assert!(t.offer(enveloped(stats("b", "1")), at + 2 * sec).is_some());
         assert_eq!(t.deadline(), Some(at + 5 * sec));
         assert!(t.due(at + 4 * sec).is_empty());
         let due = t.due(at + 5 * sec);
         assert_eq!(due.len(), 1);
-        assert!(due[0].json.contains("\"day\":\"3\""));
+        assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
         assert_eq!(t.deadline(), None);
     }
     #[test]
@@ -1003,7 +987,7 @@ mod tests {
         let (log, _) = frames(bus.replay(&start));
         assert_eq!(ids(&log), vec![start.n + 1]);
     }
-    async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Frame>>, n: usize) {
+    async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Delivery>>, n: usize) {
         for i in 0..n {
             bus.publish(item(&format!("ST-{i:03}"), "a"));
         }
@@ -1025,7 +1009,7 @@ mod tests {
     }
     #[tokio::test]
     async fn eviction_by_bytes_resets_older_cursors() {
-        let one = encoded(item("ST-000", "a")).json.len() + 8;
+        let one = retained_size(&enveloped(item("ST-000", "a")));
         let bus = Bus::with_window(1000, 2 * one + 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 4).await;
