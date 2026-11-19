@@ -575,3 +575,21 @@ fn throttle_idle_and_boundary_emit_have_only_one_pending_state() {
     assert!(!t.idle(at + sec(9)));
     assert!(t.idle(at + sec(10)));
 }
+fn protocol_jitter_keeps_the_inclusive_millisecond_lattice() {
+    let mut rng = StdRng::seed_from_u64(14);
+    let mut endpoints = [false; 2];
+    for _ in 0..128 {
+        let wait = Jitter::Full.milliseconds(Duration::from_millis(1), &mut rng);
+        endpoints[wait.as_millis() as usize] = true;
+    }
+    assert_eq!(endpoints, [true, true]);
+    for max in [0, 1, 5, 999, 300_000] {
+        let cap = Duration::from_millis(max);
+        assert_eq!(Jitter::None.milliseconds(cap, &mut rng), cap);
+        for _ in 0..64 {
+            let wait = Jitter::Full.milliseconds(cap, &mut rng);
+            assert!(wait <= cap);
+            assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
+        }
+    }
+}

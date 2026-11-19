@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::provider::{
-    self, ExtWs, GAP_PAGE, GAP_PAGES, OpenFail, call_err, full_jitter, open_err, same_identity,
+    self, ExtWs, GAP_PAGE, GAP_PAGES, OpenFail, call_err, open_err, same_identity,
 };
 use super::session::{CallError, Note, OpenError, Session};
 use super::wire::{self, Chat, Reason, SessionStatus, Status, WireMessage, WritePolicy};
@@ -94,7 +94,8 @@ impl ConnectionHook for ExtWsHook {
     async fn run(&self, run: ConnRun) -> Result<(), AdapterError> {
         let t = self.ext.timing;
         let conn = run.state.id.clone();
-        let mut backoff = t.backoff_min;
+        let backoff = t.reconnect_backoff();
+        let mut attempt = 0;
         let mut failed = 0u32;
         loop {
             if run.stop.is_cancelled() {
@@ -121,12 +122,22 @@ impl ConnectionHook for ExtWsHook {
                     if failed >= 3 {
                         run.cx.report(Health::Failed(e.to_string())).await;
                     }
-                    feed_wait(&mut backoff, t, None)
+                    steve_runtime::policy::Jitter::Full.milliseconds(
+                        backoff.supervised(
+                            &mut attempt,
+                            std::time::Duration::ZERO,
+                            &mut rand::rng(),
+                        ),
+                        &mut rand::rng(),
+                    )
                 }
                 End::Lost(why) => {
                     tracing::info!(conn, "ext_ws: session ended: {why}");
                     failed = 0;
-                    feed_wait(&mut backoff, t, Some(started.elapsed()))
+                    steve_runtime::policy::Jitter::Full.milliseconds(
+                        backoff.supervised(&mut attempt, started.elapsed(), &mut rand::rng()),
+                        &mut rand::rng(),
+                    )
                 }
             };
             tokio::select! {
@@ -135,27 +146,6 @@ impl ConnectionHook for ExtWsHook {
             }
         }
     }
-}
-
-fn feed_wait(
-    wait: &mut std::time::Duration,
-    timing: super::session::Timing,
-    ran: Option<std::time::Duration>,
-) -> std::time::Duration {
-    if ran.is_some_and(|ran| ran >= timing.stable) {
-        *wait = timing.backoff_min;
-    }
-    let delay = full_jitter(*wait);
-    *wait = steve_runtime::policy::Backoff {
-        base: *wait,
-        max: timing.backoff_max,
-        factor: 2,
-        jitter: steve_runtime::policy::Jitter::None,
-        attempts: None,
-        reset_after: Some(timing.stable),
-    }
-    .delay(1, &mut rand::rng());
-    delay
 }
 
 impl ExtWsHook {
@@ -1109,29 +1099,34 @@ fn gap(it: &Value, now: i64) -> Result<(Option<Vec<String>>, i64, i64), String> 
 
 #[cfg(test)]
 mod retry_sequence_tests {
-    use super::*;
     use std::time::Duration;
     #[test]
     fn feed_caps_and_stable_run_resets_the_wait() {
-        let t = super::super::session::Timing::default();
-        let mut backoff = t.backoff_min;
-        for _ in 0..32 {
-            let previous = backoff;
-            assert!(feed_wait(&mut backoff, t, None) <= previous);
-        }
-        assert_eq!(backoff, t.backoff_max);
-        for (ran, resets) in [
-            (Duration::from_secs(59), false),
-            (Duration::from_secs(60), true),
-        ] {
-            let mut wait = backoff;
-            let delay = feed_wait(&mut wait, t, Some(ran));
-            if resets {
-                assert!(delay <= t.backoff_min);
-                assert_eq!(wait, t.backoff_min * 2);
-            } else {
-                assert_eq!(wait, t.backoff_max);
+        let policy = super::super::session::Timing::default().reconnect_backoff();
+        let mut attempt = 0;
+        for (n, seconds) in [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300]
+            .into_iter()
+            .enumerate()
+        {
+            let cap = policy.supervised(&mut attempt, Duration::ZERO, &mut rand::rng());
+            assert_eq!(cap, Duration::from_secs(seconds), "restart {n}");
+            for _ in 0..64 {
+                let wait = steve_runtime::policy::Jitter::Full.milliseconds(cap, &mut rand::rng());
+                assert!(wait <= cap);
+                assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
             }
         }
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::from_secs(59), &mut rand::rng()),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::from_secs(60), &mut rand::rng()),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            policy.supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
+            Duration::from_secs(2)
+        );
     }
 }

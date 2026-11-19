@@ -51,6 +51,19 @@ pub struct Timing {
     pub stable: Duration,
 }
 
+impl Timing {
+    pub(super) fn reconnect_backoff(self) -> steve_runtime::policy::Backoff {
+        steve_runtime::policy::Backoff {
+            base: self.backoff_min,
+            max: self.backoff_max,
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::None,
+            attempts: None,
+            reset_after: Some(self.stable),
+        }
+    }
+}
+
 impl Default for Timing {
     fn default() -> Self {
         Self {

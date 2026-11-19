@@ -7,6 +7,8 @@ pub mod due;
 #[cfg(feature = "machine")]
 pub mod machine;
 #[cfg(feature = "policy")]
+mod jitter;
+#[cfg(feature = "policy")]
 pub mod policy;
 #[cfg(feature = "schedule")]
 pub mod schedule;

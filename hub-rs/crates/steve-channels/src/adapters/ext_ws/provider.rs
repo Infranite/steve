@@ -8,8 +8,10 @@
 //! opened for that call and closed after it.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_runtime::policy::{Backoff, Jitter, Retry};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -299,53 +301,47 @@ impl ExtWs {
         if let Some(k) = key {
             params["idempotency_key"] = k.into();
         }
-        let base = Duration::from_secs(1);
-        for attempt in 0..=RETRIES {
-            let backoff = rpc_delay(base, Duration::from_secs(60), attempt as u32);
-            self.pace(cx.id(), s).await;
-            // A borrowed ConnCx and an earlier approval are not a grant: the switch or the
-            // service policy may have changed during pacing/backoff. Never replay after denial.
-            self.hub_writable(cx)?;
-            writable(s)?;
-            match s.call(method, params.clone(), s.timing().call).await {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    let wait = match e.reason() {
-                        Some(Reason::RateLimited) => Some(match &e {
-                            CallError::Rpc(r) => r
-                                .retry_after_ms()
-                                .map(|ms| hinted_wait(ms))
-                                .unwrap_or_else(|| full_jitter(backoff)),
-                            _ => backoff,
-                        }),
-                        Some(Reason::Internal | Reason::UpstreamUnavailable | Reason::Timeout) => {
-                            Some(full_jitter(backoff))
+        let policy = rpc_backoff(Duration::from_secs(1), Duration::from_secs(60));
+        let calls = AtomicU32::new(0);
+        let keyed = params.get("idempotency_key").is_some();
+        policy
+            .retry(
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    let params = params.clone();
+                    let (policy, calls) = (&policy, &calls);
+                    async move {
+                        self.pace(cx.id(), s).await;
+                        // Recheck live authorization after every pace/backoff, including retries.
+                        self.hub_writable(cx).map_err(|e| (e, Retry::Stop))?;
+                        writable(s).map_err(|e| (e, Retry::Stop))?;
+                        match s.call(method, params, s.timing().call).await {
+                            Ok(v) => Ok(v),
+                            Err(e) => {
+                                let retry = rpc_retry(
+                                    &policy,
+                                    calls.load(Ordering::Relaxed) - 1,
+                                    &e,
+                                    Some(keyed),
+                                );
+                                if e.reason() == Some(Reason::WriteForbidden) {
+                                    s.forbid_writes();
+                                    Self::remember_write_policy(cx, s).await;
+                                }
+                                if let Some(Reason::AccountChanged | Reason::Unauthorized) =
+                                    e.reason()
+                                {
+                                    s.close(1000, "account changed");
+                                }
+                                Err((write_err(e), retry))
+                            }
                         }
-                        // the outcome is unknown: only the same key goes again
-                        None if matches!(e, CallError::Timeout)
-                            && params.get("idempotency_key").is_some() =>
-                        {
-                            Some(full_jitter(backoff))
-                        }
-                        _ => None,
-                    };
-                    if let Some(Reason::WriteForbidden) = e.reason() {
-                        s.forbid_writes();
-                        Self::remember_write_policy(cx, s).await;
                     }
-                    if let Some(Reason::AccountChanged | Reason::Unauthorized) = e.reason() {
-                        s.close(1000, "account changed");
-                    }
-                    match wait {
-                        Some(w) if attempt < RETRIES => {
-                            tokio::time::sleep(w).await;
-                        }
-                        _ => return Err(write_err(e)),
-                    }
-                }
-            }
-        }
-        unreachable!("the loop returns")
+                },
+                |(_, retry)| *retry,
+            )
+            .await
+            .map_err(|(e, _)| e)
     }
 
     /// All personal writes, including recall/reactions and direct connector dispatch, share the
@@ -382,39 +378,33 @@ impl ExtWs {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CallError> {
-        let base = Duration::from_millis(500);
-        let mut last = CallError::Timeout;
-        for attempt in 0..=RETRIES {
-            let backoff = rpc_delay(base, Duration::from_secs(30), attempt as u32);
-            match s.call(method, params.clone(), timeout).await {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    let wait = match (&e, e.reason()) {
-                        (CallError::Rpc(r), Some(Reason::RateLimited)) => r
-                            .retry_after_ms()
-                            .map(|ms| hinted_wait(ms))
-                            .or(Some(full_jitter(backoff))),
-                        (
-                            _,
-                            Some(Reason::Internal | Reason::UpstreamUnavailable | Reason::Timeout),
-                        ) => Some(full_jitter(backoff)),
-                        (CallError::Timeout, None) => Some(Duration::ZERO),
-                        _ => None,
-                    };
-                    if e.reason() == Some(Reason::Unsupported) {
-                        s.drop_feature(method);
-                    }
-                    last = e;
-                    match wait {
-                        Some(w) if attempt < RETRIES && !s.is_closed() => {
-                            tokio::time::sleep(w).await;
+        let policy = rpc_backoff(Duration::from_millis(500), Duration::from_secs(30));
+        let calls = AtomicU32::new(0);
+        policy
+            .retry(
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    let params = params.clone();
+                    async move {
+                        let result = s.call(method, params, timeout).await;
+                        if result
+                            .as_ref()
+                            .is_err_and(|e| e.reason() == Some(Reason::Unsupported))
+                        {
+                            s.drop_feature(method);
                         }
-                        _ => return Err(last),
+                        result
                     }
-                }
-            }
-        }
-        Err(last)
+                },
+                |e| {
+                    if s.is_closed() {
+                        Retry::Stop
+                    } else {
+                        rpc_retry(&policy, calls.load(Ordering::Relaxed) - 1, e, None)
+                    }
+                },
+            )
+            .await
     }
 }
 
@@ -530,39 +520,46 @@ impl Drop for Use {
     }
 }
 
-fn rpc_delay(base: Duration, max: Duration, attempt: u32) -> Duration {
-    steve_runtime::policy::Backoff {
+fn rpc_backoff(base: Duration, max: Duration) -> Backoff {
+    Backoff {
         base,
         max,
         factor: 2,
-        jitter: steve_runtime::policy::Jitter::None,
+        jitter: Jitter::None,
         attempts: Some(RETRIES as u32),
         reset_after: None,
     }
-    .delay(attempt, &mut rand::rng())
 }
 
-fn hinted_wait(ms: u64) -> Duration {
-    Duration::from_millis(ms) + full_jitter(Duration::from_millis(ms / 5))
-}
-
-/// Full jitter on the protocol's inclusive millisecond lattice. Runtime Jitter
-/// samples nanoseconds: one equally sized interval per possible old millisecond
-/// preserves both endpoints and the old uniform distribution after quantizing.
-pub(crate) fn full_jitter(d: Duration) -> Duration {
-    let max = Duration::from_millis(d.as_millis() as u64)
-        .saturating_add(Duration::from_millis(1))
-        .saturating_sub(Duration::from_nanos(1));
-    let delay = steve_runtime::policy::Backoff {
-        base: max,
-        max,
-        factor: 1,
-        jitter: steve_runtime::policy::Jitter::Full,
-        attempts: None,
-        reset_after: None,
+// `write`: None for reads, Some(keyed) for writes. Keep timeout safety and the protocol's
+// inclusive millisecond jitter while Backoff owns attempts, exponential caps and sleeping.
+fn rpc_retry(policy: &Backoff, attempt: u32, error: &CallError, write: Option<bool>) -> Retry {
+    match (error, error.reason()) {
+        (CallError::Rpc(r), Some(Reason::RateLimited)) => {
+            let delay = if let Some(ms) = r.retry_after_ms() {
+                Duration::from_millis(ms)
+                    + Jitter::Full.milliseconds(Duration::from_millis(ms / 5), &mut rand::rng())
+            } else {
+                Jitter::Full.milliseconds(policy.delay(attempt, &mut rand::rng()), &mut rand::rng())
+            };
+            Retry::After(delay)
+        }
+        (_, Some(Reason::Internal | Reason::UpstreamUnavailable | Reason::Timeout)) => {
+            Retry::After(
+                Jitter::Full
+                    .milliseconds(policy.delay(attempt, &mut rand::rng()), &mut rand::rng()),
+            )
+        }
+        (CallError::Timeout, None) => match write {
+            None => Retry::Now,
+            Some(true) => Retry::After(
+                Jitter::Full
+                    .milliseconds(policy.delay(attempt, &mut rand::rng()), &mut rand::rng()),
+            ),
+            Some(false) => Retry::Stop,
+        },
+        _ => Retry::Stop,
     }
-    .delay(0, &mut rand::rng());
-    Duration::from_millis(delay.as_millis() as u64)
 }
 
 /// Writes may go out: not read-only, the remote session usable (§3.6, §9.2).
@@ -1609,27 +1606,50 @@ mod retry_sequence_tests {
     #[test]
     fn rpc_wait_tables_keep_millisecond_jitter_and_server_hint() {
         for (base, expected) in [(1000, [1000, 2000, 4000]), (500, [500, 1000, 2000])] {
+            let policy = rpc_backoff(Duration::from_millis(base), Duration::from_secs(60));
             for (attempt, max) in expected.into_iter().enumerate() {
-                let delay = rpc_delay(
-                    Duration::from_millis(base),
-                    Duration::from_secs(30),
-                    attempt as u32,
+                assert_eq!(
+                    policy.delay(attempt as u32, &mut rand::rng()),
+                    Duration::from_millis(max)
                 );
-                assert_eq!(delay, Duration::from_millis(max));
                 for _ in 0..64 {
-                    let wait = full_jitter(delay);
+                    let wait = Jitter::Full.milliseconds(
+                        policy.delay(attempt as u32, &mut rand::rng()),
+                        &mut rand::rng(),
+                    );
                     assert!(wait <= Duration::from_millis(max));
                     assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
                 }
             }
         }
+        let hint_policy = rpc_backoff(Duration::from_secs(1), Duration::from_secs(60));
         for ms in [0, 1, 4, 5, 1000, 60000] {
+            let mut rpc = super::super::wire::RpcError::new(Reason::RateLimited, "limited");
+            rpc.data["retry_after_ms"] = json!(ms);
             for _ in 0..64 {
-                let wait = hinted_wait(ms);
+                let Retry::After(wait) =
+                    rpc_retry(&hint_policy, 2, &CallError::Rpc(rpc.clone()), Some(true))
+                else {
+                    panic!("hint must retry")
+                };
                 assert!(wait >= Duration::from_millis(ms));
                 assert!(wait <= Duration::from_millis(ms + ms / 5));
+                assert_eq!(wait.subsec_nanos() % 1_000_000, 0);
             }
         }
+        let policy = rpc_backoff(Duration::from_secs(1), Duration::from_secs(60));
+        assert!(matches!(
+            rpc_retry(&policy, 0, &CallError::Timeout, None),
+            Retry::Now
+        ));
+        assert!(matches!(
+            rpc_retry(&policy, 0, &CallError::Timeout, Some(false)),
+            Retry::Stop
+        ));
+        assert!(matches!(
+            rpc_retry(&policy, 0, &CallError::Timeout, Some(true)),
+            Retry::After(_)
+        ));
     }
 }
 
