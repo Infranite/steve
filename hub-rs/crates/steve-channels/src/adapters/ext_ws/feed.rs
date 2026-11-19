@@ -519,7 +519,7 @@ impl Feed<'_> {
         let mut bodies: Vec<Option<WireMessage>> = Vec::new();
         let mut gaps: Vec<(Option<Vec<String>>, i64, i64)> = Vec::new();
         let mut chats: Vec<(String, String)> = Vec::new();
-        for it in items {
+        for (index, it) in items.iter().enumerate() {
             match it.get("type").and_then(Value::as_str) {
                 Some("message") => match WireMessage::meta(it, now, true) {
                     Ok(m) => {
@@ -531,7 +531,12 @@ impl Feed<'_> {
                         metas.push(m);
                         bodies.push(inline);
                     }
-                    Err(e) => tracing::warn!(conn = self.conn(), "ext_ws: item dropped: {e}"),
+                    Err(e) => self.retain_dead_letter(
+                        it["chat_id"].as_str().unwrap_or_default(),
+                        &format!("fp:batch:{cursor}:{index}"),
+                        it,
+                        &e,
+                    )?,
                 },
                 Some("gap") => match gap(it, now) {
                     Ok(g) => gaps.push(g),
@@ -684,7 +689,7 @@ impl Feed<'_> {
     }
 
     /// One message through the pipeline (its dedupe drops what is already stored). A message the
-    /// pipeline refuses is dropped and logged; a store failure ends the session, unacked.
+    /// permanently refuses is retained as a dead letter; transient failures end the session unacked.
     async fn deliver(&mut self, mut msg: InboundMessage) -> Step {
         if self.s.hello().connector.is_some() {
             for a in &mut msg.attachments {
@@ -713,6 +718,11 @@ impl Feed<'_> {
         if self.run.queries.known(&msg).unwrap_or(false) {
             return Ok(());
         }
+        let rejected = msg.clone();
+        if self.hook.channels.store().reader(|c| {
+            c.query_row("SELECT EXISTS(SELECT 1 FROM chan_ext_ws_dead_letters WHERE connection_id = ? AND chat_id = ? AND source_id = ?)",
+                params![self.conn(), msg.space_ext_id, msg.source_id.as_deref().unwrap_or(&msg.external_id)], |r| r.get::<_, bool>(0)).map_err(ApiError::from)
+        }).map_err(|e| End::Lost(e.to_string()))? { return Ok(()); }
         match self.run.inbound.message(msg).await {
             Ok(_) => Ok(()),
             Err(ApiError::Internal(e)) => {
@@ -724,11 +734,55 @@ impl Feed<'_> {
                 tracing::debug!(conn = self.conn(), "ext_ws: stopped: {e}");
                 Err(End::Stopped)
             }
-            Err(e) => {
-                tracing::warn!(conn = self.conn(), "ext_ws: message dropped: {e}");
+            Err(e @ (ApiError::Invalid(_) | ApiError::Rule(_))) => {
+                self.dead_letter(&rejected, &e.to_string())?;
                 Ok(())
             }
+            Err(e) => {
+                self.s.close(1011, "message not stored");
+                Err(End::Lost(format!("message not stored: {e}")))
+            }
         }
+    }
+
+    fn dead_letter(&self, msg: &InboundMessage, error: &str) -> Step {
+        let handle = |h: &crate::channel::HandleRef| json!({"system": h.system, "handle": h.handle, "extra": h.extra});
+        let payload = json!({"chat_id": msg.space_ext_id, "id": msg.external_id,
+            "source_id": msg.source_id, "text": msg.text, "raw": msg.raw,
+            "created": msg.created, "edited": msg.edited, "mine": msg.mine,
+            "backfill": msg.backfill, "attachments": msg.attachments,
+            "sender": {"handle": handle(&msg.sender.handle), "aliases": msg.sender.aliases.iter().map(handle).collect::<Vec<_>>(),
+                "display_name": msg.sender.display_name, "is_bot": msg.sender.is_bot, "external": msg.sender.external},
+            "mentions": msg.mentions.iter().map(|m| json!({"handle": m.handle.as_ref().map(handle), "name": m.name, "is_connection": m.is_connection})).collect::<Vec<_>>(),
+            "thread_key": msg.thread_key, "reply_to": msg.reply_to, "root_id": msg.root_id,
+            "event_id": msg.event_id, "space_kind": msg.space_kind, "space_name": msg.space_name,
+            "via": msg.via});
+        self.retain_dead_letter(
+            &msg.space_ext_id,
+            msg.source_id.as_deref().unwrap_or(&msg.external_id),
+            &payload,
+            error,
+        )
+    }
+
+    fn retain_dead_letter(&self, chat: &str, source: &str, payload: &Value, error: &str) -> Step {
+        self.hook.channels.store().transaction(|tx| {
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO chan_ext_ws_dead_letters
+                 (connection_id, chat_id, source_id, payload, error, created) VALUES (?, ?, ?, ?, ?, ?)",
+                params![self.conn(), chat, source, payload.to_string(), error, self.now()])?;
+            if inserted > 0 {
+                steve_store::base::audit(tx, &self.run.state.ws, "steve", "channel.dead_letter", self.conn(),
+                    &json!({"chat_id": chat, "source_id": source, "reason": "invalid_inbound"}))?;
+            }
+            Ok::<_, ApiError>(())
+        }).map_err(|e| End::Lost(format!("dead letter not stored: {e}")))?;
+        tracing::warn!(
+            conn = self.conn(),
+            source,
+            "ext_ws: message retained as dead letter"
+        );
+        Ok(())
     }
 
     fn unknown_chat(&self, chat: &str) -> bool {
