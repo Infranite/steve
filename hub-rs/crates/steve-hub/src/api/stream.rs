@@ -11,8 +11,9 @@
 //!   the retained window), one `id: <epoch>:<head>` + `{"type":"stream.reset"}`: refetch everything;
 //! - then live frames, with an `id:` line when they are kept in the log; frames already replayed are skipped.
 //!
-//! Falling behind the bus replays from the last frame written (or resets) instead of the `workspace` frame.
-//! Pings never carry an id. Without a cursor the bytes are exactly as before: no `id:` lines, no new types.
+//! Falling behind the bus replays from the last frame written (or resets). A subscriber without a cursor
+//! receives `stream.reset` without an id and refetches everything. Its ordinary live frames still have no
+//! `id:` lines. Pings never carry an id.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
