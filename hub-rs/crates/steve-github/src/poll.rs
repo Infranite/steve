@@ -1,6 +1,6 @@
 //! The polling fallback: repos without webhooks (`ingest=poll`), and App/hook
 //! repos whose last delivery is over 6 hours old while they have an open PR linked to an item (the
-//! public entry may be down). Every 2 minutes: the 50 most recently updated PRs (with ETag), then the
+//! public entry may be down). Every 2 minutes: updated PRs in bounded pages (first-page ETag), then the
 //! check runs and statuses of open PRs whose checks have not passed; every 10 minutes the issues
 //! updated since the last look.
 //!
@@ -30,12 +30,16 @@ pub const DELIVERY_KEEP_MS: i64 = 7 * 24 * 3_600_000;
 const TICK: Duration = Duration::from_secs(30);
 /// Repos polled at the same time.
 const POLL_CONCURRENCY: usize = 4;
+/// Bound API work per repo; an unfinished scan continues on the next poll.
+pub const PULL_PAGES_MAX: usize = 10;
 
 /// What one poll did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PollReport {
     /// GitHub answered 304 for the PR list.
     pub pulls_unchanged: bool,
+    /// The page budget was exhausted; the next URL was saved for the next poll.
+    pub pulls_deferred: bool,
     /// Changes handed to the handler (new synthetic deliveries).
     pub applied: usize,
     /// Views already applied before (same synthetic id).
@@ -126,41 +130,89 @@ impl GitHub {
         let now = self.now();
         let repository = json!({"id": r.gh_id, "full_name": r.full_name});
 
-        // 1. PRs, newest update first.
-        let path = format!(
+        // 1. PRs, newest update first. The pulls endpoint has no `since` parameter:
+        // https://docs.github.com/en/rest/pulls/pulls#list-pull-requests
+        // Keep the old watermark until the whole scan completes, including all timestamps equal
+        // to it (GitHub has second precision). Receipts make inclusive replay harmless.
+        let first_path = format!(
             "/repos/{}/pulls?state=all&sort=updated&direction=desc&per_page=50",
             r.full_name
         );
-        let etag = r.poll_state["pulls_etag"].as_str().map(String::from);
-        let res = conn
-            .get_if_changed(&path, etag.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut new_etag = etag.clone();
-        if res.not_modified() {
-            rep.pulls_unchanged = true;
+        let mut scan = r.poll_state["pulls_scan"].clone();
+        let continuing = scan["next"].as_str().is_some();
+        let since = r.poll_state["pulls_since"].as_i64().unwrap_or(0);
+        let mut newest = scan["newest"].as_i64().unwrap_or(since);
+        let mut path = scan["next"].as_str().unwrap_or(&first_path).to_string();
+        let mut new_etag = if continuing {
+            scan["etag"].as_str()
         } else {
-            new_etag = res.etag.clone();
-            // Oldest first, so transitions apply in order.
-            let mut list = match res.body {
-                Value::Array(v) => v,
-                _ => Vec::new(),
-            };
-            list.reverse();
-            for pr in list {
-                let (Some(n), Some(u)) = (pr["number"].as_i64(), pr["updated_at"].as_str()) else {
-                    continue;
-                };
-                // GitHub timestamps have second precision; distinct pushes in that second
-                // still need distinct receipts. Semantic dedupe remains the flow event's job.
-                let head = pr["head"]["sha"].as_str().unwrap_or("");
-                let draft = pr["draft"].as_bool().unwrap_or(false);
-                let key = format!("poll:{}:pr:{n}:{u}:{head}:{draft}", r.id);
-                let payload =
-                    json!({"action": "poll", "pull_request": pr, "repository": repository});
-                self.poll_change(&r, &key, "pull_request", &payload, &mut rep)
-                    .await?;
+            r.poll_state["pulls_etag"].as_str()
+        }
+        .map(String::from);
+        let mut list = Vec::new();
+        for page in 0..PULL_PAGES_MAX {
+            // A 304 on page one says nothing about an unfinished tail.
+            // An installation upgraded from first-page-only polling has no watermark yet:
+            // its old ETag cannot certify that the older pages were ever consumed.
+            let etag = (!continuing && page == 0 && r.poll_state["pulls_since"].is_number())
+                .then_some(new_etag.as_deref())
+                .flatten();
+            let res = conn
+                .get_if_changed(&path, etag)
+                .await
+                .map_err(|e| e.to_string())?;
+            if res.not_modified() {
+                if continuing || page > 0 {
+                    return Err("GitHub returned 304 for an unconditional PR page".into());
+                }
+                rep.pulls_unchanged = true;
+                scan = Value::Null;
+                break;
             }
+            if !continuing && page == 0 {
+                new_etag = res.etag;
+            }
+            let Value::Array(prs) = res.body else {
+                return Err("GitHub returned an invalid PR list".into());
+            };
+            let mut reached = false;
+            for pr in prs {
+                let updated = crate::sync::ts(&pr["updated_at"])
+                    .ok_or("GitHub returned a PR without an update timestamp")?;
+                if updated < since {
+                    reached = true;
+                    break;
+                }
+                newest = newest.max(updated);
+                list.push(pr);
+            }
+            match res.next.filter(|_| !reached) {
+                None => {
+                    scan = Value::Null;
+                    break;
+                }
+                Some(next) => path = next,
+            }
+            scan = json!({"next": path, "newest": newest, "etag": new_etag});
+            if page + 1 == PULL_PAGES_MAX {
+                rep.pulls_deferred = true;
+                tracing::warn!(repo = %r.id, next = %path, pages = PULL_PAGES_MAX,
+                    "github PR page limit reached; continuing next poll");
+            }
+        }
+        // Oldest first within this bounded segment. State is committed only after all deliveries
+        // are durable; a failure replays the segment using the same synthetic IDs.
+        list.reverse();
+        for pr in list {
+            let (Some(n), Some(u)) = (pr["number"].as_i64(), pr["updated_at"].as_str()) else {
+                return Err("GitHub returned a PR without a number".into());
+            };
+            let head = pr["head"]["sha"].as_str().unwrap_or("");
+            let draft = pr["draft"].as_bool().unwrap_or(false);
+            let key = format!("poll:{}:pr:{n}:{u}:{head}:{draft}", r.id);
+            let payload = json!({"action": "poll", "pull_request": pr, "repository": repository});
+            self.poll_change(&r, &key, "pull_request", &payload, &mut rep)
+                .await?;
         }
 
         // 2. Checks of open PRs that have not passed.
@@ -254,8 +306,10 @@ impl GitHub {
                         st = json!({});
                     }
                     st["last_poll"] = json!(now);
-                    if let Some(e) = &new_etag {
-                        st["pulls_etag"] = json!(e);
+                    st["pulls_scan"] = scan.clone();
+                    if scan.is_null() {
+                        st["pulls_since"] = json!(newest);
+                        st["pulls_etag"] = json!(new_etag);
                     }
                     if issues_due {
                         st["last_issues_poll"] = json!(now);

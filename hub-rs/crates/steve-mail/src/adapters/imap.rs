@@ -51,6 +51,8 @@ pub const LARGE_BYTES: u32 = 25 * 1024 * 1024;
 pub const FIRST_SYNC_MAX: usize = 500;
 /// Messages per `UID FETCH`.
 pub const BATCH: usize = 50;
+/// Three completed fetch attempts tolerate temporary omissions without blocking a folder forever.
+pub const MISSING_UID_ATTEMPTS: u32 = 3;
 /// Flags re-checked without CONDSTORE: the newest this many, every [`FLAG_RECHECK_MS`].
 pub const FLAG_RECHECK_COUNT: u32 = 200;
 pub const FLAG_RECHECK_MS: i64 = 10 * 60 * 1000;
@@ -804,9 +806,17 @@ impl ImapAdapter {
             f.uidvalidity = Some(validity);
             f.last_uid = None;
             f.modseq = None;
+            f.synced = None;
+            f.cursor = None;
         }
         let first = f.last_uid.is_none();
-        let backfill = first;
+        let backfill = f.synced.is_none();
+        // IMAP uses the existing folder cursor for the one unresolved UID and its retry count.
+        // Keeping it in the saved state also bounds retries across job/process restarts.
+        let pending: Option<(u32, u32)> = f
+            .cursor
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         let mut uids: Vec<u32> = if first {
             let since = search_date(now - sync_days.max(1) * 86_400_000);
             let mut u: Vec<u32> = timed(async {
@@ -831,6 +841,11 @@ impl ImapAdapter {
             u.sort_unstable();
             u
         };
+        if let Some((uid, _)) = pending {
+            // A UID that vanished after discovery still needs an explicit retry/diagnostic.
+            uids.push(uid);
+            uids.sort_unstable();
+        }
         uids.dedup();
         let thrid = if caps.gmail { " X-GM-THRID" } else { "" };
         for chunk in uids.chunks(BATCH) {
@@ -869,13 +884,30 @@ impl ImapAdapter {
                     .await?,
                 );
             }
-            items.sort_by_key(|i| i.uid);
+            let mut items: BTreeMap<_, _> = items
+                .into_iter()
+                // Unsolicited flag-only FETCH responses must not replace a fetched body.
+                .filter(|i| i.body.is_some() || i.header.is_some())
+                .filter_map(|i| Some((i.uid?, i)))
+                .collect();
             let mut batch = Vec::with_capacity(items.len());
             let mut top = None;
-            for it in items {
-                let Some(uid) = it.uid else { continue };
+            let mut missing = None;
+            let mut skipped = Vec::new();
+            for &uid in chunk {
+                let it = items.remove(&uid).unwrap_or_default();
                 let partial = it.body.is_none();
                 let Some(raw) = it.body.or(it.header) else {
+                    let attempts = pending
+                        .filter(|(u, _)| *u == uid)
+                        .map_or(1, |(_, n)| n.saturating_add(1));
+                    if attempts < MISSING_UID_ATTEMPTS {
+                        missing = Some((uid, attempts));
+                        break;
+                    }
+                    tracing::warn!(folder = %f.ext_id, uid, attempts, "imap UID unavailable after retry limit; advancing past it");
+                    skipped.push(ext_id(&f.ext_id, validity, uid));
+                    top = Some(i64::from(uid));
                     continue;
                 };
                 batch.push(FetchedMessage {
@@ -897,8 +929,15 @@ impl ImapAdapter {
             let n = batch.len();
             sink.put_batch(batch).await?;
             report.fetched += n;
+            report.skipped.extend(skipped);
             if let Some(top) = top {
                 f.last_uid = Some(f.last_uid.unwrap_or(0).max(top));
+            }
+            f.cursor = missing.map(|m| serde_json::to_string(&m).expect("UID retry tuple"));
+            if let Some((uid, attempts)) = missing {
+                tracing::warn!(folder = %f.ext_id, uid, attempts, "imap UID has no body or header; retrying next sync");
+                // In particular, do not run the first-sync UIDNEXT shortcut over this gap.
+                return Ok(());
             }
         }
         if first {
