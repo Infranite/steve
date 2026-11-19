@@ -1,4 +1,6 @@
-//! One-time journal upgrades. Initialization and recovery share the caller's transaction.
+//! Versioned journal schema and the single receipt/state write path. Legacy upgrades discard
+//! command/process ledgers only after all recorded groups are proven gone, preserve pending
+//! events, and fence pre-upgrade commands. Initialization and recovery commit together.
 use super::*;
 
 /// 4: operation states are checked columns and restart recovery is an indexed bulk update.
@@ -45,6 +47,11 @@ const OPS_V4: &str = r#"CREATE TABLE IF NOT EXISTS ops (
 
 /// Unknown still needs reconciliation; Waiting is an active (running) operation.
 const OPEN_OPS: &str = "state IN ('accepted','running','unknown')";
+static RESTART_OPS_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "UPDATE ops SET state=?1, receipt=json_set(receipt,'$.state',json(?2)) WHERE {OPEN_OPS} AND state<>'unknown'"
+    )
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OpState {
@@ -149,9 +156,21 @@ impl Tx<'_> {
     }
 
     fn migrate_v3_to_v4(&self) -> ApiResult<()> {
+        self.require_legacy_processes_gone()?;
         // The old command ledger is intentionally discarded. Keep payloads the Hub has not
         // acknowledged: stream/event shapes did not change and their positions remain valid.
-        self.remove_op_dependents(None)?;
+        // Clear whole dependent tables, including orphan rows whose op/attempt is already gone.
+        self.c()
+            .execute_batch(
+                "DELETE FROM artifact_grants;
+                 DELETE FROM attempts;
+                 DELETE FROM command_specs;
+                 DELETE FROM reservations;
+                 DELETE FROM answers;
+                 DELETE FROM waits;
+                 DELETE FROM harness_setups;",
+            )
+            .map_err(internal)?;
         self.c().execute(
             "DELETE FROM streams WHERE (stream GLOB 'op:*' OR stream GLOB 'job:*') AND produced=acknowledged AND NOT EXISTS (SELECT 1 FROM events WHERE events.stream=streams.stream AND seq>acknowledged)",
             [],
@@ -172,15 +191,28 @@ impl Tx<'_> {
                 [],
             )
             .map_err(internal)?;
-        // Process records belong to the old incarnation; never backfill process identity.
+        // All old groups are proven gone; discard their records without backfilling identity.
         self.c()
-            .execute_batch("DROP TABLE procs;")
+            .execute_batch("DROP TABLE IF EXISTS procs;")
             .map_err(internal)?;
         self.c().execute_batch(PROCS_V4).map_err(internal)?;
-        if self.table_exists("disk_observations")? {
-            self.c()
-                .execute_batch("DROP TABLE disk_observations;")
-                .map_err(internal)?;
+        self.c()
+            .execute_batch("DROP TABLE IF EXISTS disk_observations;")
+            .map_err(internal)?;
+        Ok(())
+    }
+
+    fn require_legacy_processes_gone(&self) -> ApiResult<()> {
+        // Legacy tables may lack started. Group absence (ESRCH) is the only proof needed;
+        // alive, unsignalable, reused or invalid identities must retain their durable records.
+        let groups = self.rows("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))?;
+        if groups.into_iter().any(|pgid| {
+            !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
+        }) {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "stop the old Node's processes before upgrading the journal",
+            ));
         }
         Ok(())
     }
@@ -214,7 +246,12 @@ impl Tx<'_> {
                     reason: steve_node_api::RESTARTED.into(),
                 };
                 // Preserve existing Unknown reasons, as before; only live states lose their run.
-                self.c().execute(&format!("UPDATE ops SET state=?1, receipt=json_set(receipt,'$.state',json(?2)) WHERE {OPEN_OPS} AND state<>'unknown'"), params![unknown.state().as_str(), json(&unknown)]).map_err(internal)?;
+                self.c()
+                    .execute(
+                        &RESTART_OPS_SQL,
+                        params![unknown.state().as_str(), json(&unknown)],
+                    )
+                    .map_err(internal)?;
             }
         }
         Ok(())

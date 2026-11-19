@@ -104,6 +104,7 @@ struct Writer {
     db: Connection,
     heads: BTreeMap<String, StreamHead>,
     counters: BTreeMap<String, u64>,
+    accept_floor: i64,
     id: String,
     incarnation: u64,
     used: u64,
@@ -314,6 +315,7 @@ pub(crate) struct Tx<'a> {
     head_changes: RefCell<BTreeMap<String, Option<StreamHead>>>,
     identity: &'a str,
     counters: &'a BTreeMap<String, u64>,
+    accept_floor: i64,
     counter_changes: RefCell<BTreeMap<String, u64>>,
     used: u64,
     limit: u64,
@@ -442,6 +444,7 @@ impl Writer {
             db: c,
             heads: BTreeMap::new(),
             counters: BTreeMap::new(),
+            accept_floor: 0,
             id: String::new(),
             incarnation: 0,
             used: 0,
@@ -467,12 +470,21 @@ impl Writer {
         j.incarnation = incarnation;
         j.counters = j
             .read(|t| {
-                t.rows("SELECT key, value FROM meta WHERE key IN ('incarnation','event','revision','snapshot','workspace','accept_floor')", [], |r| {
+                t.rows("SELECT key, value FROM meta WHERE key IN ('incarnation','event','revision','snapshot','workspace')", [], |r| {
                     Ok((r.get(0)?, r.get::<_, i64>(1)? as u64))
                 })
             })?
             .into_iter()
             .collect();
+        j.accept_floor = j.read(|t| {
+            t.c()
+                .query_row("SELECT value FROM meta WHERE key='accept_floor'", [], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map(|floor| floor.unwrap_or(0))
+                .map_err(internal)
+        })?;
         let heads = j.read(|t| {
             t.rows(
                 "SELECT stream, epoch, produced, acknowledged FROM streams ORDER BY stream",
@@ -703,6 +715,7 @@ impl Writer {
                 head_changes: RefCell::new(BTreeMap::new()),
                 identity: &self.id,
                 counters: &self.counters,
+                accept_floor: self.accept_floor,
                 counter_changes: RefCell::new(BTreeMap::new()),
                 used: self.used,
                 limit: self.limit,
@@ -864,7 +877,7 @@ impl Tx<'_> {
 
     /// Loaded once after the migration commits; command admission never probes meta for this.
     pub(crate) fn accept_floor(&self) -> i64 {
-        self.counters.get("accept_floor").copied().unwrap_or(0) as i64
+        self.accept_floor
     }
 
     pub(crate) fn mark_unknown(&self) -> ApiResult<()> {
@@ -1396,7 +1409,7 @@ impl Tx<'_> {
                     .map_err(internal)?;
                 self.head_changes.borrow_mut().insert(stream, None);
             }
-            self.remove_op_dependents(Some(op))?;
+            self.remove_op_dependents(op)?;
             self.c()
                 .execute("DELETE FROM ops WHERE id=?1", [op])
                 .map_err(internal)?;
@@ -1407,16 +1420,10 @@ impl Tx<'_> {
         Ok(rows.len())
     }
 
-    /// Retention removes one op's dependencies; the one-time upgrade removes the whole ledger's.
-    /// Session/workspace/process state is independent and remains available for recovery.
-    fn remove_op_dependents(&self, op: Option<&str>) -> ApiResult<()> {
-        let owners = if op.is_some() {
-            "SELECT id FROM ops WHERE id=?1"
-        } else {
-            "SELECT id FROM ops WHERE ?1 IS NULL"
-        };
+    /// Daily retention removes only this op's dependencies, after its eligibility checks.
+    fn remove_op_dependents(&self, op: &str) -> ApiResult<()> {
         self.c().execute(
-            &format!("DELETE FROM artifact_grants WHERE attempt IN (SELECT attempt FROM attempts WHERE op IN ({owners}))"),
+            "DELETE FROM artifact_grants WHERE attempt IN (SELECT attempt FROM attempts WHERE op=?1)",
             [op],
         ).map_err(internal)?;
         for table in [
@@ -1428,7 +1435,7 @@ impl Tx<'_> {
             "harness_setups",
         ] {
             self.c()
-                .execute(&format!("DELETE FROM {table} WHERE op IN ({owners})"), [op])
+                .execute(&format!("DELETE FROM {table} WHERE op=?1"), [op])
                 .map_err(internal)?;
         }
         Ok(())

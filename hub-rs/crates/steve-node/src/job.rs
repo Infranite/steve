@@ -562,6 +562,8 @@ fn event_failed(inner: &Inner, broken: &AtomicBool, error: &ApiError) {
     match error.code {
         ErrorCode::Exhausted => broken.store(true, Ordering::SeqCst),
         ErrorCode::Internal => inner.fault(),
+        // Journal event writes produce only Exhausted (budget) or Internal (storage).
+        // Other API errors do not identify either condition and must not set their flags.
         _ => {}
     }
 }

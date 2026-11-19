@@ -2097,6 +2097,50 @@ async fn disconnected_lease_and_empty_ack_backoff() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_operations_are_invalid_for_recover_as_for_query_cancel_and_abandon() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let target = OperationId::new("missing").unwrap();
+    let errors = [
+        n.operation(target.clone()).await.unwrap_err(),
+        n.cancel(now_cmd(
+            "cancel_missing",
+            Cancel {
+                target: target.clone(),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+        n.abandon(now_cmd(
+            "abandon_missing",
+            Abandon {
+                target: target.clone(),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+        n.recover(now_cmd(
+            "recover_missing",
+            Recover {
+                target,
+                expected: Digest::sha256(b"missing"),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap_err(),
+    ];
+    for e in errors {
+        assert_eq!(e.code, ErrorCode::Invalid);
+        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.safe_detail, "no such operation");
+    }
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_workspace_controls_recover_via_public_port() {
     let t = T::new(&[]);
     let n = t.node();
@@ -2777,6 +2821,12 @@ async fn a_v3_upgrade_refuses_executed_envelopes_before_the_floor_across_restart
     let db = rusqlite::Connection::open(&path).unwrap();
     // Keep the command that really ran, its workspace/session and events, in the actual v3 shape.
     db.execute_batch("BEGIN; DROP INDEX ops_open; ALTER TABLE ops DROP COLUMN state; PRAGMA user_version=3; COMMIT;").unwrap();
+    // A resource reservation whose command is already missing must not hold this worktree.
+    db.execute(
+        "INSERT INTO reservations (key,op) VALUES ('item:x','missing_legacy_op')",
+        [],
+    )
+    .unwrap();
     drop(db);
     let n = open_again(&t).await;
     let db = rusqlite::Connection::open(&path).unwrap();

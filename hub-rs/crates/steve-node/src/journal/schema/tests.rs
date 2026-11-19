@@ -3,6 +3,7 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use std::sync::atomic::AtomicUsize;
 
 const V3: &str = include_str!("../fixtures/v3.sql");
+const GONE_PGID: i64 = i32::MAX as i64;
 
 fn variants() -> Vec<Observed> {
     vec![
@@ -45,9 +46,10 @@ fn v3(path: &Path, started: bool, disk: bool, version: i64) -> Connection {
         c.execute("INSERT INTO meta (key,value) VALUES ('journal_id',123)", [])
             .unwrap();
     }
+    assert!(crate::procs::state(GONE_PGID, None).gone());
     c.execute(
-        "INSERT INTO procs (session,pgid,generation,incarnation,meter) VALUES ('s',42,1,7,'m')",
-        [],
+        "INSERT INTO procs (session,pgid,generation,incarnation,meter) VALUES ('s',?1,1,7,'m')",
+        [GONE_PGID],
     )
     .unwrap();
     if started {
@@ -62,11 +64,11 @@ fn v3(path: &Path, started: bool, disk: bool, version: i64) -> Connection {
         c.execute("INSERT INTO ops (rowid,id,method,digest,receipt,session,cancel,accepted) VALUES (?4,?1,'test',?2,?3,'s',1,123)",
             params![r.operation.as_str(), Digest::sha256(b"test").as_str(), json(&r), ((n + 1) * 10) as i64]).unwrap();
     }
-    c.execute("INSERT INTO ops (id,method,digest,receipt,accepted) VALUES ('bad','test',?1,'not-json',456)", [Digest::sha256(b"bad").as_str()]).unwrap();
+    c.execute("INSERT INTO ops (id,method,digest,receipt,accepted) VALUES ('legacy_opaque','test',?1,'legacy receipt bytes',456)", [Digest::sha256(b"legacy_opaque").as_str()]).unwrap();
     c
 }
 
-// Exercise initialize alone to inspect the backfill before the same transaction's recovery.
+// Exercise the one-time ledger deletion before the same transaction's restart recovery.
 fn migrate(c: &mut Connection) {
     let heads = BTreeMap::new();
     let counters = BTreeMap::new();
@@ -76,6 +78,7 @@ fn migrate(c: &mut Connection) {
         head_changes: Default::default(),
         identity: "",
         counters: &counters,
+        accept_floor: 0,
         counter_changes: Default::default(),
         used: 0,
         limit: u64::MAX,
@@ -118,6 +121,67 @@ fn every_observed_variant_matches_the_partial_index_and_checked_column() {
         }
         Ok(())
     }).unwrap();
+}
+
+#[test]
+fn upgrade_refuses_live_or_unproven_process_groups_before_discarding_any_records() {
+    let live_group = unsafe { libc::getpgrp() } as i64;
+    for started in [false, true] {
+        for pgid in [live_group, 1, i64::MAX] {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("node.db");
+            let c = v3(&p, started, true, 3);
+            c.execute("UPDATE procs SET pgid=?1", [pgid]).unwrap();
+            c.execute(
+                "INSERT INTO reservations (key,op) VALUES ('held','missing_op')",
+                [],
+            )
+            .unwrap();
+            let e = Writer::open(&p)
+                .err()
+                .expect("unproven group must block migration");
+            assert_eq!(e.code, ErrorCode::Unsupported, "{started} / {pgid}");
+            assert!(e.safe_detail.contains("stop the old Node's processes"));
+            assert_eq!(
+                c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                3
+            );
+            assert_eq!(
+                c.query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+                7
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM meta WHERE key='accept_floor'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                c.query_row("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                pgid
+            );
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM ops", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                variants().len() as i64 + 1
+            );
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM reservations", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            assert!(!columns(&c, "ops").contains(&"state".into()));
+        }
+    }
 }
 
 #[test]
@@ -197,6 +261,8 @@ fn migration_and_recovery_commit_together_and_v4_keeps_the_original_floor() {
         })
         .unwrap();
     assert!(floor > 0);
+    assert_eq!(w.accept_floor, floor);
+    assert!(!w.counters.contains_key("accept_floor"));
     let r = receipt(
         0,
         Observed::Unknown {
@@ -268,7 +334,7 @@ fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
     assert_eq!(
         c.query_row("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        42
+        GONE_PGID
     );
     assert_eq!(
         c.query_row(
@@ -280,10 +346,13 @@ fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
         1
     );
     assert_eq!(
-        c.query_row("SELECT receipt FROM ops WHERE id='bad'", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        "not-json"
+        c.query_row(
+            "SELECT receipt FROM ops WHERE id='legacy_opaque'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "legacy receipt bytes"
     );
     assert_eq!(
         c.query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
@@ -293,13 +362,10 @@ fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
         7
     );
     assert_eq!(
-        c.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name='ops_v3'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
+        c.query_row("SELECT count(*) FROM ops", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        variants().len() as i64 + 1,
+        "all legacy command rows survive the failed migration"
     );
 }
 
@@ -329,7 +395,7 @@ fn failed_recovery_rolls_back_the_completed_migration_and_incarnation() {
     assert_eq!(
         c.query_row("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        42
+        GONE_PGID
     );
     assert_eq!(
         c.query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
@@ -400,7 +466,18 @@ fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipt
     .unwrap();
     w.write(|t| t.mark_unknown()).unwrap();
     assert_eq!(updates.load(Ordering::SeqCst), 1);
-    let plan = w.read(|t| t.rows(&format!("EXPLAIN QUERY PLAN UPDATE ops SET state='unknown',receipt=json_set(receipt,'$.state',json(?1)) WHERE {OPEN_OPS} AND state<>'unknown'"), [json(&Observed::Unknown { reason: "restart".into() })], |r| r.get::<_, String>(3))).unwrap();
+    let unknown = Observed::Unknown {
+        reason: steve_node_api::RESTARTED.into(),
+    };
+    let plan = w
+        .read(|t| {
+            t.rows(
+                &format!("EXPLAIN QUERY PLAN {}", *RESTART_OPS_SQL),
+                params![unknown.state().as_str(), json(&unknown)],
+                |r| r.get::<_, String>(3),
+            )
+        })
+        .unwrap();
     assert!(
         plan.iter().any(|line| line.contains("ops_open")),
         "{plan:?}"
@@ -452,6 +529,11 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     );
     drop(w);
     let c = Connection::open(&p).unwrap();
+    c.execute(
+        "INSERT INTO procs (session,pgid,generation,incarnation,meter) VALUES ('held',1,1,1,'m')",
+        [],
+    )
+    .unwrap();
     let denied = Arc::new(AtomicUsize::new(0));
     let observed = denied.clone();
     c.authorizer(Some(move |context: AuthContext<'_>| {
@@ -472,8 +554,13 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
         }
     }))
     .unwrap();
-    let (_w, inc) = Writer::from_connection(&p, c).unwrap();
+    let (mut w, inc) = Writer::from_connection(&p, c).unwrap();
     assert_eq!(inc, 2);
+    assert_eq!(
+        w.read(|t| t.procs()).unwrap().len(),
+        1,
+        "normal v4 restart retains an unproven group"
+    );
     assert_eq!(denied.load(Ordering::SeqCst), 0);
 }
 
@@ -580,17 +667,17 @@ fn dependent_v3(c: &Connection) {
         attempt: AttemptId::new("turn_attempt").unwrap(),
     };
     for (op, execution) in [
-        ("bad", Some(job("private", "private_attempt"))),
-        ("bad_shared", Some(job("shared", "bad_attempt"))),
-        ("bad_turn", Some(turn)),
-        ("bad_pair_1", Some(job("bad_pair", "pair_1"))),
-        ("bad_pair_2", Some(job("bad_pair", "pair_2"))),
-        ("bad_plain", None),
+        ("legacy_opaque", Some(job("private", "private_attempt"))),
+        ("legacy_shared", Some(job("shared", "legacy_attempt"))),
+        ("legacy_turn", Some(turn)),
+        ("legacy_pair_1", Some(job("legacy_pair", "pair_1"))),
+        ("legacy_pair_2", Some(job("legacy_pair", "pair_2"))),
+        ("legacy_plain", None),
         ("op_0", Some(job("shared", "good_attempt"))),
     ] {
         let encoded = execution.as_ref().map(json);
         if op != "op_0" {
-            c.execute("INSERT OR IGNORE INTO ops (id,method,digest,receipt,accepted) VALUES (?1,'test','digest','not-json',456)", [op]).unwrap();
+            c.execute("INSERT OR IGNORE INTO ops (id,method,digest,receipt,accepted) VALUES (?1,'test','digest','legacy receipt bytes',456)", [op]).unwrap();
         }
         c.execute(
             "UPDATE ops SET execution=?2 WHERE id=?1",
@@ -645,6 +732,13 @@ fn upgrade_deletes_all_command_dependencies_but_preserves_pending_events_and_ses
     let d = tempfile::tempdir().unwrap();
     let mut c = v3(&d.path().join("node.db"), false, true, 3);
     dependent_v3(&c);
+    c.execute_batch("INSERT INTO attempts (attempt,execution,op) VALUES ('orphan_attempt','null','missing_op');
+        INSERT INTO command_specs (op,body) VALUES ('missing_op','body');
+        INSERT INTO reservations (key,op) VALUES ('workspace_resource','missing_op');
+        INSERT INTO answers (op,permission,resolution) VALUES ('missing_op','permission','resolution');
+        INSERT INTO waits (id,op,session,request) VALUES ('orphan_wait','missing_op','session','request');
+        INSERT INTO harness_setups (harness,op) VALUES ('orphan_harness','missing_op');
+        INSERT INTO artifact_grants (attempt,workspace,body) VALUES ('missing_attempt','workspace','grant');").unwrap();
     for stream in [
         "op:acknowledged",
         "job:acknowledged",
@@ -757,7 +851,7 @@ fn failed_ledger_deletion_rolls_back_everything() {
         })
     };
     let before = counts(&c);
-    c.execute_batch("CREATE TRIGGER fail_discard BEFORE DELETE ON reservations WHEN OLD.op='bad' BEGIN SELECT RAISE(ABORT,'discard fixture'); END;").unwrap();
+    c.execute_batch("CREATE TRIGGER fail_discard BEFORE DELETE ON reservations WHEN OLD.op='legacy_opaque' BEGIN SELECT RAISE(ABORT,'discard fixture'); END;").unwrap();
     drop(c);
     assert!(Writer::open(&p).is_err());
     let c = Connection::open(&p).unwrap();
@@ -778,10 +872,13 @@ fn failed_ledger_deletion_rolls_back_everything() {
         0
     );
     assert_eq!(
-        c.query_row("SELECT receipt FROM ops WHERE id='bad'", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        "not-json"
+        c.query_row(
+            "SELECT receipt FROM ops WHERE id='legacy_opaque'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "legacy receipt bytes"
     );
     c.execute_batch("DROP TRIGGER fail_discard;").unwrap();
     drop(c);

@@ -1468,8 +1468,9 @@ impl LocalNode {
 
     /// Takes the home (one Node per journal) and opens a new incarnation. A normal v4 restart
     /// stops nothing: groups left by the old incarnation keep their sessions held until the Hub
-    /// abandons them. The one-time v3 upgrade discards the old command and process ledgers; stop
-    /// the old Node and its subprocesses cleanly before upgrading, as their ownership is then lost.
+    /// abandons them. The one-time v3 upgrade refuses to discard the old command and process
+    /// ledgers until every recorded process group is confirmed gone; stop the old Node and its
+    /// subprocesses cleanly before upgrading.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
@@ -2976,7 +2977,9 @@ impl ExecutionControl for LocalNode {
         let key = format!("recover:{target}");
         let mut session = None;
         let (receipt, fresh) = self.accept("recover", &c, |t| {
-            let op = t.op(&target)?.ok_or_else(|| internal("unknown target"))?;
+            let op = t
+                .op(&target)?
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such operation"))?;
             if op.digest != c.body.expected || !matches!(op.receipt.state, Observed::Unknown { .. })
             {
                 return Err(ApiError::new(ErrorCode::Stale, "recovery target changed"));
