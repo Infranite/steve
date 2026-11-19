@@ -96,7 +96,7 @@ pub fn tags(event: &BusEvent) -> Tags {
             DomainEvent::Devices(event) => match event {
                 DevicesEvent::Node { id, .. } => {
                     tags.push(Tag::of("node", id.as_str()));
-                    tags.push(Tag::global("runtimes"));
+                    tags.push(Tag::of("runtimes", id.as_str()));
                 }
                 DevicesEvent::Device { .. } => tags.push(Tag::global("runtimes")),
                 DevicesEvent::ReleaseHold { .. } | DevicesEvent::Client { .. } => {}
@@ -192,6 +192,17 @@ pub(crate) fn validate_spaces(spaces: &[(&str, u8)]) -> Result<(), crate::config
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_node_change_does_not_revoke_another_nodes_report() {
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        let event = BusEvent::Domain(DomainEvent::Devices(DevicesEvent::Node {
+            id: "n_a".into(),
+            user: "owner".into(),
+        }));
+        caches.invalidate(&tags(&event));
+        assert_eq!(caches.generation(&Tag::of("runtimes", "n_a")), 1);
+        assert_eq!(caches.generation(&Tag::of("runtimes", "n_b")), 0);
+    }
     #[test]
     fn all_spaces_register_from_the_startup_catalogue() {
         validate_spaces(SPACES).unwrap();

@@ -183,11 +183,12 @@ impl RuntimeReports {
         force: bool,
     ) -> Result<Arc<RuntimeReport>, ReportError> {
         self.nodes.write().unwrap().insert(id.to_owned());
-        if force
-            || self
-                .read(id)
-                .await
-                .is_some_and(|(v, _)| v.link_generation != generation)
+        // A cold caller shares discovery already in flight. Revoking an absent
+        // entry would force a duplicate probe before the caller's outer deadline.
+        if self
+            .read(id)
+            .await
+            .is_some_and(|(v, _)| force || v.link_generation != generation)
         {
             self.invalidate(id);
         }
@@ -203,9 +204,17 @@ impl RuntimeReports {
                         match tokio::time::timeout(Duration::from_secs(45), node.probe(fresh)).await
                         {
                             Ok(Ok(report)) if report.node.as_str() == id => report.harnesses,
-                            _ => {
-                                self.invalidate(id);
-                                return Err(ReportError::Unavailable);
+                            Ok(Ok(report)) => {
+                                tracing::warn!(node=id, reported=%report.node, "runtime probe returned another Node identity");
+                                self.invalidate(id); return Err(ReportError::Unavailable);
+                            }
+                            Ok(Err(error)) => {
+                                tracing::debug!(node=id, "runtime probe failed: {}", error.safe_detail);
+                                self.invalidate(id); return Err(ReportError::Unavailable);
+                            }
+                            Err(_) => {
+                                tracing::warn!(node=id, "runtime probe timed out");
+                                self.invalidate(id); return Err(ReportError::Unavailable);
                             }
                         }
                     }
