@@ -3,11 +3,11 @@
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use steve_flow::alarms::{AlarmClock, AlarmLine, AlarmSource, Want};
 use steve_flow::exec::{RunExecutor, RunStatus};
-use steve_flow::scheduler::{BATCH, RunSource};
+use steve_flow::scheduler::{BATCH, Retries, Triggers, Waits};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowCx, FlowResult, FlowSetup};
 use steve_modules::{
@@ -82,9 +82,55 @@ enum Kind {
     Wait,
     Retry,
 }
+enum Inner {
+    Trigger(Triggers),
+    Wait(Waits),
+    Retry(Retries),
+}
+struct Source {
+    inner: Inner,
+    last: AtomicI64,
+}
+impl Source {
+    fn new(kind: Kind, cx: Arc<FlowCx>) -> Self {
+        let inner = match kind {
+            Kind::Trigger => Inner::Trigger(Triggers::new(cx)),
+            Kind::Wait => Inner::Wait(Waits::new(cx)),
+            Kind::Retry => Inner::Retry(Retries::new(cx)),
+        };
+        Self {
+            inner,
+            last: AtomicI64::new(NOW),
+        }
+    }
+}
+impl DueSource for Source {
+    fn name(&self) -> &'static str {
+        match &self.inner {
+            Inner::Trigger(s) => s.name(),
+            Inner::Wait(s) => s.name(),
+            Inner::Retry(s) => s.name(),
+        }
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        match &self.inner {
+            Inner::Trigger(s) => s.next_due().await,
+            Inner::Wait(s) => s.next_due().await,
+            Inner::Retry(s) => s.next_due().await,
+        }
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        self.last.store(now, Ordering::SeqCst);
+        match &self.inner {
+            Inner::Trigger(s) => s.run_due(now).await,
+            Inner::Wait(s) => s.run_due(now).await,
+            Inner::Retry(s) => s.run_due(now).await,
+        }
+    }
+}
 struct Runs {
     env: TestEnv,
-    source: RunSource,
+    source: Source,
     kind: Kind,
     cx: Arc<FlowCx>,
     rows: Mutex<Vec<(String, bool)>>,
@@ -95,11 +141,7 @@ impl Runs {
     }
     fn with_executor(kind: Kind, exec: Arc<dyn RunExecutor>) -> Self {
         let (env, cx) = environment_for(exec);
-        let source = match kind {
-            Kind::Trigger => RunSource::triggers(cx.clone()),
-            Kind::Wait => RunSource::waits(cx.clone()),
-            Kind::Retry => RunSource::retries(cx.clone()),
-        };
+        let source = Source::new(kind, cx.clone());
         Self {
             env,
             source,
@@ -137,8 +179,8 @@ impl Runs {
     }
 }
 impl Fixture for Runs {
-    type Source = RunSource;
-    fn source(&self) -> &RunSource {
+    type Source = Source;
+    fn source(&self) -> &Source {
         &self.source
     }
     fn batch(&self) -> usize {
@@ -177,25 +219,10 @@ impl Fixture for Runs {
         if !matches!(self.kind, Kind::Trigger) {
             return None;
         }
-        // Healthy time triggers recur. A disabled poison trigger must not mask their next run.
-        self.rows
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, poison)| !poison)
-            .filter_map(|(id, _)| {
-                self.env
-                    .store()
-                    .reader(|c| {
-                        Ok::<_, steve_store::StoreError>(c.query_row(
-                            "SELECT next_at FROM flow_triggers WHERE id=?",
-                            [id],
-                            |r| r.get(0),
-                        )?)
-                    })
-                    .unwrap()
-            })
-            .min()
+        // Independent oracle: this fixture uses a daily UTC schedule. Do not read next_at
+        // back from the source's own table, which could hide an incorrect calculation.
+        let at = self.source.last.load(Ordering::SeqCst);
+        Some((at.div_euclid(DAY) + 1) * DAY)
     }
 }
 struct Alarms {
@@ -327,11 +354,13 @@ async fn waits_and_retries_wake_at_their_own_deadline_without_a_trigger_or_fifte
     for kind in [Kind::Wait, Kind::Retry] {
         let f = Runs::new(kind);
         let id = f.add(NOW + 37, false);
-        let source = Arc::new(match kind {
-            Kind::Wait => RunSource::waits(f.cx.clone()),
-            Kind::Retry => RunSource::retries(f.cx.clone()),
-            _ => unreachable!(),
-        });
+        let source = Arc::new(Source::new(kind, f.cx.clone()));
+        assert_eq!(source.next_due().await.unwrap(), Some(NOW + 37));
+        source.run_due(NOW + 36).await.unwrap();
+        assert!(
+            !f.state(&id, true),
+            "completed claim pass before the deadline must do nothing"
+        );
         let clock = f.env.clock.clone();
         let task = steve_runtime::spawn(
             "deadline",
@@ -797,4 +826,20 @@ async fn failed_wait_completion_settles_its_signal_once_through_the_engine() {
             .unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn source_jobs_are_spawnable_and_stop_after_the_recovery_gate() {
+    let (_env, cx) = environment();
+    let jobs = [
+        steve_runtime::spawn("triggers", Triggers::new(cx.clone()).run()),
+        steve_runtime::spawn("waits", Waits::new(cx.clone()).run()),
+        steve_runtime::spawn("retries", Retries::new(cx.clone()).run()),
+        steve_runtime::spawn("followups", cx.clone().followups_task()),
+    ];
+    cx.recovered().await;
+    for job in jobs {
+        job.stop();
+        job.await;
+    }
 }

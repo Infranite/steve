@@ -10,7 +10,7 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use steve_flow::nodes::bot::{self, BotNode};
 use steve_flow::testkit::FlowEnv;
-use steve_flow::{EventSink, RawEvent, Scheduler};
+use steve_flow::{EventSink, RawEvent};
 use steve_modules::Tier;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 
@@ -243,7 +243,6 @@ async fn branch_outside_the_list_follows_on_fail() {
 async fn gateway_timeout_retries_once_ten_minutes_later() {
     let e = env();
     flow(&e, triage(bot_cfg())).await;
-    let sched = Scheduler::new(e.flow.clone());
     // first: times out twice → retried once, then failed
     e.env.gateway.fail("timeout");
     e.env.gateway.fail("timeout");
@@ -271,10 +270,10 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     assert_eq!(outcome(&e, &evt), "pending");
     // not yet due
     e.env.clock.advance(9 * 60 * 1000);
-    assert!(sched.round().await.unwrap().is_empty());
+    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
     e.env.clock.advance(60 * 1000);
-    for h in sched.round().await.unwrap() {
-        h.await.unwrap().unwrap();
+    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
+        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
     }
     let status: String = q(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]);
     assert_eq!(status, "failed");
@@ -305,8 +304,8 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     })
     .await;
     e.env.clock.advance(10 * 60 * 1000);
-    for h in sched.round().await.unwrap() {
-        h.await.unwrap().unwrap();
+    for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {
+        steve_flow::scheduler::drive(&e.flow, &id).await.unwrap();
     }
     assert_eq!(outcome(&e, &evt), "ignored");
     assert_eq!(

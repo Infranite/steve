@@ -4,11 +4,13 @@
 use chrono::{TimeZone, Utc};
 use rusqlite::params;
 use serde_json::{Value, json};
-use steve_flow::scheduler::{self, claim_due, drive, recover, start_manual};
+use steve_flow::scheduler::{self, drive, recover, start_manual};
+use steve_flow::testkit::claim_due;
 use steve_flow::testkit::{CoreCall, FlowEnv};
 use steve_flow::{RunStatus, budget, digest, on_session_cost, runs};
 use steve_modules::GatewayOut;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
+use steve_runtime::due::DueSource;
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 60 * MIN;
@@ -389,10 +391,24 @@ async fn boot_applies_missed_policy() {
         .boot()
         .await
         .unwrap();
-    assert_eq!(handles.len(), 1);
-    for h in handles {
-        assert_eq!(h.await.unwrap().unwrap(), RunStatus::Done);
-    }
+    assert!(handles.is_empty(), "boot performs recovery only");
+    assert!(
+        runs_of(&e, &id).is_empty(),
+        "startup does not claim through a second path"
+    );
+    let source = scheduler::Triggers::new(e.flow.clone());
+    assert!(source.next_due().await.unwrap().unwrap() <= e.flow.now());
+    source.run_due(e.flow.now()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if runs_of(&e, &id).first().is_some_and(|r| r.status == "done") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("source completes the first due run");
     let rs = runs_of(&e, &id);
     assert_eq!((rs.len(), rs[0].trigger_kind.as_str()), (1, "catch_up"));
     assert_eq!(rs[0].outcome_label, "补跑（错过 2 次）已发布到信息流");
@@ -921,6 +937,14 @@ fn add_session(e: &FlowEnv, sid: &str, item: &str, cost: f64) {
 #[tokio::test]
 async fn budget_pauses_and_continue_once_doubles() {
     let e = env();
+    assert!(
+        scheduler::Scheduler::new(e.flow.clone())
+            .boot()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let followups = steve_runtime::spawn("flow.followups", e.flow.clone().followups_task());
     let mut b = daily("item_auto");
     b["name"] = json!("整理周报");
     b["budget_usd"] = json!(0.5);
@@ -978,7 +1002,15 @@ async fn budget_pauses_and_continue_once_doubles() {
     )
     .unwrap();
     assert!(res.is_ok());
-    e.flow.run_followups().await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !e.core.calls().contains(&CoreCall::Resume("ST-1".into())) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reactive follow-up job resumes the item without a timer tick");
+    followups.stop();
+    followups.await;
     assert!(e.core.calls().contains(&CoreCall::Resume("ST-1".into())));
     let r = e
         .env

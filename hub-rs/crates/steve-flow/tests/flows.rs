@@ -931,9 +931,9 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
     );
     assert_eq!(child_out, "合同终稿");
     // too early: nothing; after 30 minutes the scheduler wakes it
-    assert!(scheduler::claim_due(&e.flow).unwrap().is_empty());
+    assert!(steve_flow::testkit::claim_due(&e.flow).unwrap().is_empty());
     e.env.clock.advance(31 * 60_000);
-    let ids = scheduler::claim_due(&e.flow).unwrap();
+    let ids = steve_flow::testkit::claim_due(&e.flow).unwrap();
     assert_eq!(ids, vec![run.clone()]);
     scheduler::drive(&e.flow, &run).await.unwrap();
     assert_eq!(run_status(&e, &run), "done");

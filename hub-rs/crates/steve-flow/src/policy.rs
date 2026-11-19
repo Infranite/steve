@@ -155,7 +155,7 @@ pub fn plan_claim(
     now_ms: i64,
     policy: MissedPolicy,
 ) -> Claim {
-    // Claims may run up to 1 s early; never schedule the same planned time twice.
+    // Claims are due now; always move past the original planned time as well.
     let next_at_ms_new = cron.next_after_ms(&tz, now_ms.max(next_at_ms));
     let late_ms = now_ms - next_at_ms;
     let action = if late_ms <= MISSED_GRACE_MS {

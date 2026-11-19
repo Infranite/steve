@@ -366,24 +366,6 @@ pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     Ok(out)
 }
 
-/// One best-effort pass for explicit callers and boot; all claims use the same source functions.
-/// Background timing belongs to the three independent due_loop tasks below.
-pub fn claim_due(cx: &FlowCx) -> FlowResult<Vec<String>> {
-    let now = cx.now();
-    let mut out = Vec::new();
-    for claims in [
-        claim_triggers(cx, now),
-        crate::engine::claim_waits_at(cx, now),
-        claim_retries(cx, now),
-    ] {
-        match claims {
-            Ok(claims) => out.extend(claims.ids),
-            Err(e) => tracing::error!(%e, "due source failed"),
-        }
-    }
-    Ok(out)
-}
-
 /// `POST /schedules/:id/run`: a manual run now. Leaves `next_at` alone; the overlap rule applies.
 /// Returns the run id and whether it was started (`false` = written as skipped).
 pub fn start_manual(cx: &FlowCx, ws: &str, flow_id: &str) -> FlowResult<(String, bool)> {
@@ -457,7 +439,7 @@ pub fn recover(cx: &FlowCx) -> FlowResult<usize> {
     })
 }
 
-/// The `flow.scheduler` task.
+/// One-time recovery. Due work belongs exclusively to the independent sources below.
 pub struct Scheduler {
     cx: Arc<FlowCx>,
 }
@@ -468,47 +450,21 @@ impl Scheduler {
     }
 
     /// Boot: recover interrupted runs (schedules here, flows in [`crate::engine::recover`], whose
-    /// safe runs continue), then a first round (which applies the missed-run policy to
-    /// everything that came due while the Hub was down). Returns the runs started.
+    /// safe runs continue), open the gate for the independent due sources. Returns only the recovered runs started.
     pub async fn boot(&self) -> FlowResult<Vec<tokio::task::JoinHandle<FlowResult<RunStatus>>>> {
         let _activity = self.cx.store().activity("scheduler_boot").await;
         let n = recover(&self.cx)?;
         if n > 0 {
             tracing::warn!("{n} schedule runs were interrupted by a restart");
         }
-        let mut started: Vec<_> = crate::engine::recover(&self.cx)?
+        let started: Vec<_> = crate::engine::recover(&self.cx)?
             .into_iter()
             .map(|id| spawn_drive(self.cx.clone(), id))
             .collect();
         // only once both recoveries went through (and their runs are spawned): the gate of what
         // starts runs on its own ([`FlowCx::recovered`])
         self.cx.mark_recovered();
-        // past this point a failure must not boot again (the recovered runs are driven already)
-        match self.round().await {
-            Ok(more) => started.extend(more),
-            Err(e) => tracing::error!("scheduler round: {e}"),
-        }
         Ok(started)
-    }
-
-    /// One round: follow-ups, claims, retries; the runs are spawned.
-    pub async fn round(&self) -> FlowResult<Vec<tokio::task::JoinHandle<FlowResult<RunStatus>>>> {
-        let Some(_activity) = self.cx.store().try_activity("scheduler") else {
-            return Ok(vec![]);
-        };
-        self.cx
-            .store()
-            .admitted(async {
-                // spawned, not awaited: a resumed run must not hold up the claims
-                self.cx.spawn_followups().await;
-                let cx = self.cx.clone();
-                let ids = self.cx.blocking(move |_| claim_due(&cx)).await?;
-                Ok(ids
-                    .into_iter()
-                    .map(|id| spawn_drive(self.cx.clone(), id))
-                    .collect())
-            })
-            .await
     }
 }
 
@@ -524,129 +480,168 @@ pub(crate) fn backoff() -> steve_runtime::policy::Backoff {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Triggers,
-    Waits,
-    Retries,
+/// Time triggers own the one-time recovery phase before opening the other sources' gate.
+pub struct Triggers {
+    cx: Arc<FlowCx>,
+}
+/// Persisted wait deadlines, independently woken and claimed.
+pub struct Waits {
+    cx: Arc<FlowCx>,
+}
+/// Persisted action retries, independently woken and claimed.
+pub struct Retries {
+    cx: Arc<FlowCx>,
 }
 
-/// One table of runnable flow work. Each instance owns its own due_loop and wake permit.
-pub struct RunSource {
+async fn run_ready<S: steve_runtime::due::DueSource>(
+    source: S,
     cx: Arc<FlowCx>,
-    kind: Kind,
+    wake: Arc<tokio::sync::Notify>,
+) {
+    cx.recovered().await;
+    steve_runtime::due::due_loop(Arc::new(source), cx.modules.clock.clone(), wake, backoff()).await;
 }
-impl RunSource {
-    pub fn triggers(cx: Arc<FlowCx>) -> Self {
-        Self {
-            cx,
-            kind: Kind::Triggers,
-        }
+fn next(
+    cx: Arc<FlowCx>,
+    sql: &'static str,
+) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send {
+    async move {
+        let now = cx.now();
+        cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [now], |r| r.get(0))?)))
+            .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
-    pub fn waits(cx: Arc<FlowCx>) -> Self {
-        Self {
-            cx,
-            kind: Kind::Waits,
-        }
-    }
-    pub fn retries(cx: Arc<FlowCx>) -> Self {
-        Self {
-            cx,
-            kind: Kind::Retries,
-        }
-    }
-    pub fn run(self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        async move {
-            let clock = self.cx.modules.clock.clone();
-            if matches!(self.kind, Kind::Triggers) {
-                let scheduler = Scheduler::new(self.cx.clone());
-                let policy = backoff();
-                let mut attempt = 0u32;
-                // This is the one-time recovery gate, not another due-work polling loop.
-                while let Err(error) = scheduler.boot().await {
-                    tracing::error!(%error, "flow recovery failed; retrying");
-                    clock.sleep(policy.sample_delay(attempt)).await;
-                    attempt = attempt.saturating_add(1);
+}
+fn process(
+    cx: Arc<FlowCx>,
+    name: &'static str,
+    now: i64,
+    claim: fn(&FlowCx, i64) -> FlowResult<Claims>,
+) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+    async move {
+        let _activity = cx
+            .store()
+            .try_activity(name)
+            .ok_or_else(|| steve_runtime::due::DueError("store is in maintenance".into()))?;
+        cx.store()
+            .admitted(async {
+                let work = cx.clone();
+                let claims = cx
+                    .blocking(move |_| claim(&work, now))
+                    .await
+                    .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+                for id in claims.ids {
+                    spawn_drive(cx.clone(), id);
                 }
-            } else {
-                self.cx.recovered().await;
-            }
-            let wake = match self.kind {
-                Kind::Triggers => self.cx.trigger_wake(),
-                Kind::Waits => self.cx.wait_wake.clone(),
-                Kind::Retries => self.cx.retry_wake.clone(),
-            };
-            steve_runtime::due::due_loop(Arc::new(self), clock, wake, backoff()).await;
-        }
+                claims
+                    .error
+                    .map_or(Ok(()), |e| Err(steve_runtime::due::DueError(e.to_string())))
+            })
+            .await
     }
 }
-impl steve_runtime::due::DueSource for RunSource {
-    fn name(&self) -> &'static str {
-        match self.kind {
-            Kind::Triggers => "flow.triggers",
-            Kind::Waits => "flow.waits",
-            Kind::Retries => "flow.retries",
+impl Triggers {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let scheduler = Scheduler::new(cx.clone());
+        let mut attempt = 0;
+        while let Err(error) = scheduler.boot().await {
+            tracing::error!(%error,"flow recovery failed; retrying");
+            cx.modules
+                .clock
+                .sleep(backoff().sample_delay(attempt))
+                .await;
+            attempt = attempt.saturating_add(1);
         }
+        let wake = cx.trigger_wake();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl Waits {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let wake = cx.wait_wake.clone();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl Retries {
+    pub fn new(cx: Arc<FlowCx>) -> Self {
+        Self { cx }
+    }
+    pub async fn run(self) {
+        let cx = self.cx.clone();
+        let wake = cx.retry_wake.clone();
+        run_ready(self, cx, wake).await;
+    }
+}
+impl steve_runtime::due::DueSource for Triggers {
+    fn name(&self) -> &'static str {
+        "flow.triggers"
     }
     fn next_due(
         &self,
     ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
     {
-        let (cx, kind) = (self.cx.clone(), self.kind);
-        async move {
-            if matches!(kind, Kind::Triggers) && cx.has_followups().await {
-                return Ok(Some(cx.now()));
-            }
-            let when = cx.now();
-            let sql = match kind {
-                Kind::Triggers => {
-                    "SELECT min(CASE WHEN typeof(t.next_at)='integer' THEN t.next_at ELSE ?1 END) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL"
-                }
-                Kind::Waits => {
-                    "SELECT min(CASE WHEN typeof(w.until)='integer' THEN w.until ELSE ?1 END) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.until IS NOT NULL AND w.mode IN ('delay','until','event')"
-                }
-                Kind::Retries => {
-                    "SELECT min(CASE WHEN typeof(retry_at)='integer' THEN retry_at ELSE ?1 END) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL"
-                }
-            };
-            cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [when], |r| r.get(0))?)))
-                .await
-                .map_err(|e| steve_runtime::due::DueError(e.to_string()))
-        }
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(t.next_at)='integer' THEN t.next_at ELSE ?1 END) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL",
+        )
     }
     fn run_due(
         &self,
         now: i64,
     ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
-        // Own the context: the public loop future can cross crate and Tokio task boundaries.
-        let (cx, kind, name) = (self.cx.clone(), self.kind, self.name());
-        async move {
-            let _activity = cx
-                .store()
-                .try_activity(name)
-                .ok_or_else(|| steve_runtime::due::DueError("store is in maintenance".into()))?;
-            cx.store()
-                .admitted(async {
-                    if matches!(kind, Kind::Triggers) {
-                        cx.spawn_followups().await;
-                    }
-                    let work = cx.clone();
-                    let claims = cx
-                        .blocking(move |_| match kind {
-                            Kind::Triggers => claim_triggers(&work, now),
-                            Kind::Waits => crate::engine::claim_waits_at(&work, now),
-                            Kind::Retries => claim_retries(&work, now),
-                        })
-                        .await
-                        .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
-                    for id in claims.ids {
-                        spawn_drive(cx.clone(), id);
-                    }
-                    claims
-                        .error
-                        .map_or(Ok(()), |e| Err(steve_runtime::due::DueError(e.to_string())))
-                })
-                .await
-        }
+        process(self.cx.clone(), "flow.triggers", now, claim_triggers)
+    }
+}
+impl steve_runtime::due::DueSource for Waits {
+    fn name(&self) -> &'static str {
+        "flow.waits"
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(w.until)='integer' THEN w.until ELSE ?1 END) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.until IS NOT NULL AND w.mode IN ('delay','until','event')",
+        )
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        process(
+            self.cx.clone(),
+            "flow.waits",
+            now,
+            crate::engine::claim_waits_at,
+        )
+    }
+}
+impl steve_runtime::due::DueSource for Retries {
+    fn name(&self) -> &'static str {
+        "flow.retries"
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        next(
+            self.cx.clone(),
+            "SELECT min(CASE WHEN typeof(retry_at)='integer' THEN retry_at ELSE ?1 END) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
+        )
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        process(self.cx.clone(), "flow.retries", now, claim_retries)
     }
 }

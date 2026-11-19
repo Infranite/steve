@@ -28,9 +28,10 @@
 //! let flow = setup.build(modules, Arc::new(steve_flow::GraphEngine));
 //! // steve-core's `Core` port: implement `supplement` too (item.link); the default refuses
 //! api_router.merge(steve_flow::routes(flow.clone()));              // /schedules…, behind the Caller layer
-//! tokio::spawn(steve_flow::scheduler::RunSource::triggers(flow.clone()).run()); // recovery first
-//! tokio::spawn(steve_flow::scheduler::RunSource::waits(flow.clone()).run());
-//! tokio::spawn(steve_flow::scheduler::RunSource::retries(flow.clone()).run());
+//! tokio::spawn(steve_flow::scheduler::Triggers::new(flow.clone()).run()); // recovery first
+//! tokio::spawn(steve_flow::scheduler::Waits::new(flow.clone()).run());
+//! tokio::spawn(steve_flow::scheduler::Retries::new(flow.clone()).run());
+//! tokio::spawn(flow.clone().followups_task());                   // reactive post-decision work
 //! tokio::spawn(steve_flow::Poller::new(flow.clone()).run());       // `flow.poll`
 //! tokio::spawn(steve_flow::retention::run(flow.clone()));          // `flow.retention`
 //! // other modules (mail E1, GitHub G2, channels F1) get the entry point as a trait object:
@@ -67,10 +68,10 @@ macro_rules! t_in {
 
 pub mod adapter;
 pub mod alarms;
-mod claim;
 pub mod api;
 pub mod bots;
 pub mod budget;
+mod claim;
 pub mod corrections;
 pub mod cron;
 pub mod decisions;
@@ -169,6 +170,7 @@ pub struct FlowCx {
     /// Registered alarm sources ([`alarms::AlarmSource`]).
     pub alarms: alarms::AlarmSources,
     wake: Arc<Notify>,
+    followup_wake: Arc<Notify>,
     pub(crate) alarm_wake: Arc<Notify>,
     pub(crate) wait_wake: Arc<Notify>,
     pub(crate) retry_wake: Arc<Notify>,
@@ -187,7 +189,7 @@ impl FlowCx {
         self.modules.clock.now()
     }
 
-    /// Makes the scheduler look at its triggers now (a schedule was created or changed).
+    /// Wakes the persisted trigger, wait and retry sources after a change.
     pub fn wake(&self) {
         self.wake.notify_one();
         self.wait_wake.notify_one();
@@ -204,10 +206,6 @@ impl FlowCx {
     pub(crate) fn trigger_wake(&self) -> Arc<Notify> {
         self.wake.clone()
     }
-    pub(crate) async fn has_followups(&self) -> bool {
-        !self.followups.lock().await.is_empty()
-    }
-
     /// Resolves once [`Scheduler::boot`] has recovered the runs a restart interrupted (or at once
     /// after it). Whatever starts runs from stored state on its own (the outbox's
     /// `automation.item_trigger`) waits for it, so `engine::recover` and it never drive one run twice.
@@ -241,23 +239,37 @@ impl FlowCx {
         }
     }
 
-    /// Starts each queued [`Followup`] in its own task, so a resumed run does not hold up the
-    /// scheduler round. Each task holds its own activity permit and runs admitted; a follow-up is
-    /// only taken off the queue once it has a permit, so none is lost while maintenance waits.
-    pub async fn spawn_followups(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
-        let mut rx = self.followups.lock().await;
-        let mut out = Vec::new();
-        while let Some(permit) = self.store().try_activity("flow_followup") {
-            let Ok(f) = rx.try_recv() else {
-                break;
-            };
-            let cx = self.clone();
-            out.push(tokio::spawn(async move {
-                let _permit = permit;
-                cx.store().admitted(decisions::followup(&cx, f)).await;
-            }));
+    /// Reactive, owned follow-up work, separate from persisted deadline sources. A maintenance
+    /// permit is acquired before removing an item; dropping this job cancels all its child tasks.
+    pub async fn followups_task(self: Arc<Self>) {
+        self.recovered().await;
+        let mut running = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _=self.followup_wake.notified()=>{},
+                result=running.join_next(), if !running.is_empty()=>{
+                    if let Some(Err(error))=result {tracing::error!(%error,"flow follow-up task failed");}
+                }
+            }
+            loop {
+                let permit = self.store().activity("flow_followup").await;
+                let Ok(mut rx) = self.followups.try_lock() else {
+                    // A synchronous caller may be draining the queue. Never keep an activity
+                    // permit while awaiting its receiver lock: maintenance could be waiting on us.
+                    drop(permit);
+                    drop(self.followups.lock().await);
+                    continue;
+                };
+                let next = rx.try_recv().ok();
+                drop(rx);
+                let Some(f) = next else { break };
+                let cx = self.clone();
+                running.spawn(async move {
+                    let _permit = permit;
+                    cx.store().admitted(decisions::followup(&cx, f)).await;
+                });
+            }
         }
-        out
     }
 }
 
@@ -310,6 +322,7 @@ pub struct FlowSetup {
     finders: link::ItemFinders,
     alarms: alarms::AlarmSources,
     wake: Arc<Notify>,
+    followup_wake: Arc<Notify>,
     tx: mpsc::UnboundedSender<Followup>,
     rx: mpsc::UnboundedReceiver<Followup>,
 }
@@ -327,6 +340,7 @@ impl FlowSetup {
             finders: link::ItemFinders::default(),
             alarms: alarms::AlarmSources::default(),
             wake: Arc::new(Notify::new()),
+            followup_wake: Arc::new(Notify::new()),
             tx,
             rx,
         }
@@ -343,21 +357,21 @@ impl FlowSetup {
             budget::SUBJECT,
             Box::new(budget::FlowRunDecisions::new(
                 self.tx.clone(),
-                self.wake.clone(),
+                self.followup_wake.clone(),
             )),
         );
         r.decision(
             nodes::approve::SUBJECT,
             Box::new(decisions::FlowStepDecisions::new(
                 self.tx.clone(),
-                self.wake.clone(),
+                self.followup_wake.clone(),
             )),
         );
         r.decision(
             nodes::action::SIGNAL_SUBJECT,
             Box::new(decisions::SignalDecisions::new(
                 self.tx.clone(),
-                self.wake.clone(),
+                self.followup_wake.clone(),
             )),
         );
     }
@@ -417,6 +431,7 @@ impl FlowSetup {
             signals: signals::SignalDebounce::default(),
             alarms: self.alarms,
             wake: self.wake,
+            followup_wake: self.followup_wake,
             alarm_wake: Arc::new(Notify::new()),
             wait_wake: Arc::new(Notify::new()),
             retry_wake: Arc::new(Notify::new()),
