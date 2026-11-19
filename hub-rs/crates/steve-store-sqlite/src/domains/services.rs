@@ -344,7 +344,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             .entities()
             .find(|e| e.desc.name == name)
             .ok_or_else(|| error(steve_types::Code::Unsupported, "unknown retention entity"))?;
-        let definition = crate::domains::retention::authorize(e)?;
+        let bind_policy = crate::domains::retention::authorize(e)?;
         let mut after = lock(&self.after);
         let report = self.write(e.desc.domain, Lane::Background, |c, runner| {
             let root = runner.reserve_root(c).map_err(Error::from)?;
@@ -352,11 +352,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
                     .map_err(crate::domains::sql_error)
                     .map_err(Error::from)?;
-            let policy = crate::domains::retention::EntityPolicy {
-                entity: e,
-                definition,
-                rev: root.rev(),
-            };
+            let policy = bind_policy(root.rev());
             let report = crate::retention::run_slice(
                 &tx,
                 &policy,
