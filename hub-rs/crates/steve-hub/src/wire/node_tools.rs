@@ -941,7 +941,7 @@ pub(crate) mod tests {
         assert!(text.starts_with("line \"x\"\n"), "{}", &text[..40]);
         assert!(text.contains("[Steve cut this test result"), "cut note");
         let answer = steve_node_wire::envelope::Envelope {
-            v: steve_node_wire::WIRE,
+            v: steve_node_api::PROTOCOL,
             t: steve_node_wire::envelope::Kind::Res,
             id: "h_1".into(),
             re: Some("n_1".into()),

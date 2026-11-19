@@ -83,6 +83,45 @@ async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgr
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_common_upgrade_protocol_report_tells_devices_to_upgrade_the_hub() {
+    use steve_node_wire::{
+        handshake::{self, NodeIntro},
+        tls::{self, Trust},
+    };
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let (mut sink, mut stream) = tls::connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+        .await
+        .unwrap();
+    let error = handshake::dial_protocols(
+        &mut sink,
+        &mut stream,
+        NodeIntro {
+            node: &node,
+            identity: &identity,
+            incarnation: 1,
+            hub_id: Some(&h.svc.hub_id),
+            hub_key: None,
+        },
+        steve_node_api::PROTOCOL,
+        &[2],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "incompatible");
+    let device = row(&h, node.as_str()).await;
+    assert_eq!(device["linked"], false);
+    assert_eq!(device["link_error"]["error"], "版本不一致，需要升级 Hub");
+    assert!(h.svc.registry.current(node.as_str()).is_none());
+    assert_eq!(
+        h.q::<i64>(&format!(
+            "SELECT generation FROM nodes WHERE node_id='{node}'"
+        )),
+        0
+    );
+}
+
 /// A Hub whose store's change events are kept, to read back which reached the stream.
 async fn watched() -> (Hub, Arc<Mutex<Vec<BusEvent>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));

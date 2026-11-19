@@ -336,7 +336,7 @@ pub async fn dial_url_as(
         NodeServer::new(serve),
         ConnOptions {
             side: "n",
-            mode: w.mode,
+            mode: steve_node_api::upgrade_v1::Mode::between(proto, w.proto),
             ..Default::default()
         },
     );

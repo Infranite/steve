@@ -309,14 +309,55 @@ async fn pause_keeps_the_link_and_holds_new_work() {
     assert!(rt.is_holding());
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!l.conn.is_closed());
-    // a paused Node still links (welcome says paused)
-    let l2 = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
-    assert_eq!(l2.generation, 2);
+    // Pausing is ordinary data after Welcome, including a paused reconnect.
+    use futures::StreamExt;
+    use steve_node_wire::{
+        Envelope, Frame,
+        handshake::{self, NodeIntro},
+        tls::{self, Trust},
+    };
+    let (mut sink, mut stream) = tls::connect(&h.ws_url(), &Trust::LoopbackPlaintext)
+        .await
+        .unwrap();
+    let (_, welcome) = handshake::dial(
+        &mut sink,
+        &mut stream,
+        NodeIntro {
+            node: &node,
+            identity: &id,
+            incarnation: 1,
+            hub_id: Some(&h.svc.hub_id),
+            hub_key: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(welcome.generation, 2);
+    async fn paused(stream: &mut steve_node_wire::envelope::FrameStream, generation: u64) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let Some(Ok(Frame::Text(text))) = stream.next().await else {
+                    panic!("paused link closed")
+                };
+                let env = Envelope::decode(&text).unwrap();
+                if env.m == "paused" {
+                    assert_eq!(env.v, PROTOCOL);
+                    assert_eq!(env.generation, generation);
+                    return env.p["paused"].as_bool().unwrap();
+                }
+            }
+        })
+        .await
+        .expect("ordinary paused control")
+    }
+    assert!(paused(&mut stream, 2).await);
+    assert!(rt.is_holding());
     let (s, _) = h
         .post("u1", &format!("/api/nodes/{node}/resume"), json!({}))
         .await;
     assert_eq!(s, 200);
     assert!(!rt.is_holding());
+    assert!(!paused(&mut stream, 2).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

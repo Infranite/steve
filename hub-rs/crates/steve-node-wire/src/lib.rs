@@ -37,9 +37,6 @@ pub use remote_hub::{HubLink, RemoteFiles, RemoteSecrets, RemoteSink, RemoteTool
 pub use remote_node::RemoteNode;
 pub use serve_hub::ServeHub;
 
-/// Ordinary frames use the single application protocol number; upgrade/bootstrap frames use v1.
-pub use steve_node_api::PROTOCOL as WIRE;
-
 pub use steve_node_api::upgrade_v1::close;
 
 /// A wait drawn at random between half of `d` and all of it ("equal jitter"): Nodes that lost

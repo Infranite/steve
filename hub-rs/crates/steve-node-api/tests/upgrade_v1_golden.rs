@@ -23,8 +23,6 @@ fn frame(kind: v1::Kind, method: &str, p: Value) -> v1::Frame {
         re: response.then(|| "h_1".into()),
         m: method.into(),
         generation: 7,
-        trace: Some("trace-golden".into()),
-        deadline_at: 1_700_000_001_000,
         p,
     }
 }
@@ -54,13 +52,10 @@ fn cases() -> BTreeMap<String, Value> {
         nonce: "00".repeat(32),
         hub_id: "hub-1".into(),
         conn_id: "conn-1".into(),
-        proto: 10,
         upgrade_protocol: 1,
-        hub_time: 1_700_000_000_000,
     };
     let hello = v1::Hello {
         node_id: "node-1".into(),
-        incarnation: 3,
         proto: 11,
         upgrade_protocol: 1,
         sig: "33".repeat(64),
@@ -68,9 +63,6 @@ fn cases() -> BTreeMap<String, Value> {
     let welcome = v1::Welcome {
         generation: 7,
         proto: 10,
-        upgrade_protocol: 1,
-        mode: v1::Mode::Upgrade,
-        paused: false,
         heartbeat_ms: 10_000,
         hub_key: "22".repeat(32),
         pins: vec![format!("sha256:{}", "aa".repeat(32))],
@@ -88,25 +80,14 @@ fn cases() -> BTreeMap<String, Value> {
         (
             "welcome.normal",
             value(v1::Welcome {
-                mode: v1::Mode::Normal,
+                proto: hello.proto,
                 ..welcome.clone()
             }),
         ),
         ("report", value(&report)),
         ("noted", value(v1::Noted {})),
-        (
-            "heartbeat",
-            value(v1::Heartbeat {
-                at: 1_700_000_000_000,
-            }),
-        ),
+        ("heartbeat", value(v1::Heartbeat {})),
         ("fenced", value(v1::Fenced { generation: 8 })),
-        (
-            "goodbye",
-            value(v1::Goodbye {
-                reason: "upgrade restart".into(),
-            }),
-        ),
         (
             "handshake_error",
             value(v1::Error::new(v1::Code::Denied, "not admitted")),
@@ -121,7 +102,6 @@ fn cases() -> BTreeMap<String, Value> {
             "handshake_error" => v1::ERROR,
             "heartbeat" => v1::HEARTBEAT,
             "fenced" => v1::FENCED,
-            "goodbye" => v1::GOODBYE,
             _ => unreachable!("every control message has a frozen wire name"),
         };
         cases.insert(
@@ -165,7 +145,6 @@ fn cases() -> BTreeMap<String, Value> {
             value(v1::StageRequest {
                 operation: "op_upgrade".into(),
                 build: build(),
-                artifact: "node-upgrade.op_upgrade".into(),
                 size: 4096,
                 sha256: "cd".repeat(32),
                 health_secs: 180,
@@ -174,12 +153,9 @@ fn cases() -> BTreeMap<String, Value> {
             v1::Code::Invalid,
         ),
         (
-            v1::BLOB_FETCH,
+            v1::UPGRADE_FETCH,
             value(v1::FetchRequest {
-                access: v1::FileAccess::Operation {
-                    operation: "op_upgrade".into(),
-                },
-                id: "node-upgrade.op_upgrade".into(),
+                operation: "op_upgrade".into(),
                 offset: 0,
                 max: 1024,
             }),
@@ -194,8 +170,7 @@ fn cases() -> BTreeMap<String, Value> {
             v1::UPGRADE_SWITCH,
             value(v1::SwitchRequest {
                 operation: "op_upgrade".into(),
-                abandon: false,
-                force: true,
+                action: v1::SwitchAction::Force,
             }),
             value(switch),
             v1::Code::Downgrade,
@@ -220,8 +195,6 @@ fn cases() -> BTreeMap<String, Value> {
         );
         let error = v1::Error {
             code,
-            retry: v1::Retry::Never,
-            operation: Some("op_upgrade".into()),
             detail: "request refused".into(),
         };
         cases.insert(
@@ -252,23 +225,31 @@ fn cases() -> BTreeMap<String, Value> {
             value(v1::Outcome::Ok(value(failed))),
         )),
     );
-    let mut header = frame(v1::Kind::Unknown, "future", json!({}));
-    header.re = Some("h_0".into());
-    cases.insert("frame.unknown.json".into(), value(header));
+    for (name, action) in [
+        ("switch", v1::SwitchAction::Switch),
+        ("abandon", v1::SwitchAction::Abandon),
+    ] {
+        cases.insert(
+            format!("upgrade_switch.{name}.request.json"),
+            value(frame(
+                v1::Kind::Req,
+                v1::UPGRADE_SWITCH,
+                value(v1::SwitchRequest {
+                    operation: "op_upgrade".into(),
+                    action,
+                }),
+            )),
+        );
+    }
     for code in [
         v1::Code::Incompatible,
         v1::Code::Downgrade,
-        v1::Code::Offline,
         v1::Code::Busy,
         v1::Code::Unsupported,
         v1::Code::Denied,
-        v1::Code::Expired,
-        v1::Code::Stale,
         v1::Code::Conflict,
         v1::Code::Exhausted,
         v1::Code::Invalid,
-        v1::Code::OutcomeUnknown,
-        v1::Code::Gap,
         v1::Code::Internal,
     ] {
         cases.insert(
@@ -288,14 +269,6 @@ fn cases() -> BTreeMap<String, Value> {
     ] {
         cases.insert(format!("phase.{}.json", phase_name(phase)), value(phase));
     }
-    for retry in [v1::Retry::Never, v1::Retry::Later, v1::Retry::Reconcile] {
-        let name = match retry {
-            v1::Retry::Never => "never",
-            v1::Retry::Later => "later",
-            v1::Retry::Reconcile => "reconcile",
-        };
-        cases.insert(format!("retry.{name}.json"), value(retry));
-    }
     cases
 }
 
@@ -304,17 +277,12 @@ fn code_name(code: v1::Code) -> &'static str {
     match code {
         v1::Code::Incompatible => "incompatible",
         v1::Code::Downgrade => "downgrade",
-        v1::Code::Offline => "offline",
         v1::Code::Busy => "busy",
         v1::Code::Unsupported => "unsupported",
         v1::Code::Denied => "denied",
-        v1::Code::Expired => "expired",
-        v1::Code::Stale => "stale",
         v1::Code::Conflict => "conflict",
         v1::Code::Exhausted => "exhausted",
         v1::Code::Invalid => "invalid",
-        v1::Code::OutcomeUnknown => "outcome_unknown",
-        v1::Code::Gap => "gap",
         v1::Code::Internal => "internal",
     }
 }
@@ -346,9 +314,6 @@ fn roundtrip(name: &str, encoded: Value) -> Value {
     if name.starts_with("phase.") {
         return typed::<v1::Phase>(encoded);
     }
-    if name.starts_with("retry.") {
-        return typed::<v1::Retry>(encoded);
-    }
     let mut frame: v1::Frame = serde_json::from_value(encoded).unwrap();
     frame.p = match frame.t {
         v1::Kind::Ctl => match frame.m.as_str() {
@@ -360,13 +325,12 @@ fn roundtrip(name: &str, encoded: Value) -> Value {
             v1::ERROR => typed::<v1::Error>(frame.p),
             v1::HEARTBEAT => typed::<v1::Heartbeat>(frame.p),
             v1::FENCED => typed::<v1::Fenced>(frame.p),
-            v1::GOODBYE => typed::<v1::Goodbye>(frame.p),
             _ => panic!("uncovered control fixture: {name}"),
         },
         v1::Kind::Req => match frame.m.as_str() {
             v1::PROBE_BUILD => typed::<v1::ProbeBuildRequest>(frame.p),
             v1::UPGRADE_STAGE => typed::<v1::StageRequest>(frame.p),
-            v1::BLOB_FETCH => typed::<v1::FetchRequest>(frame.p),
+            v1::UPGRADE_FETCH => typed::<v1::FetchRequest>(frame.p),
             v1::UPGRADE_SWITCH => typed::<v1::SwitchRequest>(frame.p),
             v1::UPGRADE_STATUS => typed::<v1::StatusRequest>(frame.p),
             _ => panic!("uncovered request fixture: {name}"),
@@ -377,7 +341,7 @@ fn roundtrip(name: &str, encoded: Value) -> Value {
                 v1::Outcome::Err(error) => v1::Outcome::Err(error),
                 v1::Outcome::Ok(payload) => v1::Outcome::Ok(if name.starts_with("probe_build.") {
                     typed::<v1::ProbeBuildResponse>(payload)
-                } else if name.starts_with("blob.fetch.") {
+                } else if name.starts_with("upgrade_fetch.") {
                     typed::<v1::FetchResponse>(payload)
                 } else {
                     typed::<v1::UpgradeState>(payload)
@@ -437,36 +401,13 @@ fn the_permanent_module_has_no_dependency_on_mutable_node_contracts() {
         [
             "probe_build",
             "upgrade_stage",
-            "blob.fetch",
+            "upgrade_fetch",
             "upgrade_switch",
             "upgrade_status"
         ]
     );
-    let mode_name = |mode| match mode {
-        v1::Mode::Normal => "normal",
-        v1::Mode::Upgrade => "upgrade",
-    };
-    assert_eq!(mode_name(v1::Mode::Normal), "normal");
-    let operation = |scope| match scope {
-        v1::FileAccess::Operation { operation } => operation,
-    };
-    assert_eq!(
-        operation(v1::FileAccess::Operation {
-            operation: "op".into()
-        }),
-        "op"
-    );
     assert_eq!((v1::REPORT_MAX, v1::HANDSHAKE_BUDGET_MS), (1024, 10_000));
-    assert_eq!(
-        (
-            v1::MAX_FRAME,
-            v1::CONTROL_CAP,
-            v1::BULK_CAP,
-            v1::BULK_FRAME,
-            v1::CHUNK_BYTES
-        ),
-        (294912, 65536, 262144, 49152, 23552)
-    );
+    assert_eq!(v1::MAX_FRAME, 65536);
 }
 
 #[test]
@@ -482,5 +423,43 @@ fn fixed_payloads_reject_unknown_or_mutable_scope_fields() {
         serde_json::from_value::<v1::StatusRequest>(json!({"operation":"op_upgrade","extra":1}))
             .is_err()
     );
-    assert_eq!(v1::Error::incompatible().retry, v1::Retry::Never);
+    assert!(!v1::Code::Incompatible.retryable());
+    for code in [
+        v1::Code::Incompatible,
+        v1::Code::Downgrade,
+        v1::Code::Busy,
+        v1::Code::Unsupported,
+        v1::Code::Denied,
+        v1::Code::Conflict,
+        v1::Code::Exhausted,
+        v1::Code::Invalid,
+        v1::Code::Internal,
+    ] {
+        assert_eq!(
+            code.retryable(),
+            matches!(
+                code,
+                v1::Code::Busy | v1::Code::Exhausted | v1::Code::Internal
+            )
+        );
+    }
+    let mut unknown = v1::Frame::ctl("test", "future", 0, json!({}));
+    unknown.t = v1::Kind::Unknown;
+    assert!(
+        unknown.encode().is_err(),
+        "internal fallback kind is never sent"
+    );
+}
+
+#[test]
+fn the_single_v1_frame_limit_is_enforced_in_bytes_at_both_ends() {
+    let mut frame = v1::Frame::ctl("limit", "test", 7, json!(""));
+    let overhead = frame.encode().unwrap().len();
+    frame.p = json!("x".repeat(v1::MAX_FRAME - overhead));
+    let text = frame.encode().unwrap();
+    assert_eq!(text.len(), v1::MAX_FRAME);
+    assert!(v1::Frame::decode(&text).is_some());
+    frame.p = json!("x".repeat(v1::MAX_FRAME - overhead + 1));
+    assert_eq!(frame.encode().unwrap_err().code, v1::Code::Exhausted);
+    assert!(v1::Frame::decode(&serde_json::to_string(&frame).unwrap()).is_none());
 }

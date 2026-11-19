@@ -4,14 +4,9 @@
   "id": "h_1",
   "m": "welcome",
   "gen": 7,
-  "trace": "trace-golden",
-  "deadline_at": 1700000001000,
   "p": {
     "gen": 7,
-    "proto": 10,
-    "upgrade_protocol": 1,
-    "mode": "normal",
-    "paused": false,
+    "proto": 11,
     "heartbeat_ms": 10000,
     "hub_key": "2222222222222222222222222222222222222222222222222222222222222222",
     "pins": [

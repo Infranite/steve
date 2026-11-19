@@ -4,31 +4,24 @@
 use crate::upgrade_v1 as v1;
 use crate::*;
 
+/// Local archive naming, outside the permanent wire contract.
+pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
+
 impl From<ApiError> for v1::Error {
     fn from(error: ApiError) -> Self {
         let code = match error.code {
-            ErrorCode::Offline => v1::Code::Offline,
             ErrorCode::Busy => v1::Code::Busy,
             ErrorCode::Unsupported => v1::Code::Unsupported,
             ErrorCode::Denied => v1::Code::Denied,
-            ErrorCode::Expired => v1::Code::Expired,
-            ErrorCode::Stale => v1::Code::Stale,
             ErrorCode::Conflict => v1::Code::Conflict,
             ErrorCode::Exhausted => v1::Code::Exhausted,
-            ErrorCode::Invalid => v1::Code::Invalid,
+            ErrorCode::Invalid | ErrorCode::Expired => v1::Code::Invalid,
             ErrorCode::Downgrade => v1::Code::Downgrade,
-            ErrorCode::OutcomeUnknown => v1::Code::OutcomeUnknown,
-            ErrorCode::Gap => v1::Code::Gap,
-            ErrorCode::Internal => v1::Code::Internal,
+            ErrorCode::Stale | ErrorCode::Offline => v1::Code::Incompatible,
+            ErrorCode::OutcomeUnknown | ErrorCode::Gap | ErrorCode::Internal => v1::Code::Internal,
         };
         Self {
             code,
-            retry: match error.retry {
-                RetryClass::Never => v1::Retry::Never,
-                RetryClass::SameOperation => v1::Retry::Later,
-                RetryClass::AfterReconcile => v1::Retry::Reconcile,
-            },
-            operation: error.operation.map(|op| op.to_string()),
             detail: error.safe_detail,
         }
     }
@@ -41,31 +34,22 @@ impl From<v1::Error> for ApiError {
             v1::Code::Unsupported => ErrorCode::Unsupported,
             v1::Code::Invalid => ErrorCode::Invalid,
             v1::Code::Downgrade => ErrorCode::Downgrade,
-            v1::Code::Offline => ErrorCode::Offline,
             v1::Code::Busy => ErrorCode::Busy,
             v1::Code::Denied => ErrorCode::Denied,
-            v1::Code::Expired => ErrorCode::Expired,
-            v1::Code::Stale => ErrorCode::Stale,
             v1::Code::Conflict => ErrorCode::Conflict,
             v1::Code::Exhausted => ErrorCode::Exhausted,
-            v1::Code::OutcomeUnknown => ErrorCode::OutcomeUnknown,
-            v1::Code::Gap => ErrorCode::Gap,
             v1::Code::Internal => ErrorCode::Internal,
+        };
+        let retry = if code == ErrorCode::Offline || error.code.retryable() {
+            RetryClass::SameOperation
+        } else {
+            RetryClass::Never
         };
         Self {
             code,
-            // `incompatible/never` is a wire refusal, not a permanent rejection of queued work.
-            retry: if error.code == v1::Code::Incompatible {
-                RetryClass::SameOperation
-            } else {
-                match error.retry {
-                    v1::Retry::Never => RetryClass::Never,
-                    v1::Retry::Later => RetryClass::SameOperation,
-                    v1::Retry::Reconcile => RetryClass::AfterReconcile,
-                }
-            },
-            operation: error.operation.and_then(|op| OperationId::new(op).ok()),
-            state: (code == ErrorCode::OutcomeUnknown).then_some(StateTag::Unknown),
+            retry,
+            operation: None,
+            state: None,
             safe_detail: error.detail,
         }
     }
@@ -94,7 +78,6 @@ impl From<NodeUpgrade> for v1::StageRequest {
         Self {
             operation: u.operation.to_string(),
             build: u.build.into(),
-            artifact: u.artifact.to_string(),
             size: u.size,
             sha256: u.sha256,
             health_secs: u.health_secs,
@@ -105,9 +88,10 @@ impl TryFrom<v1::StageRequest> for NodeUpgrade {
     type Error = v1::Error;
     fn try_from(u: v1::StageRequest) -> v1::Result<Self> {
         Ok(Self {
+            artifact: ArtifactId::new(format!("{}{}", ARTIFACT_PREFIX, u.operation))
+                .map_err(|e| invalid(e.to_string()))?,
             operation: operation(u.operation)?,
             build: u.build.into(),
-            artifact: ArtifactId::new(u.artifact).map_err(|e| invalid(e.to_string()))?,
             size: u.size,
             sha256: u.sha256,
             health_secs: u.health_secs,
@@ -118,8 +102,13 @@ impl From<UpgradeSwitch> for v1::SwitchRequest {
     fn from(s: UpgradeSwitch) -> Self {
         Self {
             operation: s.operation.to_string(),
-            abandon: s.abandon,
-            force: s.force,
+            action: if s.abandon {
+                v1::SwitchAction::Abandon
+            } else if s.force {
+                v1::SwitchAction::Force
+            } else {
+                v1::SwitchAction::Switch
+            },
         }
     }
 }
@@ -128,8 +117,8 @@ impl TryFrom<v1::SwitchRequest> for UpgradeSwitch {
     fn try_from(s: v1::SwitchRequest) -> v1::Result<Self> {
         Ok(Self {
             operation: operation(s.operation)?,
-            abandon: s.abandon,
-            force: s.force,
+            abandon: s.action == v1::SwitchAction::Abandon,
+            force: s.action == v1::SwitchAction::Force,
         })
     }
 }
@@ -190,15 +179,12 @@ pub fn operation(id: String) -> v1::Result<OperationId> {
 }
 
 pub fn fetch_request(q: v1::FetchRequest) -> v1::Result<(FileAccess, ArtifactId, u64, u32)> {
-    let v1::FileAccess::Operation { operation: op } = q.access;
-    if q.id != format!("{}{op}", v1::ARTIFACT_PREFIX) || q.max == 0 || q.max > v1::CHUNK_BYTES {
-        return Err(v1::Error::new(
-            v1::Code::Denied,
-            "only bounded reads of this operation's upgrade archive are permitted",
-        ));
+    if q.max == 0 {
+        return Err(invalid("nonzero read size required"));
     }
-    let op = operation(op)?;
-    let id = ArtifactId::new(q.id).map_err(|e| invalid(e.to_string()))?;
+    let op = operation(q.operation)?;
+    let id =
+        ArtifactId::new(format!("{}{op}", ARTIFACT_PREFIX)).map_err(|e| invalid(e.to_string()))?;
     Ok((FileAccess::Operation { operation: op }, id, q.offset, q.max))
 }
 

@@ -4,8 +4,6 @@
   "id": "h_1",
   "m": "report",
   "gen": 7,
-  "trace": "trace-golden",
-  "deadline_at": 1700000001000,
   "p": {
     "node_id": "node-1",
     "error": "link failed",

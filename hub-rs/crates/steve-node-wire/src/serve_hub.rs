@@ -29,11 +29,12 @@ impl ServeHub {
 #[async_trait]
 impl Handler for ServeHub {
     async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
-        if method != upgrade_v1::BLOB_FETCH {
+        if method != upgrade_v1::UPGRADE_FETCH {
             return Err(upgrade_v1::Error::incompatible());
         }
         let request: upgrade_v1::FetchRequest = crate::upgrade::decode(p)?;
         let (access, id, offset, max) = upgrade_bridge::fetch_request(request)?;
+        let max = max.min(crate::envelope::CHUNK_BYTES);
         let chunk = self
             .files()
             .map_err(upgrade_v1::Error::from)?

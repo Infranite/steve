@@ -4,8 +4,6 @@
   "id": "n_1",
   "re": "h_1",
   "gen": 7,
-  "trace": "trace-golden",
-  "deadline_at": 1700000001000,
   "p": {
     "ok": {
       "operation": "op_upgrade",

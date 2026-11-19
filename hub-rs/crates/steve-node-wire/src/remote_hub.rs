@@ -173,24 +173,35 @@ impl HubFiles for RemoteFiles {
         // hex doubles the bytes: keep a chunk's frame within a bulk frame
         let max = max.min(CHUNK_BYTES);
         if let FileAccess::Operation { operation } = &access
-            && id.as_str().starts_with(upgrade_v1::ARTIFACT_PREFIX)
+            && id.as_str().starts_with(upgrade_bridge::ARTIFACT_PREFIX)
         {
+            if id.as_str() != format!("{}{operation}", upgrade_bridge::ARTIFACT_PREFIX) {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "archive belongs to another operation",
+                ));
+            }
             let request = upgrade_v1::FetchRequest {
-                access: upgrade_v1::FileAccess::Operation {
-                    operation: operation.to_string(),
-                },
-                id: id.to_string(),
+                operation: operation.to_string(),
                 offset,
                 max,
             };
             let value = self
                 .0
                 .live_conn()?
-                .call_upgrade(upgrade_v1::BLOB_FETCH, to_value(&request)?, None)
-                .await
-                .map_err(ApiError::from)?;
+                .call_upgrade(upgrade_v1::UPGRADE_FETCH, to_value(&request)?, None)
+                .await?;
             let response: upgrade_v1::FetchResponse =
                 crate::upgrade::decode(value).map_err(ApiError::from)?;
+            if response.offset != offset
+                || response.bytes.len() > max as usize
+                || (!response.eof && response.bytes.is_empty())
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "invalid upgrade chunk bounds",
+                ));
+            }
             return Ok(response.into());
         }
         let a = FetchArgs {

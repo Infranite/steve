@@ -1,6 +1,4 @@
 {
   "code": "internal",
-  "retry": "never",
-  "operation": null,
   "detail": "golden error"
 }

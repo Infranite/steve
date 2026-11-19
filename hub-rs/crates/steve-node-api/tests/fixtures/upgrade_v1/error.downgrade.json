@@ -1,6 +1,4 @@
 {
   "code": "downgrade",
-  "retry": "never",
-  "operation": null,
   "detail": "golden error"
 }

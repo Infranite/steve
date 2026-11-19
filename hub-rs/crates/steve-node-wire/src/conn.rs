@@ -29,7 +29,7 @@ pub trait Handler: Send + Sync + 'static {
     async fn handle_upgrade(&self, _method: &str, _p: Value) -> upgrade::Result<Value> {
         Err(upgrade::Error::incompatible())
     }
-    /// A control message other than a heartbeat (`paused`, `fenced`, `goodbye`…).
+    /// A control message other than a heartbeat (`paused`, `fenced`…).
     fn control(&self, _m: &str, _p: &Value) {}
 }
 
@@ -151,6 +151,28 @@ impl Schema {
         }
     }
 
+    fn encode(self, env: Envelope) -> ApiResult<String> {
+        match self {
+            Self::Ordinary => env.encode(),
+            Self::V1 => upgrade::Frame {
+                v: env.v,
+                t: match env.t {
+                    Kind::Req => upgrade::Kind::Req,
+                    Kind::Res => upgrade::Kind::Res,
+                    Kind::Ctl => upgrade::Kind::Ctl,
+                    Kind::Unknown => upgrade::Kind::Unknown,
+                },
+                id: env.id,
+                re: env.re,
+                m: env.m,
+                generation: env.generation,
+                p: env.p,
+            }
+            .encode()
+            .map_err(ApiError::from),
+        }
+    }
+
     fn outcome(self, outcome: Outcome) -> Value {
         match self {
             Self::Ordinary => serde_json::to_value(outcome).unwrap(),
@@ -172,15 +194,60 @@ enum Route {
 
 /// A mismatched peer's ordinary requests never touch a mutable payload decoder.
 fn route(mode: upgrade::Mode, env: &Envelope) -> Route {
+    if env.t == Kind::Ctl
+        && matches!(env.m.as_str(), upgrade::HEARTBEAT | upgrade::FENCED)
+        && env.v != upgrade::UPGRADE_PROTOCOL
+    {
+        return Route::Unsupported;
+    }
     match (env.v, env.t) {
         (upgrade::UPGRADE_PROTOCOL, Kind::Req) if !upgrade::is_method(&env.m) => {
             Route::Incompatible
         }
         (upgrade::UPGRADE_PROTOCOL, Kind::Unknown) => Route::Incompatible,
         (upgrade::UPGRADE_PROTOCOL, _) => Route::V1,
-        (_, Kind::Req | Kind::Unknown) if mode == upgrade::Mode::Upgrade => Route::Incompatible,
+        (_, Kind::Req | Kind::Ctl | Kind::Unknown) if mode == upgrade::Mode::Upgrade => {
+            Route::Incompatible
+        }
         (steve_node_api::PROTOCOL, _) if mode == upgrade::Mode::Normal => Route::Ordinary,
         _ => Route::Unsupported,
+    }
+}
+
+/// Inspect the permanent integer discriminator before selecting an independent schema.
+fn decode_frame(text: &str) -> Option<Envelope> {
+    match crate::envelope::version(text)? {
+        1..=9 => {
+            let frame = upgrade::Frame::decode(text)?;
+            if frame.t == upgrade::Kind::Ctl {
+                match frame.m.as_str() {
+                    upgrade::HEARTBEAT => {
+                        serde_json::from_value::<upgrade::Heartbeat>(frame.p.clone()).ok()?;
+                    }
+                    upgrade::FENCED => {
+                        serde_json::from_value::<upgrade::Fenced>(frame.p.clone()).ok()?;
+                    }
+                    _ => {}
+                }
+            }
+            Some(Envelope {
+                v: frame.v,
+                t: match frame.t {
+                    upgrade::Kind::Req => Kind::Req,
+                    upgrade::Kind::Res => Kind::Res,
+                    upgrade::Kind::Ctl => Kind::Ctl,
+                    upgrade::Kind::Unknown => Kind::Unknown,
+                },
+                id: frame.id,
+                re: frame.re,
+                m: frame.m,
+                generation: frame.generation,
+                trace: None,
+                deadline_at: 0,
+                p: frame.p,
+            })
+        }
+        _ => Envelope::decode(text),
     }
 }
 
@@ -291,20 +358,18 @@ impl Conn {
 
     /// Ends the link: what is queued and not yet written is dropped (those calls fail `offline`),
     /// what is in flight resolves by the written rule. `pre` is one last control message
-    /// (`fenced`, `goodbye`) written before the close frame.
+    /// (`fenced`) written before the close frame.
     pub fn close(&self, pre: Option<(&str, Value)>, code: u16, reason: &str) {
-        let pre = pre.and_then(|(m, p)| self.s.control(m, p).encode().ok());
+        let pre = pre.and_then(|(m, p)| self.s.control(m, p).ok());
         shut(&self.s, pre, code, reason);
     }
 
     /// A control message (not a request: nobody answers it).
     pub fn notify(&self, m: &str, p: Value) {
-        if self.is_upgrade()
-            && !matches!(m, upgrade::HEARTBEAT | upgrade::FENCED | upgrade::GOODBYE)
-        {
+        if self.is_upgrade() && !matches!(m, upgrade::HEARTBEAT | upgrade::FENCED) {
             return;
         }
-        if let Ok(text) = self.s.control(m, p).encode() {
+        if let Ok(text) = self.s.control(m, p) {
             let _ = self.s.ctl.try_send(text, None);
         }
     }
@@ -357,27 +422,24 @@ impl Conn {
         method: &str,
         p: Value,
         op: Option<&OperationId>,
-    ) -> upgrade::Result<Value> {
+    ) -> ApiResult<Value> {
         if !upgrade::is_method(method) {
-            return Err(upgrade::Error::incompatible());
+            return Err(upgrade::Error::incompatible().into());
         }
-        let (lane, budget) = if method == upgrade::BLOB_FETCH {
+        let (lane, budget) = if method == upgrade::UPGRADE_FETCH {
             (Lane::Bulk, Duration::from_secs(60))
         } else {
             (Lane::Control, Duration::from_secs(60))
         };
         let raw = self
             .call_raw(method, p, lane, budget, op, Schema::V1)
-            .await
-            .map_err(upgrade::Error::from)?;
-        let outcome: upgrade::Outcome = serde_json::from_value(raw).map_err(|_| {
-            upgrade::Error::new(upgrade::Code::Invalid, "malformed upgrade response")
-        })?;
+            .await?;
+        let outcome: upgrade::Outcome = answer_of(method, raw, op)?;
         match outcome {
             upgrade::Outcome::Ok(value) => Ok(value),
             upgrade::Outcome::Err(mut error) => {
                 error.detail = peer_text(&error.detail);
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -408,7 +470,7 @@ impl Conn {
             deadline_at: crate::now_ms() + deadline.as_millis() as i64,
             p,
         };
-        let text = env.encode()?;
+        let text = schema.encode(env)?;
         let state = Arc::new(AtomicU8::new(QUEUED));
         let (tx, rx) = oneshot::channel();
         self.s
@@ -452,14 +514,15 @@ impl Drop for Conn {
 }
 
 impl Shared {
-    fn control(&self, method: &str, payload: Value) -> Envelope {
-        let mut env = Envelope::ctl(self.id(), method, self.generation, payload);
-        env.v = if self.mode == upgrade::Mode::Upgrade {
-            upgrade::UPGRADE_PROTOCOL
+    fn control(&self, method: &str, payload: Value) -> ApiResult<String> {
+        let schema = if matches!(method, upgrade::HEARTBEAT | upgrade::FENCED) {
+            Schema::V1
         } else {
-            steve_node_api::PROTOCOL
+            Schema::Ordinary
         };
-        env
+        let mut env = Envelope::ctl(self.id(), method, self.generation, payload);
+        env.v = schema.version();
+        schema.encode(env)
     }
     fn id(&self) -> String {
         format!("{}_{}", self.side, self.next.fetch_add(1, Ordering::SeqCst))
@@ -538,18 +601,18 @@ impl Shared {
             deadline_at: 0,
             p,
         };
-        let text = match env.encode() {
+        let text = match schema.encode(env.clone()) {
             Ok(t) => t,
             Err(mut e) => {
                 // too large to answer: answer that instead of breaking the link
                 if !method.is_empty() {
-                    e.detail = e
-                        .detail
-                        .replacen("request ", &format!("{method} request "), 1);
+                    e.safe_detail =
+                        e.safe_detail
+                            .replacen("request ", &format!("{method} request "), 1);
                 }
                 let mut env = env;
-                env.p = schema.outcome(Outcome::Err(e.into()));
-                env.encode().ok()?
+                env.p = schema.outcome(Outcome::Err(e));
+                schema.encode(env).ok()?
             }
         };
         Some(text)
@@ -692,7 +755,7 @@ async fn reader(
             }
             Ok(Some(Ok(Frame::Text(t)))) => t,
         };
-        let Some(env) = Envelope::decode(&frame) else {
+        let Some(env) = decode_frame(&frame) else {
             shut(&s, None, crate::close::MALFORMED, "malformed envelope");
             return;
         };
@@ -723,6 +786,19 @@ async fn reader(
             }
             Kind::Req => {
                 if env.generation != s.generation {
+                    if schema == Schema::V1 {
+                        let pre = s
+                            .control(
+                                upgrade::FENCED,
+                                serde_json::to_value(upgrade::Fenced {
+                                    generation: s.generation,
+                                })
+                                .unwrap(),
+                            )
+                            .ok();
+                        shut(&s, pre, crate::close::FENCED, "another connection");
+                        return;
+                    }
                     s.respond_now(
                         env.id,
                         Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
@@ -753,7 +829,7 @@ async fn reader(
                 drop(frame);
                 // the answer goes on its request's lane: a file chunk never sits in the
                 // control lane in front of a permission answer
-                let lane = if env.m == upgrade::BLOB_FETCH {
+                let lane = if env.m == upgrade::UPGRADE_FETCH {
                     Lane::Bulk
                 } else {
                     methods::spec(&env.m).map_or(Lane::Control, |m| m.lane)
@@ -795,14 +871,9 @@ async fn reader(
                     shut(&s, None, crate::close::FENCED, upgrade::FENCED);
                     return;
                 }
-                upgrade::GOODBYE => {
-                    if s.mode == upgrade::Mode::Normal {
-                        handler.control(&env.m, &env.p);
-                    }
-                    shut(&s, None, crate::close::GOODBYE, upgrade::GOODBYE);
-                    return;
+                m if schema == Schema::Ordinary && s.mode == upgrade::Mode::Normal => {
+                    handler.control(m, &env.p)
                 }
-                m if s.mode == upgrade::Mode::Normal => handler.control(m, &env.p),
                 _ => {}
             },
             Kind::Unknown => s.respond_now(
@@ -826,12 +897,9 @@ async fn heartbeat(s: std::sync::Weak<Shared>, every: Duration) {
         }
         let env = s.control(
             upgrade::HEARTBEAT,
-            serde_json::to_value(upgrade::Heartbeat {
-                at: crate::now_ms(),
-            })
-            .unwrap(),
+            serde_json::to_value(upgrade::Heartbeat {}).unwrap(),
         );
-        if let Ok(text) = env.encode() {
+        if let Ok(text) = env {
             let _ = s.ctl.try_send(text, None);
         }
     }
@@ -890,4 +958,54 @@ pub fn answer_of<T: serde::de::DeserializeOwned>(
             format!("{method}: unreadable answer: {e}"),
         ),
     })
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn integer_version_selects_independent_frame_decoders() {
+        let ordinary = Envelope::ctl("test", "paused", 7, json!({"paused":true}));
+        let text = ordinary.encode().unwrap();
+        assert!(decode_frame(&text).is_some());
+        assert!(
+            upgrade::Frame::decode(&text).is_none(),
+            "ordinary-only fields cannot enter v1"
+        );
+        let mut changed: Value = serde_json::from_str(&text).unwrap();
+        changed["v"] = json!(1);
+        assert!(decode_frame(&changed.to_string()).is_none());
+        for version in [json!("1"), json!(1.5), json!(-1), Value::Null] {
+            changed["v"] = version;
+            assert!(decode_frame(&changed.to_string()).is_none());
+        }
+        let fixed = upgrade::Frame::ctl("beat", upgrade::HEARTBEAT, 7, json!({}));
+        assert!(decode_frame(&fixed.encode().unwrap()).is_some());
+        let mut bad = fixed.clone();
+        bad.p = json!({"at":123});
+        assert!(decode_frame(&bad.encode().unwrap()).is_none());
+        let mut ordinary_heartbeat = ordinary;
+        ordinary_heartbeat.m = upgrade::HEARTBEAT.into();
+        assert!(matches!(
+            route(upgrade::Mode::Normal, &ordinary_heartbeat),
+            Route::Unsupported
+        ));
+        assert!(matches!(
+            route(upgrade::Mode::Upgrade, &ordinary_heartbeat),
+            Route::Unsupported
+        ));
+        ordinary_heartbeat.id = "beat".into();
+        ordinary_heartbeat.p = json!({});
+        assert_eq!(
+            Schema::V1
+                .encode(Envelope {
+                    v: 1,
+                    ..ordinary_heartbeat
+                })
+                .unwrap(),
+            fixed.encode().unwrap()
+        );
+    }
 }

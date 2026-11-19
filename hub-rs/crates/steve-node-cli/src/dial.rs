@@ -638,6 +638,7 @@ async fn link_once(
     if hub.pinned && signed.is_some() && !welcome.pins.is_empty() {
         (hub.pins_learnt)(welcome.pins.clone());
     }
+    let mode = steve_node_api::upgrade_v1::Mode::between(steve_node_api::PROTOCOL, welcome.proto);
     let conn = Conn::spawn(
         sink,
         stream,
@@ -647,12 +648,12 @@ async fn link_once(
             heartbeat: Duration::from_millis(welcome.heartbeat_ms.max(1000)),
             dead_after: Duration::from_millis(welcome.heartbeat_ms.max(1000) * 3),
             side: "n",
-            mode: welcome.mode,
+            mode,
         },
     );
-    tracing::info!(generation = welcome.generation, mode = ?welcome.mode, "linked to the hub");
+    tracing::info!(generation = welcome.generation, ?mode, "linked to the hub");
     // An incompatible link can fetch an upgrade, but is not proof the new build is healthy.
-    if welcome.mode == steve_node_api::upgrade_v1::Mode::Normal {
+    if mode == steve_node_api::upgrade_v1::Mode::Normal {
         linked();
     }
     link.set(Some(conn.clone()));

@@ -82,6 +82,7 @@ struct Admit {
     arrival: Arrival,
     /// The incarnation before this link (a change: the Node restarted).
     previous: Mutex<Option<Option<i64>>>,
+    incarnation: Mutex<Option<u64>>,
 }
 
 #[async_trait]
@@ -100,14 +101,13 @@ impl Admission for Admit {
     }
 
     async fn admit(&self, hello: &Hello) -> Result<Option<Admitted>, String> {
-        let (store, node, inc) = (
-            self.svc.store.clone(),
-            hello.node_id.to_string(),
-            hello.incarnation as i64,
-        );
+        let (store, node) = (self.svc.store.clone(), hello.node_id.to_string());
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
             store.transaction::<_, StoreError>(|tx| {
+                let inc = steve_store::nodes::get(tx, &node)?
+                    .and_then(|n| n.incarnation)
+                    .unwrap_or(0);
                 let l = steve_store::nodes::begin_link(tx, &node, inc, now())?;
                 if let Some(l) = &l {
                     steve_store::nodes::set_link(tx, &node, &arrival)?;
@@ -116,7 +116,7 @@ impl Admission for Admit {
                         Some(&node),
                         None,
                         "link",
-                        Some(&format!("generation {} incarnation {inc}", l.generation)),
+                        Some(&format!("generation {}", l.generation)),
                         now(),
                     )?;
                 }
@@ -130,13 +130,42 @@ impl Admission for Admit {
         *self.previous.lock().unwrap() = Some(link.previous_incarnation);
         Ok(Some(Admitted {
             generation: link.generation as u64,
-            paused: link.paused,
         }))
+    }
+
+    async fn introduced(
+        &self,
+        hello: &Hello,
+        admitted: &Admitted,
+        incarnation: u64,
+    ) -> Result<(), String> {
+        let (store, node, generation) = (
+            self.svc.store.clone(),
+            hello.node_id.clone(),
+            admitted.generation,
+        );
+        let changed = tokio::task::spawn_blocking(move || store.transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE nodes SET incarnation=?1 WHERE node_id=?2 AND generation=?3 AND state IN ('active','paused')",
+                rusqlite::params![incarnation as i64, node, generation as i64]).map_err(Into::into)
+        })).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        if changed != 1 {
+            return Err("ordinary introduction was fenced".into());
+        }
+        *self.incarnation.lock().unwrap() = Some(incarnation);
+        Ok(())
     }
 
     async fn reported(&self, node: &NodeId, error: &str) {
         tracing::warn!(node = %node, "node could not link: {error}");
-        self.svc.fleet.link_failed(node, now(), error);
+        self.svc.fleet.link_failed(
+            node,
+            now(),
+            if error.starts_with("incompatible:") {
+                "版本不一致，需要升级 Hub"
+            } else {
+                error
+            },
+        );
         super::tell(&self.svc.store, node.as_str()).await;
     }
 }
@@ -185,6 +214,7 @@ async fn serve_after(
         svc: svc.clone(),
         arrival,
         previous: Mutex::new(None),
+        incarnation: Mutex::new(None),
     };
     let hub = svc.identity.get().map(|k| k.as_ref());
     // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
@@ -240,7 +270,10 @@ async fn serve_after(
         },
     );
     let previous = admit.previous.lock().unwrap().take().flatten();
-    let restarted = previous.is_some_and(|p| p != hello.incarnation as i64);
+    let incarnation = *admit.incarnation.lock().unwrap();
+    let restarted = previous
+        .zip(incarnation)
+        .is_some_and(|(p, inc)| p != inc as i64);
     let remote = svc.fleet.remote(&node);
     let Some(paused) = install_link(&svc, &node, conn.clone(), restarted).await else {
         return;
@@ -252,8 +285,7 @@ async fn serve_after(
     if !conn.is_upgrade() {
         tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
     }
-    if paused != admitted.paused {
-        // paused or resumed since the welcome went out
+    if !conn.is_upgrade() {
         conn.notify("paused", serde_json::json!({ "paused": paused }));
     }
     tracing::info!(node = %node, generation, restarted, paused, "node linked");

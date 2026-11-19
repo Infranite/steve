@@ -2,20 +2,36 @@
 //!
 //! This is the complete compatibility boundary: bootstrap, frame headers, signatures, control
 //! messages, five methods and their errors. Do not extend or change v1. Introduce v2 alongside
-//! it and retain v1 when a change is necessary. Ordinary payloads are NOT covered by this promise.
+//! it and retain v1 when a change is necessary after the first production installation. Ordinary payloads are NOT covered by this promise.
 //! In particular, never import ordinary Node errors, commands, events, ids or build types here.
 //!
-//! Each upgrade WebSocket text message is one JSON Frame. `v` is UPGRADE_PROTOCOL, including
-//! bootstrap; ordinary frames use the application's protocol number instead. The independent
-//! `proto` in bootstrap is the ordinary application protocol: exact
-//! equality selects normal mode; any difference selects upgrade mode after authenticating.
-//! Binary WebSocket messages are refused. Heartbeats keep an upgrade link alive; fencing and
-//! goodbye end it. No other control message changes an upgrade-mode Node's execution state.
+//! Every WebSocket text message is a JSON object with a top-level integer `v`: this is the
+//! ONLY permanent constraint on ordinary envelopes. Read `v` BEFORE selecting a decoder.
+//! Bootstrap (challenge/hello/welcome/report/noted/error), heartbeat and fenced ALWAYS use
+//! v=1 and this same immutable schema, even after upgrade-v2 is introduced. Five-method
+//! requests/responses use the selected upgrade version. Ordinary envelopes use PROTOCOL>=10
+//! and evolve independently; 1..=9 is reserved for upgrade schemas. Binary frames are refused.
+//!
+//! Challenge announces the Hub's highest implemented upgrade version N (the Hub retains all
+//! 1..=N). Hello selects the Node's highest implemented version <=N; Nodes accept ANY N>=1.
+//! With no common implementation the Node sends signed Report "incompatible: upgrade Hub"
+//! and closes after noted. Hub refuses Hello outside 1..=N. Welcome confirms only the Hub's
+//! ordinary proto; equality with the Node proto selects normal mode, otherwise upgrade-only.
+//! Selection controls only the five methods and errors, NEVER bootstrap or fixed controls.
+//!
+//! upgrade_fetch is Node -> Hub; probe_build/upgrade_stage/upgrade_switch/upgrade_status are
+//! Hub -> Node. Fetch names only an operation, offset and requested maximum; the Hub may
+//! return fewer bytes. Continue at offset+bytes.len until eof. Queue/chunk/control limits are
+//! local policy, not wire constants. A protocol mismatch executes no ordinary business request.
+//! Heartbeat is empty (only receipt/liveness matters); fenced ends the link by close 4409.
+//! REPORT_MAX bounds the sender's report; HANDSHAKE_BUDGET_MS is the receiver's timeout.
 //!
 //! Signatures are Ed25519 over a domain, NUL-separated connection bindings, and SHA256 of
 //! canonical JSON (sorted object keys, compact JSON scalars/arrays). Bootstrap carries no
 //! ordinary capabilities or stream heads: those are queried only after an equal-version link.
 
+//! Signed structures may contain only strings, integers, booleans and arrays of strings.
+//! Floating point values and nested objects MUST NOT enter signed structures.
 //! Authentication encoding is part of v1: Ed25519 (RFC 8032, pure Ed25519, no prehash),
 //! a raw 32-byte compressed public key and raw 64-byte R || S signature. Writers emit lowercase
 //! hexadecimal (64/128 ASCII digits, no prefix); readers accept either hex case, but no whitespace
@@ -64,12 +80,8 @@ pub fn parse_pin(pin: &str) -> Option<[u8; 32]> {
 pub const UPGRADE_PROTOCOL: u32 = 1;
 pub const REPORT_MAX: usize = 1024;
 pub const HANDSHAKE_BUDGET_MS: u64 = 10_000;
-pub const MAX_FRAME: usize = 288 * 1024;
-pub const CONTROL_CAP: usize = 64 * 1024;
-pub const BULK_CAP: usize = 256 * 1024;
-pub const BULK_FRAME: usize = 48 * 1024;
-pub const CHUNK_BYTES: u32 = (BULK_FRAME / 2) as u32 - 1024;
-pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
+/// Receivers MUST accept and senders MUST NOT exceed this many UTF-8 bytes per v1 frame.
+pub const MAX_FRAME: usize = 65536;
 pub const CHALLENGE: &str = "challenge";
 pub const HELLO: &str = "hello";
 pub const WELCOME: &str = "welcome";
@@ -78,16 +90,15 @@ pub const NOTED: &str = "noted";
 pub const ERROR: &str = "error";
 pub const HEARTBEAT: &str = "heartbeat";
 pub const FENCED: &str = "fenced";
-pub const GOODBYE: &str = "goodbye";
 pub const PROBE_BUILD: &str = "probe_build";
 pub const UPGRADE_STAGE: &str = "upgrade_stage";
-pub const BLOB_FETCH: &str = "blob.fetch";
+pub const UPGRADE_FETCH: &str = "upgrade_fetch";
 pub const UPGRADE_SWITCH: &str = "upgrade_switch";
 pub const UPGRADE_STATUS: &str = "upgrade_status";
 pub const METHODS: [&str; 5] = [
     PROBE_BUILD,
     UPGRADE_STAGE,
-    BLOB_FETCH,
+    UPGRADE_FETCH,
     UPGRADE_SWITCH,
     UPGRADE_STATUS,
 ];
@@ -96,8 +107,8 @@ pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Derived connection state, not an on-wire enum: compare the two ordinary protocol numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Upgrade,
@@ -119,16 +130,13 @@ pub struct Challenge {
     pub nonce: String,
     pub hub_id: String,
     pub conn_id: String,
-    pub proto: u32,
     pub upgrade_protocol: u32,
-    pub hub_time: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hello {
     pub node_id: String,
-    pub incarnation: u64,
     pub proto: u32,
     pub upgrade_protocol: u32,
     pub sig: String,
@@ -140,9 +148,6 @@ pub struct Welcome {
     #[serde(rename = "gen")]
     pub generation: u64,
     pub proto: u32,
-    pub upgrade_protocol: u32,
-    pub mode: Mode,
-    pub paused: bool,
     pub heartbeat_ms: u64,
     pub hub_key: String,
     pub pins: Vec<String>,
@@ -163,9 +168,7 @@ pub struct Noted {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Heartbeat {
-    pub at: i64,
-}
+pub struct Heartbeat {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -174,19 +177,13 @@ pub struct Fenced {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Goodbye {
-    pub reason: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Req,
     Res,
     Ctl,
-    #[serde(other)]
+    #[serde(other, skip_serializing)]
     Unknown,
 }
 
@@ -202,10 +199,6 @@ pub struct Frame {
     pub m: String,
     #[serde(default, rename = "gen")]
     pub generation: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace: Option<String>,
-    #[serde(default)]
-    pub deadline_at: i64,
     #[serde(default)]
     pub p: Value,
 }
@@ -219,8 +212,6 @@ impl Frame {
             re: None,
             m: method.into(),
             generation,
-            trace: None,
-            deadline_at: 0,
             p,
         }
     }
@@ -228,11 +219,7 @@ impl Frame {
     pub fn encode(&self) -> Result<String> {
         let text =
             serde_json::to_string(self).map_err(|e| Error::new(Code::Internal, e.to_string()))?;
-        let cap = if self.t == Kind::Ctl {
-            CONTROL_CAP
-        } else {
-            MAX_FRAME
-        };
+        let cap = MAX_FRAME;
         if text.len() > cap {
             return Err(Error::new(
                 Code::Exhausted,
@@ -264,9 +251,6 @@ impl Frame {
             return None;
         }
         let frame: Self = serde_json::from_str(text).ok()?;
-        if frame.t == Kind::Ctl && text.len() > CONTROL_CAP {
-            return None;
-        }
         Some(frame)
     }
 }
@@ -276,48 +260,34 @@ impl Frame {
 pub enum Code {
     Incompatible,
     Downgrade,
-    Offline,
     Busy,
     Unsupported,
     Denied,
-    Expired,
-    Stale,
     Conflict,
     Exhausted,
     Invalid,
-    OutcomeUnknown,
-    Gap,
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Retry {
-    Never,
-    Later,
-    Reconcile,
+impl Code {
+    /// Only transient capacity and implementation failures may be resent as the same operation.
+    /// A lost switch response is a LOCAL transport outcome: reconnect and query upgrade_status.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Busy | Self::Exhausted | Self::Internal)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Error {
     pub code: Code,
-    pub retry: Retry,
-    pub operation: Option<String>,
     pub detail: String,
 }
 
 impl Error {
     pub fn new(code: Code, detail: impl Into<String>) -> Self {
-        let retry = match code {
-            Code::Offline | Code::Busy | Code::Exhausted => Retry::Later,
-            Code::OutcomeUnknown | Code::Gap => Retry::Reconcile,
-            _ => Retry::Never,
-        };
         Self {
             code,
-            retry,
-            operation: None,
             detail: detail.into(),
         }
     }
@@ -366,7 +336,6 @@ pub struct ProbeBuildResponse {
 pub struct StageRequest {
     pub operation: String,
     pub build: BuildIdentity,
-    pub artifact: String,
     pub size: u64,
     pub sha256: String,
     pub health_secs: u32,
@@ -403,17 +372,9 @@ pub type StatusResponse = UpgradeState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FetchRequest {
-    pub access: FileAccess,
-    pub id: String,
+    pub operation: String,
     pub offset: u64,
     pub max: u32,
-}
-
-/// No execution scope, general filesystem path or upload exists in the permanent protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "for", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FileAccess {
-    Operation { operation: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,8 +390,15 @@ pub struct FetchResponse {
 #[serde(deny_unknown_fields)]
 pub struct SwitchRequest {
     pub operation: String,
-    pub abandon: bool,
-    pub force: bool,
+    pub action: SwitchAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchAction {
+    Switch,
+    Force,
+    Abandon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

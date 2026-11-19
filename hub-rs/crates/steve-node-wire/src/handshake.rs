@@ -1,7 +1,7 @@
 //! Authenticated bootstrap using the self-contained upgrade-v1 schema.
 //!
 //! Hub challenge → signed Node hello → signed Hub welcome. The signed welcome confirms both
-//! application protocol numbers and the mode: exact equality is Normal; every mismatch is
+//! application protocol numbers: exact equality implies Normal; every mismatch implies
 //! Upgrade, without closing an authenticated connection. Capabilities and stream heads are
 //! ordinary data, never part of bootstrap. Existing identity pins, replay binding, generation
 //! fencing and the 10-second handshake budget remain in force.
@@ -15,7 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use steve_node_api::upgrade_v1::{self as upgrade, Mode, UPGRADE_PROTOCOL};
+use steve_node_api::upgrade_v1::{self as upgrade, UPGRADE_PROTOCOL};
 use steve_node_api::{NodeId, PROTOCOL};
 
 use crate::envelope::{Envelope, Frame, FrameSink, FrameStream, Kind};
@@ -80,7 +80,6 @@ fn refused(code: &str, detail: impl Into<String>) -> Refused {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Admitted {
     pub generation: u64,
-    pub paused: bool,
 }
 
 #[async_trait]
@@ -88,17 +87,27 @@ pub trait Admission: Send + Sync {
     /// The public key of a Node that may connect now (active or paused); `Ok(None)` for anything
     /// else. `Err`: the store could not say (answered `internal`, not `denied`).
     async fn key(&self, node: &NodeId) -> Result<Option<[u8; 32]>, String>;
-    /// The signature checked out: take the link (generation + 1, the incarnation recorded), in one
+    /// The signature checked out: take the link (generation + 1), in one
     /// transaction that again requires active or paused. `Ok(None)`: refused after all; `Err`: the
     /// store failed.
     async fn admit(&self, hello: &Hello) -> Result<Option<Admitted>, String>;
+    /// Ordinary-protocol metadata arrives only after the permanent signed Welcome. It cannot
+    /// influence generation allocation, but must be applied before admitting ordinary work.
+    async fn introduced(
+        &self,
+        _hello: &Hello,
+        _admitted: &Admitted,
+        _incarnation: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// A Node whose key may connect said why it could not link ([`Report`], its signature checked,
     /// `error` at most [`REPORT_MAX`] bytes).
     async fn reported(&self, _node: &NodeId, _error: &str) {}
 }
 
 async fn send_ctl(sink: &mut FrameSink, m: &str, p: Value) -> Result<(), Refused> {
-    let text = Envelope::ctl(format!("hs_{m}"), m, 0, p)
+    let text = upgrade::Frame::ctl(format!("hs_{m}"), m, 0, p)
         .encode()
         .map_err(|e| refused("internal", e.detail))?;
     sink.send(Frame::Text(text))
@@ -114,13 +123,19 @@ async fn recv_ctl(stream: &mut FrameStream, want: &str) -> Result<Value, Refused
 async fn recv_ctl_of(stream: &mut FrameStream, want: &[&str]) -> Result<(String, Value), Refused> {
     let want0 = want[0];
     match stream.next().await {
-        Some(Ok(Frame::Text(t))) => match Envelope::decode(&t) {
+        Some(Ok(Frame::Text(t))) => match upgrade::Frame::decode(&t) {
             Some(e)
-                if e.v == UPGRADE_PROTOCOL && e.t == Kind::Ctl && want.contains(&e.m.as_str()) =>
+                if e.v == UPGRADE_PROTOCOL
+                    && e.t == upgrade::Kind::Ctl
+                    && want.contains(&e.m.as_str()) =>
             {
                 Ok((e.m, e.p))
             }
-            Some(e) if e.v == UPGRADE_PROTOCOL && e.t == Kind::Ctl && e.m == upgrade::ERROR => {
+            Some(e)
+                if e.v == UPGRADE_PROTOCOL
+                    && e.t == upgrade::Kind::Ctl
+                    && e.m == upgrade::ERROR =>
+            {
                 let error: upgrade::Error = serde_json::from_value(e.p)
                     .map_err(|_| refused("invalid", "malformed bootstrap error"))?;
                 let code = serde_json::to_value(error.code).unwrap();
@@ -168,7 +183,7 @@ async fn receive_hello(
     }
     let hello: Hello =
         serde_json::from_value(p).map_err(|_| refused("invalid", "malformed hello"))?;
-    if hello.upgrade_protocol != UPGRADE_PROTOCOL {
+    if !(1..=challenge.upgrade_protocol).contains(&hello.upgrade_protocol) {
         return Err(refused("unsupported", "no supported bootstrap protocol"));
     }
     let node = NodeId::new(hello.node_id.clone())
@@ -231,6 +246,32 @@ pub async fn accept_version(
     pins: &[String],
     proto: u32,
 ) -> Result<(Hello, Admitted), Refused> {
+    accept_protocols(
+        sink,
+        stream,
+        hub_id,
+        admission,
+        hub,
+        pins,
+        proto,
+        UPGRADE_PROTOCOL,
+    )
+    .await
+}
+
+/// Test seam for a future Hub that retains all lower upgrade schemas.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_protocols(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    hub_id: &str,
+    admission: &dyn Admission,
+    hub: Option<&Identity>,
+    pins: &[String],
+    proto: u32,
+    upgrade_highest: u32,
+) -> Result<(Hello, Admitted), Refused> {
     let run = async {
         let challenge = Challenge {
             nonce: hex::encode(
@@ -240,9 +281,7 @@ pub async fn accept_version(
             conn_id: hex::encode(
                 identity::random::<12>().map_err(|e| refused("internal", e.to_string()))?,
             ),
-            proto,
-            upgrade_protocol: UPGRADE_PROTOCOL,
-            hub_time: crate::now_ms(),
+            upgrade_protocol: upgrade_highest,
         };
         send_ctl(
             sink,
@@ -254,9 +293,6 @@ pub async fn accept_version(
         let mut welcome = Welcome {
             generation: admitted.generation,
             proto,
-            upgrade_protocol: UPGRADE_PROTOCOL,
-            mode: Mode::between(proto, hello.proto),
-            paused: admitted.paused,
             heartbeat_ms: 10_000,
             hub_key: hub.map(|k| hex::encode(k.public())).unwrap_or_default(),
             // announced only when signed: an unsigned list is no one's word
@@ -272,6 +308,31 @@ pub async fn accept_version(
             serde_json::to_value(&welcome).unwrap_or_default(),
         )
         .await?;
+        if proto == hello.proto {
+            let Some(Ok(Frame::Text(text))) = stream.next().await else {
+                return Err(refused("offline", "ordinary introduction missing"));
+            };
+            if crate::envelope::version(&text) != Some(proto) {
+                return Err(refused("invalid", "ordinary introduction version"));
+            }
+            let intro = Envelope::decode(&text)
+                .filter(|e| {
+                    e.v == proto
+                        && e.t == Kind::Ctl
+                        && e.m == "node.intro"
+                        && e.generation == admitted.generation
+                })
+                .ok_or_else(|| refused("invalid", "expected ordinary node.intro"))?;
+            let intro: OrdinaryIntro = serde_json::from_value(intro.p)
+                .map_err(|_| refused("invalid", "malformed ordinary introduction"))?;
+            admission
+                .introduced(&hello, &admitted, intro.incarnation)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("node introduction: {e}");
+                    refused(INTERNAL, "the hub could not decide; dial again")
+                })?;
+        }
         Ok((hello, admitted))
     };
     let r = match tokio::time::timeout(BUDGET, run).await {
@@ -336,7 +397,7 @@ fn check_challenge(challenge: &Challenge, hub_id: Option<&str>) -> Result<(), Re
     if hub_id.is_some_and(|want| want != challenge.hub_id) {
         return Err(refused(DENIED, "not the hub this node paired with"));
     }
-    if challenge.upgrade_protocol != UPGRADE_PROTOCOL {
+    if challenge.upgrade_protocol == 0 {
         return Err(refused("unsupported", "no supported bootstrap protocol"));
     }
     Ok(())
@@ -348,15 +409,6 @@ fn check_welcome(
     welcome: &Welcome,
     hub_key: Option<[u8; 32]>,
 ) -> Result<(), Refused> {
-    if welcome.proto != challenge.proto
-        || welcome.upgrade_protocol != UPGRADE_PROTOCOL
-        || welcome.mode != Mode::between(hello.proto, challenge.proto)
-    {
-        return Err(refused(
-            "invalid",
-            "welcome does not confirm the authenticated protocol mode",
-        ));
-    }
     let signed = welcome_key(challenge, hello, welcome)?;
     if hub_key.is_some_and(|want| signed != Some(want)) {
         return Err(refused(DENIED, "not the hub this node paired with"));
@@ -403,7 +455,13 @@ pub async fn report(
     }
 }
 
-/// What the Node says about itself in its hello.
+/// Ordinary metadata sent after Welcome, outside the permanent authentication schema.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrdinaryIntro {
+    incarnation: u64,
+}
+
 pub struct NodeIntro<'a> {
     pub node: &'a NodeId,
     pub identity: &'a Identity,
@@ -431,16 +489,46 @@ pub async fn dial_as(
     intro: NodeIntro<'_>,
     proto: u32,
 ) -> Result<(Challenge, Welcome), Refused> {
+    dial_protocols(sink, stream, intro, proto, &[UPGRADE_PROTOCOL]).await
+}
+
+/// Select only schemas actually implemented by this Node; useful for testing a v2-only Node.
+#[doc(hidden)]
+pub async fn dial_protocols(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    intro: NodeIntro<'_>,
+    proto: u32,
+    supported: &[u32],
+) -> Result<(Challenge, Welcome), Refused> {
     let run = async {
         let p = recv_ctl(stream, upgrade::CHALLENGE).await?;
         let challenge: Challenge =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed challenge"))?;
         check_challenge(&challenge, intro.hub_id)?;
+        let selected = supported
+            .iter()
+            .copied()
+            .filter(|v| (1..=9).contains(v) && *v <= challenge.upgrade_protocol)
+            .max();
+        let Some(selected) = selected else {
+            let detail = "incompatible: upgrade Hub; no common upgrade protocol";
+            let mut report = Report {
+                node_id: intro.node.to_string(),
+                error: detail.into(),
+                sig: String::new(),
+            };
+            report.sig = hex::encode(intro.identity.sign(&report_message(&challenge, &report)));
+            send_ctl(sink, upgrade::REPORT, serde_json::to_value(report).unwrap()).await?;
+            let noted = recv_ctl(stream, upgrade::NOTED).await?;
+            serde_json::from_value::<upgrade::Noted>(noted)
+                .map_err(|_| refused("invalid", "malformed report acknowledgement"))?;
+            return Err(refused("incompatible", detail));
+        };
         let mut hello = Hello {
             node_id: intro.node.to_string(),
-            incarnation: intro.incarnation,
             proto,
-            upgrade_protocol: UPGRADE_PROTOCOL,
+            upgrade_protocol: selected,
             sig: String::new(),
         };
         hello.sig = hex::encode(intro.identity.sign(&hello_message(&challenge, &hello)));
@@ -454,6 +542,25 @@ pub async fn dial_as(
         let welcome: Welcome =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed welcome"))?;
         check_welcome(&challenge, &hello, &welcome, intro.hub_key)?;
+        if proto == welcome.proto {
+            let mut message = Envelope::ctl(
+                "intro",
+                "node.intro",
+                welcome.generation,
+                serde_json::to_value(OrdinaryIntro {
+                    incarnation: intro.incarnation,
+                })
+                .unwrap(),
+            );
+            message.v = proto;
+            sink.send(Frame::Text(
+                message
+                    .encode()
+                    .map_err(|e| refused("internal", e.safe_detail))?,
+            ))
+            .await
+            .map_err(|e| refused("offline", e.to_string()))?;
+        }
         Ok((challenge, welcome))
     };
     match tokio::time::timeout(BUDGET, run).await {

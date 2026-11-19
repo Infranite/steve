@@ -4,7 +4,6 @@
   "id": "hs_report",
   "m": "report",
   "gen": 0,
-  "deadline_at": 0,
   "p": {
     "node_id": "node-1",
     "error": "link failed",

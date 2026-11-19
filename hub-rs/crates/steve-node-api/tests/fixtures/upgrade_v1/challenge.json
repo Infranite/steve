@@ -4,14 +4,10 @@
   "id": "h_1",
   "m": "challenge",
   "gen": 7,
-  "trace": "trace-golden",
-  "deadline_at": 1700000001000,
   "p": {
     "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
     "hub_id": "hub-1",
     "conn_id": "conn-1",
-    "proto": 10,
-    "upgrade_protocol": 1,
-    "hub_time": 1700000000000
+    "upgrade_protocol": 1
   }
 }

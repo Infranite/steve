@@ -1,6 +1,4 @@
 {
   "code": "incompatible",
-  "retry": "never",
-  "operation": null,
   "detail": "golden error"
 }

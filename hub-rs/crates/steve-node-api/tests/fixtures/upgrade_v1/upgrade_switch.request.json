@@ -4,11 +4,8 @@
   "id": "h_1",
   "m": "upgrade_switch",
   "gen": 7,
-  "trace": "trace-golden",
-  "deadline_at": 1700000001000,
   "p": {
     "operation": "op_upgrade",
-    "abandon": false,
-    "force": true
+    "action": "force"
   }
 }

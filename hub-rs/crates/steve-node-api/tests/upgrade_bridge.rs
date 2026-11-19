@@ -12,8 +12,8 @@ fn release_order_is_numeric_and_an_unrecognized_version_cannot_switch() {
     for (current, target) in [("1.10.0", "1.9.0"), ("2.0.0", "1.99.99")] {
         let error = refuse_downgrade(current, target).unwrap_err();
         assert_eq!(
-            (error.code, error.retry),
-            (v1::Code::Downgrade, v1::Retry::Never)
+            (error.code, error.code.retryable()),
+            (v1::Code::Downgrade, false)
         );
     }
     for version in [
@@ -37,7 +37,7 @@ fn release_order_is_numeric_and_an_unrecognized_version_cannot_switch() {
 fn wire_incompatible_defers_local_work_and_downgrade_keeps_its_code() {
     use steve_node_api::{ApiError, ErrorCode, RetryClass};
     let wire = v1::Error::incompatible();
-    assert_eq!(wire.retry, v1::Retry::Never);
+    assert!(!wire.code.retryable());
     let local = ApiError::from(wire);
     assert_eq!(
         (local.code, local.retry),
@@ -45,4 +45,29 @@ fn wire_incompatible_defers_local_work_and_downgrade_keeps_its_code() {
     );
     let wire = v1::Error::new(v1::Code::Downgrade, "older journal reader");
     assert_eq!(v1::Error::from(ApiError::from(wire.clone())), wire);
+}
+
+#[test]
+fn switch_actions_are_exclusive_and_legacy_flags_are_not_wire_fields() {
+    use steve_node_api::{OperationId, UpgradeSwitch};
+    for (action, abandon, force) in [
+        (v1::SwitchAction::Switch, false, false),
+        (v1::SwitchAction::Force, false, true),
+        (v1::SwitchAction::Abandon, true, false),
+    ] {
+        let wire = v1::SwitchRequest {
+            operation: "op_upgrade".into(),
+            action,
+        };
+        let ordinary = UpgradeSwitch::try_from(wire.clone()).unwrap();
+        assert_eq!((ordinary.abandon, ordinary.force), (abandon, force));
+        assert_eq!(ordinary.operation, OperationId::new("op_upgrade").unwrap());
+        assert_eq!(v1::SwitchRequest::from(ordinary), wire);
+    }
+    assert!(
+        serde_json::from_value::<v1::SwitchRequest>(serde_json::json!({
+            "operation":"op_upgrade", "abandon":true, "force":true
+        }))
+        .is_err()
+    );
 }

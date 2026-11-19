@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use steve_node_api::NodeId;
-use steve_node_wire::envelope::{Envelope, Frame};
+use steve_node_api::upgrade_v1::Frame as Envelope;
+use steve_node_wire::envelope::Frame;
 use steve_node_wire::handshake::{self, Admission, Admitted, Hello, NodeIntro};
 use steve_node_wire::testkit::pair;
 use steve_node_wire::{Identity, close};
@@ -16,6 +17,7 @@ use steve_node_wire::{Identity, close};
 struct Mem {
     keys: Mutex<HashMap<String, [u8; 32]>>,
     generation: Mutex<u64>,
+    introductions: Mutex<Vec<u64>>,
     /// The store fails.
     broken: Mutex<bool>,
     /// What Nodes reported instead of a hello.
@@ -33,10 +35,11 @@ impl Admission for Mem {
     async fn admit(&self, _: &Hello) -> Result<Option<Admitted>, String> {
         let mut g = self.generation.lock().unwrap();
         *g += 1;
-        Ok(Some(Admitted {
-            generation: *g,
-            paused: false,
-        }))
+        Ok(Some(Admitted { generation: *g }))
+    }
+    async fn introduced(&self, _: &Hello, _: &Admitted, incarnation: u64) -> Result<(), String> {
+        self.introductions.lock().unwrap().push(incarnation);
+        Ok(())
     }
     async fn reported(&self, node: &NodeId, error: &str) {
         self.reports
@@ -97,7 +100,8 @@ async fn the_right_key_is_welcomed_with_a_new_generation() {
     adm.keys.lock().unwrap().insert("n1".into(), id.public());
     let (h, n, _) = run(adm.clone(), "n1", &id).await;
     let (hello, a) = h.unwrap();
-    assert_eq!(hello.incarnation, 3);
+    assert_eq!(*adm.introductions.lock().unwrap(), vec![3]);
+    assert_eq!(hello.node_id, "n1");
     assert_eq!(n.unwrap().1.generation, a.generation);
     let (_, n2, _) = run(adm, "n1", &id).await;
     assert_eq!(n2.unwrap().1.generation, 2, "each link a new generation");
@@ -159,15 +163,18 @@ async fn exact_equality_is_normal_and_every_other_protocol_stays_linked_for_upgr
             (result.unwrap(), end)
         };
         assert_eq!(
-            (challenge.proto, hello.proto, welcome.proto),
-            (hub_proto, node_proto, hub_proto)
+            (challenge.upgrade_protocol, hello.proto, welcome.proto),
+            (1, node_proto, hub_proto)
         );
-        assert_eq!(welcome.mode, Mode::between(hub_proto, node_proto));
+        assert_eq!(
+            Mode::between(welcome.proto, node_proto),
+            Mode::between(hub_proto, node_proto)
+        );
         let heartbeat = Envelope::ctl(
             "still-open",
             "heartbeat",
             welcome.generation,
-            serde_json::to_value(Heartbeat { at: 1 }).unwrap(),
+            serde_json::to_value(Heartbeat {}).unwrap(),
         );
         hub.sink
             .send(Frame::Text(heartbeat.encode().unwrap()))
@@ -220,7 +227,6 @@ async fn manual(
     let ch: handshake::Challenge = serde_json::from_value(Envelope::decode(&t).unwrap().p).unwrap();
     let mut hello = Hello {
         node_id: "n1".into(),
-        incarnation: 1,
         proto: steve_node_api::PROTOCOL,
         upgrade_protocol: 1,
         sig: String::new(),
@@ -238,7 +244,7 @@ async fn manual(
 #[tokio::test]
 async fn tampering_is_denied() {
     // a field flipped after signing
-    let e = manual(Arc::new(Mem::default()), |h, _, _| h.incarnation = 99).await;
+    let e = manual(Arc::new(Mem::default()), |h, _, _| h.proto = 99).await;
     assert_eq!(e.code, "denied");
     // a signature made for another challenge (another nonce and connection)
     let e = manual(Arc::new(Mem::default()), |h, ch, id| {
@@ -253,6 +259,61 @@ async fn tampering_is_denied() {
     // garbage signature
     let e = manual(Arc::new(Mem::default()), |h, _, _| h.sig = "zz".into()).await;
     assert_eq!(e.code, "denied");
+}
+
+#[tokio::test]
+async fn a_hub_rejects_hello_outside_its_announced_upgrade_versions() {
+    for version in [0, 2] {
+        let e = manual(Arc::new(Mem::default()), |h, ch, id| {
+            h.upgrade_protocol = version;
+            h.sig = hex::encode(id.sign(&handshake::hello_message(ch, h)));
+        })
+        .await;
+        assert_eq!(e.code, "unsupported");
+    }
+}
+
+#[tokio::test]
+async fn no_common_upgrade_schema_is_a_signed_report_not_a_link() {
+    let adm = Arc::new(Mem::default());
+    let id = Identity::from_seed([7; 32]);
+    adm.keys.lock().unwrap().insert("n1".into(), id.public());
+    let (mut hub, mut node) = pair();
+    let keep = adm.clone();
+    let accepting = tokio::spawn(async move {
+        handshake::accept(&mut hub.sink, &mut hub.stream, "hub_1", &*keep).await
+    });
+    let node_id = nid("n1");
+    let error = handshake::dial_protocols(
+        &mut node.sink,
+        &mut node.stream,
+        NodeIntro {
+            node: &node_id,
+            identity: &id,
+            incarnation: 1,
+            hub_id: Some("hub_1"),
+            hub_key: None,
+        },
+        steve_node_api::PROTOCOL,
+        &[2],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "incompatible");
+    assert!(error.detail.contains("upgrade Hub"));
+    assert_eq!(
+        accepting.await.unwrap().unwrap_err().code,
+        handshake::REPORTED
+    );
+    assert_eq!(*adm.generation.lock().unwrap(), 0);
+    assert_eq!(
+        adm.reports.lock().unwrap().as_slice(),
+        &[("n1".into(), error.detail)]
+    );
+    assert_eq!(
+        node.stream.next().await.unwrap().unwrap(),
+        Frame::Close(close::GOODBYE, handshake::REPORTED.into())
+    );
 }
 
 #[tokio::test]
@@ -408,13 +469,10 @@ fn a_changed_welcome_no_longer_holds() {
         nonce: "nn".into(),
         hub_id: "hub_1".into(),
         conn_id: "cc".into(),
-        proto: 10,
         upgrade_protocol: 1,
-        hub_time: 0,
     };
     let h = Hello {
         node_id: "n1".into(),
-        incarnation: 1,
         proto: 10,
         upgrade_protocol: 1,
         sig: "ab".into(),
@@ -422,9 +480,6 @@ fn a_changed_welcome_no_longer_holds() {
     let mut w = Welcome {
         generation: 4,
         proto: 10,
-        upgrade_protocol: 1,
-        mode: steve_node_api::upgrade_v1::Mode::Normal,
-        paused: false,
         heartbeat_ms: 10_000,
         hub_key: hex::encode(hub.public()),
         pins: vec!["sha256:ab".into()],
@@ -432,15 +487,18 @@ fn a_changed_welcome_no_longer_holds() {
     };
     w.sig = hex::encode(hub.sign(&welcome_message(&c, &h, &w)));
     assert_eq!(welcome_key(&c, &h, &w).unwrap(), Some(hub.public()));
-    let mut paused = w.clone();
-    paused.paused = true;
-    assert!(welcome_key(&c, &h, &paused).is_err());
+    let mut heartbeat = w.clone();
+    heartbeat.heartbeat_ms += 1;
+    assert!(welcome_key(&c, &h, &heartbeat).is_err());
     let mut protocol = w.clone();
     protocol.proto += 1;
     assert!(welcome_key(&c, &h, &protocol).is_err());
-    let mut mode = w.clone();
-    mode.mode = steve_node_api::upgrade_v1::Mode::Upgrade;
-    assert!(welcome_key(&c, &h, &mode).is_err());
+    let mut selected = h.clone();
+    selected.upgrade_protocol = 2;
+    assert!(
+        welcome_key(&c, &selected, &w).is_err(),
+        "selected schema is bound by signed Hello"
+    );
     let mut pins = w.clone();
     pins.pins = vec!["sha256:ee".into()];
     assert!(

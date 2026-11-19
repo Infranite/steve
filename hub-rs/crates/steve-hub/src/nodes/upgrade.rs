@@ -37,7 +37,7 @@ use steve_store::nodes::{self as store_nodes, UPGRADE_DONE, UpgradeRow};
 use super::now;
 
 /// The artifact ids of upgrade archives (`node-upgrade.<operation>`).
-pub use steve_node_api::upgrade_v1::ARTIFACT_PREFIX;
+pub use steve_node_api::upgrade_bridge::ARTIFACT_PREFIX;
 
 /// The phases in which an upgrade has not yet switched: "switch now" still applies.
 const WAITING: &[&str] = &["preparing", "staging", "staged", "draining"];
@@ -1108,9 +1108,10 @@ mod tests {
             panic!("upgrade-only orchestration must not call ordinary Hub ports")
         }
         async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
-            assert_eq!(method, upgrade_v1::BLOB_FETCH);
+            assert_eq!(method, upgrade_v1::UPGRADE_FETCH);
             let request = steve_node_wire::upgrade::decode(p)?;
             let (access, id, offset, max) = upgrade_bridge::fetch_request(request)?;
+            let max = max.min(steve_node_wire::envelope::CHUNK_BYTES);
             let FileAccess::Operation { operation } = access else {
                 panic!("execution scope in upgrade")
             };
@@ -1146,7 +1147,7 @@ mod tests {
                 let request: upgrade_v1::StageRequest =
                     steve_node_wire::upgrade::decode(p.clone())?;
                 let operation = upgrade_bridge::operation(request.operation)?;
-                let artifact = ArtifactId::new(request.artifact).unwrap();
+                let artifact = ArtifactId::new(format!("{ARTIFACT_PREFIX}{operation}")).unwrap();
                 let files = steve_node_wire::RemoteFiles(self.link.clone());
                 let mut bytes = vec![];
                 loop {
@@ -1157,7 +1158,7 @@ mod tests {
                             },
                             artifact.clone(),
                             bytes.len() as u64,
-                            upgrade_v1::CHUNK_BYTES,
+                            steve_node_wire::envelope::CHUNK_BYTES,
                         )
                         .await
                         .map_err(upgrade_v1::Error::from)?;

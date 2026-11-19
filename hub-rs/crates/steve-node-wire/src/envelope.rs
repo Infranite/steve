@@ -5,12 +5,118 @@ use std::pin::Pin;
 use futures_util::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_node_api::ApiError;
+use steve_node_api::{ApiError, ErrorCode};
 
-// The permanent frame header is shared; ordinary payloads still require exact PROTOCOL equality.
-pub use steve_node_api::upgrade_v1::{
-    BULK_CAP, BULK_FRAME, CHUNK_BYTES, CONTROL_CAP, Frame as Envelope, Kind, MAX_FRAME,
-};
+// Local scheduling policy; these limits may evolve with the ordinary protocol.
+pub const MAX_FRAME: usize = 288 * 1024;
+pub const CONTROL_CAP: usize = 64 * 1024;
+pub const BULK_CAP: usize = 256 * 1024;
+pub const BULK_FRAME: usize = 48 * 1024;
+pub const CHUNK_BYTES: u32 = (BULK_FRAME / 2) as u32 - 1024;
+
+/// The only permanent ordinary-frame constraint: a top-level integer v selects its decoder.
+pub fn version(text: &str) -> Option<u32> {
+    #[derive(Deserialize)]
+    struct Version {
+        v: u32,
+    }
+    if text.len() > MAX_FRAME {
+        return None;
+    }
+    serde_json::from_str::<Version>(text).ok().map(|v| v.v)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Req,
+    Res,
+    Ctl,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Envelope {
+    pub v: u32,
+    pub t: Kind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub m: String,
+    #[serde(default, rename = "gen")]
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
+    #[serde(default)]
+    pub deadline_at: i64,
+    #[serde(default)]
+    pub p: Value,
+}
+
+impl Envelope {
+    pub fn ctl(id: impl Into<String>, method: &str, generation: u64, p: Value) -> Self {
+        Self {
+            v: steve_node_api::PROTOCOL,
+            t: Kind::Ctl,
+            id: id.into(),
+            re: None,
+            m: method.into(),
+            generation,
+            trace: None,
+            deadline_at: 0,
+            p,
+        }
+    }
+
+    pub fn encode(&self) -> Result<String, ApiError> {
+        let text = serde_json::to_string(self)
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        let cap = if self.t == Kind::Ctl {
+            CONTROL_CAP
+        } else {
+            MAX_FRAME
+        };
+        if text.len() > cap {
+            return Err(ApiError::new(
+                ErrorCode::Exhausted,
+                format!(
+                    "{} is {} bytes, over the {cap} limit",
+                    self.subject(),
+                    text.len()
+                ),
+            ));
+        }
+        Ok(text)
+    }
+
+    fn subject(&self) -> String {
+        match (self.t, self.m.is_empty()) {
+            (Kind::Res, _) => self.re.as_ref().map_or_else(
+                || "an answer".into(),
+                |re| format!("the answer to request {re}"),
+            ),
+            (Kind::Ctl, false) => format!("control message {}", self.m),
+            (Kind::Req, false) => format!("request {}", self.m),
+            (Kind::Ctl, true) => "a control message".into(),
+            _ => "a message".into(),
+        }
+    }
+
+    pub fn decode(text: &str) -> Option<Self> {
+        if text.len() > MAX_FRAME {
+            return None;
+        }
+        let frame: Self = serde_json::from_str(text).ok()?;
+        if frame.t == Kind::Ctl && text.len() > CONTROL_CAP {
+            return None;
+        }
+        Some(frame)
+    }
+}
+
 /// Event batches use the existing, smaller transport scheduling limit.
 pub const EVENTS_FRAME: usize = 64 * 1024;
 
@@ -36,7 +142,6 @@ pub type FrameStream = Pin<Box<dyn Stream<Item = std::io::Result<Frame>> + Send>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steve_node_api::upgrade_v1::Code as ErrorCode;
 
     #[test]
     fn round_trip_and_caps() {
@@ -72,9 +177,9 @@ mod tests {
         let err = huge.encode().unwrap_err();
         assert_eq!(err.code, ErrorCode::Exhausted);
         assert!(
-            err.detail.starts_with("request turn.start is "),
+            err.safe_detail.starts_with("request turn.start is "),
             "{}",
-            err.detail
+            err.safe_detail
         );
         // an answer carries no method: the error still names what was too big
         huge.t = Kind::Res;
@@ -82,12 +187,12 @@ mod tests {
         huge.re = Some("n_4".into());
         let err = huge.encode().unwrap_err();
         assert!(
-            err.detail.starts_with("the answer to request n_4 is "),
+            err.safe_detail.starts_with("the answer to request n_4 is "),
             "{}",
-            err.detail
+            err.safe_detail
         );
         assert_eq!(
-            big.encode().unwrap_err().detail.split(" is ").next(),
+            big.encode().unwrap_err().safe_detail.split(" is ").next(),
             Some("control message hello")
         );
         let ok = serde_json::to_string(&Outcome::Ok(serde_json::json!(1))).unwrap();

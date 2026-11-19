@@ -179,9 +179,8 @@ impl RemoteNode {
         let value = self
             .live_conn()?
             .call_upgrade(method, to_value(&args)?, operation)
-            .await
-            .map_err(ApiError::from)?;
-        crate::upgrade::decode(value).map_err(ApiError::from)
+            .await?;
+        answer_of(method, value, operation)
     }
 
     pub fn is_upgrade(&self) -> bool {
