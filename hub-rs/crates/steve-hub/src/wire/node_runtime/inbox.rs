@@ -79,9 +79,17 @@ impl NodeRuntime {
                 // quarantined), so the rest of the batch and every other stream go on; the
                 // durable prefix moves once per stream, after the whole batch is in
                 if let rt::Inboxed::Conflict(why) =
-                    rt::inbox_put_in(tx, k, seq, e.id.as_str(), &payload, now())?
+                    rt::inbox_put_in(tx, k, seq, e.id.as_str(), &payload, self.clock.now_ms())?
                 {
-                    let q = rt::quarantine_in(tx, k, seq, e.id.as_str(), &payload, why, now())?;
+                    let q = rt::quarantine_in(
+                        tx,
+                        k,
+                        seq,
+                        e.id.as_str(),
+                        &payload,
+                        why,
+                        self.clock.now_ms(),
+                    )?;
                     if q.new {
                         tracing::warn!(
                             "node {node}: stream {} epoch {} seq {seq} ({}): {}; quarantined",
