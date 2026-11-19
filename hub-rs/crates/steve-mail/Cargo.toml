@@ -46,6 +46,8 @@ axum = { version = "=0.8.9", default-features = false, features = ["http1", "jso
 rcgen = { version = "=0.14.10", optional = true }
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+
 steve-channels = { path = "../steve-channels" }
 # Integration tests use the fakes; this turns the feature on for `cargo test -p steve-mail`.
 steve-mail = { path = ".", features = ["fake"] }

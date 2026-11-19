@@ -9,6 +9,8 @@ description = "Steve's runtime facilities: clock, time zones, schedules, retry a
 [features]
 default = ["tz", "schedule", "policy", "due", "jobs", "machine"]
 machine = []
+# Shared eventual conditions for dev-dependencies only.
+testkit = []
 tz = ["dep:chrono", "dep:chrono-tz", "dep:iana-time-zone"]
 schedule = ["tz", "dep:croner"]
 policy = ["dep:backon", "dep:rand"]
@@ -35,5 +37,5 @@ tracing = { version = "=0.1.44", optional = true }
 moka = { version = "=0.12.16", default-features = false, features = ["future"], optional = true }
 
 [dev-dependencies]
-steve-runtime = { path = ".", features = ["due-contract"] }
+steve-runtime = { path = ".", features = ["due-contract", "testkit"] }
 tokio = { version = "=1.54.1", features = ["time", "sync", "rt", "macros", "test-util"] }

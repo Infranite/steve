@@ -31,7 +31,7 @@ zeroize = "=1.9.1"
 
 [dev-dependencies]
 chrono-tz = "=0.10.4"
-steve-runtime = { path = "../steve-runtime", features = ["due-contract"] }
+steve-runtime = { path = "../steve-runtime", features = ["due-contract", "testkit"] }
 tempfile = "=3.27.0"
 # `cmd` steps against a real local Node (tests/code_nodes.rs)
 steve-acp = { path = "../steve-acp" }

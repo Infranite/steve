@@ -32,6 +32,8 @@ zeroize = "=1.9.1"
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+
 steve-acp = { path = "../steve-acp", features = ["testkit"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 # scan parity: the Node's scan against the knowledge folder's walk

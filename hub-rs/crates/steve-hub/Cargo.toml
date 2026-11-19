@@ -85,6 +85,8 @@ metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+
 tokio = { version = "=1.54.1", features = ["test-util"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }

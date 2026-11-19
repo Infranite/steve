@@ -19,3 +19,5 @@ pub mod tz;
 pub mod jobs;
 #[cfg(feature = "jobs")]
 pub use jobs::{FirstRun, Task, every, every_after, spawn};
+#[cfg(feature = "testkit")]
+pub mod testkit;
