@@ -10,6 +10,30 @@ pub use steve_storage_api::{
 
 pub mod policies;
 
+pub const MAX_SLICE_ROWS: u32 = 500;
+pub const SLICE_TARGET_MS: u32 = 20;
+pub const DEFAULT_BUDGET: Budget = Budget {
+    rows: MAX_SLICE_ROWS,
+    target_ms: SLICE_TARGET_MS,
+};
+
+fn effective_budget<P: Policy + ?Sized>(p: &P, budget: Budget) -> rusqlite::Result<Budget> {
+    if budget.rows == 0
+        || budget.target_ms == 0
+        || p.definition().budget.rows == 0
+        || p.definition().budget.target_ms == 0
+    {
+        return Err(invalid("retention budget must be positive"));
+    }
+    Ok(Budget {
+        rows: budget
+            .rows
+            .min(p.definition().budget.rows)
+            .min(MAX_SLICE_ROWS),
+        target_ms: budget.target_ms.min(p.definition().budget.target_ms),
+    })
+}
+
 pub struct Window<C> {
     pub rows: Vec<(Row, C)>,
     pub more: bool,
@@ -88,11 +112,8 @@ pub fn before_candidates<P: Policy>(
     budget: Budget,
     after: Option<&P::Cursor>,
 ) -> rusqlite::Result<BeforeCandidates> {
-    let window = p.window(
-        c,
-        after,
-        budget.rows.min(p.definition().budget.rows).min(500),
-    )?;
+    let budget = effective_budget(p, budget)?;
+    let window = p.window(c, after, budget.rows)?;
     let mut rows = vec![];
     for (r, _) in window.rows {
         if is_selected(c, p, &r, now)? && !p.protect(c, &r)? {
@@ -167,7 +188,12 @@ pub fn selected(row: &Row, select: &Select, now: i64, keep: Option<u64>) -> bool
         _ => false,
     }
 }
-fn is_selected<P: Policy>(c: &Connection, p: &P, row: &Row, now: i64) -> rusqlite::Result<bool> {
+fn is_selected<P: Policy + ?Sized>(
+    c: &Connection,
+    p: &P,
+    row: &Row,
+    now: i64,
+) -> rusqlite::Result<bool> {
     match p.definition().select {
         Select::MaxRows { .. } | Select::Bytes { .. } => p.overflow(c, row),
         _ => Ok(selected(
@@ -234,7 +260,7 @@ impl Drop for Scope<'_> {
     }
 }
 
-pub fn run_slice<P: Policy>(
+pub fn run_slice<P: Policy + ?Sized>(
     c: &Connection,
     p: &P,
     now: i64,
@@ -247,7 +273,7 @@ pub fn run_slice<P: Policy>(
     })
 }
 /// Injectable monotonic elapsed time for deterministic budget tests; wall time is `now`.
-pub fn run_slice_timed<P: Policy>(
+pub fn run_slice_timed<P: Policy + ?Sized>(
     c: &Connection,
     p: &P,
     now: i64,
@@ -255,24 +281,10 @@ pub fn run_slice_timed<P: Policy>(
     after: Option<&P::Cursor>,
     mut elapsed: impl FnMut() -> u64,
 ) -> rusqlite::Result<SliceReport<P::Cursor>> {
-    if budget.rows == 0
-        || budget.target_ms == 0
-        || p.definition().budget.rows == 0
-        || p.definition().budget.target_ms == 0
-    {
-        return Err(invalid("retention budget must be positive"));
-    }
-    let budget = Budget {
-        rows: budget.rows.min(p.definition().budget.rows),
-        target_ms: budget.target_ms.min(p.definition().budget.target_ms),
-    };
+    let budget = effective_budget(p, budget)?;
     let scope = Scope::new(c, "steve_retention_slice")?;
-    let window = p.window(
-        c,
-        after,
-        budget.rows.min(p.definition().budget.rows).min(500),
-    )?;
-    if window.rows.len() > budget.rows.min(500) as usize {
+    let window = p.window(c, after, budget.rows)?;
+    if window.rows.len() > budget.rows as usize {
         return Err(invalid("retention window exceeds budget"));
     }
     let mut report = SliceReport {
@@ -310,7 +322,8 @@ pub fn run_slice_timed<P: Policy>(
                 action.commit()?;
                 report.affected += n;
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(entity = %p.definition().entity, error = %error, "retention row failed; retrying next sweep");
                 action.rollback()?;
                 report.failures += 1;
             }

@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 use crate::{Inner, Result, Store, StoreError, now};
 
 pub const RETENTION_DAYS: i64 = 7;
-pub const MAX_ITEM_BYTES: i64 = 10 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: i64 = 100 * 1024 * 1024;
+pub use steve_store_sqlite::retention::policies::{
+    ITEM_BYTES as MAX_ITEM_BYTES, TOTAL_BYTES as MAX_TOTAL_BYTES,
+};
 pub const DEFAULT_CAPTURE_MINUTES: u32 = 30;
 pub const MAX_CAPTURE_MINUTES: u32 = 60;
 
@@ -199,7 +200,8 @@ impl Recorder {
                     epoch.fetch_add(1, Ordering::AcqRel);
                     let result: Result<u64> = store.write(|w| {
                         let tx = w.tx()?;
-                        let mut retention_budget = 200;
+                        let mut retention_budget =
+                            steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
                         for event in &batch {
                             persist(&tx, event, &mut retention_budget)?;
                         }
@@ -666,49 +668,39 @@ fn persist(c: &Connection, p: &Pending, remaining: &mut u32) -> Result<()> {
         )?;
         return Ok(());
     }
-    // Critical facts may evict old metadata, but the entire writer transaction shares
-    // one 200-candidate allowance. Drop a new record rather than exceed either hard cap.
-    if item_bytes.saturating_add(bytes) > MAX_ITEM_BYTES
-        || total.saturating_add(bytes) > MAX_TOTAL_BYTES
-    {
-        if *remaining > 0 {
-            use steve_store_sqlite::retention::{
-                self as retention, Budget,
-                policies::{Kind, TablePolicy},
-            };
-            let mut policy = TablePolicy::new(Kind::DiagnosticCapacity);
-            policy.reserve = Some((item.clone(), bytes));
-            let report = retention::run_slice(
-                c,
-                &policy,
-                p.at,
-                Budget {
-                    rows: *remaining,
-                    target_ms: 20,
-                },
-                None,
-            )?;
-            *remaining = remaining.saturating_sub(report.inspected);
-        }
-        let own: i64 = c.query_row(
-            "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
+    // A transaction shares one bounded eviction allowance. Only this item's indexed
+    // oldest rows may be evicted here; global pressure converges in the background.
+    if item_bytes.saturating_add(bytes) > MAX_ITEM_BYTES && *remaining > 0 {
+        use steve_store_sqlite::retention::{self as retention, policies::Diagnostics};
+        let policy = Diagnostics::for_insert(&ws, &item, bytes);
+        let report = retention::run_slice(
+            c,
+            &policy,
+            p.at,
+            retention::Budget {
+                rows: *remaining,
+                ..retention::DEFAULT_BUDGET
+            },
+            None,
+        )?;
+        *remaining = remaining.saturating_sub(report.inspected);
+    }
+    let own: i64 = c.query_row(
+        "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
+        [&item],
+        |r| r.get(0),
+    )?;
+    let total: i64 = c.query_row(
+        "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
+        [],
+        |r| r.get(0),
+    )?;
+    if own.saturating_add(bytes) > MAX_ITEM_BYTES || total.saturating_add(bytes) > MAX_TOTAL_BYTES {
+        c.execute(
+            "UPDATE diagnostic_item_stats SET dropped=dropped+1 WHERE item_id=?",
             [&item],
-            |r| r.get(0),
         )?;
-        let total: i64 = c.query_row(
-            "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
-            [],
-            |r| r.get(0),
-        )?;
-        if own.saturating_add(bytes) > MAX_ITEM_BYTES
-            || total.saturating_add(bytes) > MAX_TOTAL_BYTES
-        {
-            c.execute(
-                "UPDATE diagnostic_item_stats SET dropped=dropped+1 WHERE item_id=?",
-                [&item],
-            )?;
-            return Ok(());
-        }
+        return Ok(());
     }
     let severity = match r.severity {
         Severity::Info => "info",
@@ -810,11 +802,120 @@ mod tests {
                 "insufficient bounded eviction drops incoming facts (global={global})"
             );
             assert_eq!(total, sum);
+            if global {
+                assert_eq!(
+                    rows, before,
+                    "global pressure never scans or evicts unrelated rows on the writer"
+                );
+            }
             assert!(
                 max <= MAX_ITEM_BYTES && total <= MAX_TOTAL_BYTES,
                 "both caps remain hard limits"
             );
         }
+    }
+
+    #[test]
+    fn a_full_item_evicts_its_own_oldest_row_behind_unrelated_history_and_accepts_new_facts() {
+        use steve_store_sqlite::retention::policies::DIAGNOSTIC_EVICT_ROWS;
+        let c = Connection::open_in_memory().unwrap();
+        steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
+        c.pragma_update(None, "foreign_keys", false).unwrap();
+        c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('i','default',1,'I','run','',0,0);").unwrap();
+        let insert = |item: &str| {
+            c.execute("INSERT INTO diagnostic_events(workspace_id,item_id,at,kind,reason_code,severity,detail,data,bytes)
+                VALUES('default',?,0,'event','old','info',0,'{}',4096)",[item]).unwrap();
+        };
+        let prefix = DIAGNOSTIC_EVICT_ROWS + 1;
+        for _ in 0..prefix {
+            insert("unrelated");
+        }
+        for _ in 0..MAX_ITEM_BYTES / 4096 {
+            insert("i");
+        }
+        let oldest: i64 = c
+            .query_row(
+                "SELECT min(seq) FROM diagnostic_events WHERE item_id='i'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c.execute(
+            "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES('i',?),('unrelated',?)",
+            params![MAX_ITEM_BYTES, i64::from(prefix) * 4096],
+        )
+        .unwrap();
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut remaining = DIAGNOSTIC_EVICT_ROWS;
+        persist(
+            &c,
+            &Pending {
+                at: 1,
+                record: Record {
+                    workspace_id: crate::WS.into(),
+                    item_id: Some("i".into()),
+                    kind: "turn.ended".into(),
+                    reason_code: "new_fact".into(),
+                    ..Default::default()
+                },
+            },
+            &mut remaining,
+        )
+        .unwrap();
+        c.execute_batch("COMMIT").unwrap();
+        let old: i64 = c
+            .query_row(
+                "SELECT count(*) FROM diagnostic_events WHERE seq=?",
+                [oldest],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let new:i64=c.query_row("SELECT count(*) FROM diagnostic_events WHERE item_id='i' AND reason_code='new_fact'",[],|r|r.get(0)).unwrap();
+        assert_eq!(
+            (old, new),
+            (0, 1),
+            "foreground eviction finds the item's oldest row even after more than a whole writer budget of unrelated rows"
+        );
+        let unrelated: i64 = c
+            .query_row(
+                "SELECT count(*) FROM diagnostic_events WHERE item_id='unrelated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unrelated,
+            i64::from(prefix),
+            "an item never evicts another item's records on the writer"
+        );
+        let (dropped, bytes): (i64, i64) = c
+            .query_row(
+                "SELECT dropped,bytes FROM diagnostic_item_stats WHERE item_id='i'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let sum: i64 = c
+            .query_row(
+                "SELECT sum(bytes) FROM diagnostic_events WHERE item_id='i'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((dropped, bytes), (0, sum));
+        assert!(bytes <= MAX_ITEM_BYTES);
+        let plan: String = c
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT seq,at,item_id,bytes FROM diagnostic_events
+            WHERE workspace_id='default' AND item_id='i' AND seq>0 ORDER BY seq LIMIT 200",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("diagnostic_events_item"),
+            "foreground window uses the item index: {plan}"
+        );
     }
 
     #[test]

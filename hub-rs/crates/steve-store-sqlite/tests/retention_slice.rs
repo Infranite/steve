@@ -22,10 +22,7 @@ impl FixturePolicy {
                 before: None,
                 protect: None,
                 action: Action::Delete,
-                budget: Budget {
-                    rows: 500,
-                    target_ms: 20,
-                },
+                budget: r::DEFAULT_BUDGET,
             },
             protect: vec![],
             fail: None,

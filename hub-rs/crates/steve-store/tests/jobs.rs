@@ -450,110 +450,6 @@ fn a_command_targets_a_session_attempt_or_a_job_attempt() {
         .unwrap();
 }
 
-fn settle(tx: &Tx<'_>, op: &str) -> steve_store::Result<()> {
-    runtime::merge_receipt_in(tx, op, runtime::ReceiptState::Finished, true, &json!({}), 3)?;
-    Ok(())
-}
-
-#[test]
-fn prune_keeps_open_jobs_and_live_commands() {
-    let t = fresh();
-    t.store
-        .transaction::<_, StoreError>(|tx| {
-            // open: never pruned
-            create(tx, "open")?;
-            // finished, its command settled: pruned
-            create(tx, "done")?;
-            finish(tx, "done-a0")?;
-            settle(tx, "done-op0")?;
-            finish_job_in(tx, "done", 5)?;
-            // finished, but its start command may still reach the Node
-            create(tx, "sent")?;
-            finish(tx, "sent-a0")?;
-            finish_job_in(tx, "sent", 5)?;
-            // finished, settled, but another command depends on it
-            create(tx, "dep")?;
-            finish(tx, "dep-a0")?;
-            settle(tx, "dep-op0")?;
-            finish_job_in(tx, "dep", 5)?;
-            runtime::insert_command_in(
-                tx,
-                &runtime::NewCommand {
-                    operation: "after",
-                    node: "n",
-                    method: "open_session",
-                    request: &json!({}),
-                    digest: "d",
-                    target_attempt: None,
-                    dependency: Some("dep-op0"),
-                },
-                5,
-            )?;
-            // finished too recently
-            create(tx, "fresh")?;
-            finish(tx, "fresh-a0")?;
-            settle(tx, "fresh-op0")?;
-            finish_job_in(tx, "fresh", 50)?;
-            assert_eq!(prune_jobs_in(tx, 10, 100)?, 1);
-            assert!(job_in(tx, "done")?.is_none());
-            assert!(attempt_in(tx, "done-a0")?.is_none());
-            assert!(runtime::command_in(tx, "done-op0")?.is_none());
-            for kept in ["open", "sent", "dep", "fresh"] {
-                assert!(job_in(tx, kept)?.is_some(), "{kept}");
-            }
-            assert!(attempt_in(tx, "open-a0")?.is_some());
-            assert_eq!(prune_jobs_in(tx, 10, 100)?, 0);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn prune_takes_a_whole_job_with_every_attempt_and_command() {
-    let t = fresh();
-    t.store
-        .transaction::<_, StoreError>(|tx| {
-            create(tx, "j")?;
-            finish(tx, "j-a0")?;
-            next(tx, "j", 1)?;
-            insert_job_command_in(
-                tx,
-                &NewJobCommand {
-                    operation: "j-cancel",
-                    attempt: "j-a1",
-                    method: "cancel",
-                    request: &json!({}),
-                    digest: "c",
-                },
-                2,
-            )?;
-            finish(tx, "j-a1")?;
-            for op in ["j-op0", "j-op1", "j-cancel"] {
-                settle(tx, op)?;
-            }
-            finish_job_in(tx, "j", 5)?;
-            create(tx, "k")?;
-            finish(tx, "k-a0")?;
-            settle(tx, "k-op0")?;
-            finish_job_in(tx, "k", 6)?;
-            // oldest first, within the limit
-            assert_eq!(prune_jobs_in(tx, 10, 1)?, 1);
-            assert!(job_in(tx, "j")?.is_none());
-            assert!(job_in(tx, "k")?.is_some());
-            assert_eq!(
-                count(
-                    tx,
-                    "SELECT count(*) FROM node_commands WHERE operation_id LIKE 'j-%'"
-                ),
-                0
-            );
-            assert_eq!(prune_jobs_in(tx, 10, 1)?, 1);
-            assert_eq!(count(tx, "SELECT count(*) FROM runtime_job_attempts"), 0);
-            Ok(())
-        })
-        .unwrap();
-}
-
 #[test]
 fn an_attempt_is_started_only_under_its_own_operation_id() {
     let t = fresh();
@@ -619,6 +515,32 @@ fn a_cancelled_job_never_falls_back() {
             create(tx, "k")?;
             assert!(finish(tx, "k-a0")?);
             assert!(next(tx, "k", 1)?);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn background_job_retention_reaches_finished_rows_behind_a_large_live_prefix() {
+    let t = fresh();
+    t.store.transaction::<_,StoreError>(|tx| {
+        for n in 0..600 {
+            tx.execute("INSERT INTO runtime_jobs(job_id,kind,purpose,workspace_id,node_id,state,created,updated) VALUES(?,'think','prefix','default','n','open',0,0)",[format!("live-{n}")])?;
+        }
+        create(tx,"expired")?;
+        finish(tx,"expired-a0")?;
+        runtime::merge_receipt_in(tx,"expired-op0",runtime::ReceiptState::Finished,true,&json!({}),3)?;
+        finish_job_in(tx,"expired",5)?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        retain(&t.store, steve_store::retention::Kind::Jobs, 8 * 86_400_000),
+        1
+    );
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert!(job_in(tx, "expired")?.is_none());
+            assert_eq!(count(tx, "SELECT count(*) FROM runtime_jobs"), 600);
             Ok(())
         })
         .unwrap();

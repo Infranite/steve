@@ -2,8 +2,8 @@ use rusqlite::{Connection, params};
 use steve_store_sqlite::{
     legacy,
     retention::{
-        self as r, Budget, Policy,
-        policies::{DAY, ITEM_BYTES, Kind, TOTAL_BYTES, TablePolicy},
+        self as r, Budget,
+        policies::{BACKGROUND_TOTAL_BYTES, DAY, Diagnostics, ITEM_BYTES, Kind, Turns},
     },
 };
 fn database() -> Connection {
@@ -18,7 +18,7 @@ fn one(c: &Connection, sql: &str) -> i64 {
 fn slice(c: &Connection, kind: Kind, now: i64) -> r::SliceReport<i64> {
     r::run_slice_timed(
         c,
-        &TablePolicy::new(kind),
+        kind.policy().as_ref(),
         now,
         Budget::default(),
         None,
@@ -61,7 +61,7 @@ fn age_days_and_window_expiry_boundaries_and_latest_64_turns() {
     assert_eq!(slice(&c, Kind::Turns, now).affected, 6);
     assert_eq!(one(&c, "SELECT min(updated) FROM session_turns"), 7);
     // Reusing a declaration must not keep a stale ranking cache across slices.
-    let p = TablePolicy::new(Kind::Turns);
+    let p = Turns::new();
     r::run_slice_timed(&c, &p, now, Budget::default(), None, || 0).unwrap();
     c.execute(
         "INSERT INTO session_turns(session_id,attempt,updated) VALUES('s','new',71)",
@@ -170,7 +170,13 @@ fn diagnostic_expiry_and_capacity_update_bytes_and_gap_watermarks() {
         [ITEM_BYTES / 2 * 3],
     )
     .unwrap();
-    assert_eq!(slice(&c, Kind::DiagnosticCapacity, 1).affected, 1);
+    let foreground = Diagnostics::for_insert("default", "i", 0);
+    assert_eq!(
+        r::run_slice_timed(&c, &foreground, 1, r::DEFAULT_BUDGET, None, || 0)
+            .unwrap()
+            .affected,
+        1
+    );
     assert_eq!(
         one(
             &c,
@@ -188,30 +194,42 @@ fn diagnostic_expiry_and_capacity_update_bytes_and_gap_watermarks() {
         diag(&c, &id, 0, ITEM_BYTES / 2);
     }
     slice(&c, Kind::DiagnosticCapacity, 1);
-    assert!(one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats") <= TOTAL_BYTES);
+    assert!(one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats") <= BACKGROUND_TOTAL_BYTES);
     assert_eq!(
         one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats"),
         one(&c, "SELECT sum(bytes) FROM diagnostic_events")
     );
 }
+
 #[test]
-fn keep_sess_settings_and_runtime_protection_are_resolved_per_slice() {
+fn total_pressure_below_the_hard_cap_converges_to_background_headroom() {
     let c = database();
-    c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,phase,archived,created,updated) VALUES('i','default',1,'I','done','','closed',1,0,0);
-        INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES('s','default','i','fake','/tmp','ended',0,0);
-        INSERT INTO events(session_id,ts,kind,data) VALUES('s',0,'user','{}');").unwrap();
-    let p = TablePolicy::new(Kind::Payloads);
-    let row = p.window(&c, None, 1).unwrap().rows.remove(0).0;
-    assert_eq!(p.keep_ms(&c, &row).unwrap(), None);
-    c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES('default','keepSess','\"90 天\"',0)",[]).unwrap();
-    assert_eq!(p.keep_ms(&c, &row).unwrap(), Some(90 * DAY));
-    assert!(!p.protect(&c, &row).unwrap());
-    c.execute(
-        "UPDATE settings SET value='\"1 年\"' WHERE key='keepSess'",
-        [],
-    )
-    .unwrap();
-    assert_eq!(p.keep_ms(&c, &row).unwrap(), Some(365 * DAY));
-    c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES('turn','s','running',0,0)",[]).unwrap();
-    assert!(p.protect(&c, &row).unwrap());
+    // 95 MiB is legal for the writer but must activate the background 90 MiB threshold.
+    for n in 0..19 {
+        let id = format!("i{n}");
+        c.execute(
+            "INSERT INTO diagnostic_item_stats(item_id,bytes) VALUES(?,?)",
+            params![id, ITEM_BYTES / 2],
+        )
+        .unwrap();
+        diag(&c, &id, 0, ITEM_BYTES / 2);
+    }
+    let report = slice(&c, Kind::DiagnosticCapacity, 1);
+    assert_eq!(
+        report.affected, 1,
+        "cleanup runs before the hard 100 MiB limit"
+    );
+    assert_eq!(
+        one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats"),
+        BACKGROUND_TOTAL_BYTES
+    );
+    assert_eq!(
+        one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats"),
+        one(&c, "SELECT sum(bytes) FROM diagnostic_events")
+    );
+    assert_eq!(
+        slice(&c, Kind::DiagnosticCapacity, 1).affected,
+        0,
+        "hysteresis target reached"
+    );
 }

@@ -6,7 +6,6 @@ publish.workspace = true
 
 [dependencies]
 steve-store-sqlite = { path = "../steve-store-sqlite" }
-steve-runtime = { path = "../steve-runtime" }
 steve-types = { path = "../steve-types" }
 steve-node-api = { path = "../steve-node-api" }
 steve-i18n = { path = "../steve-i18n" }

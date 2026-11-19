@@ -87,11 +87,8 @@ pub fn count(c: &Connection, sql: &str) -> i64 {
 
 /// Drive the production outbox declaration through the unique slice core.
 pub fn prune_outbox(store: &Store, now: i64, keep: i64) -> steve_store::Result<usize> {
-    use steve_store_sqlite::retention::{
-        self as r, Budget, KeepFrom,
-        policies::{Kind, TablePolicy},
-    };
-    let mut policy = TablePolicy::new(Kind::Outbox);
+    use steve_store_sqlite::retention::{self as r, KeepFrom, policies::Outbox};
+    let mut policy = Outbox::new();
     policy.definition.keep_from = KeepFrom::Fixed {
         millis: keep.max(0) as u64,
     };
@@ -103,10 +100,7 @@ pub fn prune_outbox(store: &Store, now: i64, keep: i64) -> steve_store::Result<u
                 c,
                 &policy,
                 now,
-                Budget {
-                    rows: 500,
-                    target_ms: 20,
-                },
+                r::DEFAULT_BUDGET,
                 after.as_ref(),
             )?)
         })?;

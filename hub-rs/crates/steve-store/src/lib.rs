@@ -575,103 +575,13 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
-/// The legacy table scheduler, using the same slice implementation as entity adapters.
+/// Legacy storage grants; scheduling belongs to the Hub assembly root.
 pub mod retention {
     use super::{Result, Store};
-    use std::{future::Future, sync::Mutex};
-    use steve_runtime::due::{DueError, DueSource};
-    // Legacy Hub wiring stays behind this facade until the engine owns scheduling.
-    pub use steve_runtime::{
-        Clock, SystemClock,
-        due::due_loop,
-        policy::{Backoff, Jitter},
-    };
     pub use steve_store_sqlite::retention::{
-        Budget, SliceReport,
+        Budget, DEFAULT_BUDGET, SliceReport,
         policies::{ALL, Kind},
     };
-    const INTERVAL: i64 = 300_000;
-    struct State {
-        due: i64,
-        after: [Option<i64>; 10],
-        done: [bool; 10],
-    }
-    pub struct Source<F> {
-        execute: F,
-        state: Mutex<State>,
-    }
-    impl<F> Source<F> {
-        pub fn new(first_due: i64, execute: F) -> Self {
-            Self {
-                execute,
-                state: Mutex::new(State {
-                    due: first_due,
-                    after: [None; 10],
-                    done: [false; 10],
-                }),
-            }
-        }
-    }
-    impl<F, Fut> DueSource for Source<F>
-    where
-        F: Fn(Kind, i64, Option<i64>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<SliceReport<i64>>> + Send,
-    {
-        fn name(&self) -> &'static str {
-            "storage.retention"
-        }
-        async fn next_due(&self) -> std::result::Result<Option<i64>, DueError> {
-            Ok(Some(
-                self.state.lock().unwrap_or_else(|e| e.into_inner()).due,
-            ))
-        }
-        async fn run_due(&self, now: i64) -> std::result::Result<(), DueError> {
-            if now < self.state.lock().unwrap_or_else(|e| e.into_inner()).due {
-                return Ok(());
-            }
-            let mut error = None;
-            for (index, kind) in ALL.into_iter().enumerate() {
-                for _ in 0..4 {
-                    let after = {
-                        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                        if state.done[index] {
-                            break;
-                        }
-                        state.after[index]
-                    };
-                    match (self.execute)(kind, now, after).await {
-                        Ok(report) => {
-                            if report.failures > 0 {
-                                tracing::warn!(
-                                    ?kind,
-                                    failures = report.failures,
-                                    "retention rows deferred to next sweep"
-                                );
-                            }
-                            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                            state.after[index] = report.next;
-                            if !report.more() {
-                                state.done[index] = true;
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error = Some(DueError(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.done.iter().all(|v| *v) {
-                state.due = now.saturating_add(INTERVAL);
-                state.done.fill(false);
-            } else {
-                state.due = now;
-            }
-            if let Some(e) = error { Err(e) } else { Ok(()) }
-        }
-    }
     impl Store {
         /// Exactly one writer-grant lifetime. The scheduler invokes this separately for each slice.
         pub fn retention_slice(
@@ -681,16 +591,11 @@ pub mod retention {
             budget: Budget,
             after: Option<i64>,
         ) -> Result<SliceReport<i64>> {
-            if kind == Kind::Payloads {
-                return self
-                    .retention_payload_slice(None, None, now, budget, after, &mut || Some(()))
-                    .map(|r| r.expect("unconditional background guard"));
-            }
-            let policy = steve_store_sqlite::retention::policies::TablePolicy::new(kind);
+            let policy = kind.policy();
             self.with_conn(|c| {
                 Ok(steve_store_sqlite::retention::run_slice(
                     c,
-                    &policy,
+                    policy.as_ref(),
                     now,
                     budget,
                     after.as_ref(),
@@ -699,15 +604,15 @@ pub mod retention {
         }
         pub(crate) fn retention_payload_slice<G>(
             &self,
-            session: Option<&str>,
-            upper: Option<i64>,
+            session: &str,
+            upper: i64,
             now: i64,
             budget: Budget,
             after: Option<i64>,
             guard: &mut impl FnMut() -> Option<G>,
         ) -> Result<Option<SliceReport<i64>>> {
             use std::{cell::RefCell, collections::BTreeMap};
-            use steve_store_sqlite::retention::{self as r, Select};
+            use steve_store_sqlite::retention as r;
             let cache = RefCell::new(BTreeMap::new());
             let action = |c: &rusqlite::Connection, row: &r::Row| {
                 let id = r::policies::integer(row, "rowid")?;
@@ -717,24 +622,10 @@ pub mod retention {
                         .borrow()
                         .get(&id)
                         .ok_or_else(|| r::invalid("missing prepared event"))?,
-                    session.is_none(),
-                    now,
                 )
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
             };
-            let mut policy = r::policies::TablePolicy::new(Kind::Payloads);
-            policy.scope = session.map(str::to_owned);
-            policy.upper = upper;
-            policy.manual = session.is_some();
-            policy.domain_action = Some(&action);
-            if session.is_some() {
-                policy.definition.select = Select::MaxRows {
-                    group: vec![],
-                    keep: 0,
-                    order: vec![],
-                };
-                policy.definition.budget.rows = budget.rows;
-            }
+            let policy = r::policies::SessionEvents::new(session, upper, &action);
             let candidates = self.reader(|c| {
                 super::read_snapshot(c, |snapshot| {
                     Ok(r::before_candidates(

@@ -233,11 +233,6 @@ pub fn feed_page(
     })
 }
 
-/// Compatibility entry for API callers. Expiry is now background retention, never read-side DML.
-pub fn cleanup(_tx: &Tx, _now: i64) -> Result<()> {
-    Ok(())
-}
-
 struct Window {
     revision: String,
     upper: i64,

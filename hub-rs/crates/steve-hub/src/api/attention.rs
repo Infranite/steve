@@ -55,7 +55,6 @@ async fn list(
             steve_store::feed::member(tx,&who.ws,&who.me).map_err(error)?;
             let viewer=steve_store::base::Viewer::bare(&who.ws,&who.me);
             let now=m.clock.now();
-            attention::cleanup(tx,now).map_err(error)?;
             let mut categories=vec![];
             for kind in attention::KINDS {
                 if q.kind.as_deref().is_some_and(|k|k!=kind) { continue; }

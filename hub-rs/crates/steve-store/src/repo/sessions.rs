@@ -619,12 +619,12 @@ impl Events<'_> {
         let mut changed = 0;
         loop {
             let Some(report) = self.0.retention_payload_slice(
-                Some(session_id),
-                Some(upto),
+                session_id,
+                upto,
                 now(),
                 Budget {
                     rows: COMPACT_PAGE as u32,
-                    target_ms: 20,
+                    target_ms: steve_store_sqlite::retention::SLICE_TARGET_MS,
                 },
                 after,
                 &mut still_due,
@@ -646,7 +646,15 @@ impl Events<'_> {
         let Some(_due) = still_due() else {
             return Ok(None);
         };
-        self.0.with_conn(|c|{c.execute("INSERT INTO session_compactions(session_id,upto,events,at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET upto=max(upto,excluded.upto),events=events+excluded.events,at=excluded.at",params![session_id,upto,changed as i64,now()])?;Ok(())})?;
+        self.0.with_conn(|c| {
+            c.execute(
+                "INSERT INTO session_compactions(session_id,upto,events,at) VALUES(?,?,?,?)
+                 ON CONFLICT(session_id) DO UPDATE SET upto=max(upto,excluded.upto),
+                    events=events+excluded.events,at=excluded.at",
+                params![session_id, upto, changed as i64, now()],
+            )?;
+            Ok(())
+        })?;
         Ok(Some(changed))
     }
 
@@ -999,8 +1007,6 @@ impl Store {
         &self,
         c: &rusqlite::Connection,
         event: &RetentionEvent,
-        account: bool,
-        at: i64,
     ) -> Result<u64> {
         if !event.changed {
             return Ok(0);
@@ -1014,11 +1020,6 @@ impl Store {
             params![event.data, event.seq, event.session],
         )?;
         crate::event_payload::save(c, &event.session, event.seq, &event.payloads)?;
-        // Only the legacy Core guard can certify a whole live session complete. Background
-        // slices account changed events without advancing upto past a failed/protected row.
-        if account {
-            c.execute("INSERT INTO session_compactions(session_id,upto,events,at) VALUES(?,0,1,?) ON CONFLICT(session_id) DO UPDATE SET events=events+1,at=excluded.at",params![event.session,at])?;
-        }
         Ok(1)
     }
 }

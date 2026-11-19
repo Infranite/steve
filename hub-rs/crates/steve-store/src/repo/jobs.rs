@@ -503,34 +503,3 @@ pub fn open_attempts_in(tx: &Tx<'_>, node: &str) -> Result<Vec<JobAttemptRow>> {
         [node],
     )
 }
-
-/// Deletes up to `limit` finished jobs last touched before `before`, with their attempts and
-/// commands. A job stays while any of its commands may still reach its Node (not finished or
-/// rejected) or another command depends on one of them. Returns how many jobs went.
-pub fn prune_jobs_in(tx: &Tx<'_>, before: i64, limit: i64) -> Result<usize> {
-    use steve_store_sqlite::retention::{
-        self as r, Budget, KeepFrom,
-        policies::{Kind, TablePolicy},
-    };
-    if limit <= 0 {
-        return Ok(0);
-    }
-    let mut policy = TablePolicy::new(Kind::Jobs);
-    policy.definition.keep_from = KeepFrom::Fixed { millis: 0 };
-    let report = r::run_slice(
-        tx,
-        &policy,
-        before,
-        Budget {
-            rows: limit.min(500) as u32,
-            target_ms: 20,
-        },
-        None,
-    )?;
-    if report.failures > 0 {
-        return Err(crate::StoreError::Conflict(
-            "job retention row failed".into(),
-        ));
-    }
-    Ok(report.affected as usize)
-}

@@ -1,33 +1,136 @@
 use super::*;
-use steve_store::retention::{Backoff, Clock, Jitter, SystemClock, due_loop};
+use std::{future::Future, sync::Mutex, time::Duration};
+use steve_runtime::{
+    Clock, SystemClock,
+    due::{DueError, DueSource, due_loop},
+    policy::{Backoff, Jitter},
+};
+use steve_store::retention::{ALL, DEFAULT_BUDGET, Kind, SliceReport};
 
-install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    let HubEnv { cfg, .. } = *cx;
-    if !cfg.no_resume {
-        jobs.push(Box::pin(run(db.clone())));
-    }
+const INTERVAL: Duration = Duration::from_secs(5 * 60);
+const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const SLICES_PER_POLICY: usize = 4;
+
+install! { install(reg, _cx) [db, mut jobs] => [db, jobs] {
+    jobs.push(Box::pin(run(db.clone())));
 }}
 
+struct State {
+    due: i64,
+    optimize_due: i64,
+    after: [Option<i64>; ALL.len()],
+    done: [bool; ALL.len()],
+}
+struct Source<F, O> {
+    execute: F,
+    optimize: O,
+    state: Mutex<State>,
+}
+impl<F, O> Source<F, O> {
+    fn new(first_due: i64, execute: F, optimize: O) -> Self {
+        Self {
+            execute,
+            optimize,
+            state: Mutex::new(State {
+                due: first_due,
+                optimize_due: first_due.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64),
+                after: [None; ALL.len()],
+                done: [false; ALL.len()],
+            }),
+        }
+    }
+}
+impl<F, O, Fut, Opt> DueSource for Source<F, O>
+where
+    F: Fn(Kind, i64, Option<i64>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = steve_store::Result<SliceReport<i64>>> + Send,
+    O: Fn() -> Opt + Send + Sync + 'static,
+    Opt: Future<Output = steve_store::Result<()>> + Send,
+{
+    fn name(&self) -> &'static str {
+        "storage.retention"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(Some(state.due.min(state.optimize_due)))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        let optimize_due = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .optimize_due;
+        let mut error = None;
+        if optimize_due <= now {
+            match (self.optimize)().await {
+                Ok(()) => {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .optimize_due = now.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64)
+                }
+                Err(e) => error = Some(DueError(e.to_string())),
+            }
+        }
+        let due = self.state.lock().unwrap_or_else(|e| e.into_inner()).due;
+        if due <= now {
+            for (index, kind) in ALL.into_iter().enumerate() {
+                for _ in 0..SLICES_PER_POLICY {
+                    let after = {
+                        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                        if state.done[index] {
+                            break;
+                        }
+                        state.after[index]
+                    };
+                    match (self.execute)(kind, now, after).await {
+                        Ok(report) => {
+                            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            state.after[index] = report.next;
+                            if !report.more() {
+                                state.done[index] = true;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error = Some(DueError(e.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.done.iter().all(|v| *v) {
+                state.due = now.saturating_add(INTERVAL.as_millis() as i64);
+                state.done.fill(false);
+            } else {
+                state.due = now;
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+}
 async fn run(db: steve_store::Store) {
     let clock = Arc::new(SystemClock);
-    let source = Arc::new(steve_store::retention::Source::new(
+    let optimizer = db.clone();
+    let source = Arc::new(Source::new(
         clock.now(),
         move |kind, now, after| {
             let db = db.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
-                    db.retention_slice(
-                        kind,
-                        now,
-                        steve_store::retention::Budget {
-                            rows: 500,
-                            target_ms: 20,
-                        },
-                        after,
-                    )
+                    db.retention_slice(kind, now, DEFAULT_BUDGET, after)
                 })
                 .await
                 .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
+            }
+        },
+        move || {
+            let db = optimizer.clone();
+            async move {
+                tokio::task::spawn_blocking(move || db.optimize())
+                    .await
+                    .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
             }
         },
     ));
@@ -36,8 +139,8 @@ async fn run(db: steve_store::Store) {
         clock,
         Arc::new(tokio::sync::Notify::new()),
         Backoff {
-            base: std::time::Duration::from_secs(1),
-            max: std::time::Duration::from_secs(60),
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
             factor: 2,
             jitter: Jitter::None,
             attempts: None,
@@ -45,4 +148,140 @@ async fn run(db: steve_store::Store) {
         },
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_runtime::FakeClock;
+
+    async fn settle(clock: &FakeClock, at: i64) {
+        for _ in 0..1000 {
+            if clock.observed(at) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("due_loop did not reach virtual sleep at {at}");
+    }
+
+    #[tokio::test]
+    async fn retention_installs_when_no_resume_is_set() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_path_buf();
+        let vars: crate::wire::Vars = Arc::new(move |key| match key {
+            "HOME" | "STEVE_HOME" => Some(path.display().to_string()),
+            "STEVE_NO_RESUME" => Some("1".into()),
+            "STEVE_PORT" => Some("1".into()),
+            "STEVE_VAULT_KEYSTORE" => Some("file".into()),
+            _ => None,
+        });
+        let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
+        assert!(cfg.no_resume);
+        let db = steve_store::Store::open(
+            home.path().join("retention.sqlite3"),
+            steve_store::NoPublisher,
+        )
+        .unwrap();
+        let mut registry = HubRegistry {
+            db: Some(db),
+            jobs: Some(vec![]),
+            ..Default::default()
+        };
+        let bus = Bus::new();
+        let asm = crate::extension::Assembly::empty();
+        install(
+            &mut registry,
+            &HubEnv {
+                cfg: &cfg,
+                bus: &bus,
+                vars: &vars,
+                asm: &asm,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registry.jobs.unwrap().len(),
+            1,
+            "the real installer registers retention in NO_RESUME mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_continues_cursors_and_optimizes_hourly_on_virtual_time() {
+        let clock = Arc::new(FakeClock::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let optimized = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let count_opt = optimized.clone();
+        let source = Arc::new(Source::new(
+            100,
+            move |kind: Kind, _: i64, after: Option<i64>| {
+                let count = observed.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(SliceReport {
+                        affected: 0,
+                        inspected: 1,
+                        elapsed_ms: 0,
+                        overruns: 0,
+                        failures: 0,
+                        next: if kind == Kind::Vitals && after.unwrap_or(0) < 5 {
+                            Some(after.unwrap_or(0) + 1)
+                        } else {
+                            None
+                        },
+                    })
+                }
+            },
+            move || {
+                count_opt.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        ));
+        assert_eq!(source.name(), "storage.retention");
+        let task = tokio::spawn(due_loop(
+            source.clone(),
+            clock.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+            Backoff {
+                base: Duration::from_secs(1),
+                max: Duration::from_secs(1),
+                factor: 1,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        ));
+        settle(&clock, 0).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        clock.advance_to(100);
+        settle(&clock, 100).await;
+        let sweep = ALL.len() + 5;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            sweep,
+            "four-slice quota continues in a second round"
+        );
+        assert_eq!(optimized.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            source.next_due().await.unwrap(),
+            Some(100 + INTERVAL.as_millis() as i64)
+        );
+        let hour = 100 + OPTIMIZE_INTERVAL.as_millis() as i64;
+        clock.advance_to(hour);
+        settle(&clock, hour).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2 * sweep);
+        assert_eq!(optimized.load(Ordering::SeqCst), 1);
+        clock.advance_to(hour + INTERVAL.as_millis() as i64);
+        settle(&clock, hour + INTERVAL.as_millis() as i64).await;
+        assert_eq!(
+            optimized.load(Ordering::SeqCst),
+            1,
+            "ordinary retention sweep does not run optimize again"
+        );
+        task.abort();
+        let _ = task.await;
+    }
 }
