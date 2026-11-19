@@ -106,7 +106,7 @@ print(json.dumps(manifest))
         (self.home / "fail").touch()
         with self.assertRaises(subprocess.CalledProcessError):
             m.run(self.home, True)
-        self.assert_call("diagnostic")
+        self.assert_call("pre-destructive")
         self.assertFalse((self.home / "workspaces").exists())
         with closing(sqlite3.connect(self.db, isolation_level=None)) as c:
             self.assertEqual(c.execute("SELECT location FROM artifacts").fetchone()[0], "交付摘要")

@@ -41,9 +41,9 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
         match arg.as_str() {
             "--json" => {}
             "--reason" => {
-                chosen = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--reason needs pre-upgrade or diagnostic"))?
+                chosen = it.next().ok_or_else(|| {
+                    anyhow::anyhow!("--reason needs pre-upgrade, pre-destructive or diagnostic")
+                })?
             }
             _ => bail!("unknown backup option: {arg}"),
         }
@@ -54,7 +54,10 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
             from: "unknown".into(),
             to: "unknown".into(),
         }),
-        _ => bail!("backup reason must be pre-upgrade or diagnostic"),
+        "pre-destructive" => Ok(Reason::PreDestructive {
+            what: "manual".into(),
+        }),
+        _ => bail!("backup reason must be pre-upgrade, pre-destructive or diagnostic"),
     }
 }
 pub(crate) fn run(home: &Path, db: &Path, reason: Reason) -> Result<Manifest> {

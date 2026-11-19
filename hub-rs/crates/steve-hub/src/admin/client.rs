@@ -41,17 +41,7 @@ pub(crate) fn try_command(home: &Path, args: &[String]) -> Result<Option<CliOutp
                 "POST",
                 "/admin/v1/backup".into(),
                 serde_json::to_vec(&super::routes::BackupRequest {
-                    reason: Some(
-                        if matches!(
-                            reason,
-                            steve_store_sqlite::backup::Reason::PreUpgrade { .. }
-                        ) {
-                            "pre-upgrade"
-                        } else {
-                            "diagnostic"
-                        }
-                        .into(),
-                    ),
+                    reason: Some(reason.kind().into()),
                 })?,
             )
         }

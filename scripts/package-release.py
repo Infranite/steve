@@ -14,8 +14,8 @@ import tempfile
 from pathlib import Path
 
 
-RUNTIME_OPS = ("run.sh", "run-managed.sh", "backup.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
-INSTALLER_OPS = ("run.sh", "run-managed.sh", "backup.sh", "sign-setup.sh", "release-lib.sh")
+RUNTIME_OPS = ("run.sh", "run-managed.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
+INSTALLER_OPS = ("run.sh", "run-managed.sh", "sign-setup.sh", "release-lib.sh")
 
 
 def write(path, value):
@@ -105,8 +105,8 @@ def package(a):
         asset = out / f"steve-{a.version}-{a.target}.tar.gz"
         archive_bundle(root, manifest, a.target, asset, out / f"manifest-{a.target}.json")
         if installer:
-            # Old installed upgraders have an exact path allowlist and compare inner/outer
-            # manifests. Keep their payload unchanged; only the native installer drops
+            # The runtime archive stays within old updaters' path allowlist and preserves
+            # their inner/outer manifest contract. The native installer also omits
             # the legacy Python bridge after the runtime archive has been completed.
             for name in RUNTIME_OPS:
                 if name not in INSTALLER_OPS:

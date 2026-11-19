@@ -546,7 +546,7 @@ const USAGE: &str =
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
        steve-hub --access client revoke ID
-       steve-hub --admin backup [--reason pre-upgrade|diagnostic]";
+       steve-hub --admin backup [--reason pre-upgrade|pre-destructive|diagnostic]";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()

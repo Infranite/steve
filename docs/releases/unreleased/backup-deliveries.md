@@ -1,1 +1,0 @@
-The daily backup job of a source-based installation (`ops/backup.sh`) now also copies `deliveries`, the delivered files, as the Hub's own daily copy already did. Before, restoring from such a backup lost them.

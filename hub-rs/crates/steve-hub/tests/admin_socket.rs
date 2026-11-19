@@ -516,6 +516,41 @@ async fn backup_command_uses_the_live_socket_and_management_inventory() {
     );
     hub.stop().await;
 }
+#[tokio::test]
+async fn pre_destructive_backup_preserves_purpose_through_cli_and_direct_management_post() {
+    let hub = Hub::start(false);
+    let result = hub.cli(&["backup", "--reason", "pre-destructive"]).await;
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let first: steve_store_sqlite::backup::Manifest = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(
+        first.reason,
+        steve_store_sqlite::backup::Reason::PreDestructive {
+            what: "manual".into()
+        }
+    );
+    assert!(first.completed && first.database_path().is_file());
+    let path = access::admin_socket_path(&hub.cfg.home).unwrap();
+    let direct = tokio::task::spawn_blocking(move || {
+        let body = r#"{"reason":"pre-destructive"}"#;
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(socket, "POST /admin/v1/backup HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert_eq!(response.split_whitespace().nth(1), Some("200"), "{response}");
+        serde_json::from_str::<access::CliOutput>(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }).await.unwrap();
+    assert_eq!(direct.code, 0, "{}", direct.stderr);
+    let second: steve_store_sqlite::backup::Manifest =
+        serde_json::from_str(&direct.stdout).unwrap();
+    assert_eq!(second.reason, first.reason);
+    assert_ne!(second.directory, first.directory);
+    let usage = steve_store_sqlite::backup::usage(&hub.cfg.home.join("backups")).unwrap();
+    // Both transports must retain the selected purpose, rather than falling into diagnostic.
+    assert_eq!(usage["pre-destructive"].count, 2);
+    assert_eq!(usage["diagnostic"].count, 0);
+    hub.stop().await;
+}
 #[test]
 fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
     let temp = tempfile::tempdir().unwrap();
@@ -529,20 +564,24 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
         .unwrap()
         .modified()
         .unwrap();
-    let args = vec!["backup".into(), "--reason".into(), "pre-upgrade".into()];
-    let result = access::command(&cfg, &args);
-    assert_eq!(result.code, 0, "{}", result.stderr);
-    let manifest: steve_store_sqlite::backup::Manifest =
-        serde_json::from_str(&result.stdout).unwrap();
-    assert_eq!(manifest.schema_version, Some(50));
-    assert_eq!(std::fs::read(cfg.db_path()).unwrap(), before);
-    assert_eq!(
-        std::fs::metadata(cfg.db_path())
-            .unwrap()
-            .modified()
-            .unwrap(),
-        modified
-    );
+    for chosen in ["pre-upgrade", "pre-destructive"] {
+        let args = vec!["backup".into(), "--reason".into(), chosen.into()];
+        let result = access::command(&cfg, &args);
+        assert_eq!(result.code, 0, "{}", result.stderr);
+        let manifest: steve_store_sqlite::backup::Manifest =
+            serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(manifest.schema_version, Some(50));
+        assert_eq!(manifest.reason.kind(), chosen);
+        assert_eq!(std::fs::read(cfg.db_path()).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(cfg.db_path())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+    }
+    let args = vec!["backup".into(), "--reason".into(), "pre-destructive".into()];
     let _lock = steve_hub::upgrades::instance_lock(&cfg).unwrap();
     let refused = access::command(&cfg, &args);
     assert_eq!(refused.code, 2);
@@ -550,6 +589,6 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
         steve_store_sqlite::backup::list(&cfg.home.join("backups"))
             .unwrap()
             .len(),
-        1
+        2
     );
 }

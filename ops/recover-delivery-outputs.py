@@ -116,9 +116,7 @@ def run(home, apply):
             print(f"  {item} {aid}: no saved full text", file=sys.stderr)
         if not apply or not pending:
             return
-        # The CLI currently exposes diagnostic/pre-upgrade only. Diagnostic has the same
-        # no-auto-prune policy as pre-destructive; do not implement another copier here.
-        result = subprocess.run([str(home / "current/bin/steve-hub"), "--admin", "backup", "--reason", "diagnostic"],
+        result = subprocess.run([str(home / "current/bin/steve-hub"), "--admin", "backup", "--reason", "pre-destructive"],
                                 env={**os.environ, "STEVE_HOME": str(home.resolve())},
                                 capture_output=True, text=True, check=True, timeout=120)
         manifest = json.loads(result.stdout)
