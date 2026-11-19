@@ -5,6 +5,7 @@
 
 pub mod backup;
 pub mod checkpoint;
+pub mod compat;
 pub mod convert;
 pub mod digest;
 pub mod domains;
