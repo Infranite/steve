@@ -34,6 +34,7 @@ cal_meetings	comms
 cal_not_same	comms
 chan_app_registrations	comms
 chan_cursors	comms
+chan_ext_ws_dead_letters	comms
 chan_message_seen	comms
 chan_messages	comms
 chan_reactions	comms
