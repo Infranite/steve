@@ -3,6 +3,7 @@ use super::*;
 install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node, node_host, nodes, workspaces] => [built, core, db, jobs, local_node, local_runtime, mcp, nodes, tool_service, workspaces] {
     let HubEnv { cfg, vars, .. } = *cx;
     let extra = mcp_extra::Extra {
+        cfg: cfg.clone(),
         caps: built.caps.clone(),
         store: db.clone(),
         modules: built.modules.clone(),

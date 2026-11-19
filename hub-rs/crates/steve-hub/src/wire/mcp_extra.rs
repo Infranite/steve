@@ -16,6 +16,7 @@ use steve_store::Store;
 
 #[derive(Clone)]
 pub struct Extra {
+    pub cfg: std::sync::Arc<crate::config::Config>,
     /// 能力: the remote agents a session's Bot uses, as tools.
     pub caps: steve_modules::caps::Capabilities,
     pub store: Store,
@@ -551,10 +552,7 @@ async fn call_owned_inner(
             if args["action"] == "request" && !may_request {
                 Err("共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级".into())
             } else {
-                match crate::config::Config::from_env()
-                    .map_err(|e| e.to_string())
-                    .and_then(|cfg| crate::upgrades::Updates::new(&cfg).map_err(|e| e.to_string()))
-                {
+                match crate::upgrades::Updates::new(&x.cfg).map_err(|e| e.to_string()) {
                     Ok(u) => u
                         .agent(cx.session_id.as_deref().unwrap_or_default(), &args)
                         .await
@@ -800,5 +798,93 @@ mod session_identity_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn upgrade_uses_the_assembled_home_without_process_steve_home() {
+        const CHILD: &str = "STEVE_TEST_UPGRADE_HOME_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Exercise a missing process variable without mutating a parallel test's environment.
+            let process_home = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "wire::mcp_extra::upgrade_tests::upgrade_uses_the_assembled_home_without_process_steve_home",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("STEVE_HOME")
+                .env("HOME", process_home.path())
+                .env("STEVE_MANAGED", "1")
+                .env("STEVE_VAULT_KEYSTORE", "file")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated upgrade test: {status}");
+            assert!(
+                !process_home.path().join(".steve").exists(),
+                "the process HOME must not receive Hub data or upgrade files"
+            );
+            return;
+        }
+        assert!(std::env::var_os("STEVE_HOME").is_none());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            steve_modules::net::forbid_in_this_process();
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("hub");
+            let vars: std::collections::HashMap<&str, String> = [
+                ("HOME", dir.path().display().to_string()),
+                ("STEVE_HOME", home.display().to_string()),
+                ("STEVE_PORT", "18990".into()),
+                ("STEVE_NO_RESUME", "1".into()),
+                ("STEVE_VAULT_KEYSTORE", "file".into()),
+                ("STEVE_BACKUP", "off".into()),
+                ("STEVE_REPO", dir.path().join("no-repo").display().to_string()),
+                ("STEVE_WEB_DIR", dir.path().join("no-web").display().to_string()),
+                ("CODEX_HOME", dir.path().join("codex").display().to_string()),
+            ]
+            .into_iter()
+            .collect();
+            let get = move |k: &str| {
+                vars.get(k).cloned().or_else(|| {
+                    k.starts_with("STEVE_ADAPTER_")
+                        .then(|| "/usr/bin/false".into())
+                })
+            };
+            let cfg = Arc::new(crate::config::Config::from_vars(&get).unwrap());
+            for path in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            let wired = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get))
+                .unwrap();
+            let store = &wired.tool_service.extra.store;
+            store.ensure_workspace().unwrap();
+            store.users().create("owner", "Owner", None, "owner").unwrap();
+            let session = store.sessions().create(&steve_store::NewSession {
+                workspace_id: steve_store::WS.into(),
+                harness: "fixture".into(),
+                ..Default::default()
+            }).unwrap();
+            let text = wired.tool_service.call(
+                session.clone(),
+                "steve_upgrade",
+                json!({"action": "request", "version": "99.0.0", "idempotency_key": "assembled-home"}),
+            ).await.unwrap();
+            let op: crate::upgrades::Operation = serde_json::from_str(&text).unwrap();
+            assert_eq!(op.phase, "awaiting_approval");
+            assert_eq!(op.requested_by, format!("agent:{}", session.id));
+            let journal = crate::upgrades::Updates::journal(&home);
+            assert_eq!(journal.active().unwrap().unwrap().id, op.id);
+            let saved: crate::upgrades::Operation = crate::upgrades::read(
+                &home.join("updates/operations").join(format!("{}.json", op.id)),
+            ).unwrap();
+            assert_eq!(saved.idempotency_key, "assembled-home");
+            wired.domain.shutdown().await;
+        });
     }
 }
