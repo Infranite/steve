@@ -256,20 +256,30 @@ pub fn release_expired(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
     )?)
 }
 
-/// Why a batch is due now (`packets` waiting, or the oldest waited `every`), `None` when it is not.
-pub fn due(c: &Connection, ws: &str, now: i64, b: &Batching) -> Result<Option<&'static str>> {
+/// The earliest queue deadline and its cause; failed packets and active leases are excluded.
+pub fn due_at(
+    c: &Connection,
+    ws: &str,
+    now: i64,
+    b: &Batching,
+) -> Result<Option<(i64, &'static str)>> {
     let (n, oldest): (i64, Option<i64>) = c
         .prepare_cached("SELECT count(*), min(created) FROM digest_packets WHERE workspace_id = ? AND state = 'queued'")?
         .query_row([ws], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(if n == 0 {
-        None
-    } else if n >= b.packets.max(1) {
-        Some("packets")
-    } else if oldest.is_some_and(|o| now - o >= b.every_ms()) {
-        Some("every")
-    } else {
-        None
-    })
+    Ok(oldest.map(|oldest| {
+        if n >= b.packets.max(1) {
+            (now, "packets")
+        } else {
+            (oldest.saturating_add(b.every_ms()), "every")
+        }
+    }))
+}
+
+/// Why a batch is due now (`packets` waiting, or the oldest waited `every`), `None` when it is not.
+pub fn due(c: &Connection, ws: &str, now: i64, b: &Batching) -> Result<Option<&'static str>> {
+    Ok(due_at(c, ws, now, b)?
+        .filter(|(at, _)| *at <= now)
+        .map(|(_, why)| why))
 }
 
 /// Leases up to `max` queued packets of `ws` to a new batch: `(batch id, packet ids)`, the most urgent first.
@@ -456,4 +466,126 @@ pub fn stats(c: &Connection, ws: &str, conv: Option<&str>) -> Result<Value> {
         .query_row(params![ws, conv], |r| r.get::<_, Option<i64>>(0))?
     );
     Ok(out)
+}
+
+/// Starts the ordinary Bot schedule; the Hub supplies policy and execution, tests supply a consumer.
+/// Packet retries and dead letters remain in the durable queue, never in the runner.
+pub trait BotRunner: Send + Sync + 'static {
+    /// None when unavailable/busy; otherwise the earliest time another start is allowed.
+    fn ready(&self, c: &Connection, ws: &str) -> Result<Option<i64>>;
+    fn start(&self, ws: &str, now: i64) -> Result<()>;
+}
+
+/// One due batch contains at most this many workspaces (each starts at most one Bot).
+pub const BOT_BATCH: usize = 32;
+
+/// Queue/lease deadlines over workspaces with unfinished packets; never scans all workspaces.
+pub struct BotSource<R> {
+    store: steve_store::Store,
+    clock: std::sync::Arc<dyn steve_runtime::Clock>,
+    runner: std::sync::Arc<R>,
+}
+impl<R: BotRunner> BotSource<R> {
+    pub fn new(m: &steve_modules::Modules, runner: R) -> Self {
+        Self {
+            store: m.store.clone(),
+            clock: m.clock.clone(),
+            runner: std::sync::Arc::new(runner),
+        }
+    }
+}
+
+fn bot_work(c: &Connection, runner: &impl BotRunner, now: i64) -> Result<Vec<(i64, String)>> {
+    let mut stmt = c.prepare_cached(
+        "SELECT workspace_id, min(CASE WHEN state = 'leased' THEN lease_until END)
+         FROM digest_packets WHERE state IN ('queued','leased') GROUP BY workspace_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut work = Vec::new();
+    for row in rows {
+        let (ws, mut at) = row?;
+        let b = batching(c, &ws)?;
+        if b.enabled
+            && let Some((queued, _)) = due_at(c, &ws, now, &b)?
+        {
+            match runner.ready(c, &ws) {
+                Ok(Some(ready)) => {
+                    let queued = queued.max(ready);
+                    at = Some(at.map_or(queued, |lease| lease.min(queued)));
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(workspace = %ws, "digest Bot binding: {e}"),
+            }
+        }
+        if let Some(at) = at {
+            work.push((at, ws));
+        }
+    }
+    work.sort();
+    Ok(work)
+}
+
+fn due_error(e: impl std::fmt::Display) -> steve_runtime::due::DueError {
+    steve_runtime::due::DueError(e.to_string())
+}
+
+impl<R: BotRunner> steve_runtime::due::DueSource for BotSource<R> {
+    fn name(&self) -> &'static str {
+        "digest.bot"
+    }
+
+    async fn next_due(&self) -> std::result::Result<Option<i64>, steve_runtime::due::DueError> {
+        let (store, runner, now) = (self.store.clone(), self.runner.clone(), self.clock.now());
+        tokio::task::spawn_blocking(move || {
+            store.reader(|c| {
+                Ok::<_, StoreError>(
+                    bot_work(c, runner.as_ref(), now)?
+                        .first()
+                        .map(|(at, _)| *at),
+                )
+            })
+        })
+        .await
+        .map_err(due_error)?
+        .map_err(due_error)
+    }
+
+    async fn run_due(&self, now: i64) -> std::result::Result<(), steve_runtime::due::DueError> {
+        let (store, runner) = (self.store.clone(), self.runner.clone());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let work = store.reader(|c| bot_work(c, runner.as_ref(), now))?;
+            let mut error = None;
+            // Filter before LIMIT: future workspaces cannot hide a due queue or expired lease.
+            for (_, ws) in work
+                .into_iter()
+                .filter(|(at, _)| *at <= now)
+                .take(BOT_BATCH)
+            {
+                let step = (|| -> Result<()> {
+                    store.transaction(|tx| release_expired(tx, &ws, now))?;
+                    let ready = store.reader(|c| -> Result<_> {
+                        let b = batching(c, &ws)?;
+                        Ok(b.enabled
+                            && due(c, &ws, now, &b)?.is_some()
+                            && runner.ready(c, &ws)?.is_some_and(|at| at <= now))
+                    })?;
+                    if ready {
+                        runner.start(&ws, now)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = step {
+                    tracing::warn!(workspace = %ws, "digest Bot queue: {e}");
+                    // Start/store failures back off the source, after the other workspaces run.
+                    error.get_or_insert(e);
+                }
+            }
+            error.map_or(Ok(()), Err)
+        })
+        .await
+        .map_err(due_error)?
+        .map_err(due_error)
+    }
 }
