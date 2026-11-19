@@ -129,44 +129,12 @@ async fn status(State(store): State<Store>) -> Response {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt;
-    #[tokio::test(start_paused = true)]
-    async fn deadline_reports_why_without_waiting_for_wall_time() {
-        let router = Router::new()
-            .route(
-                "/slow",
-                get(|| async {
-                    std::future::pending::<()>().await;
-                    "done"
-                }),
-            )
-            .layer(middleware::from_fn_with_state(
-                Duration::from_secs(30),
-                deadline,
-            ));
-        let response = router
-            .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let reply: CliOutput = serde_json::from_slice(&body).unwrap();
-        assert_eq!(reply.code, 2);
-        assert!(reply.stderr.contains("deadline exceeded"));
-    }
-}
-
 #[derive(Default, Deserialize, Serialize)]
 pub(super) struct BackupRequest {
     pub reason: Option<String>,
 }
-async fn make_backup(State(store): State<Store>, Json(input): Json<BackupRequest>) -> Response {
+async fn make_backup(State(store): State<Store>, input: Option<Json<BackupRequest>>) -> Response {
+    let input = input.map(|Json(input)| input).unwrap_or_default();
     let args = vec![
         "backup".into(),
         "--reason".into(),
@@ -199,5 +167,38 @@ async fn backups(State(store): State<Store>) -> Response {
     match result {
         Ok(Ok(usage)) => Json(usage).into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    #[tokio::test(start_paused = true)]
+    async fn deadline_reports_why_without_waiting_for_wall_time() {
+        let router = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    std::future::pending::<()>().await;
+                    "done"
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                Duration::from_secs(30),
+                deadline,
+            ));
+        let response = router
+            .oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let reply: CliOutput = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply.code, 2);
+        assert!(reply.stderr.contains("deadline exceeded"));
     }
 }

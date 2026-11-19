@@ -211,3 +211,28 @@ fn default_retention_keeps_the_current_upgrade_copy_after_a_clock_correction() {
     assert!(current.database_path().exists());
     assert_eq!(list(&p.dest_root).unwrap().len(), 8);
 }
+
+#[test]
+fn unfamiliar_application_schema_metadata_does_not_prevent_a_verified_copy() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("legacy.sqlite3");
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.execute_batch("CREATE TABLE schema_version(version TEXT); INSERT INTO schema_version VALUES('ancient'); CREATE TABLE evidence(v); INSERT INTO evidence VALUES('keep');").unwrap();
+    drop(c);
+    let m = backup(
+        &db,
+        &plan(root.path(), Reason::Diagnostic),
+        &|_| {},
+        &CancelFlag::default(),
+    )
+    .unwrap();
+    assert!(m.completed);
+    assert_eq!(m.schema_version, None);
+    assert_eq!(
+        rusqlite::Connection::open(m.database_path())
+            .unwrap()
+            .query_row("SELECT v FROM evidence", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "keep"
+    );
+}
