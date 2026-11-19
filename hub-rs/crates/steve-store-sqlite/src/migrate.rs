@@ -7,8 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use steve_types::Error;
 
-/// Storage work stages. These are progress labels, not persisted schema versions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Monotonic storage work stages within an observed call, not persisted schema versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase {
     LegacyReplay,
     Validation,
@@ -254,6 +254,10 @@ fn apply_set_on(conn: &Connection, set: &MigrationSet) -> Result<(), Error> {
     if current == head(set) {
         return Ok(());
     }
+    // Public entry points hold an exclusive mutable connection; observed calls
+    // additionally share it with their progress tracker. Internal calls run in
+    // sequence, outside transactions. SQLite rejects nesting; RAII rolls back
+    // failures, so new_unchecked only relaxes the Rust borrow requirement.
     let tx: Transaction<'_> =
         Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(db_error)?;
     for migration in set.migrations.iter().filter(|m| m.version > current) {

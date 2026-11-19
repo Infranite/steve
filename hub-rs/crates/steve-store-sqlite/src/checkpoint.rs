@@ -31,7 +31,7 @@ impl Default for CheckpointPolicy {
     }
 }
 impl CheckpointPolicy {
-    /// An idle writer gap allows truncation even after a large WAL was checkpointed:
+    /// An idle maintenance deadline allows truncation after a large WAL was checkpointed:
     /// PASSIVE alone does not shrink the allocated file. Under load, pressure forces
     /// PASSIVE and an alert. Busy truncation is retried by the executor on a later slice.
     pub fn decide(&self, wal_bytes: u64, idle: bool, since_last: Duration) -> Action {
@@ -58,21 +58,23 @@ impl Engine {
     /// TRUNCATE never waits behind a pinned reader: temporarily replace the ordinary
     /// busy timeout, restoring it even when SQLite returns an error.
     pub fn checkpoint(&self, mode: Mode) -> Result<(i64, i64, i64), Error> {
-        let sql = match mode {
-            Mode::Passive => "PRAGMA main.wal_checkpoint(PASSIVE)",
-            Mode::Truncate => "PRAGMA main.wal_checkpoint(TRUNCATE)",
-        };
         let writer = self.writer_conn()?;
-        let timeout: u32 = writer
-            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
-            .map_err(db_error)?;
-        writer.busy_timeout(Duration::ZERO).map_err(db_error)?;
-        let result = writer.query_row(sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)));
-        writer
-            .busy_timeout(Duration::from_millis(u64::from(timeout)))
-            .map_err(db_error)?;
-        result.map_err(db_error)
+        checkpoint_on(&writer, mode).map_err(db_error)
     }
+}
+
+// Keep raw SQLite failures for the internal, rate-limited diagnostic log; the
+// public checkpoint API continues returning the sanitized transport error.
+fn checkpoint_on(writer: &rusqlite::Connection, mode: Mode) -> rusqlite::Result<(i64, i64, i64)> {
+    let sql = match mode {
+        Mode::Passive => "PRAGMA main.wal_checkpoint(PASSIVE)",
+        Mode::Truncate => "PRAGMA main.wal_checkpoint(TRUNCATE)",
+    };
+    let timeout: u32 = writer.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+    writer.busy_timeout(Duration::ZERO)?;
+    let result = writer.query_row(sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)));
+    writer.busy_timeout(Duration::from_millis(u64::from(timeout)))?;
+    result
 }
 
 pub const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -99,6 +101,9 @@ pub(crate) struct Maintenance {
     last_optimize: Option<Duration>,
     checkpoint_retry: Option<Duration>,
     optimize_retry: Option<Duration>,
+    checkpoint_errors: WarningLimit,
+    pressure_warnings: WarningLimit,
+    optimize_errors: WarningLimit,
 }
 impl Default for Maintenance {
     fn default() -> Self {
@@ -124,98 +129,157 @@ impl Maintenance {
             last_optimize: None,
             checkpoint_retry: None,
             optimize_retry: None,
+            checkpoint_errors: WarningLimit::default(),
+            pressure_warnings: WarningLimit::default(),
+            optimize_errors: WarningLimit::default(),
         })
     }
     pub(crate) fn run(&mut self, engine: &Engine, now: Duration, idle: bool) -> Option<Duration> {
-        let last_checkpoint = *self.last_checkpoint.get_or_insert(now);
-        let last_optimize = *self.last_optimize.get_or_insert(now);
-        if self.checkpoint_retry.is_none_or(|at| at <= now) {
-            let mut wal = engine.path().into_os_string();
-            wal.push("-wal");
-            let bytes = match std::fs::metadata(std::path::PathBuf::from(wal)) {
-                Ok(m) => Some(m.len()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(0),
-                Err(_) => None,
-            };
-            if let Some(bytes) = bytes {
-                let mut action =
-                    self.policy
-                        .checkpoint
-                        .decide(bytes, idle, now.saturating_sub(last_checkpoint));
-                if self.checkpoint_retry.is_some() && action == Action::None {
-                    action = Action::Passive;
-                }
-                let mode = match action {
-                    Action::None => None,
-                    Action::Truncate => Some(Mode::Truncate),
-                    Action::Passive | Action::ForcedPassive { .. } => Some(Mode::Passive),
-                };
-                if let Some(mode) = mode {
-                    if let Action::ForcedPassive { alert: true } = action {
-                        tracing::warn!(
-                            wal_bytes = bytes,
-                            "storage WAL pressure requires a forced checkpoint"
-                        );
-                        metrics::counter!("steve_store_checkpoint_alert_total").increment(1);
-                    }
-                    match engine.checkpoint(mode) {
-                        Ok((busy, log, done)) => {
-                            metrics::counter!("steve_store_checkpoint_total", "mode"=>if mode==Mode::Truncate {"truncate"} else {"passive"}).increment(1);
-                            self.last_checkpoint = Some(now);
-                            if busy != 0 || done < log {
-                                self.checkpoint_retry =
-                                    Some(now.saturating_add(self.policy.retry_interval));
-                                metrics::counter!("steve_store_checkpoint_busy_total").increment(1);
-                            } else {
-                                self.checkpoint_retry = None;
-                            }
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "storage checkpoint failed; retrying at a later writer gap"
-                            );
-                            self.checkpoint_retry =
-                                Some(now.saturating_add(self.policy.retry_interval));
-                        }
-                    }
-                }
-            } else {
-                self.checkpoint_retry = Some(now.saturating_add(self.policy.retry_interval));
-            }
+        self.last_checkpoint.get_or_insert(now);
+        self.last_optimize.get_or_insert(now);
+        let checkpoint_at = self.run_checkpoint(engine, now, idle);
+        let optimize_at = self.run_optimize(engine, now);
+        Some(checkpoint_at.min(optimize_at))
+    }
+
+    fn run_checkpoint(&mut self, engine: &Engine, now: Duration, idle: bool) -> Duration {
+        if let Some(at) = self.checkpoint_retry.filter(|&at| at > now) {
+            return at;
         }
-        let optimize_due = self
-            .optimize_retry
-            .unwrap_or(last_optimize.saturating_add(self.policy.optimize_interval));
-        if now >= optimize_due {
-            let result = engine
-                .writer_conn()
-                .and_then(|c| crate::pragmas::optimize(&c).map_err(crate::open::db_error));
-            match result {
-                Ok(()) => {
-                    self.last_optimize = Some(now);
-                    self.optimize_retry = None;
-                    metrics::counter!("steve_store_optimize_total").increment(1);
-                }
-                Err(_) => {
-                    tracing::warn!("storage optimize failed; retrying at a later writer gap");
-                    self.optimize_retry = Some(now.saturating_add(self.policy.retry_interval));
-                }
-            }
+        if let Err(error) = self.checkpoint_action(engine, now, idle) {
+            self.checkpoint_errors.report(now, "checkpoint", &error);
+            self.checkpoint_retry = Some(now.saturating_add(self.policy.retry_interval));
         }
-        Some(
-            self.checkpoint_retry
-                .unwrap_or(
-                    self.last_checkpoint
-                        .unwrap()
-                        .saturating_add(self.policy.checkpoint.interval),
-                )
-                .min(
-                    self.optimize_retry.unwrap_or(
-                        self.last_optimize
-                            .unwrap()
-                            .saturating_add(self.policy.optimize_interval),
-                    ),
-                ),
+        self.checkpoint_retry.unwrap_or(
+            self.last_checkpoint
+                .unwrap()
+                .saturating_add(self.policy.checkpoint.interval),
         )
+    }
+
+    fn checkpoint_action(
+        &mut self,
+        engine: &Engine,
+        now: Duration,
+        idle: bool,
+    ) -> Result<(), MaintenanceError> {
+        let mut wal = engine.path().into_os_string();
+        wal.push("-wal");
+        let bytes = match std::fs::metadata(std::path::PathBuf::from(wal)) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        let mut action = self.policy.checkpoint.decide(
+            bytes,
+            idle,
+            now.saturating_sub(self.last_checkpoint.unwrap()),
+        );
+        if self.checkpoint_retry.is_some() && action == Action::None {
+            action = Action::Passive;
+        }
+        let mode = match action {
+            Action::None => return Ok(()),
+            Action::Truncate => Mode::Truncate,
+            Action::Passive | Action::ForcedPassive { .. } => Mode::Passive,
+        };
+        if let Action::ForcedPassive { alert: true } = action {
+            if self.pressure_warnings.allow(now) {
+                tracing::warn!(
+                    wal_bytes = bytes,
+                    "storage WAL pressure requires a forced checkpoint"
+                );
+            }
+            metrics::counter!("steve_store_checkpoint_alert_total").increment(1);
+        }
+        let writer = engine.writer_conn()?;
+        let (busy, log, done) = checkpoint_on(&writer, mode)?;
+        metrics::counter!("steve_store_checkpoint_total", "mode"=>if mode==Mode::Truncate {"truncate"} else {"passive"}).increment(1);
+        self.last_checkpoint = Some(now);
+        self.checkpoint_errors = WarningLimit::default();
+        self.checkpoint_retry = if busy != 0 || done < log {
+            metrics::counter!("steve_store_checkpoint_busy_total").increment(1);
+            Some(now.saturating_add(self.policy.retry_interval))
+        } else {
+            None
+        };
+        Ok(())
+    }
+
+    fn run_optimize(&mut self, engine: &Engine, now: Duration) -> Duration {
+        let due = self.optimize_retry.unwrap_or(
+            self.last_optimize
+                .unwrap()
+                .saturating_add(self.policy.optimize_interval),
+        );
+        if now < due {
+            return due;
+        }
+        let result = engine
+            .writer_conn()
+            .map_err(MaintenanceError::from)
+            .and_then(|writer| crate::pragmas::optimize(&writer).map_err(MaintenanceError::from));
+        match result {
+            Ok(()) => {
+                self.last_optimize = Some(now);
+                self.optimize_retry = None;
+                self.optimize_errors = WarningLimit::default();
+                metrics::counter!("steve_store_optimize_total").increment(1);
+                now.saturating_add(self.policy.optimize_interval)
+            }
+            Err(error) => {
+                self.optimize_errors.report(now, "optimize", &error);
+                let retry = now.saturating_add(self.policy.retry_interval);
+                self.optimize_retry = Some(retry);
+                retry
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MaintenanceError {
+    #[error(transparent)]
+    Store(#[from] Error),
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+// Keep retries responsive without emitting a warning every second during a
+// persistent failure. Checkpoint and optimize have independent warning budgets.
+const ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
+#[derive(Default)]
+struct WarningLimit {
+    next: Option<Duration>,
+}
+impl WarningLimit {
+    fn allow(&mut self, now: Duration) -> bool {
+        if self.next.is_some_and(|next| now < next) {
+            return false;
+        }
+        self.next = Some(now.saturating_add(ERROR_LOG_INTERVAL));
+        true
+    }
+    fn report(&mut self, now: Duration, operation: &'static str, error: &impl std::fmt::Display) {
+        if self.allow(now) {
+            tracing::warn!(operation, %error, "storage maintenance failed; retrying at a later writer gap");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn persistent_failures_warn_at_most_once_per_minute_and_recovery_resets_the_limit() {
+        let mut failures = WarningLimit::default();
+        let allowed: Vec<_> = (0..=120)
+            .filter(|&s| failures.allow(Duration::from_secs(s)))
+            .collect();
+        assert_eq!(allowed, [0, 60, 120]);
+        failures = WarningLimit::default(); // Successful maintenance resets its failure streak.
+        assert!(failures.allow(Duration::from_secs(121)));
     }
 }

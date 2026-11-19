@@ -6,6 +6,8 @@ use std::path::Path;
 
 pub const STATEMENT_CACHE: usize = 512;
 pub const MMAP_SIZE: i64 = 256 * 1024 * 1024;
+/// Bound planner analysis work per hourly optimize.
+pub const ANALYSIS_LIMIT: u32 = 400;
 pub const JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 /// A reader must never gain write access through its main database or attachments.
 pub fn readonly_flags() -> OpenFlags {
@@ -72,6 +74,9 @@ pub const READER_MAIN: &str = CORE_FILE;
 
 /// Bounded hourly planner maintenance, under the executor's exclusive writer turn.
 /// Startup optimization (if any) belongs to the runtime open flow.
+/// TEMP G2-W2a6a2-OPT: the Hub retention source still schedules hourly optimize;
+/// W2a.6a3 must remove that copy when switching the facade to this executor.
 pub(crate) fn optimize(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("PRAGMA analysis_limit=400; PRAGMA optimize;")
+    conn.pragma_update(None, "analysis_limit", ANALYSIS_LIMIT)?;
+    conn.execute_batch("PRAGMA optimize;")
 }
