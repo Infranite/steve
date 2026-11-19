@@ -27,10 +27,6 @@ impl Faults {
         f.budget.store(-1, Ordering::SeqCst);
         Arc::new(f)
     }
-    /// After `n` more frames written, everything breaks (both directions).
-    pub fn cut_after(&self, n: i64) {
-        self.budget.store(n, Ordering::SeqCst);
-    }
     pub fn cut_now(&self) {
         self.cut.store(true, Ordering::SeqCst);
     }

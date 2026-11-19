@@ -52,10 +52,6 @@ pub fn parse_pin(s: &str) -> Result<[u8; 32], String> {
         .ok_or_else(|| "a pin is sha256:<64 hex digits>".to_string())
 }
 
-pub fn pin_of(cert_der: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(crate::identity::sha256(cert_der)))
-}
-
 /// The host a `ws://` or `wss://` URL connects to, read by the parser the connection itself uses
 /// (`http::Uri`, what tungstenite dials), brackets of an IPv6 literal taken off. Refused outright:
 /// userinfo (`@`), a fragment (`#`), percent escapes, backslashes, whitespace and control

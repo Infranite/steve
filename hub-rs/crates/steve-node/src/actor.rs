@@ -2069,13 +2069,6 @@ impl Actor {
                 error: completion.error.clone(),
             };
             t.set_state(&op, &state)?;
-            self.inner.disk.record(
-                t,
-                &op,
-                &exec,
-                crate::disk_observation::Phase::Finished,
-                self.inner.incarnation,
-            )?;
             evs.push((
                 Subject::Execution(exec.clone()),
                 EventBody::AttemptEnded {
@@ -2093,7 +2086,6 @@ impl Actor {
         });
         match r {
             Ok(()) => {
-                self.inner.disk.wake();
                 self.gate.0.store(0, Ordering::SeqCst);
                 self.inner.reset_output(&self.session);
                 self.run = None;
@@ -2127,18 +2119,10 @@ impl Actor {
                     ));
                 }
                 t.set_state(&op, &state)?;
-                self.inner.disk.record(
-                    t,
-                    &op,
-                    &exec,
-                    crate::disk_observation::Phase::Unknown,
-                    self.inner.incarnation,
-                )?;
                 crate::emit_all(&self.inner, t, events)
             })
             .is_ok()
         {
-            self.inner.disk.wake();
             self.gate.0.store(0, Ordering::SeqCst);
             self.run = None;
             self.waits.clear();

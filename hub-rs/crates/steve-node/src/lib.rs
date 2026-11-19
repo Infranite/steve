@@ -22,9 +22,6 @@ mod confine;
 
 mod bot_mcp;
 mod bot_skills;
-pub mod cow;
-pub mod disk_observation;
-pub mod disk_usage;
 mod exec;
 pub mod git;
 mod harness_context;
@@ -37,7 +34,6 @@ mod job;
 mod journal;
 mod procs;
 pub mod project_setup;
-pub mod reclaim;
 mod research;
 mod scan;
 mod secrets;
@@ -525,7 +521,6 @@ pub(crate) struct Inner {
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
     confine: confine::Confine,
-    disk: disk_observation::Observer,
 }
 
 impl Inner {
@@ -1537,10 +1532,8 @@ impl LocalNode {
             Ok(())
         })?;
         let confine = confine::Confine::open(&cfg.acp.steve_home, &cfg.home);
-        let disk = disk_observation::Observer::from_env();
         let node = LocalNode(Arc::new_cyclic(|weak| Inner {
             confine,
-            disk,
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
             roots_file: Mutex::new(None),
             discovery: std::sync::RwLock::new(None),
@@ -1636,7 +1629,6 @@ impl LocalNode {
             self.spawn_owned(deliver_loop(Arc::downgrade(&self.0)));
         }
         self.0.wake.notify_one();
-        self.start_disk_observer();
     }
 
     /// Where commands' secrets come from ([`HubSecrets`], bound to this Node). Without it a command
@@ -1661,10 +1653,6 @@ impl LocalNode {
     /// what runs goes on. A removal turns it on, and off again when it is given up.
     pub fn set_retiring(&self, on: bool) {
         self.0.retiring.store(on, Ordering::SeqCst);
-    }
-
-    pub fn is_retiring(&self) -> bool {
-        self.0.retiring.load(Ordering::SeqCst)
     }
 
     /// Cancels every turn, job and command still running, as the Hub's cancel would (`reason`
@@ -1736,9 +1724,7 @@ impl LocalNode {
     /// home is free once the last handle is dropped.
     pub async fn shutdown(&self) {
         self.0.closed.store(true, Ordering::SeqCst);
-        self.0.disk.cancel_scan();
         self.0.wake.notify_one();
-        self.0.disk.wake();
         let tasks = std::mem::take(&mut *self.0.tasks.lock().unwrap());
         for task in tasks {
             let _ = task.await;
@@ -1751,12 +1737,7 @@ impl LocalNode {
             }
         }
         // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
-        let _ = self.0.j.tx(|t| {
-            t.mark_unknown()?;
-            t.optional_disk_update(|| {
-                t.interrupt_disk_records(disk_observation::Unavailable::Stopping, now())
-            })
-        });
+        let _ = self.0.j.tx(|t| t.mark_unknown());
         self.0.wake.notify_one();
     }
 
@@ -2708,13 +2689,6 @@ impl SessionExecutor for LocalNode {
             row.view.phase = SessionPhase::Active;
             row.view.active = Some(exec.clone());
             t.put_session(&row)?;
-            self.0.disk.record(
-                t,
-                &c.id,
-                &exec,
-                disk_observation::Phase::Started,
-                self.0.incarnation,
-            )?;
             Ok(Decided {
                 state: Observed::Running,
                 execution: Some(exec.clone()),
@@ -2724,8 +2698,6 @@ impl SessionExecutor for LocalNode {
             })
         })?;
         if fresh {
-            self.start_disk_observer();
-            self.0.disk.wake();
             let _ = self.actor(&c.body.session).send(Msg::Start {
                 op: c.id.clone(),
                 spec: Box::new(c.body.clone()),
