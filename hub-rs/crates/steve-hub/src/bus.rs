@@ -1,8 +1,9 @@
 //! Typed, ordered in-process notifications. Encoding belongs to SSE and plugin boundaries.
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 pub use steve_types::{BusEvent, Scope};
 use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
@@ -39,6 +40,8 @@ pub struct Delivery {
     pub envelope: Arc<Envelope<BusEvent>>,
     /// Only retained notifications take a position in the change log.
     pub id: Option<u64>,
+    /// Opaque egress bytes, initialized by the transport on first use, never by the bus.
+    pub(crate) encoded: OnceLock<Bytes>,
 }
 
 impl Delivery {
@@ -152,8 +155,8 @@ impl Ring {
     }
 }
 
-/// Retained events are never slimmed. Count their JSON without allocating or keeping an
-/// encoded copy, including the historical eight-byte per-entry allowance. Egress owns bytes.
+/// Retained events are never slimmed. Measure the historical byte budget without populating
+/// the egress cache at publication, including the eight-byte per-entry allowance.
 fn retained_size(event: &Envelope<BusEvent>) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
@@ -563,6 +566,7 @@ impl Sender {
         let frame = Arc::new(Delivery {
             envelope: event,
             id,
+            encoded: OnceLock::new(),
         });
         if let Some(id) = id {
             let bytes = retained_size(&frame.envelope);

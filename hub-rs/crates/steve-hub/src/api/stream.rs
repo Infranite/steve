@@ -62,7 +62,7 @@ pub(crate) fn encode_event(event: &Envelope<BusEvent>) -> Bytes {
     Bytes::from(json)
 }
 
-/// One SSE frame, encoded at the stream boundary.
+/// One SSE frame, encoded once at the stream boundary and shared across readers and replay.
 #[derive(Debug)]
 pub struct Frame {
     pub bytes: Bytes,
@@ -72,13 +72,16 @@ pub struct Frame {
 
 impl From<&Delivery> for Frame {
     fn from(event: &Delivery) -> Self {
-        let json = encode_event(&event.envelope);
-        let mut bytes = Vec::with_capacity(json.len() + 8);
-        bytes.extend_from_slice(b"data: ");
-        bytes.extend_from_slice(&json);
-        bytes.extend_from_slice(b"\n\n");
+        let bytes = event.encoded.get_or_init(|| {
+            let json = encode_event(&event.envelope);
+            let mut bytes = Vec::with_capacity(json.len() + 8);
+            bytes.extend_from_slice(b"data: ");
+            bytes.extend_from_slice(&json);
+            bytes.extend_from_slice(b"\n\n");
+            Bytes::from(bytes)
+        });
         Self {
-            bytes: bytes.into(),
+            bytes: bytes.clone(),
             scope: event.envelope.scope(),
             id: event.id,
         }
@@ -430,7 +433,74 @@ mod tests {
                 rev: steve_types::Rev(1),
             }),
             id: None,
+            encoded: Default::default(),
         })
+    }
+
+    #[tokio::test]
+    async fn visible_connections_and_replay_share_one_lazy_encoding() {
+        let events: [BusEvent; 2] = [
+            steve_types::WorkEvent::Item {
+                id: "item".into(),
+                ws: "a".into(),
+            }
+            .into(),
+            steve_types::WorkLiveEvent::Event {
+                session_id: "s".into(),
+                seq: steve_types::Seq(1),
+                kind: "tool".into(),
+                data: steve_types::RawJson::from_str(
+                    &serde_json::json!({"rawOutput": "x".repeat(5000)}).to_string(),
+                )
+                .unwrap(),
+                ws: "a".into(),
+            }
+            .into(),
+        ];
+        for event in events {
+            let bus = Bus::new();
+            let start = bus.cursor();
+            let subscriber = || Sub {
+                ws: "a".into(),
+                here: None,
+                rx: bus.subscribe(),
+                ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
+                resume: None,
+                pending: Pending::default(),
+            };
+            let (first, second) = (subscriber(), subscriber());
+            let mut watch = bus.subscribe();
+            bus.publish(event);
+            let delivery = tokio::time::timeout(Duration::from_secs(5), watch.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                delivery.encoded.get().is_none(),
+                "publication must not encode"
+            );
+            let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(first.next(), second.next())
+            })
+            .await
+            .unwrap();
+            let first = first.unwrap().0.unwrap();
+            let second = second.unwrap().0.unwrap();
+            // Both real connections receive the same allocation, rather than separately encoded copies.
+            assert_eq!(first.as_ptr(), second.as_ptr());
+            assert_eq!(first.as_ptr(), delivery.encoded.get().unwrap().as_ptr());
+            if delivery.id.is_some() {
+                let Replay::Frames { frames, .. } = bus.replay(&start) else {
+                    panic!("retained event must be replayable");
+                };
+                assert_eq!(frames.len(), 1);
+                assert!(Arc::ptr_eq(&frames[0], &delivery));
+                assert_eq!(
+                    Frame::from(frames[0].as_ref()).bytes.as_ptr(),
+                    first.as_ptr()
+                );
+            }
+        }
     }
 
     #[tokio::test]
