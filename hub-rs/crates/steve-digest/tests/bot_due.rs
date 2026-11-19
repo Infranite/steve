@@ -23,7 +23,7 @@ impl BotRunner for Consumer {
         Ok(Some(i64::MIN))
     }
     fn start(&self, ws: &str, now: i64) -> Result<(), StoreError> {
-        self.store.transaction(|tx| {
+        self.store.transaction(|tx| -> Result<(), StoreError> {
             let b = queue::batching(tx, ws)?;
             let (_, ids) = queue::lease(tx, ws, now, &b, 10)?;
             for id in ids {
