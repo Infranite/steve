@@ -6037,8 +6037,10 @@ dependencies = [
  "futures",
  "governor",
  "iana-time-zone",
+ "metrics",
  "rand 0.10.3",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
