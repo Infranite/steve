@@ -8,7 +8,7 @@
 use rusqlite::{Connection, params};
 
 use super::{Cached, all, must, one};
-use crate::{ChangeEvent, Result, StoreError, Tag, W, now, uid};
+use crate::{Result, StoreError, Tag, W, now, uid};
 
 /// The tag category the six item categories live in, and only they.
 pub const KIND_CAT: &str = "类型";
@@ -171,7 +171,12 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             Some(t) if t.cat == KIND_CAT => out.push(t),
             Some(t) => {
                 w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [KIND_CAT, &t.id])?;
-                w.publish(ChangeEvent::Tag { id: t.id.clone() });
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Tag {
+                        ws: ws.into(),
+                        id: t.id.clone().into(),
+                    },
+                ));
                 out.push(Tag {
                     cat: KIND_CAT.into(),
                     ..t
@@ -183,7 +188,12 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
                     "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
                     params![id, ws, name, KIND_CAT, desc, now()],
                 )?;
-                w.publish(ChangeEvent::Tag { id: id.clone() });
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Tag {
+                        ws: ws.into(),
+                        id: id.clone().into(),
+                    },
+                ));
                 out.push(must(one(
                     w.c,
                     "SELECT * FROM tags WHERE id = ?",
@@ -201,7 +211,12 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
     )?;
     for id in strays {
         w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [MOVED_CAT, &id])?;
-        w.publish(ChangeEvent::Tag { id });
+        w.publish(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Tag {
+                ws: ws.into(),
+                id: id.into(),
+            },
+        ));
     }
     // Seed and infer only once. Delivery tags remain ordinary editable tags, so a person's later
     // choice to rename or remove one is not silently reversed by `ensure` on the next boot.
@@ -224,7 +239,12 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
                         "UPDATE tags SET cat = ? WHERE id = ?",
                         [DELIVERY_CAT, &t.id],
                     )?;
-                    w.publish(ChangeEvent::Tag { id: t.id });
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::ConfigEvent::Tag {
+                            ws: ws.into(),
+                            id: t.id.into(),
+                        },
+                    ));
                 }
                 None => {
                     let id = uid("tag");
@@ -232,7 +252,12 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
                     "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
                     params![id, ws, name, DELIVERY_CAT, desc, now()],
                 )?;
-                    w.publish(ChangeEvent::Tag { id });
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::ConfigEvent::Tag {
+                            ws: ws.into(),
+                            id: id.into(),
+                        },
+                    ));
                 }
             }
         }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{all, next_counter, one, to_json};
-use crate::{ChangeEvent, Item, Parent, Result, Store, StoreError, Tx, now};
+use crate::{Item, Parent, Result, Store, StoreError, Tx, now};
 
 fn required() -> bool {
     true
@@ -448,7 +448,19 @@ fn record(
             now()
         ],
     )?;
-    tx.publish(ChangeEvent::Item { id: parent.into() });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM items WHERE id = ?",
+        [parent],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: ws.into(),
+                id: parent.into(),
+            },
+        ));
+    }
     Ok(())
 }
 
@@ -587,7 +599,7 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     super::stats::mark_in(
         tx,
         &crate::NewMark {
-            workspace_id: item.workspace_id,
+            workspace_id: item.workspace_id.clone(),
             item_id: child.clone(),
             ts: t,
             kind: "status".into(),
@@ -595,7 +607,12 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
             ..Default::default()
         },
     )?;
-    tx.publish(ChangeEvent::Item { id: child.clone() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: item.workspace_id.clone().into(),
+            id: child.clone().into(),
+        },
+    ));
     record(
         tx,
         parent,
@@ -656,7 +673,12 @@ fn reclaim_in(tx: &Tx<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<
          attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
         params![parent, unit.spec.id],
     )?;
-    tx.publish(ChangeEvent::Item { id: child.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: item.workspace_id.clone().into(),
+            id: child.into(),
+        },
+    ));
     record(
         tx,
         parent,
@@ -1041,7 +1063,19 @@ impl Workflows<'_> {
                      VALUES (?,1,'plan',?,?,?)",
                     params![parent, reason, to_json(&json!({"cycle":context.0,"goal_version":context.1,"units":specs,"max_parallel":max_parallel,"max_attempts":max_attempts}))?, now()],
                 )?;
-                tx.publish(ChangeEvent::Item { id: parent.into() });
+                if let Some(ws) = crate::repo::one(
+                    tx,
+                    "SELECT workspace_id FROM items WHERE id = ?",
+                    [parent],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: ws.into(),
+                            id: parent.into(),
+                        },
+                    ));
+                }
             }
             must_graph(tx, parent)
         })

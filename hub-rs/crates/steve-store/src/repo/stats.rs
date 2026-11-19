@@ -287,11 +287,11 @@ pub(crate) fn first_tool_in(c: &Connection, session: &str, kind: &str, ts: i64) 
 }
 
 /// The `stats` change event of a workspace.
-pub fn stats_changed(ws: &str, day: Option<&str>) -> crate::ChangeEvent {
-    crate::ChangeEvent::Stats {
-        ws: ws.to_string(),
+pub fn stats_changed(ws: &str, day: Option<&str>) -> steve_types::DomainEvent {
+    steve_types::DomainEvent::from(steve_types::StatsEvent::Stats {
+        ws: ws.to_string().into(),
         day: day.map(str::to_string),
-    }
+    })
 }
 
 /// Finishes an open turn; returns its workspace, or `None` if it was not open.

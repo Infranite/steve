@@ -20,11 +20,11 @@ fn secret() -> String {
 }
 
 /// `{type:"client", id, user}`: the client was signed in or out (its user's pages refetch).
-fn client_changed(id: &str, user: &str) -> crate::ChangeEvent {
-    crate::ChangeEvent::Client {
+fn client_changed(id: &str, user: &str) -> steve_types::DomainEvent {
+    steve_types::DomainEvent::from(steve_types::DevicesEvent::Client {
         id: id.into(),
         user: user.into(),
-    }
+    })
 }
 
 /// An access token, without the token itself.

@@ -9,9 +9,7 @@ use serde_json::Value;
 
 use super::{Sets, all, kinds, must, one, revision, to_json};
 use crate::types::double;
-use crate::{
-    ChangeEvent, Device, Link, Project, Release, Result, Store, StoreError, Tag, now, uid,
-};
+use crate::{Device, Link, Project, Release, Result, Store, StoreError, Tag, now, uid};
 
 impl Store {
     pub fn projects(&self) -> Projects<'_> {
@@ -111,7 +109,12 @@ impl Projects<'_> {
                 "INSERT INTO projects (id, workspace_id, name, description, device_id, path, kind, worktree, default_bot, release, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, ws, p.name, p.description, p.device_id, p.path, p.kind, p.worktree as i64, p.default_bot, release, t, t],
             )?;
-            w.publish(ChangeEvent::Project { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Project {
+                    ws: ws.into(),
+                    id: id.clone().into(),
+                },
+            ));
             must(one(w.c, PROJECT, [&id], Project::from_row)?)
         })
     }
@@ -143,7 +146,12 @@ impl Projects<'_> {
                 )?;
             }
             revision(w.c, &cur.workspace_id, "project", id, 0, p, author)?;
-            w.publish(ChangeEvent::Project { id: id.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Project {
+                    ws: cur.workspace_id.clone().into(),
+                    id: id.into(),
+                },
+            ));
             must(one(w.c, PROJECT, [id], Project::from_row)?)
         })
     }
@@ -235,7 +243,12 @@ impl Tags<'_> {
                 "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![id, ws, p.name, p.cat, p.description, by, now()],
             )?;
-            w.publish(ChangeEvent::Tag { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Tag {
+                    ws: ws.into(),
+                    id: id.clone().into(),
+                },
+            ));
             must(one(w.c, TAG, [&id], Tag::from_row)?)
         })
     }
@@ -275,7 +288,19 @@ impl Tags<'_> {
                     rusqlite::params_from_iter(s.params([id.to_string().into()])),
                 )?;
             }
-            w.publish(ChangeEvent::Tag { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM tags WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Tag {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             one(w.c, TAG, [id], Tag::from_row)
         })
     }
@@ -289,12 +314,26 @@ impl Tags<'_> {
                 )));
             }
             let tx = w.tx()?;
+            let ws = one(
+                &tx,
+                "SELECT workspace_id FROM tags WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )?;
             tx.run("DELETE FROM item_tags WHERE tag_id = ?", [id])?;
             // migration 4: tags on contacts, teams, … reference the tag too
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [id])?;
             tx.run("DELETE FROM tags WHERE id = ?", [id])?;
             tx.commit()?;
-            w.publish(ChangeEvent::Tag { id: id.into() });
+            if let Some(ws) = ws {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Tag {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
+
             Ok(())
         })
     }
@@ -313,7 +352,19 @@ impl Tags<'_> {
             tx.run("DELETE FROM entity_tags WHERE tag_id = ?", [from])?;
             tx.run("DELETE FROM tags WHERE id = ?", [from])?;
             tx.commit()?;
-            w.publish(ChangeEvent::Tag { id: into.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM tags WHERE id = ?",
+                [into],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Tag {
+                        ws: ws.into(),
+                        id: into.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -358,7 +409,12 @@ impl Tags<'_> {
             let tx = w.tx()?;
             put_item_tags(&tx, item, &ids)?;
             tx.commit()?;
-            w.publish(ChangeEvent::Item { id: item.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: ws.into(),
+                    id: item.into(),
+                },
+            ));
             Ok(ids)
         })
     }
@@ -446,7 +502,9 @@ impl Devices<'_> {
                         return Err(StoreError::Conflict("device_revision_conflict".into()));
                     }
                 }
-                w.publish(ChangeEvent::Device { id: id.into() });
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::DevicesEvent::Device { id: id.into() },
+                ));
                 Ok(())
             })
         })

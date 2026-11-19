@@ -878,12 +878,9 @@ fn decisions() {
         }]
     );
     s.decisions().reopen("dec_missing").unwrap();
-    assert_eq!(
-        t.events.take(),
-        vec![ChangeEvent::Decision {
-            id: "dec_missing".into(),
-            item_id: None
-        }]
+    assert!(
+        t.events.take().is_empty(),
+        "a missing decision has no workspace"
     );
 }
 

@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::{all, one};
-use crate::{ChangeEvent, Item, NewDecision, Result, Store, StoreError, now};
+use crate::{Item, NewDecision, Result, Store, StoreError, now};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DependencyWait {
@@ -184,7 +184,12 @@ impl DependencyWaits<'_> {
             tx.execute("UPDATE items SET status='block',now=?,updated=? WHERE id=?", params![text,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some(&i.status),"block")?;
             super::items::timeline_on(tx,item,"steve","sys",&format!("登记前置等待（{resume}）：{reason}"),Some(session),&[])?;
-            tx.publish(ChangeEvent::Item{id:item.into()});
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: i.workspace_id.clone().into(),
+                    id: item.into(),
+                },
+            ));
             Ok(true)
         })
     }
@@ -217,7 +222,16 @@ impl DependencyWaits<'_> {
                 if !live { return Err(refuse("当前会话不可续跑")); }
                 tx.execute("INSERT INTO queued(id,session_id,text,via,created,files) VALUES(?,?,?,'steve',?,'[]')",
                            params![crate::uid("q"),session,text,at])?;
-                tx.publish(ChangeEvent::Session{id:session.into(),item_id:Some(Some(item.into()))});
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: i.workspace_id.clone().into(),
+                        id: session.into(),
+                        item_id: {
+                            let value: Option<Option<String>> = Some(Some(item.into()));
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
             } else {
                 crate::decision_create_in(tx,&NewDecision {
                     workspace_id:i.workspace_id.clone(),kind:"propose".into(),subject_type:"item".into(),
@@ -230,7 +244,12 @@ impl DependencyWaits<'_> {
             tx.execute("UPDATE items SET status=?,now=?,updated=? WHERE id=?",params![status,note,at,item])?;
             super::items::status_mark(tx,&i.workspace_id,item,at,Some("block"),status)?;
             super::items::timeline_on(tx,item,"steve","sys",note,None,&[])?;
-            tx.publish(ChangeEvent::Item{id:item.into()});
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: i.workspace_id.clone().into(),
+                    id: item.into(),
+                },
+            ));
             Ok(true)
         })
     }

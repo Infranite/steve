@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::{Level, ObjRef, Viewer, Visibility, bind};
 use crate::repo::Sets;
-use crate::{ChangeEvent, Result, Tx, now, uid};
+use crate::{Result, Tx, now, uid};
 
 /// A `mems` row with its `about` objects.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -257,10 +257,12 @@ pub fn create(tx: &Tx, ws: &str, m: &NewMem) -> Result<Mem> {
         )?
         .execute(params![id, ws, a.kind, a.id])?;
     }
-    tx.publish(ChangeEvent::Mm {
-        id: id.clone(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Mm {
+            id: id.clone().into(),
+            ws: ws.into(),
+        },
+    ));
     crate::repo::must(get(tx, &id)?)
 }
 
@@ -282,10 +284,12 @@ pub fn patch(tx: &Tx, id: &str, p: &MemPatch) -> Result<Option<Mem>> {
             &format!("UPDATE mems SET {} WHERE id = ?", s.sql()),
             bind(s.params([Sql::Text(id.into())])),
         )?;
-        tx.publish(ChangeEvent::Mm {
-            id: id.into(),
-            ws: old.workspace_id.clone(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Mm {
+                id: id.into(),
+                ws: old.workspace_id.clone().into(),
+            },
+        ));
     }
     get(tx, id)
 }
@@ -297,10 +301,12 @@ pub fn delete(tx: &Tx, id: &str) -> Result<bool> {
     };
     tx.run("DELETE FROM mem_about WHERE mem_id = ?", [id])?;
     tx.run("DELETE FROM mems WHERE id = ?", [id])?;
-    tx.publish(ChangeEvent::Mm {
-        id: id.into(),
-        ws: old.workspace_id,
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Mm {
+            id: id.into(),
+            ws: old.workspace_id.into(),
+        },
+    ));
     Ok(true)
 }
 
@@ -348,10 +354,12 @@ pub fn retarget_about(
             "DELETE FROM mem_about WHERE mem_id = ? AND object_type = ? AND object_id = ?",
             params![id, object_type, from],
         )?;
-        tx.publish(ChangeEvent::Mm {
-            id: id.clone(),
-            ws: ws.into(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Mm {
+                id: id.clone().into(),
+                ws: ws.into(),
+            },
+        ));
     }
     Ok(ids)
 }

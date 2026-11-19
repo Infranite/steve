@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::Change;
 use crate::repo::to_json;
 use crate::types::json_or;
-use crate::{ChangeEvent, Result, Tx, now, uid};
+use crate::{Result, Tx, now, uid};
 
 /// How long an applied changeset can be undone.
 pub const UNDO_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
@@ -139,10 +139,12 @@ pub fn create(tx: &Tx, ws: &str, p: &NewChangeset) -> Result<Changeset> {
 }
 
 fn publish(tx: &Tx, id: &str, ws: &str) {
-    tx.publish(ChangeEvent::Changeset {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Changeset {
+            id: id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 /// `draft → applied` with the operations' `before`; `false` if it was not a draft any more (a second

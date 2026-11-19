@@ -1092,12 +1092,28 @@ pub fn add_event_in(
     let seq = tx.last_insert_rowid();
     crate::event_payload::save(tx, session, seq, &payloads)?;
     super::stats::first_tool_in(tx, session, kind, now)?;
-    tx.publish(crate::ChangeEvent::Event {
-        session_id: session.into(),
-        seq,
-        kind: kind.into(),
-        data,
-    });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM sessions WHERE id = ?",
+        [session],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::Event {
+                ws: ws.into(),
+                session_id: session.into(),
+                seq: steve_types::Seq(seq),
+                kind: kind.into(),
+                data: {
+                    let value: serde_json::Value = data;
+                    steve_types::RawJson::from_str(
+                        &serde_json::to_string(&value).expect("JSON value"),
+                    )
+                    .expect("validated JSON")
+                },
+            },
+        ));
+    }
     Ok(Some(seq))
 }
 

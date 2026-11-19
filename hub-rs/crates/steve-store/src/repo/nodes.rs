@@ -72,10 +72,12 @@ pub fn changed(tx: &Tx<'_>, node_id: &str) -> Result<()> {
         })
         .optional()?;
     if let Some(user) = owner {
-        tx.publish(crate::ChangeEvent::Node {
-            id: node_id.into(),
-            user,
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::DevicesEvent::Node {
+                id: node_id.into(),
+                user: user.into(),
+            },
+        ));
     }
     Ok(())
 }
