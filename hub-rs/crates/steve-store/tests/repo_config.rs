@@ -160,7 +160,7 @@ fn workspaces_users_auth() {
                     let value: String = w.id.clone();
                     steve_types::WorkspaceId::from(value)
                 },
-                ws: steve_types::WorkspaceId::from(steve_store::WS)
+                ws: w.id.clone().into()
             })
         ))
     );
@@ -205,7 +205,7 @@ fn workspaces_users_auth() {
                     let value: String = w.id.clone();
                     steve_types::WorkspaceId::from(value)
                 },
-                ws: steve_types::WorkspaceId::from(steve_store::WS)
+                ws: w.id.clone().into()
             })
         )]
     );

@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-#[cfg(test)]
 use steve_store::Store;
 use tokio::sync::watch;
 

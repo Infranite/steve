@@ -687,7 +687,7 @@ fn queued() {
             })
         ))
         .unwrap(),
-        r#"{"type":"session","id":"x"}"#
+        r#"{"type":"session","id":"x","ws":"default"}"#
     );
     let taken = s.queued().take(&ses.id).unwrap();
     assert_eq!(taken.len(), 1);
