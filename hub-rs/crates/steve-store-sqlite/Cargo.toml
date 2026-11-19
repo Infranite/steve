@@ -3,7 +3,7 @@ name = "steve-store-sqlite"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
-description = "The built-in SQLite implementation of Steve's domain storage contract; the only crate that may use rusqlite"
+description = "Steve's built-in SQLite implementation of the storage contract: engines, executor, schema, backup"
 
 [dependencies]
 steve-types = { path = "../steve-types" }
