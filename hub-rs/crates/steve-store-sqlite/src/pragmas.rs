@@ -69,3 +69,9 @@ pub fn attach_readonly(
 }
 /// Shared main filename for pool constructors.
 pub const READER_MAIN: &str = CORE_FILE;
+
+/// Bounded hourly planner maintenance, under the executor's exclusive writer turn.
+/// Startup optimization (if any) belongs to the runtime open flow.
+pub(crate) fn optimize(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("PRAGMA analysis_limit=400; PRAGMA optimize;")
+}

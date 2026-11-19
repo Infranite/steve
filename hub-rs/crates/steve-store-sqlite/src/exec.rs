@@ -1,6 +1,8 @@
 //! One writer, four FIFO lanes, and caller-thread root grants sharing the same scheduler.
 //! The connection moves between the scheduler and a thread-local Rc lease. No Send/Sync
 //! implementation or connection pointer is needed, even for a Send + !Sync SQLite connection.
+#[cfg(test)]
+mod maintenance;
 mod schedule;
 pub use schedule::{Head, LANES, Lane, Scheduler, index, name, target};
 
@@ -44,6 +46,12 @@ pub trait BatchRunner<C>: Send + Sync + 'static {
     type Job: Send + 'static;
     type Output: Send + 'static;
     fn run(&self, conn: &C, jobs: Vec<Self::Job>) -> Vec<Result<Self::Output, CommitError>>;
+    /// Runs exclusively at writer gaps, including idle clock deadlines. Return the
+    /// next monotonic deadline, strictly after now. Never acquire another grant here.
+    /// The default does no maintenance and schedules no idle wakeups.
+    fn maintenance(&self, _conn: &C, _now: Duration, _idle: bool) -> Option<Duration> {
+        None
+    }
 }
 pub type Completion<T> = oneshot::Receiver<Result<T, CommitError>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +88,8 @@ struct State<C, R: BatchRunner<C>> {
     reserved: Option<u64>,
     closing: bool,
     next_ticket: u64,
+    maintenance_requested: bool,
+    maintenance_at: Option<Duration>,
     queues: [VecDeque<Queued<C, R>>; 4],
     admitted: [usize; 4], // queued units and slices; a yielding slice keeps its admission slot
     scheduler: Scheduler,
@@ -172,6 +182,7 @@ impl<C: Send + 'static, R: BatchRunner<C>> Drop for Lease<C, R> {
         s.scheduler.charge(self.lane, elapsed);
         s.connection = self.connection.take();
         s.busy = false;
+        s.maintenance_requested = true;
         drop(s);
         self.shared.changed.notify_all();
     }
@@ -246,6 +257,8 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
                 reserved: None,
                 closing: false,
                 next_ticket: 0,
+                maintenance_requested: true,
+                maintenance_at: None,
                 queues: std::array::from_fn(|_| VecDeque::new()),
                 admitted: [0; 4],
                 scheduler: Scheduler::default(),
@@ -436,6 +449,31 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
             continue;
         }
         let now = shared.clock.now();
+        if s.maintenance_requested || s.maintenance_at.is_some_and(|at| at <= now) {
+            s.maintenance_requested = false;
+            let idle = s.queues.iter().all(VecDeque::is_empty);
+            let connection = s.connection.take().unwrap();
+            s.busy = true;
+            drop(s);
+            let next = catch_unwind(AssertUnwindSafe(|| {
+                shared.runner.maintenance(&connection, now, idle)
+            }));
+            let mut s = lock(&shared.state);
+            s.connection = Some(connection);
+            s.busy = false;
+            s.scheduler
+                .charge(Lane::Background, shared.clock.now().saturating_sub(now));
+            s.maintenance_at = match next {
+                Ok(next) => next.map(|at| at.max(now.saturating_add(Duration::from_millis(1)))),
+                Err(_) => {
+                    tracing::warn!(file=%shared.file, "storage maintenance panicked; retrying");
+                    Some(now.saturating_add(Duration::from_secs(1)))
+                }
+            };
+            drop(s);
+            shared.changed.notify_all();
+            continue;
+        }
         let heads = heads(&s);
         let Some(lane) = s.scheduler.choose(now, heads) else {
             let until = heads
@@ -443,6 +481,7 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
                 .flatten()
                 .map(|h| h.ready_at)
                 .filter(|&d| d > now)
+                .chain(s.maintenance_at)
                 .min();
             if let Some(deadline) = until {
                 drop(

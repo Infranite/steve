@@ -7,6 +7,90 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use steve_types::Error;
 
+/// Storage work stages. These are progress labels, not persisted schema versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    LegacyReplay,
+    Validation,
+    InstallContract,
+    DomainMigration,
+}
+/// Cumulative VM work within one observed call. complete is emitted only after
+/// that call succeeds and its last transaction commits; it never asserts health.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub phase: Phase,
+    pub domain: Option<&'static str>,
+    pub vm_steps: u64,
+    pub complete: bool,
+}
+pub type Observer = std::sync::Arc<dyn Fn(Progress) + Send + Sync>;
+/// Observers must be quick and nonblocking. This owns the connection's progress
+/// handler for the call, removing it on success, error or unwind. No raw SQL/data
+/// is sent to the observer. Replacing an existing handler is not supported.
+pub(crate) struct ProgressTracker<'a> {
+    connection: &'a Connection,
+    observer: Observer,
+    state: std::sync::Arc<std::sync::Mutex<Progress>>,
+}
+const PROGRESS_VM_STEPS: i32 = 10_000;
+impl<'a> ProgressTracker<'a> {
+    pub(crate) fn new(
+        connection: &'a Connection,
+        observer: Observer,
+        phase: Phase,
+    ) -> Result<Self, Error> {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(Progress {
+            phase,
+            domain: None,
+            vm_steps: 0,
+            complete: false,
+        }));
+        let (progress, report) = (state.clone(), observer.clone());
+        connection
+            .progress_handler(
+                PROGRESS_VM_STEPS,
+                Some(move || {
+                    let snapshot = {
+                        let mut s = progress.lock().unwrap_or_else(|e| e.into_inner());
+                        s.vm_steps = s.vm_steps.saturating_add(PROGRESS_VM_STEPS as u64);
+                        *s
+                    };
+                    report(snapshot);
+                    false
+                }),
+            )
+            .map_err(db_error)?;
+        let tracker = Self {
+            connection,
+            observer,
+            state,
+        };
+        tracker.report(phase, None, false);
+        Ok(tracker)
+    }
+    pub(crate) fn report(&self, phase: Phase, domain: Option<&'static str>, complete: bool) {
+        let snapshot = {
+            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            s.phase = phase;
+            s.domain = domain;
+            s.complete = complete;
+            *s
+        };
+        (self.observer)(snapshot);
+    }
+    pub(crate) fn finish(&self) {
+        let mut snapshot = *self.state.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.complete = true;
+        (self.observer)(snapshot);
+    }
+}
+impl Drop for ProgressTracker<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
 /// Contract schema is tracked in meta so domain_schema retains exactly three domain rows.
 pub const CONTRACT_SCHEMA_KEY: &str = "contract_schema";
 #[derive(Clone, Copy, Debug)]
@@ -147,6 +231,21 @@ pub fn initialize(conn: &mut Connection, layout: &Layout) -> Result<(), Error> {
 /// Apply a domain's entire pending set in one BEGIN IMMEDIATE. Exposed for migration tests
 /// and future embedded sets; callers must preflight all sets before opening writable files.
 pub fn apply_set(conn: &mut Connection, set: &MigrationSet) -> Result<(), Error> {
+    apply_set_on(conn, set)
+}
+/// Apply one set with live VM progress; completion follows the set's commit.
+pub fn apply_set_observed(
+    conn: &mut Connection,
+    set: &MigrationSet,
+    observer: Observer,
+) -> Result<(), Error> {
+    let progress = ProgressTracker::new(conn, observer, Phase::DomainMigration)?;
+    progress.report(Phase::DomainMigration, Some(set.domain), false);
+    apply_set_on(conn, set)?;
+    progress.finish();
+    Ok(())
+}
+fn apply_set_on(conn: &Connection, set: &MigrationSet) -> Result<(), Error> {
     verify_lock(set.migrations, set.lock)?;
     let current = version(conn, set.domain)?;
     if current > head(set) {
@@ -155,9 +254,8 @@ pub fn apply_set(conn: &mut Connection, set: &MigrationSet) -> Result<(), Error>
     if current == head(set) {
         return Ok(());
     }
-    let tx: Transaction<'_> = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(db_error)?;
+    let tx: Transaction<'_> =
+        Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(db_error)?;
     for migration in set.migrations.iter().filter(|m| m.version > current) {
         tx.execute_batch(migration.sql).map_err(db_error)?;
     }
@@ -166,10 +264,28 @@ pub fn apply_set(conn: &mut Connection, set: &MigrationSet) -> Result<(), Error>
 }
 /// No-op at the current head: it never rewrites version rows or planner statistics.
 pub fn migrate(conn: &mut Connection) -> Result<(), Error> {
+    migrate_on(conn, None)
+}
+/// Observed domain migration, separately callable after layout conversion. It
+/// reports one cumulative VM counter across all domains and completes only after
+/// every pending domain transaction succeeds. A no-op head still reports success.
+pub fn migrate_observed(conn: &mut Connection, observer: Observer) -> Result<(), Error> {
+    let progress = ProgressTracker::new(conn, observer, Phase::DomainMigration)?;
+    migrate_on(conn, Some(&progress))?;
+    progress.finish();
+    Ok(())
+}
+pub(crate) fn migrate_on(
+    conn: &Connection,
+    progress: Option<&ProgressTracker<'_>>,
+) -> Result<(), Error> {
     verify_locks()?;
     check_versions(conn, false)?;
     for set in CATALOG {
-        apply_set(conn, set)?;
+        if let Some(progress) = progress {
+            progress.report(Phase::DomainMigration, Some(set.domain), false);
+        }
+        apply_set_on(conn, set)?;
     }
     Ok(())
 }
