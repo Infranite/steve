@@ -5558,6 +5558,7 @@ fn review_engine(h: &H) -> steve_core::yolo::Engine {
     recovery_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone())
 }
 
+// Retain this owner while awaiting background work; dropping it models stopping that queue.
 fn cold_outbox(h: &H) -> Outbox {
     let link = OutLink::new();
     link.bind_clock(h.env.clock.clone());
@@ -5781,7 +5782,8 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         h.env.gateway.unscript(REWRITE_HEAD);
         h.env.gateway.script(REWRITE_HEAD, r#"{"text":"第二行"}"#);
         decide(&h, &first, "rewrite", "").unwrap();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         let (same, review) = wait_review(&h, &message, &first).await;
         assert_eq!(same, message, "unattempted review keeps its new UUID");
         let yes = decide(&h, &review, "yes", "").unwrap();
@@ -5804,7 +5806,8 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         );
         h.env.clock.advance(3_600_000);
         restarted.tick();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         assert_eq!(status(&h, &message), "draft");
         nothing_sent(&h);
         assert!(
@@ -5841,7 +5844,8 @@ async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rec
             result
         ),
     );
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     assert_eq!(status(&h, &message), "draft");
     let reopened = decision_of(&h, &message);
     assert_ne!(reopened, review);
@@ -5949,7 +5953,8 @@ async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid(
         &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
     );
     decide(&h, &fail, "rewrite", "").unwrap();
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     let (original, reopened) = wait_review(&h, &old, &fail).await;
     assert_eq!(original, old);
     exec(
@@ -5958,7 +5963,8 @@ async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid(
     );
     h.env.gateway.script(REWRITE_HEAD, r#"{"text":"完整正文"}"#);
     decide(&h, &reopened, "rewrite", "").unwrap();
-    cold_outbox(&h).send_due(&h.ch).await;
+    let queue = cold_outbox(&h);
+    queue.send_due(&h.ch).await;
     let (next, review) = wait_review(&h, &old, &reopened).await;
     assert_ne!(
         next, old,
@@ -6012,7 +6018,8 @@ async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirem
             .is_err()
         );
         h.env.clock.advance(3_600_000);
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         nothing_sent(&h);
     }
 }
@@ -7086,7 +7093,8 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
             .gateway
             .script(REWRITE_HEAD, json!({"text":model_text}).to_string());
         decide(&h, &fail, "rewrite", "").unwrap();
-        cold_outbox(&h).send_due(&h.ch).await;
+        let queue = cold_outbox(&h);
+        queue.send_due(&h.ch).await;
         if let Some(note) = note {
             let (next, review) = wait_review(&h, &old, &fail).await;
             assert_ne!(next, old);
@@ -7118,7 +7126,8 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
             );
             *h.fake.block_target_send.lock().unwrap() = None;
             h.env.clock.advance(3_600_000);
-            cold_outbox(&h).send_due(&h.ch).await;
+            let queue = cold_outbox(&h);
+            queue.send_due(&h.ch).await;
             assert_eq!(status(&h, &next), "draft");
         } else {
             for _ in 0..200 {
