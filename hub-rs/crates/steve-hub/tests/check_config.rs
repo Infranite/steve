@@ -115,6 +115,15 @@ fn local_cli_requests_use_the_hubs_operation_contract() {
 fn removed_and_malformed_variables_fail_the_preflight() {
     for (name, value) in [
         ("STEVE_ITEM_PREFIX", "ST"),
+        ("STEVE_OPENVIKING_KEY", "private-test-sentinel"),
+        ("STEVE_PUBLIC_URL_FILE", ""),
+        ("STEVE_PUBLIC_URLS_FILE", ""),
+        ("STEVE_CLIENT_ORIGINS_FILE", ""),
+        ("STEVE_OIDC_ISSUER_FILE", ""),
+        ("STEVE_OPENVIKING_URL_FILE", ""),
+        ("STEVE_PORT", ""),
+        ("STEVE_PORT", "0x10"),
+        ("STEVE_PORT", "65536"),
         ("STEVE_TAKEOVER_CONTINUES", "typo"),
         ("STEVE_TAKEOVER_SAME_REFUSALS", "-1"),
         ("STEVE_IDLE_RELEASE_MS", "NaN"),
@@ -125,6 +134,7 @@ fn removed_and_malformed_variables_fail_the_preflight() {
         let (code, r, tmp) = check(&[(name, value)]);
         assert_eq!(code, 2, "{name}: {r}");
         assert_eq!(r["ok"], false);
+        assert!(!r.to_string().contains("private-test-sentinel"));
         assert!(r["errors"][0].as_str().unwrap().starts_with(name), "{r}");
         if name == "STEVE_ITEM_PREFIX" {
             assert!(

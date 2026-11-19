@@ -27,6 +27,18 @@ pub struct AuthConfig {
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8440";
 
+/// A strict 0/1 switch shared by authentication and Hub configuration.
+pub fn flag(vars: impl Fn(&str) -> Option<String>, name: &str) -> io::Result<bool> {
+    match vars(name).as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name}: expected 0 or 1"),
+        )),
+    }
+}
+
 impl AuthConfig {
     /// Builds the config the way config.ts does from raw env values.
     pub fn new(
@@ -58,10 +70,10 @@ impl AuthConfig {
     /// [`AuthConfig::from_env`] over any variable source (tests pass a map).
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> io::Result<Self> {
         let client_secret = Self::secret(&var, "STEVE_OIDC_CLIENT_SECRET")?;
-        let public_url = Self::secret(&var, "STEVE_PUBLIC_URL")?;
-        let public_urls = Self::secret(&var, "STEVE_PUBLIC_URLS")?;
+        let public_url = var("STEVE_PUBLIC_URL");
+        let public_urls = var("STEVE_PUBLIC_URLS");
         let oidc = OidcConfig {
-            issuer: Self::secret(&var, "STEVE_OIDC_ISSUER")?,
+            issuer: var("STEVE_OIDC_ISSUER"),
             client_id: var("STEVE_OIDC_CLIENT_ID"),
             client_secret,
         };
@@ -69,42 +81,40 @@ impl AuthConfig {
             public_url.as_deref(),
             public_urls.as_deref(),
             oidc,
-            match var("STEVE_DEV_LOGIN").as_deref() {
-                None | Some("0") => false,
-                Some("1") => true,
-                Some(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "STEVE_DEV_LOGIN: expected 0 or 1",
-                    ));
-                }
-            },
+            flag(&var, "STEVE_DEV_LOGIN")?,
         ))
     }
 
-    /// Read one secret or credential-bearing URL from NAME_FILE or NAME.
-    /// Setting both is an error, even when either value is empty. File permissions may
-    /// grant only owner read/write; spaces are significant and only final CR/LF are removed.
-    /// Shared here so Hub configuration and standalone authentication use the same contract.
+    /// Read a supported secret, preserving spaces and removing only final CR/LF.
+    /// Direct forms are allowed only for names scrubbed from harness environments;
+    /// OIDC's secret is scrubbed, while the OpenViking key must remain file-only.
     pub fn secret(vars: impl Fn(&str) -> Option<String>, name: &str) -> io::Result<Option<String>> {
+        let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message);
+        let direct = match name {
+            "STEVE_OIDC_CLIENT_SECRET" => vars(name),
+            "STEVE_OPENVIKING_KEY" if vars(name).is_none() => None,
+            "STEVE_OPENVIKING_KEY" => {
+                return Err(invalid(&format!(
+                    "{name}: only the file source is supported"
+                )));
+            }
+            _ => return Err(invalid(&format!("{name}: unsupported secret variable"))),
+        };
         let file_name = format!("{name}_FILE");
-        let direct = vars(name);
         let Some(path) = vars(&file_name) else {
             return Ok(direct);
         };
-        let invalid = |message: &str| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{file_name}: {message}"),
-            )
-        };
-        if direct.is_some() {
-            return Err(invalid("cannot be set together with the direct variable"));
-        }
-        if path.is_empty() {
-            return Err(invalid("expected a nonempty file path"));
-        }
         let read = || -> io::Result<String> {
+            if direct.is_some() {
+                return Err(invalid("cannot be set together with the direct variable"));
+            }
+            if path.is_empty() {
+                return Err(invalid("expected a nonempty file path"));
+            }
+            // Reject special files before open: opening a FIFO could otherwise wait for a writer.
+            if !fs::metadata(&path)?.is_file() {
+                return Err(invalid("expected a regular file"));
+            }
             let mut file = fs::File::open(&path)?;
             let meta = file.metadata()?;
             if !meta.is_file() {
@@ -121,12 +131,9 @@ impl AuthConfig {
             file.read_to_string(&mut value)?;
             Ok(value.trim_end_matches(['\r', '\n']).to_owned())
         };
-        read().map(Some).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("{file_name}: cannot read secret file: {e}"),
-            )
-        })
+        read()
+            .map(Some)
+            .map_err(|e| io::Error::new(e.kind(), format!("{file_name}: {e}")))
     }
 
     pub(crate) fn secure(&self) -> bool {

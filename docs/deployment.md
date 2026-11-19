@@ -30,34 +30,33 @@ Both normal startup and `steve-hub --check-config` reject the removed `STEVE_ITE
 variable, including an empty assignment. Set each workspace's item prefix in its workspace
 settings instead. Remove the old assignment before upgrading.
 
-Secrets and URLs that may contain credentials accept the following file sources:
+The Hub and authentication share one secret-file reader. Supported secret forms are:
 
-| Direct variable | File source |
-| --- | --- |
-| `STEVE_OIDC_CLIENT_SECRET` | `STEVE_OIDC_CLIENT_SECRET_FILE` |
-| `STEVE_OPENVIKING_KEY` | `STEVE_OPENVIKING_KEY_FILE` |
-| `STEVE_PUBLIC_URL` | `STEVE_PUBLIC_URL_FILE` |
-| `STEVE_PUBLIC_URLS` | `STEVE_PUBLIC_URLS_FILE` |
-| `STEVE_CLIENT_ORIGINS` | `STEVE_CLIENT_ORIGINS_FILE` |
-| `STEVE_OIDC_ISSUER` | `STEVE_OIDC_ISSUER_FILE` |
-| `STEVE_OPENVIKING_URL` | `STEVE_OPENVIKING_URL_FILE` |
+| Secret | Direct environment variable | File source |
+| --- | --- | --- |
+| OIDC client secret | `STEVE_OIDC_CLIENT_SECRET` | `STEVE_OIDC_CLIENT_SECRET_FILE` |
+| OpenViking root key | None | `STEVE_OPENVIKING_KEY_FILE` |
 
-Set either the direct variable or its file source. Setting both is an error, even if one
-is empty. A file source must name a readable regular UTF-8 file; on Unix its permissions
-must grant only owner read/write (`0600` or stricter). Use `chmod 600 <file>` before checking
-or starting the Hub. The reader removes only trailing CR/LF, preserving spaces and embedded
-newlines. Existing OIDC/OpenViking files with group/world permissions must be corrected;
-spaces that were previously trimmed now remain part of the secret. A missing, unreadable,
-or unsafe source is an error even when the optional backend is disabled. Authentication
-and Hub configuration use the same reader. These file sources do not change how credentials
-stored in the vault or managed by the CLI and connector plugins are loaded.
+For OIDC, set either the direct variable or its file source. Setting both is an error, even
+if one is empty. OpenViking keys are file-only; the Hub rejects `STEVE_OPENVIKING_KEY` because
+that direct name is not removed from harness environments. Public addresses and origins
+(`STEVE_PUBLIC_URL`, `STEVE_PUBLIC_URLS`, `STEVE_CLIENT_ORIGINS`, `STEVE_OIDC_ISSUER` and
+`STEVE_OPENVIKING_URL`) use direct values, with no file-source variants.
 
-`STEVE_KB_STORE=openviking` requires a nonempty `STEVE_OPENVIKING_KEY` or its file source.
+A secret file must be a readable regular UTF-8 file; special files are rejected before open.
+On Unix, permissions must grant only owner read/write (`0600` or stricter), checked on the
+opened handle. Use `chmod 600 <file>` before checking or starting the Hub. The reader removes
+only trailing CR/LF, preserving spaces and embedded newlines. Existing OIDC/OpenViking files
+with group/world permissions must be corrected; spaces previously trimmed now remain part of
+the secret. Missing, unreadable or unsafe sources fail even when the optional backend is off.
+These rules do not change credentials stored in the vault or managed by CLI/connector plugins.
+
+`STEVE_KB_STORE=openviking` requires a nonempty key from `STEVE_OPENVIKING_KEY_FILE`.
 The default OpenViking URL is `http://127.0.0.1:18933`. Public URLs, client origins,
 the OIDC issuer and the OpenViking URL must be absolute HTTP(S) URLs. Lists keep their
 comma-separated format, and the OIDC issuer keeps its trailing slash.
 
-Configuration mistakes fail instead of silently keeping defaults. `STEVE_DEV_LOGIN`,
+Configuration mistakes fail instead of silently keeping defaults. `STEVE_PORT` must be a nonempty decimal integer from 0 to 65535. `STEVE_DEV_LOGIN`,
 `STEVE_NO_RESUME`, `STEVE_DYNAMIC_WORKFLOWS`, `STEVE_ALLOW_ANY_HOST` and `STEVE_DEBUG_ROUTE`
 accept only `0` or `1` (unset means off). `STEVE_BACKUP` accepts `on` or `off` (unset or empty
 means on, ignoring case and surrounding whitespace). Takeover counters must be unsigned

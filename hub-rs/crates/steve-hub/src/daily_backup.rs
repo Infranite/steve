@@ -12,9 +12,6 @@ const FROM_MINUTE: u32 = 3 * 60 + 30;
 const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(300);
 const RETRY_TICKS: u32 = 6;
-pub fn enabled(var: Option<&str>) -> bool {
-    !var.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
-}
 pub fn dir(home: &Path) -> PathBuf {
     home.join("backups")
 }
@@ -150,14 +147,6 @@ mod tests {
             .collect();
         v.sort();
         v
-    }
-
-    #[test]
-    fn off_only_when_said() {
-        assert!(enabled(None));
-        assert!(enabled(Some("")));
-        assert!(enabled(Some("on")));
-        assert!(!enabled(Some(" OFF ")));
     }
 
     #[test]

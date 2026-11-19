@@ -82,23 +82,55 @@ impl Default for DiskPolicy {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{var}: {message}")]
+pub struct DiskPolicyError {
+    pub var: &'static str,
+    pub message: &'static str,
+}
+
 impl DiskPolicy {
-    /// From a variable map (the Hub's configuration); unset or invalid values keep the defaults.
-    pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> DiskPolicy {
+    /// Unset values keep defaults; configured values must be finite, nonnegative and within range.
+    pub fn from_vars(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> std::result::Result<Self, DiskPolicyError> {
         let d = DiskPolicy::default();
-        let num = |k: &str| {
-            get(k)
-                .and_then(|v| v.trim().parse::<f64>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
+        let num = |var: &'static str, scale: f64, max: f64| {
+            get(var)
+                .map(|value| {
+                    value
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|n| n.is_finite() && *n >= 0.0)
+                        .map(|n| n * scale)
+                        .filter(|n| n.is_finite() && *n < max)
+                        .ok_or(DiskPolicyError {
+                            var,
+                            message: "expected a finite nonnegative number within range",
+                        })
+                })
+                .transpose()
         };
-        let floor = num("STEVE_DISK_FLOOR_GB").map_or(d.floor, |g| (g * GB as f64) as u64);
-        let low = num("STEVE_DISK_LOW_GB").map_or(d.low, |g| (g * GB as f64) as u64);
-        DiskPolicy {
+        let floor =
+            num("STEVE_DISK_FLOOR_GB", GB as f64, u64::MAX as f64)?.map_or(d.floor, |n| n as u64);
+        let low = match num("STEVE_DISK_LOW_GB", GB as f64, u64::MAX as f64)? {
+            Some(n) if n < floor as f64 => {
+                return Err(DiskPolicyError {
+                    var: "STEVE_DISK_LOW_GB",
+                    message: "must be at least STEVE_DISK_FLOOR_GB",
+                });
+            }
+            Some(n) => n as u64,
+            None => d.low.max(floor),
+        };
+        let idle_ms = num("STEVE_WORKTREE_IDLE_HOURS", 3_600_000.0, i64::MAX as f64)?
+            .map_or(d.idle_ms, |n| n as i64);
+        Ok(DiskPolicy {
             floor,
-            low: low.max(floor),
-            idle_ms: num("STEVE_WORKTREE_IDLE_HOURS")
-                .map_or(d.idle_ms, |h| (h * 3_600_000.0) as i64),
-        }
+            low,
+            idle_ms,
+        })
     }
 
     pub fn pressure(&self, free: u64) -> Pressure {
@@ -1034,5 +1066,71 @@ impl Tx<'_> {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn configured_values_are_strict_and_each_is_read_once() {
+        let reads = std::cell::RefCell::new(Vec::new());
+        let policy = DiskPolicy::from_vars(|var| {
+            reads.borrow_mut().push(var.to_owned());
+            match var {
+                "STEVE_DISK_FLOOR_GB" => Some("1.5".into()),
+                "STEVE_DISK_LOW_GB" => Some("2".into()),
+                "STEVE_WORKTREE_IDLE_HOURS" => Some("0.5".into()),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            *reads.borrow(),
+            [
+                "STEVE_DISK_FLOOR_GB",
+                "STEVE_DISK_LOW_GB",
+                "STEVE_WORKTREE_IDLE_HOURS"
+            ]
+        );
+        assert_eq!(
+            policy,
+            DiskPolicy {
+                floor: GB * 3 / 2,
+                low: GB * 2,
+                idle_ms: 1_800_000
+            }
+        );
+        for var in [
+            "STEVE_DISK_FLOOR_GB",
+            "STEVE_DISK_LOW_GB",
+            "STEVE_WORKTREE_IDLE_HOURS",
+        ] {
+            for invalid in ["", "oops", "NaN", "inf", "-1", "1e99"] {
+                let error = DiskPolicy::from_vars(|name| (name == var).then(|| invalid.into()))
+                    .unwrap_err();
+                assert_eq!(error.var, var);
+            }
+        }
+    }
+
+    #[test]
+    fn default_low_follows_floor_but_an_explicit_lower_value_is_rejected() {
+        assert_eq!(
+            DiskPolicy::from_vars(|_| None).unwrap(),
+            DiskPolicy::default()
+        );
+        let policy =
+            DiskPolicy::from_vars(|var| (var == "STEVE_DISK_FLOOR_GB").then(|| "50".into()))
+                .unwrap();
+        assert_eq!((policy.floor, policy.low), (50 * GB, 50 * GB));
+        let error = DiskPolicy::from_vars(|var| match var {
+            "STEVE_DISK_FLOOR_GB" => Some("50".into()),
+            "STEVE_DISK_LOW_GB" => Some("40".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert_eq!(error.var, "STEVE_DISK_LOW_GB");
     }
 }

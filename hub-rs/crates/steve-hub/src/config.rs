@@ -319,6 +319,8 @@ pub struct Config {
 /// Errors that stop the Hub at boot, like the TS module-level throws.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error(transparent)]
+    Input(#[from] std::io::Error),
     #[error("{var}: {msg}")]
     Invalid { var: &'static str, msg: String },
     #[error("cannot create {path}: {source}")]
@@ -463,27 +465,16 @@ fn strip_slash(s: &str) -> String {
     s.strip_suffix('/').unwrap_or(s).to_string()
 }
 
-// URLs can carry passwords too, so they use the same source contract as tokens.
-fn secret(
-    get: &impl Fn(&str) -> Option<String>,
-    var: &'static str,
-) -> Result<Option<String>, ConfigError> {
-    steve_auth::AuthConfig::secret(get, var).map_err(|e| ConfigError::Invalid {
-        var,
-        msg: e.to_string(),
-    })
-}
-
-fn flag(get: &impl Fn(&str) -> Option<String>, var: &'static str) -> Result<bool, ConfigError> {
-    match get(var).as_deref() {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        Some(_) => Err(ConfigError::Invalid {
-            var,
-            msg: "expected 0 or 1".into(),
-        }),
-    }
-}
+// Removed inputs are rejected even when set to an empty value.
+const REMOVED: &[&str] = &[
+    "STEVE_ITEM_PREFIX",
+    "STEVE_OPENVIKING_KEY",
+    "STEVE_PUBLIC_URL_FILE",
+    "STEVE_PUBLIC_URLS_FILE",
+    "STEVE_CLIENT_ORIGINS_FILE",
+    "STEVE_OIDC_ISSUER_FILE",
+    "STEVE_OPENVIKING_URL_FILE",
+];
 
 fn count(
     get: &impl Fn(&str) -> Option<String>,
@@ -532,10 +523,10 @@ impl Config {
 
     /// Builds the config from any variable source (tests pass a map); touches no directories.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
-        if get("STEVE_ITEM_PREFIX").is_some() {
+        if let Some(&var) = REMOVED.iter().find(|&&var| get(var).is_some()) {
             return Err(ConfigError::Invalid {
-                var: "STEVE_ITEM_PREFIX",
-                msg: "unknown variable; configure the workspace prefix instead".into(),
+                var,
+                msg: "unknown variable; see the deployment configuration reference".into(),
             });
         }
         let env = |k: &str, d: &str| get(k).unwrap_or_else(|| d.to_string());
@@ -545,23 +536,24 @@ impl Config {
         ));
 
         let port_raw = env("STEVE_PORT", "8440");
-        let port_n = js_number(&port_raw);
-        if !(0.0..=65535.0).contains(&port_n) || port_n.fract() != 0.0 {
-            return Err(ConfigError::Invalid {
+        let port_n = port_raw
+            .parse::<u16>()
+            .ok()
+            .filter(|_| !port_raw.is_empty() && port_raw.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or(ConfigError::Invalid {
                 var: "STEVE_PORT",
-                msg: format!("not a port: {port_raw}"),
-            });
-        }
+                msg: "expected a decimal port from 0 to 65535".into(),
+            })?;
 
         // unset: this machine, on the port the Hub listens on
-        let public_raw = secret(&get, "STEVE_PUBLIC_URL")?
-            .unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
+        let public_raw =
+            get("STEVE_PUBLIC_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
         validate_url("STEVE_PUBLIC_URL", &public_raw)?;
         let public_url = strip_slash(&public_raw);
         let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
             None => None,
             Some(v) => match v.trim().parse::<u16>() {
-                Ok(p) if p != 0 && p != port_n as u16 => Some(p),
+                Ok(p) if p != 0 && p != port_n => Some(p),
                 _ => {
                     return Err(ConfigError::Invalid {
                         var: "STEVE_WEB_PORT",
@@ -570,7 +562,7 @@ impl Config {
                 }
             },
         };
-        let public_urls: Vec<String> = secret(&get, "STEVE_PUBLIC_URLS")?
+        let public_urls: Vec<String> = get("STEVE_PUBLIC_URLS")
             .unwrap_or_else(|| public_raw.clone())
             .split(',')
             .map(|u| strip_slash(u.trim()))
@@ -580,7 +572,7 @@ impl Config {
         for url in &public_urls {
             validate_url("STEVE_PUBLIC_URLS", url)?;
         }
-        let client_origins: Vec<String> = secret(&get, "STEVE_CLIENT_ORIGINS")?
+        let client_origins: Vec<String> = get("STEVE_CLIENT_ORIGINS")
             .unwrap_or_default()
             .split(',')
             .map(|u| strip_slash(u.trim()))
@@ -589,14 +581,14 @@ impl Config {
         for url in &client_origins {
             validate_url("STEVE_CLIENT_ORIGINS", url)?;
         }
-        let client_secret = secret(&get, "STEVE_OIDC_CLIENT_SECRET")?;
-        let issuer = secret(&get, "STEVE_OIDC_ISSUER")?;
+        let client_secret = steve_auth::AuthConfig::secret(&get, "STEVE_OIDC_CLIENT_SECRET")?;
+        let issuer = get("STEVE_OIDC_ISSUER");
         if let Some(url) = &issuer {
             validate_url("STEVE_OIDC_ISSUER", url)?;
         }
         // Validate sources even when the optional backend is disabled.
-        let openviking_key = secret(&get, "STEVE_OPENVIKING_KEY")?;
-        let openviking_url = secret(&get, "STEVE_OPENVIKING_URL")?;
+        let openviking_key = steve_auth::AuthConfig::secret(&get, "STEVE_OPENVIKING_KEY")?;
+        let openviking_url = get("STEVE_OPENVIKING_URL");
         if let Some(url) = &openviking_url {
             validate_url("STEVE_OPENVIKING_URL", url)?;
         }
@@ -606,10 +598,12 @@ impl Config {
         let openviking = match get("STEVE_KB_STORE").as_deref() {
             None | Some("") | Some("sqlite") => None,
             Some("openviking") => {
-                let key = openviking_key.filter(|k| !k.is_empty()).ok_or(ConfigError::Invalid {
-                    var: "STEVE_OPENVIKING_KEY",
-                    msg: "required (directly or through STEVE_OPENVIKING_KEY_FILE) with STEVE_KB_STORE=openviking".into(),
-                })?;
+                let key = openviking_key
+                    .filter(|k| !k.is_empty())
+                    .ok_or(ConfigError::Invalid {
+                        var: "STEVE_OPENVIKING_KEY_FILE",
+                        msg: "required with STEVE_KB_STORE=openviking".into(),
+                    })?;
                 Some(steve_knowledge::openviking::OpenVikingConfig {
                     url: openviking_url.unwrap_or_else(|| "http://127.0.0.1:18933".into()),
                     key,
@@ -681,42 +675,12 @@ impl Config {
                 }
             },
         };
-        for (var, scale, max) in [
-            (
-                "STEVE_DISK_FLOOR_GB",
-                steve_core::workspace::GB as f64,
-                u64::MAX as f64,
-            ),
-            (
-                "STEVE_DISK_LOW_GB",
-                steve_core::workspace::GB as f64,
-                u64::MAX as f64,
-            ),
-            ("STEVE_WORKTREE_IDLE_HOURS", 3_600_000.0, i64::MAX as f64),
-        ] {
-            if let Some(v) = get(var) {
-                let valid = v.trim().parse::<f64>().is_ok_and(|n| {
-                    n.is_finite() && n >= 0.0 && (n * scale).is_finite() && n * scale < max
-                });
-                if !valid {
-                    return Err(ConfigError::Invalid {
-                        var,
-                        msg: "expected a finite nonnegative number within range".into(),
-                    });
-                }
+        let disk = steve_core::workspace::DiskPolicy::from_vars(&get).map_err(|e| {
+            ConfigError::Invalid {
+                var: e.var,
+                msg: e.message.into(),
             }
-        }
-        let disk = steve_core::workspace::DiskPolicy::from_vars(&get);
-        if get("STEVE_DISK_LOW_GB").is_some_and(|s| {
-            s.trim()
-                .parse::<f64>()
-                .is_ok_and(|n| n * (steve_core::workspace::GB as f64) < disk.floor as f64)
-        }) {
-            return Err(ConfigError::Invalid {
-                var: "STEVE_DISK_LOW_GB",
-                msg: "must be at least STEVE_DISK_FLOOR_GB".into(),
-            });
-        }
+        })?;
 
         Ok(Config {
             data_dir: home.join("data"),
@@ -724,8 +688,8 @@ impl Config {
             scratch: home.join("scratch"),
             listen: Listen::parse(
                 &env("STEVE_HOST", "127.0.0.1"),
-                port_n as u16,
-                flag(&get, "STEVE_ALLOW_ANY_HOST")?,
+                port_n,
+                steve_auth::flag(&get, "STEVE_ALLOW_ANY_HOST")?,
             )?,
             metrics: {
                 let listen =
@@ -754,9 +718,9 @@ impl Config {
                 client_id: get("STEVE_OIDC_CLIENT_ID"),
                 client_secret,
             },
-            dev_login: flag(&get, "STEVE_DEV_LOGIN")?,
-            no_resume: flag(&get, "STEVE_NO_RESUME")?,
-            dynamic_workflows: flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
+            dev_login: steve_auth::flag(&get, "STEVE_DEV_LOGIN")?,
+            no_resume: steve_auth::flag(&get, "STEVE_NO_RESUME")?,
+            dynamic_workflows: steve_auth::flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
             backup,
             takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
             takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
@@ -798,7 +762,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
-            debug_route: flag(&get, "STEVE_DEBUG_ROUTE")?,
+            debug_route: steve_auth::flag(&get, "STEVE_DEBUG_ROUTE")?,
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
