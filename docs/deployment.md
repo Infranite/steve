@@ -3,6 +3,7 @@
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
 - [Dynamic workflows](#dynamic-workflows)
+- [Configuration values and secret files](#configuration-values-and-secret-files)
 - [Homebrew installation](#homebrew-installation)
 - [The first meeting](#the-first-meeting)
 - [Reconfiguring an installed Hub](#reconfiguring-an-installed-hub)
@@ -22,6 +23,49 @@ Dynamic multi-Bot workflows are disabled by default. Ordinary items execute dire
 While disabled, planning/replanning, retrying, resuming and starting new workflow turns are rejected, including cached tool calls and queued child prompts after restart. Already running attempts may settle and report results; disabling is not confirmation that they stopped. Persisted stop intents continue to reconcile. Graphs, results, history, failed reviews and acceptance requirements remain intact; re-enabling does not clear pause/cancellation state.
 
 For an existing unfinished graph, use the item's collaboration panel to pause it and wait for all child execution to be confirmed stopped. The user can then explicitly confirm single-session takeover there. This changes the graph's required independent-review/integration acceptance, is recorded in history, and cannot be approved by a Bot token. It does not repair defects found by an earlier review or turn failed/cancelled units into passes. Ordinary Git pull requests still require human review and merge authorization; single-session execution is not independent Bot review. Do not run agent-provided scripts to raise attempt budgets as a recovery step.
+
+## Configuration values and secret files
+
+Both normal startup and `steve-hub --check-config` reject the removed `STEVE_ITEM_PREFIX`
+variable, including an empty assignment. Set each workspace's item prefix in its workspace
+settings instead. Remove the old assignment before upgrading.
+
+Secrets and URLs that may contain credentials accept the following file sources:
+
+| Direct variable | File source |
+| --- | --- |
+| `STEVE_OIDC_CLIENT_SECRET` | `STEVE_OIDC_CLIENT_SECRET_FILE` |
+| `STEVE_OPENVIKING_KEY` | `STEVE_OPENVIKING_KEY_FILE` |
+| `STEVE_PUBLIC_URL` | `STEVE_PUBLIC_URL_FILE` |
+| `STEVE_PUBLIC_URLS` | `STEVE_PUBLIC_URLS_FILE` |
+| `STEVE_CLIENT_ORIGINS` | `STEVE_CLIENT_ORIGINS_FILE` |
+| `STEVE_OIDC_ISSUER` | `STEVE_OIDC_ISSUER_FILE` |
+| `STEVE_OPENVIKING_URL` | `STEVE_OPENVIKING_URL_FILE` |
+
+Set either the direct variable or its file source. Setting both is an error, even if one
+is empty. A file source must name a readable regular UTF-8 file; on Unix its permissions
+must grant only owner read/write (`0600` or stricter). Use `chmod 600 <file>` before checking
+or starting the Hub. The reader removes only trailing CR/LF, preserving spaces and embedded
+newlines. Existing OIDC/OpenViking files with group/world permissions must be corrected;
+spaces that were previously trimmed now remain part of the secret. A missing, unreadable,
+or unsafe source is an error even when the optional backend is disabled. Authentication
+and Hub configuration use the same reader. These file sources do not change how credentials
+stored in the vault or managed by the CLI and connector plugins are loaded.
+
+`STEVE_KB_STORE=openviking` requires a nonempty `STEVE_OPENVIKING_KEY` or its file source.
+The default OpenViking URL is `http://127.0.0.1:18933`. Public URLs, client origins,
+the OIDC issuer and the OpenViking URL must be absolute HTTP(S) URLs. Lists keep their
+comma-separated format, and the OIDC issuer keeps its trailing slash.
+
+Configuration mistakes fail instead of silently keeping defaults. `STEVE_DEV_LOGIN`,
+`STEVE_NO_RESUME`, `STEVE_DYNAMIC_WORKFLOWS`, `STEVE_ALLOW_ANY_HOST` and `STEVE_DEBUG_ROUTE`
+accept only `0` or `1` (unset means off). `STEVE_BACKUP` accepts `on` or `off` (unset or empty
+means on, ignoring case and surrounding whitespace). Takeover counters must be unsigned
+32-bit integers, and `STEVE_IDLE_RELEASE_MS` must be a nonnegative integer in range.
+`STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB` and `STEVE_WORKTREE_IDLE_HOURS` must be finite,
+nonnegative numbers within their byte/millisecond ranges. An explicitly configured disk
+low-water mark must not be below the floor. Run `steve-hub --check-config` in the service's
+environment before starting it.
 
 ## Homebrew installation
 

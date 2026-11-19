@@ -305,8 +305,6 @@ pub struct Config {
     /// Model for bots that don't pick one, per harness.
     pub default_models: BTreeMap<String, String>,
     pub idle_release_ms: u64,
-    /// Read but unused, as in TS: the prefix comes from the workspace row.
-    pub item_prefix: String,
     pub version: String,
     /// Steve's own repository (`STEVE_REPO`): seed project, items about Steve itself, release repo.
     pub steve_repo: PathBuf,
@@ -323,12 +321,6 @@ pub struct Config {
 pub enum ConfigError {
     #[error("{var}: {msg}")]
     Invalid { var: &'static str, msg: String },
-    #[error("cannot read {var} file {path}: {source}")]
-    SecretFile {
-        var: &'static str,
-        path: String,
-        source: std::io::Error,
-    },
     #[error("cannot create {path}: {source}")]
     Dir {
         path: String,
@@ -471,6 +463,55 @@ fn strip_slash(s: &str) -> String {
     s.strip_suffix('/').unwrap_or(s).to_string()
 }
 
+// URLs can carry passwords too, so they use the same source contract as tokens.
+fn secret(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<Option<String>, ConfigError> {
+    steve_auth::AuthConfig::secret(get, var).map_err(|e| ConfigError::Invalid {
+        var,
+        msg: e.to_string(),
+    })
+}
+
+fn flag(get: &impl Fn(&str) -> Option<String>, var: &'static str) -> Result<bool, ConfigError> {
+    match get(var).as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(_) => Err(ConfigError::Invalid {
+            var,
+            msg: "expected 0 or 1".into(),
+        }),
+    }
+}
+
+fn count(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<Option<u32>, ConfigError> {
+    get(var)
+        .map(|s| {
+            s.trim().parse().map_err(|_| ConfigError::Invalid {
+                var,
+                msg: "expected an unsigned 32-bit integer".into(),
+            })
+        })
+        .transpose()
+}
+
+fn validate_url(var: &'static str, value: &str) -> Result<(), ConfigError> {
+    if reqwest::Url::parse(value)
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+    {
+        Ok(())
+    } else {
+        Err(ConfigError::Invalid {
+            var,
+            msg: "expected an absolute http(s) URL".into(),
+        })
+    }
+}
+
 impl Config {
     /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -491,6 +532,12 @@ impl Config {
 
     /// Builds the config from any variable source (tests pass a map); touches no directories.
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        if get("STEVE_ITEM_PREFIX").is_some() {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_ITEM_PREFIX",
+                msg: "unknown variable; configure the workspace prefix instead".into(),
+            });
+        }
         let env = |k: &str, d: &str| get(k).unwrap_or_else(|| d.to_string());
         let home_default = home_dir().join(".steve");
         let home = resolve(Path::new(
@@ -507,7 +554,9 @@ impl Config {
         }
 
         // unset: this machine, on the port the Hub listens on
-        let public_raw = env("STEVE_PUBLIC_URL", &format!("http://127.0.0.1:{port_n}"));
+        let public_raw = secret(&get, "STEVE_PUBLIC_URL")?
+            .unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
+        validate_url("STEVE_PUBLIC_URL", &public_raw)?;
         let public_url = strip_slash(&public_raw);
         let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
             None => None,
@@ -521,48 +570,48 @@ impl Config {
                 }
             },
         };
-        let public_urls = get("STEVE_PUBLIC_URLS")
+        let public_urls: Vec<String> = secret(&get, "STEVE_PUBLIC_URLS")?
             .unwrap_or_else(|| public_raw.clone())
             .split(',')
             .map(|u| strip_slash(u.trim()))
             .filter(|u| !u.is_empty())
             .collect();
 
-        let secret = match get("STEVE_OIDC_CLIENT_SECRET_FILE").filter(|p| !p.is_empty()) {
-            Some(p) => Some(
-                std::fs::read_to_string(&p)
-                    .map_err(|source| ConfigError::SecretFile {
-                        var: "STEVE_OIDC_CLIENT_SECRET_FILE",
-                        path: p.clone(),
-                        source,
-                    })?
-                    .trim()
-                    .to_string(),
-            ),
-            None => get("STEVE_OIDC_CLIENT_SECRET"),
-        };
+        for url in &public_urls {
+            validate_url("STEVE_PUBLIC_URLS", url)?;
+        }
+        let client_origins: Vec<String> = secret(&get, "STEVE_CLIENT_ORIGINS")?
+            .unwrap_or_default()
+            .split(',')
+            .map(|u| strip_slash(u.trim()))
+            .filter(|u| !u.is_empty())
+            .collect();
+        for url in &client_origins {
+            validate_url("STEVE_CLIENT_ORIGINS", url)?;
+        }
+        let client_secret = secret(&get, "STEVE_OIDC_CLIENT_SECRET")?;
+        let issuer = secret(&get, "STEVE_OIDC_ISSUER")?;
+        if let Some(url) = &issuer {
+            validate_url("STEVE_OIDC_ISSUER", url)?;
+        }
+        // Validate sources even when the optional backend is disabled.
+        let openviking_key = secret(&get, "STEVE_OPENVIKING_KEY")?;
+        let openviking_url = secret(&get, "STEVE_OPENVIKING_URL")?;
+        if let Some(url) = &openviking_url {
+            validate_url("STEVE_OPENVIKING_URL", url)?;
+        }
 
         // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
         // key from `STEVE_OPENVIKING_KEY_FILE`
         let openviking = match get("STEVE_KB_STORE").as_deref() {
             None | Some("") | Some("sqlite") => None,
             Some("openviking") => {
-                let path = get("STEVE_OPENVIKING_KEY_FILE")
-                    .filter(|p| !p.is_empty())
-                    .ok_or(ConfigError::Invalid {
-                        var: "STEVE_OPENVIKING_KEY_FILE",
-                        msg: "required with STEVE_KB_STORE=openviking".into(),
-                    })?;
-                let key = std::fs::read_to_string(&path)
-                    .map_err(|source| ConfigError::SecretFile {
-                        var: "STEVE_OPENVIKING_KEY_FILE",
-                        path: path.clone(),
-                        source,
-                    })?
-                    .trim()
-                    .to_string();
+                let key = openviking_key.filter(|k| !k.is_empty()).ok_or(ConfigError::Invalid {
+                    var: "STEVE_OPENVIKING_KEY",
+                    msg: "required (directly or through STEVE_OPENVIKING_KEY_FILE) with STEVE_KB_STORE=openviking".into(),
+                })?;
                 Some(steve_knowledge::openviking::OpenVikingConfig {
-                    url: env("STEVE_OPENVIKING_URL", "http://127.0.0.1:18933"),
+                    url: openviking_url.unwrap_or_else(|| "http://127.0.0.1:18933".into()),
                     key,
                     account: env("STEVE_OPENVIKING_ACCOUNT", "steve"),
                 })
@@ -605,7 +654,69 @@ impl Config {
                 .collect::<Vec<_>>()
         };
         let idle_raw = env("STEVE_IDLE_RELEASE_MS", "600000");
-        let idle = js_number(&idle_raw);
+        let idle = idle_raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| ConfigError::Invalid {
+                var: "STEVE_IDLE_RELEASE_MS",
+                msg: "expected a nonnegative integer number of milliseconds".into(),
+            })?;
+        if idle > i64::MAX as u64 {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_IDLE_RELEASE_MS",
+                msg: "expected a nonnegative integer number of milliseconds within i64 range"
+                    .into(),
+            });
+        }
+        let backup = match get("STEVE_BACKUP") {
+            None => true,
+            Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "" | "on" => true,
+                "off" => false,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        var: "STEVE_BACKUP",
+                        msg: "expected on or off".into(),
+                    });
+                }
+            },
+        };
+        for (var, scale, max) in [
+            (
+                "STEVE_DISK_FLOOR_GB",
+                steve_core::workspace::GB as f64,
+                u64::MAX as f64,
+            ),
+            (
+                "STEVE_DISK_LOW_GB",
+                steve_core::workspace::GB as f64,
+                u64::MAX as f64,
+            ),
+            ("STEVE_WORKTREE_IDLE_HOURS", 3_600_000.0, i64::MAX as f64),
+        ] {
+            if let Some(v) = get(var) {
+                let valid = v.trim().parse::<f64>().is_ok_and(|n| {
+                    n.is_finite() && n >= 0.0 && (n * scale).is_finite() && n * scale < max
+                });
+                if !valid {
+                    return Err(ConfigError::Invalid {
+                        var,
+                        msg: "expected a finite nonnegative number within range".into(),
+                    });
+                }
+            }
+        }
+        let disk = steve_core::workspace::DiskPolicy::from_vars(&get);
+        if get("STEVE_DISK_LOW_GB").is_some_and(|s| {
+            s.trim()
+                .parse::<f64>()
+                .is_ok_and(|n| n * (steve_core::workspace::GB as f64) < disk.floor as f64)
+        }) {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_DISK_LOW_GB",
+                msg: "must be at least STEVE_DISK_FLOOR_GB".into(),
+            });
+        }
 
         Ok(Config {
             data_dir: home.join("data"),
@@ -614,7 +725,7 @@ impl Config {
             listen: Listen::parse(
                 &env("STEVE_HOST", "127.0.0.1"),
                 port_n as u16,
-                get("STEVE_ALLOW_ANY_HOST").as_deref() == Some("1"),
+                flag(&get, "STEVE_ALLOW_ANY_HOST")?,
             )?,
             metrics: {
                 let listen =
@@ -633,29 +744,23 @@ impl Config {
             public_url,
             public_urls,
             web_port,
-            client_origins: get("STEVE_CLIENT_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|u| strip_slash(u.trim()))
-                .filter(|u| !u.is_empty())
-                .collect(),
+            client_origins,
             web_dir: get("STEVE_WEB_DIR").map(PathBuf::from).unwrap_or_else(|| {
                 // TS resolves ../../web/dist from hub/src; the Rust crate sits two levels deeper
                 resolve(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../web/dist"))
             }),
             oidc: Oidc {
-                issuer: get("STEVE_OIDC_ISSUER"),
+                issuer,
                 client_id: get("STEVE_OIDC_CLIENT_ID"),
-                client_secret: secret,
+                client_secret,
             },
-            dev_login: get("STEVE_DEV_LOGIN").as_deref() == Some("1"),
-            no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
-            dynamic_workflows: get("STEVE_DYNAMIC_WORKFLOWS").as_deref() == Some("1"),
-            backup: crate::daily_backup::enabled(get("STEVE_BACKUP").as_deref()),
-            takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
-            takeover_same_refusals: get("STEVE_TAKEOVER_SAME_REFUSALS")
-                .and_then(|v| v.parse().ok()),
-            disk: steve_core::workspace::DiskPolicy::from_vars(&get),
+            dev_login: flag(&get, "STEVE_DEV_LOGIN")?,
+            no_resume: flag(&get, "STEVE_NO_RESUME")?,
+            dynamic_workflows: flag(&get, "STEVE_DYNAMIC_WORKFLOWS")?,
+            backup,
+            takeover_continues: count(&get, "STEVE_TAKEOVER_CONTINUES")?,
+            takeover_same_refusals: count(&get, "STEVE_TAKEOVER_SAME_REFUSALS")?,
+            disk,
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),
             codex_executable: get("CODEX_EXECUTABLE").unwrap_or_else(|| {
@@ -684,12 +789,7 @@ impl Config {
                     (!model.is_empty()).then(|| (id.to_string(), model))
                 })
                 .collect(),
-            idle_release_ms: if idle.is_finite() && idle >= 0.0 {
-                idle as u64
-            } else {
-                600_000
-            },
-            item_prefix: env("STEVE_ITEM_PREFIX", "ST"),
+            idle_release_ms: idle,
             version: crate::build_identity()
                 .map(|(version, _)| version.to_owned())
                 .unwrap_or_else(|| env("STEVE_VERSION", "dev")),
@@ -698,7 +798,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(steve_core::config::steve_checkout_of_exe)
                 .unwrap_or_default(),
-            debug_route: get("STEVE_DEBUG_ROUTE").is_some(),
+            debug_route: flag(&get, "STEVE_DEBUG_ROUTE")?,
             codex_home: get("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join(".codex")),
@@ -754,9 +854,7 @@ mod tests {
     #[test]
     fn dynamic_workflows_require_explicit_one() {
         assert!(!cfg(&[]).dynamic_workflows);
-        for value in ["", "0", "true", "on", " 1", "1 "] {
-            assert!(!cfg(&[("STEVE_DYNAMIC_WORKFLOWS", value)]).dynamic_workflows);
-        }
+        assert!(!cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "0")]).dynamic_workflows);
         assert!(cfg(&[("STEVE_DYNAMIC_WORKFLOWS", "1")]).dynamic_workflows);
     }
 
@@ -917,28 +1015,6 @@ mod tests {
         let c = cfg(&[("STEVE_PORT", "9001")]);
         assert_eq!(c.public_url, "http://127.0.0.1:9001");
         assert_eq!(c.public_urls, vec!["http://127.0.0.1:9001"]);
-    }
-
-    #[test]
-    fn secret_file_wins_and_is_trimmed() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let f = dir.path().join("s");
-        std::fs::write(&f, "  sekrit\n").expect("write");
-        let c = cfg(&[
-            ("STEVE_OIDC_CLIENT_SECRET", "env"),
-            (
-                "STEVE_OIDC_CLIENT_SECRET_FILE",
-                f.to_str().unwrap_or_default(),
-            ),
-        ]);
-        assert_eq!(c.oidc.client_secret.as_deref(), Some("sekrit"));
-        assert_eq!(
-            cfg(&[("STEVE_OIDC_CLIENT_SECRET", "env")])
-                .oidc
-                .client_secret
-                .as_deref(),
-            Some("env")
-        );
     }
 
     /// Harness parity S1: the Hub's own manifest adds adapters and declarations; an explicit

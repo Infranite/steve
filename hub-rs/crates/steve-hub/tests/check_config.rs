@@ -110,3 +110,87 @@ fn local_cli_requests_use_the_hubs_operation_contract() {
         Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     );
 }
+
+#[test]
+fn removed_and_malformed_variables_fail_the_preflight() {
+    for (name, value) in [
+        ("STEVE_ITEM_PREFIX", "ST"),
+        ("STEVE_TAKEOVER_CONTINUES", "typo"),
+        ("STEVE_TAKEOVER_SAME_REFUSALS", "-1"),
+        ("STEVE_IDLE_RELEASE_MS", "NaN"),
+        ("STEVE_DISK_FLOOR_GB", "unknown"),
+        ("STEVE_BACKUP", "of"),
+        ("STEVE_DYNAMIC_WORKFLOWS", "yes"),
+    ] {
+        let (code, r, tmp) = check(&[(name, value)]);
+        assert_eq!(code, 2, "{name}: {r}");
+        assert_eq!(r["ok"], false);
+        assert!(r["errors"][0].as_str().unwrap().starts_with(name), "{r}");
+        if name == "STEVE_ITEM_PREFIX" {
+            assert!(
+                r["errors"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("unknown variable")
+            );
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+}
+
+#[test]
+fn secret_files_are_checked_for_conflicts_and_permissions_before_startup() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secret");
+    std::fs::write(&path, "private-test-sentinel\n").unwrap();
+    let path_str = path.to_str().unwrap();
+    for mode in [0o644, 0o600] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (code, r, tmp) = check(&[("STEVE_OIDC_CLIENT_SECRET_FILE", path_str)]);
+        assert_eq!(code, if mode == 0o600 { 0 } else { 2 }, "{r}");
+        assert!(!r.to_string().contains("private-test-sentinel"), "{r}");
+        if mode == 0o644 {
+            assert!(r["errors"][0].as_str().unwrap().contains("0600"));
+        }
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+    let (code, r, tmp) = check(&[
+        ("STEVE_OIDC_CLIENT_SECRET_FILE", path_str),
+        ("STEVE_OIDC_CLIENT_SECRET", "inline"),
+    ]);
+    assert_eq!(code, 2, "{r}");
+    assert!(
+        r["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("cannot be set together"),
+        "{r}"
+    );
+    assert!(!r.to_string().contains("private-test-sentinel"));
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn removed_variables_also_stop_normal_startup_before_creating_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", tmp.path())
+        .env("STEVE_HOME", tmp.path())
+        .env("STEVE_NO_RESUME", "1")
+        .env("STEVE_ADAPTER_CLAUDE", "/usr/bin/false")
+        .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
+        .env("STEVE_PORT", "0")
+        .env("STEVE_ITEM_PREFIX", "ST")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("STEVE_ITEM_PREFIX") && error.contains("unknown variable"),
+        "{error}"
+    );
+    assert!(!tmp.path().join("data").exists());
+}
