@@ -575,27 +575,6 @@ impl RoutedRuntime {
         }
     }
 
-    /// Whether the Node `session_id` is bound to can be told [`steve_node_api::PermissionMode::Auto`]:
-    /// the local Node always (it is this build), a remote one once its link said
-    /// [`steve_node_api::AUTO_MODE`]. An older Node cannot decode it and would refuse the configure.
-    /// `None`: not known yet (a remote Node not linked since the Hub started), which may change.
-    fn speaks_auto(&self, session_id: &str) -> Option<bool> {
-        let Some(node) = node_of(&self.store, session_id) else {
-            return Some(false);
-        };
-        if self
-            .node
-            .as_ref()
-            .is_some_and(|n| n.node_id().as_str() == node)
-        {
-            return Some(true);
-        }
-        match (&self.fleet, steve_node_api::NodeId::new(node)) {
-            (Some(f), Ok(id)) => f.speaks_known(&id, steve_node_api::AUTO_MODE),
-            _ => Some(false),
-        }
-    }
-
     /// The harness mode `session_id` is meant to start in (YOLO's widening included).
     pub(super) fn perm_mode(&self, session_id: &str) -> Option<String> {
         self.host.perm_mode(session_id)
@@ -697,14 +676,13 @@ impl RoutedRuntime {
             }
             _ => return false,
         }
-        let auto = f.speaks(target, steve_node_api::AUTO_MODE);
         let perm = self.perm_mode(session_id);
         let Some(b) = super::node_binding::remote_binding_for(
             &self.store,
             session_id,
             perm.as_deref(),
             target,
-            auto,
+            true,
         ) else {
             tracing::info!("{session_id}: not bound to the remote Node {target}");
             return false;
@@ -1315,21 +1293,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         match self.route_strict(session_id)? {
             // through the Node's configure, at the session's next idle boundary
             Backend::Node(n) => match super::node_binding::permission_mode(mode) {
-                // a remote Node not linked since the Hub started may well speak auto: not known
-                // yet, so the switch stays pending (an error) and the next sync asks again
-                Some(steve_node_api::PermissionMode::Auto)
-                    if self.speaks_auto(session_id).is_none() =>
-                {
-                    Err(CoreError::Msg(format!(
-                        "set mode {mode} on {session_id}: its Node has not linked yet"
-                    )))
-                }
-                Some(steve_node_api::PermissionMode::Auto)
-                    if self.speaks_auto(session_id) == Some(false) =>
-                {
-                    // its hello said an older protocol: trying again would not help
-                    Ok(Configured::Unsupported)
-                }
                 Some(p) => Ok(
                     match n.configure(
                         session_id,
@@ -2505,8 +2468,7 @@ mod routed_tests {
     }
 
     /// A switch to auto for a session on a remote Node not linked since the Hub started is not
-    /// known to be impossible: an error (the YOLO sync keeps it pending and asks again), never the
-    /// permanent Unsupported, which only a hello older than AUTO_MODE gives.
+    /// rejected as unsupported: the switch waits for its Node.
     #[tokio::test]
     async fn auto_on_a_remote_node_not_linked_yet_stays_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -2517,7 +2479,7 @@ mod routed_tests {
             Some(Arc::new(super::super::node_tools::tests::Ends)),
             None,
         );
-        rt.fleet = Some(fleet.clone());
+        rt.fleet = Some(fleet);
         rt.store
             .transaction::<_, steve_store::StoreError>(|tx| {
                 tx.execute(
@@ -2535,22 +2497,35 @@ mod routed_tests {
                     },
                     1,
                 )?;
+                use steve_node_api::testkit::build;
+                steve_store::runtime::insert_command_in(
+                    tx,
+                    &steve_store::runtime::NewCommand {
+                        operation: "open_s1",
+                        node: "n2",
+                        method: "open_session",
+                        request: &serde_json::to_value(build::cmd("open_s1", build::open("s1", "n2")))?,
+                        digest: "d",
+                        target_attempt: None,
+                        dependency: None,
+                    },
+                    1,
+                )?;
+                tx.execute_batch(
+                    r#"UPDATE node_commands SET state='finished',receipt='{"success":true}' WHERE operation_id='open_s1';
+                       UPDATE runtime_sessions SET phase='ready' WHERE session_id='s1';"#,
+                )?;
                 Ok(())
             })
             .unwrap();
-        assert!(
-            rt.set_mode("s1", "auto").is_err(),
-            "not linked yet: retried"
-        );
-        let n2 = steve_node_api::NodeId::new("n2").unwrap();
-        fleet.linked(
-            &n2,
-            (steve_node_api::AUTO_MODE.0, steve_node_api::AUTO_MODE.1 - 1),
-        );
         assert!(matches!(
             rt.set_mode("s1", "auto").unwrap(),
-            steve_core::Configured::Unsupported
+            steve_core::Configured::Pending
         ));
+        assert_eq!(
+            rt.mode_state("s1").unwrap().desired.as_deref(),
+            Some("auto")
+        );
     }
 
     /// The Hub's own Node in a process of its own could not link: a session bound to it is waiting

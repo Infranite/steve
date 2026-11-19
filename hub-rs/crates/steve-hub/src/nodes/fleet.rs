@@ -202,18 +202,6 @@ impl NodeFleet {
         self.entry(node, |e| e.link_failure = Some((at, why)));
     }
 
-    /// Whether the Node is known to speak `since` or later: its latest link said so. A Node not
-    /// linked since the Hub started counts as not, so what a minor added is never sent to it.
-    pub fn speaks(&self, node: &NodeId, since: (u16, u16)) -> bool {
-        self.speaks_known(node, since).unwrap_or(false)
-    }
-
-    /// [`Self::speaks`], telling "not known yet" (`None`: not linked since the Hub started) from
-    /// "its hello said an older protocol" (`Some(false)`).
-    pub fn speaks_known(&self, node: &NodeId, since: (u16, u16)) -> Option<bool> {
-        self.entry(node, |e| e.proto.map(|p| p.0 == since.0 && p >= since))
-    }
-
     /// Gives `node` a coordinator the Hub built itself (the Hub's own Node in a process of its
     /// own, B1): trusted as the in-process Node is, none of a remote Node's limits. Its link's
     /// events, Steve's tools and attachments go to these; [`Self::start`] returns it.

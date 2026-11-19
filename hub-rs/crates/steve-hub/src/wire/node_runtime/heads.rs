@@ -46,19 +46,13 @@ pub struct NodeSnapshot {
 pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapshot> {
     let mut entries: HashMap<String, SnapshotEntry> = HashMap::new();
     let mut heads: HashMap<String, StreamHead> = HashMap::new();
-    let (mut cursor, mut restarts, mut paged_heads) = (None, 0, true);
+    let (mut cursor, mut restarts) = (None, 0);
     loop {
         match node
             .snapshot(PageRequest {
                 cursor: cursor.clone(),
-                // Zero on the first page asks a new Node to paginate stream heads too. An
-                // older Node treats it as one entry and still sends its complete heads; later
-                // pages use the usual limit and duplicate heads are folded by stream id.
-                limit: if cursor.is_none() && paged_heads {
-                    0
-                } else {
-                    limit
-                },
+                // Zero on the first page asks the Node to paginate stream heads too.
+                limit: if cursor.is_none() { 0 } else { limit },
             })
             .await
         {
@@ -83,10 +77,6 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                 entries.clear();
                 heads.clear();
                 cursor = None;
-            }
-            Err(e) if e.code == ErrorCode::Invalid && cursor.is_none() && paged_heads => {
-                // A third-party older Node may reject zero rather than clamp it to one.
-                paged_heads = false;
             }
             Err(e) => return Err(e),
         }

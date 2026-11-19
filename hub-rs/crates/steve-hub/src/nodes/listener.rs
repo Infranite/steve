@@ -273,12 +273,8 @@ async fn serve_after(
 const HOST_ASK: Duration = Duration::from_secs(15);
 
 /// Asks the Node over `conn` what machine it is ([`Discovery::host`]) and keeps the answer with it, for
-/// while it is away too. A Node of an earlier protocol is not asked; one that does not answer keeps
-/// what it said before.
+/// while it is away too. A Node that does not answer keeps what it said before.
 async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
-    if conn.peer_minor() < HOST_INFO.1 {
-        return;
-    }
     let remote = svc.fleet.remote(&node);
     let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
         Ok(Ok(h)) => h,

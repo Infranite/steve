@@ -134,21 +134,6 @@ impl RemoteNode {
         }
     }
 
-    /// A request that uses what protocol 0.`minor` added goes only to a peer that speaks it: an
-    /// older one would ignore the new fields (no struct refuses unknown ones) and act without
-    /// them, a merge left conflicted or a push without its origin check. Refused here, nothing
-    /// sent, so `unsupported` truly means nothing ran.
-    fn needs(&self, minor: u16, what: &str) -> ApiResult<()> {
-        let have = self.conn(false)?.peer_minor();
-        if have < minor {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                format!("{what}: the node speaks protocol {}.{have}", PROTOCOL.0),
-            ));
-        }
-        Ok(())
-    }
-
     async fn go<A: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
@@ -249,26 +234,19 @@ impl WorkspaceExecutor for RemoteNode {
         self.cmd(WORKSPACE_TIDY, &c, false).await
     }
     async fn git_facts(&self, q: GitQuery) -> ApiResult<GitFacts> {
-        if !q.reads.is_empty() {
-            self.needs(2, "git reads")?;
-        }
         self.go(GIT_INSPECT, &q, None, false).await
     }
     async fn git_apply(&self, c: Command<GitApply>) -> ApiResult<Receipt> {
-        match &c.body.action {
-            GitAction::Rebase { .. } => {}
-            // a push's url, origin and local guards: 0.2
-            // a push to another branch is the merge queue's, on the Hub's own Node for now
-            GitAction::Push {
-                remote_branch: Some(_),
-                ..
-            } => {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
-                    "a push to another branch is not on a remote node yet",
-                ));
-            }
-            GitAction::Push { .. } => self.needs(2, "push")?,
+        // A push to another branch is the merge queue's, on the Hub's own Node for now.
+        if let GitAction::Push {
+            remote_branch: Some(_),
+            ..
+        } = &c.body.action
+        {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "a push to another branch is not on a remote node yet",
+            ));
         }
         self.cmd(GIT_APPLY, &c, false).await
     }
@@ -299,12 +277,6 @@ impl WorkspaceExecutor for RemoteNode {
         &self,
         mut q: ExecutionDeliveryRead,
     ) -> ApiResult<DeliveryChunk> {
-        if q.reply {
-            self.needs(
-                steve_node_api::REPLY_DELIVERY_SCOPE.1,
-                EXECUTION_DELIVERY_READ,
-            )?;
-        }
         q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(EXECUTION_DELIVERY_READ, &q, None, false).await
     }
@@ -313,9 +285,6 @@ impl WorkspaceExecutor for RemoteNode {
         self.go(DELIVERY_READ, &q, None, false).await
     }
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt> {
-        if c.body.limits != ScanLimits::default() {
-            self.needs(2, "scan limits")?;
-        }
         self.cmd(TREE_SCAN, &c, false).await
     }
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage> {
@@ -330,39 +299,31 @@ impl WorkspaceExecutor for RemoteNode {
 #[async_trait]
 impl Discovery for RemoteNode {
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
-        self.needs(steve_node_api::SESSION_CAPACITY.1, NODE_SESSION_CAPACITY)?;
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }
     async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
-        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE)?;
         let op = u.operation.clone();
         self.go(NODE_UPGRADE, &u, Some(&op), false).await
     }
     async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
-        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE_SWITCH)?;
         let op = s.operation.clone();
         self.go(NODE_UPGRADE_SWITCH, &s, Some(&op), false).await
     }
     async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
-        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE_STATUS)?;
         self.go(NODE_UPGRADE_STATUS, &operation, None, false).await
     }
     async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
-        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE)?;
         let op = r.operation.clone();
         self.go(NODE_REMOVE, &r, Some(&op), false).await
     }
     async fn remove_commit(&self, c: RemoveCommit) -> ApiResult<NodeRemoveState> {
-        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE_COMMIT)?;
         let op = c.operation.clone();
         self.go(NODE_REMOVE_COMMIT, &c, Some(&op), false).await
     }
     async fn remove_status(&self, operation: OperationId) -> ApiResult<NodeRemoveState> {
-        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE_STATUS)?;
         self.go(NODE_REMOVE_STATUS, &operation, None, false).await
     }
     async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
-        self.needs(steve_node_api::CONTROLLED_INSTALL.1, "harness.install")?;
         if !self.is_colocated() {
             return Err(ApiError::new(
                 ErrorCode::Denied,
@@ -409,16 +370,13 @@ impl Discovery for RemoteNode {
         self.go(IMPORT_PAGE, &a, None, false).await
     }
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
-        self.needs(2, "history.locate")?;
         self.go(HISTORY_LOCATE, &source, None, false).await
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
-        self.needs(steve_node_api::VITALS.1, "node.vitals")?;
         self.go(NODE_VITALS, &serde_json::json!({}), None, false)
             .await
     }
     async fn host(&self) -> ApiResult<HostInfo> {
-        self.needs(steve_node_api::HOST_INFO.1, NODE_HOST)?;
         self.go(NODE_HOST, &serde_json::json!({}), None, false)
             .await
     }

@@ -371,46 +371,19 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
     );
 }
 
-/// G2: what machine a Node is crosses the link as the Node says it (`node.host`); a Node of an
-/// earlier protocol is never sent the method.
+/// G2: what machine a Node is crosses the link as the Node says it (`node.host`).
 #[tokio::test]
-async fn host_crosses_the_link_and_an_older_node_is_not_asked() {
+async fn host_crosses_the_link() {
     let fake = FakeNode::new("n1");
     let w = wire(fake.clone(), 1);
     let h = w.remote.host().await.unwrap();
     assert_eq!(h, fake.host().await.unwrap());
     assert_eq!(h.hostname.as_deref(), Some("Studio Mac"));
     assert_eq!((h.os.as_str(), h.arch.as_str()), ("macos", "aarch64"));
-
-    let (hub, node) = steve_node_wire::testkit::pair();
-    let hub_conn = steve_node_wire::Conn::spawn(
-        hub.sink,
-        hub.stream,
-        1,
-        steve_node_wire::NodeServer::new(fake.clone()),
-        steve_node_wire::ConnOptions {
-            side: "h",
-            peer: (PROTOCOL.0, HOST_INFO.1 - 1),
-            ..Default::default()
-        },
-    );
-    let _node_conn = steve_node_wire::Conn::spawn(
-        node.sink,
-        node.stream,
-        1,
-        steve_node_wire::NodeServer::new(fake.clone()),
-        common::opts("n"),
-    );
-    let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
-    remote.attach(hub_conn, false);
-    assert_eq!(
-        remote.host().await.unwrap_err().code,
-        ErrorCode::Unsupported
-    );
 }
 
 /// A removal is begun, confirmed and asked about over the link (`node.remove*`); a Node that does
-/// not say it can, and one of an earlier protocol, are told so and nothing is begun.
+/// not say it can is told so and nothing is begun.
 #[tokio::test]
 async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
     let fake = FakeNode::new("n1");
@@ -449,39 +422,4 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
         fake.removal_calls(),
         vec![("begin", op.clone()), ("commit", op.clone())]
     );
-
-    let (hub, node) = steve_node_wire::testkit::pair();
-    let hub_conn = steve_node_wire::Conn::spawn(
-        hub.sink,
-        hub.stream,
-        1,
-        steve_node_wire::NodeServer::new(fake.clone()),
-        steve_node_wire::ConnOptions {
-            side: "h",
-            peer: (PROTOCOL.0, NODE_REMOVAL.1 - 1),
-            ..Default::default()
-        },
-    );
-    let _node_conn = steve_node_wire::Conn::spawn(
-        node.sink,
-        node.stream,
-        1,
-        steve_node_wire::NodeServer::new(fake.clone()),
-        common::opts("n"),
-    );
-    let old = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
-    old.attach(hub_conn, false);
-    let other = OperationId::new("nrm_2").unwrap();
-    assert_eq!(
-        old.remove_begin(NodeRemove {
-            operation: other,
-            grace_secs: 60
-        })
-        .await
-        .unwrap_err()
-        .code,
-        ErrorCode::Unsupported,
-        "an older node is never sent the method"
-    );
-    assert_eq!(fake.removal_calls().len(), 2);
 }

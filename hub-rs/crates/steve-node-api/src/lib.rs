@@ -39,29 +39,9 @@ pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
-/// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
-/// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
+/// Major.minor of this contract. A major change refuses the connection.
 pub const PROTOCOL: (u16, u16) = (0, 9);
 
-/// The first protocol whose execution-delivery reads can enforce automatic reply scope.
-pub const REPLY_DELIVERY_SCOPE: (u16, u16) = (0, 9);
-
-/// The first protocol with [`Discovery::host`] (what machine a Node is): an older Node is not asked.
-pub const HOST_INFO: (u16, u16) = (0, 7);
-/// The first protocol with a Node removing itself from its machine when the Hub asks
-/// ([`Discovery::remove_begin`]): an older Node is shown the command to run there instead.
-pub const NODE_REMOVAL: (u16, u16) = (0, 8);
-/// The first protocol with Hub-managed Node upgrades ([`Discovery::upgrade_stage`]).
-pub const NODE_UPGRADES: (u16, u16) = (0, 6);
-/// The first protocol with the optional controlled harness installation face.
-pub const CONTROLLED_INSTALL: (u16, u16) = (0, 5);
-/// The first protocol with [`PermissionMode::Auto`]: an older Node cannot decode it, so the Hub
-/// never opens or configures a session in `auto` on one.
-pub const AUTO_MODE: (u16, u16) = (0, 2);
-/// The first protocol with [`Discovery::vitals`] (B3): an older Node is not asked.
-pub const VITALS: (u16, u16) = (0, 3);
-/// The first protocol with live per-device turn capacity ([`Discovery::set_session_capacity`]).
-pub const SESSION_CAPACITY: (u16, u16) = (0, 4);
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.
 pub const RESTARTED: &str = "the node restarted while it ran";
