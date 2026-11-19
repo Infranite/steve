@@ -630,10 +630,10 @@ fn attempt_says(k: &Kit, sid: &str, turn: &str, attempt: &str, text: &str) {
                 rusqlite::params![seq, format!("ev-{seq}"), payload.to_string(), at],
             )?;
             if !text.is_empty() {
-                let data = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}});
+                let data = json!({"role": "assistant", "text": text});
                 tx.execute(
                     "INSERT INTO events(session_id,ts,kind,data,format,source_node,source_stream,source_epoch,source_seq)
-                     VALUES (?,?,'agent_message_chunk',?,'steve.v1','node-a','events','e1',?)",
+                     VALUES (?,?,'text',?,'steve.v1','node-a','events','e1',?)",
                     rusqlite::params![sid, at, data.to_string(), seq],
                 )?;
             }

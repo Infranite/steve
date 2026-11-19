@@ -185,9 +185,15 @@ impl FakeRuntime {
         })
         .unwrap();
     }
-    /// The agent says something (stored like an adapter's `agent_message_chunk`).
+    /// The agent says something (stored as a `steve.v1` text entry, as the Node path writes it).
     pub fn say(&self, sid: &str, text: &str) {
-        self.store.event_add(sid, "agent_message_chunk", json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})).unwrap();
+        self.store
+            .event_add(
+                sid,
+                steve_transcript::TEXT,
+                json!({"role": "assistant", "text": text}),
+            )
+            .unwrap();
     }
 }
 
