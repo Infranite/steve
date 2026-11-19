@@ -148,25 +148,13 @@ pub(crate) struct Queue {
 pub fn hook_limiter(
     clock: Arc<dyn steve_modules::Clock>,
 ) -> steve_runtime::policy::Limiter<String> {
-    struct DomainClock(Arc<dyn steve_modules::Clock>);
-    impl steve_runtime::Clock for DomainClock {
-        fn now(&self) -> i64 {
-            self.0.now()
-        }
-        fn sleep(
-            &self,
-            d: std::time::Duration,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            Box::pin(async move { tokio::time::sleep(d).await })
-        }
-    }
     steve_runtime::policy::Limiter::with_clock(
         steve_runtime::policy::RateLimit::Window {
             sliding: true,
             len: std::time::Duration::from_secs(60),
             max: RATE_PER_MINUTE as u32,
         },
-        Arc::new(DomainClock(clock)),
+        clock,
     )
 }
 
