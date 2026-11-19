@@ -189,7 +189,7 @@ mod tests {
             jobs: Some(vec![]),
             ..Default::default()
         };
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())));
         let asm = crate::extension::Assembly::empty();
         install(
             &mut registry,

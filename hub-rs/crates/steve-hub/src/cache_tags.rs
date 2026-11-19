@@ -84,7 +84,11 @@ fn domain_state(event: &DomainEvent) -> bool {
 pub fn tags(event: &BusEvent) -> Tags {
     let mut tags = Vec::new();
     if state_event(event) {
-        tags.push(scope(&event.scope()));
+        // An absent workspace has no state cache, even though it is still an event.
+        match event.scope() {
+            Scope::Ws(ws) if ws.as_str().is_empty() => {}
+            scope => tags.push(self::scope(&scope)),
+        }
         tags.push(Tag::global("state-events"));
     }
     match event {

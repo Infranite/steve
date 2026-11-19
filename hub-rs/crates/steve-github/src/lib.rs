@@ -210,7 +210,11 @@ struct Inner {
 }
 
 impl GitHub {
-    pub fn new(conns: Connections, env: GitHubEnv, caches: Arc<steve_runtime::cache::Caches>) -> Self {
+    pub fn new(
+        conns: Connections,
+        env: GitHubEnv,
+        caches: Arc<steve_runtime::cache::Caches>,
+    ) -> Self {
         let limiter = hooks::Limiter::new(conns.modules().clock.clone());
         Self(Arc::new(Inner {
             conns,

@@ -33,10 +33,7 @@ steve-flow/src/ingest.rs	timer-loop	ingest::Poller::run	1
 steve-flow/src/retention.rs	timer-loop	retention::run	1
 steve-github/src/api.rs	timer-loop	api::GhClient::request	1
 steve-github/src/effects.rs	timer-loop	effects::GitHub::run_effects_job	1
-steve-github/src/hooks.rs	ttl-cache	hooks::Limiter::0	1
 steve-github/src/poll.rs	timer-loop	poll::GitHub::run_jobs	1
-steve-hub/src/access.rs	ttl-cache	access::FAILED	1
-steve-hub/src/access.rs	ttl-cache	access::PAIR_FAILED	1
 steve-hub/src/access.rs	ttl-cache	access::SEEN	1
 steve-hub/src/api/dedupe.rs	ttl-cache	api::dedupe::Abandon::slots	1
 steve-hub/src/api/dedupe.rs	ttl-cache	api::dedupe::Dedupe::slots	1
@@ -48,14 +45,12 @@ steve-hub/src/daily_backup.rs	timer-loop	daily_backup::run	1
 steve-hub/src/extension.rs	timer-loop	extension::run	1
 steve-hub/src/harnesses.rs	timer-loop	harnesses::HubHarnesses::follow_all	1
 steve-hub/src/metrics.rs	timer-loop	metrics::start	1
-steve-hub/src/nodes/guard.rs	ttl-cache	nodes::guard::EVENT_BUDGET	1
 steve-hub/src/nodes/handover.rs	timer-loop	nodes::handover::run	1
 steve-hub/src/nodes/install.rs	timer-loop	nodes::install::Ssh::exec	1
 steve-hub/src/nodes/install.rs	timer-loop	nodes::install::Ssh::open	1
 steve-hub/src/nodes/install.rs	ttl-cache	nodes::install::Installs::ops	1
 steve-hub/src/nodes/listener.rs	timer-loop	nodes::listener::catch_up	1
 steve-hub/src/nodes/listener.rs	timer-loop	nodes::listener::reconcile_again	1
-steve-hub/src/nodes/pairing.rs	ttl-cache	nodes::pairing::Limiter::buckets	1
 steve-hub/src/nodes/registry.rs	ttl-cache	nodes::registry::NodeRegistry::takeovers	1
 steve-hub/src/nodes/removal.rs	timer-loop	nodes::removal::Removals::wait	1
 steve-hub/src/nodes/tailcat.rs	timer-loop	nodes::tailcat::finish	1
@@ -90,7 +85,6 @@ steve-hub/src/wire/node_secrets.rs	timer-loop	wire::node_secrets::VaultNodes as 
 steve-hub/src/wire/outbox.rs	timer-loop	wire::outbox::run	1
 steve-hub/src/wire/research.rs	timer-loop	wire::research::OnNode as r::AttemptRunner::run	1
 steve-hub/src/wire/research.rs	timer-loop	wire::research::ResearchAdapter as steve_core::thread::Researcher::shutdown	1
-steve-hub/src/wire/signals.rs	ttl-cache	wire::signals::Hooks::recent	1
 steve-knowledge/src/candidates.rs	timer-loop	candidates::expire_job	1
 steve-knowledge/src/sources/chat.rs	timer-loop	sources::chat::run	1
 steve-knowledge/src/sources/folder_node.rs	timer-loop	sources::folder_node::scan	1

@@ -165,7 +165,9 @@ fn s1_stateless_events_never_invalidate_state() {
 #[test]
 fn an_event_without_a_workspace_never_invalidates_a_state_cache() {
     for ty in ["item", "party", "steve.thinking"] {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(typed(ty, ""));
         assert_eq!(counts(&bus), (1, 0, 0, 0), "{ty}");
         assert_eq!(state_generation(&bus, ""), 0, "{ty}");
@@ -173,5 +175,6 @@ fn an_event_without_a_workspace_never_invalidates_a_state_cache() {
 }
 
 fn state_generation(bus: &Bus, ws: &str) -> u64 {
-    bus.caches().generation(&steve_runtime::cache::Tag::of("state", ws))
+    bus.caches()
+        .generation(&steve_runtime::cache::Tag::of("state", ws))
 }

@@ -665,7 +665,9 @@ impl<'ast> Visit<'ast> for Guard {
     }
 }
 
-struct TtlGuard<'a> { imports: &'a BTreeMap<String, Imports> }
+struct TtlGuard<'a> {
+    imports: &'a BTreeMap<String, Imports>,
+}
 impl TtlGuard<'_> {
     // Match the upstream guard's bounded explicit-import expansion. TTL value
     // declarations additionally need crate/self/super paths to locate their types.
@@ -676,12 +678,28 @@ impl TtlGuard<'_> {
             match head {
                 "crate" => return format!("@::{rest}"),
                 "self" => return format!("@::{}", join(module, rest)),
-                "super" => return format!("@::{}", join(module.rsplit_once("::").map_or("", |(parent, _)| parent), rest)),
+                "super" => {
+                    return format!(
+                        "@::{}",
+                        join(
+                            module.rsplit_once("::").map_or("", |(parent, _)| parent),
+                            rest
+                        )
+                    );
+                }
                 _ => {}
             }
-            let Some(target) = self.imports.get(module).and_then(|i| i.names.get(head)) else { break };
-            if target == head || target.starts_with(&format!("{head}::")) { break; }
-            resolved = if rest.is_empty() { target.clone() } else { join(target, rest) };
+            let Some(target) = self.imports.get(module).and_then(|i| i.names.get(head)) else {
+                break;
+            };
+            if target == head || target.starts_with(&format!("{head}::")) {
+                break;
+            }
+            resolved = if rest.is_empty() {
+                target.clone()
+            } else {
+                join(target, rest)
+            };
         }
         resolved
     }
@@ -808,16 +826,34 @@ impl TtlGuard<'_> {
                         .iter()
                         .any(|ty| self.ttl_type(ty, types, ages, module, 2, None, seen));
                 stamped_map
-                    || t.elems
-                        .iter()
-                        .any(|ty| self.ttl_type(ty, types, ages, module, stage, field, seen))
+                    || t.elems.iter().enumerate().any(|(index, ty)| {
+                        self.ttl_type(
+                            ty,
+                            types,
+                            ages,
+                            module,
+                            stage,
+                            field.or(Some(&index.to_string())),
+                            seen,
+                        )
+                    })
             }
             syn::Type::Path(p) => {
                 let resolved = self.resolve_in(&path(&p.path), module, 0);
                 let name = resolved.rsplit("::").next().unwrap();
                 let args = type_args(p);
-                if stage == 2 && (name == "Instant" || name == "i64" || name == "u64") {
-                    return ages.any && field.is_none_or(|f| ages.names.contains(f));
+                if stage == 2 && (name == "Instant" || name == "i64") {
+                    return ages.any
+                        && field.is_none_or(|f| {
+                            f.bytes().all(|c| c.is_ascii_digit()) || ages.names.contains(f)
+                        });
+                }
+                if stage == 2 && name == "u64" {
+                    // Unsigned integers also represent sequence numbers. Require
+                    // an age operation on the named field or tuple index. Signed
+                    // millisecond timestamps retain the inventory's conservative
+                    // match (including destructured tuples and Vec<i64>).
+                    return field.is_some_and(|f| ages.names.contains(f));
                 }
                 if ["Mutex", "RwLock"].contains(&name) {
                     if stage == 2 && field.is_some() {
@@ -1359,21 +1395,29 @@ fn ttl_maps_follow_aliases_value_structs_and_locks_without_counting_connections(
         use std::sync::{Mutex as Lock, Arc};
         use std::time::Instant as Stamp;
         type Entries = Map<String, (Stamp, String)>;
+        type Lag = (String, String, u64);
+        type Timed = (u64, String);
         struct Cached { at: i64, body: String }
-        struct Connection { last: Lock<Stamp> }
+        struct Connection { last: Lock<Stamp>, rtt: Option<(i64, i64)> }
         struct Caches {
             direct: Lock<Entries>,
             named: tokio::sync::RwLock<BTreeMap<String, Arc<Cached>>>,
             whole: Lock<Option<(Stamp, std::collections::HashMap<String, String>)>>,
             connections: Lock<Map<String, Arc<Connection>>>,
             ordinary: Lock<Map<String, String>>,
+            lagging: Lock<Map<String, Lag>>,
+            millis: Lock<Map<String, Timed>>,
             #[cfg(test)] test: Lock<Entries>,
         }
         static TTL: Lock<Map<String, (Stamp, bool)>> = todo!();
         fn cached() { static LOCAL: Lock<Map<String, (Stamp, bool)>> = todo!(); }
         enum Slot { Running, Done(Stamp, String) }
         type Slots = Lock<Map<String, Slot>>;
-        fn read(at: i64, stamp: Stamp) { if now() - at < TTL_MS { } stamp.elapsed(); }
+        fn read(at: i64, stamp: Stamp, entry: Timed) {
+            if now() - at < TTL_MS { }
+            if now() - entry.0 < TTL_MS { }
+            stamp.elapsed();
+        }
         #[cfg(test)] static TEST: Lock<Map<String, (Stamp, bool)>> = todo!();
     "#;
     let result = scan_sources(&[Source {
@@ -1392,6 +1436,7 @@ fn ttl_maps_follow_aliases_value_structs_and_locks_without_counting_connections(
             "Caches::direct",
             "Caches::named",
             "Caches::whole",
+            "Caches::millis",
             "TTL",
             "LOCAL",
             "Slots"

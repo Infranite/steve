@@ -200,7 +200,9 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
 /// personal events reach only the Hub's owners.
 #[tokio::test]
 async fn events_without_a_workspace_or_user_reach_nobody_beyond_the_owners() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     let viewers = [
         ("", "", false),
