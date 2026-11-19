@@ -177,7 +177,6 @@
   "core.draft.setting.handoff": "Handoff threshold",
   "core.draft.setting.archDays": "Archive automatically after finishing",
   "core.draft.setting.quiet": "Do not disturb",
-  "core.draft.setting.digestAt": "Daily report",
   "core.draft.setting.fontSize": "Font size",
   "core.draft.setting.reduceMotion": "Reduce motion",
   "core.draft.setting.keepSess": "Keep conversation history",

@@ -191,7 +191,7 @@ fn a_members_first_own_todo_turns_their_brief_on_once_and_never_again_after_they
     let s = e.brief(ME).expect("turned on");
     assert_eq!(s.spec.mode, Mode::Brief);
     assert_eq!(s.spec.requester.as_deref(), Some(ME));
-    assert_eq!(s.spec.cron, brief::cron_at("08:30").unwrap());
+    assert_eq!(s.spec.cron, brief::DEFAULT_CRON);
     assert_eq!(s.spec.tz, "Asia/Taipei");
     assert!(s.enabled && s.spec.bot.is_empty());
     assert_eq!(s.name, "晨报");
@@ -555,41 +555,4 @@ fn one_brief_per_member_and_day() {
     e.round(local(2027, 2, 3, 8, 30));
     e.round(local(2027, 2, 3, 8, 45));
     assert_eq!(e.notes().len(), 1);
-}
-
-#[test]
-fn digest_at_controls_creation_and_replanning() {
-    use steve_flow::alarms::AlarmSource;
-    for (at, minute) in [("08:30", Some(510)), ("09:00", Some(540)), ("不发", None)] {
-        let e = env();
-        e.e.store()
-            .settings()
-            .set(
-                WS,
-                &serde_json::Map::from_iter([("digestAt".into(), at.into())]),
-                ME,
-            )
-            .unwrap();
-        e.add(ME, "todo", |_| {});
-        let s = e.brief(ME);
-        assert_eq!(s.is_some(), minute.is_some());
-        if let Some(s) = s {
-            let wants =
-                e.e.store()
-                    .reader(|c| BriefAlarms.plan(c, WS, &s.id, now()))
-                    .unwrap();
-            assert!(!wants.is_empty());
-            for want in wants {
-                let local = todo::Zone::new(TZ).local(want.planned_for).unwrap();
-                assert_eq!(
-                    chrono::Timelike::hour(&local) * 60 + chrono::Timelike::minute(&local),
-                    minute.unwrap()
-                );
-                assert!(!matches!(
-                    chrono::Datelike::weekday(&local),
-                    chrono::Weekday::Sat | chrono::Weekday::Sun
-                ));
-            }
-        }
-    }
 }

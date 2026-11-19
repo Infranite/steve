@@ -29,7 +29,6 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
       ],
       "notify": [
         { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
-        { "key": "digestAt", "label": "每天汇报", "values": ["08:30", "09:00", "不发"], "def": "08:30", "live": false },
       ],
       "look": [
         { "key": "fontSize", "label": "字号", "values": ["标准", "大"], "def": "标准", "live": true },
@@ -654,7 +653,6 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
         "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
         "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
-        "digestAt" => steve_i18n::t!("core.draft.setting.digestAt"),
         "fontSize" => steve_i18n::t!("core.draft.setting.fontSize"),
         "reduceMotion" => steve_i18n::t!("core.draft.setting.reduceMotion"),
         "keepSess" => steve_i18n::t!("core.draft.setting.keepSess"),
@@ -1130,7 +1128,7 @@ pub struct Drafted {
 
 /// Settings a request in the conversation changes at once, with an undo on its card: local, and put
 /// back in one click. Retention (data is deleted) and the default acceptance still show a preview.
-const AUTO_SETTINGS: [&str; 12] = [
+const AUTO_SETTINGS: [&str; 11] = [
     "lang",
     "home",
     "awayH",
@@ -1139,7 +1137,6 @@ const AUTO_SETTINGS: [&str; 12] = [
     "handoff",
     "archDays",
     "quiet",
-    "digestAt",
     "fontSize",
     "reduceMotion",
     "item_prefix",
@@ -1177,7 +1174,7 @@ const CORE_KINDS: [&str; 5] = ["bot", "project", "settings", "models", "tags"];
 const CORE_OPTIONS: [&str; 7] = [
     "settings:general — 语言、启动页、离开期间汇报、时区",
     "settings:items — 默认验收方式（自动验收）、事项编号前缀、前置完成后、交接阈值、完成后自动归档",
-    "settings:notify — 免打扰时段、每天汇报时间",
+    "settings:notify — 免打扰时段",
     "settings:look — 字号、动态效果",
     "settings:data — 会话记录、事件原文、邮件正文的保留期限",
     "models — Steve 自己做判断用的模型和推理强度，新会话的默认模型",
@@ -2493,7 +2490,7 @@ mod tests {
         let d = setting_defaults();
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d.len(), 15);
+        assert_eq!(d.len(), 14);
         assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(
