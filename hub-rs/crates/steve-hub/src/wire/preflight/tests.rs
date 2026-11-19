@@ -178,7 +178,11 @@ async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
 #[tokio::test]
 async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent() {
     let (_d, s) = store();
-    let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
     for model in [Some("local-jobs"), None] {
         let reports = crate::system::RuntimeReports::new(Arc::new(
             steve_runtime::cache::Caches::new(cfg.cache),
