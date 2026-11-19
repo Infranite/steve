@@ -1,14 +1,14 @@
 id: hubevent-node
 snapshots:
   "fn f() { send(HubEvent::Node { id: id }); }":
-    fixed: "fn f() { send(steve_types::DevicesEvent::Node { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::DevicesEvent::Node { id: id })); }"
     labels:
     - source: "HubEvent::Node { id: id }"
       style: primary
       start: 14
       end: 39
   "fn f() { send(s::HubEvent::Node { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::DevicesEvent::Node { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::DevicesEvent::Node { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Node { ws, id: make(\"comma,colon:\") }"
       style: primary

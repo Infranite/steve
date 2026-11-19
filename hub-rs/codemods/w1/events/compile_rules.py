@@ -68,10 +68,10 @@ def main():
         expected_warnings = 0
         for i, hit in enumerate(sorted(hits, key=lambda h: h["range"]["byteOffset"]["start"])):
             rewritten = driver.replacement(hit, rules[hit["ruleId"]])
-            expected_warnings += rewritten.count("steve_types::ws_todo!()")
-            result += f"fn f{i}() {{ let _: steve_types::{expected_types[i]} = {rewritten}; }}\n"
+            expected_warnings += 2 * rewritten.count("steve_types::ws_todo!()")
+            result += f"fn f{i}(store: &steve_store::Store, tx: &steve_store::Tx) {{ store.publish({rewritten}); tx.publish({rewritten}); }}\n"
         src.write_text(result)
-        (tmp / "Cargo.toml").write_text('[package]\nname="event-rule-compile"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\nsteve-types={path=' + json.dumps(str(ROOT / "hub-rs/crates/steve-types")) + '}\nserde_json="=1.0.154"\n')
+        (tmp / "Cargo.toml").write_text('[package]\nname="event-rule-compile"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\nsteve-types={path=' + json.dumps(str(ROOT / "hub-rs/crates/steve-types")) + '}\nsteve-store={path=' + json.dumps(str(ROOT / "hub-rs/crates/steve-store")) + '}\nserde_json="=1.0.154"\n')
         env = dict(os.environ)
         env.setdefault("CARGO_TARGET_DIR", str(ROOT / "hub-rs/target"))
         check = subprocess.run(["cargo", "check", "--offline", "--message-format=json"], cwd=tmp, env=env, capture_output=True, text=True)

@@ -1,14 +1,14 @@
 id: hubevent-yolo
 snapshots:
   "fn f() { send(HubEvent::Yolo { id: id }); }":
-    fixed: "fn f() { send(steve_types::AutonomyEvent::Yolo { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::AutonomyEvent::Yolo { id: id })); }"
     labels:
     - source: "HubEvent::Yolo { id: id }"
       style: primary
       start: 14
       end: 39
   "fn f() { send(s::HubEvent::Yolo { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::AutonomyEvent::Yolo { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::AutonomyEvent::Yolo { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Yolo { ws, id: make(\"comma,colon:\") }"
       style: primary

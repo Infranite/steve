@@ -1,14 +1,14 @@
 id: changeevent-account
 snapshots:
   "fn f() { send(ChangeEvent::Account { id: id }); }":
-    fixed: "fn f() { send(steve_types::PeopleEvent::Account { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::PeopleEvent::Account { id: id })); }"
     labels:
     - source: "ChangeEvent::Account { id: id }"
       style: primary
       start: 14
       end: 45
   "fn f() { send(s::ChangeEvent::Account { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::PeopleEvent::Account { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::PeopleEvent::Account { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Account { ws, id: make(\"comma,colon:\") }"
       style: primary

@@ -94,6 +94,7 @@ edge	steve-stats	steve-i18n
 edge	steve-stats	steve-store
 edge	steve-store	steve-i18n
 edge	steve-store	steve-node-api
+edge	steve-store	steve-types
 edge	steve-transcript	steve-acp
 edge	steve-transcript	steve-node-api
 rusqlite	steve-calendar

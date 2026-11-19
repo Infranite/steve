@@ -1,14 +1,14 @@
 id: hubevent-account
 snapshots:
   "fn f() { send(HubEvent::Account { id: id }); }":
-    fixed: "fn f() { send(steve_types::PeopleEvent::Account { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::PeopleEvent::Account { id: id })); }"
     labels:
     - source: "HubEvent::Account { id: id }"
       style: primary
       start: 14
       end: 42
   "fn f() { send(s::HubEvent::Account { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::PeopleEvent::Account { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::PeopleEvent::Account { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Account { ws, id: make(\"comma,colon:\") }"
       style: primary

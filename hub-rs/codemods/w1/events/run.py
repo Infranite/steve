@@ -38,7 +38,7 @@ python3 hub-rs/codemods/w1/events/run.py --rollback scratch/events-backup-EXAMPL
 
 Do not apply raw ast-grep fixes directly. Rule fixes replace the enum constructor and add missing
 workspace fields. The driver also converts each captured AST field to its newtype/RawJson and adds
-`.into()` for the domain/live aggregate. It anchors the old expression's type so `None`, nested
+explicit `DomainEvent::from(...)` / `LiveEvent::from(...)` for the aggregate. It anchors the old expression's type so `None`, nested
 options, shorthand fields and existing `.into()` calls remain inferable. This is necessary for
 compilable rewrites. The compile probe type-checks 92 constructions for all 73 rules, including
 legacy optional-field cases, and verifies all 34 generated placeholder sites emit warnings.
@@ -189,6 +189,8 @@ ROOT = HERE.parents[3]
 ADAPTERS = {
     "steve-knowledge/src/sync.rs", "steve-mail/src/threads.rs",
     "steve-hub/src/wire/modules.rs", "steve-hub/src/wire/signals.rs",
+    # Value taps and the knowledge subscriber remain legacy until W1.3c (card §4).
+    "steve-hub/src/wire/install/domain/knowledge.rs",
 }
 RAW = re.compile(r'r(#{0,})"')
 CHAR = re.compile(r"'(?:\\.|[^'\\\n])'")
@@ -486,7 +488,7 @@ def main():
                 if any(a <= match.start() < b for a, b in test_ranges(body)):
                     continue
                 line = body.count("\n", 0, match.start()) + 1
-                reason = "typed kb event" if rel.endswith("wire/modules.rs") else "split gh/mail notifier" if rel.endswith("wire/signals.rs") else "remove Value forwarding adapter"
+                reason = "retained legacy forwarding (W1.3c)" if rel.endswith("bus.rs") else "unexpected production Value publisher"
                 print(f"  {rel}:{line}: {reason}")
         print("Warning: no Hub/store production source was compiled by this preparation step.")
 

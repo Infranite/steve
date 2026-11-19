@@ -1,14 +1,14 @@
 id: hubevent-stevedraft
 snapshots:
   "fn f() { send(HubEvent::SteveDraft { id: id }); }":
-    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveDraft { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::LiveEvent::from(steve_types::WorkLiveEvent::SteveDraft { id: id })); }"
     labels:
     - source: "HubEvent::SteveDraft { id: id }"
       style: primary
       start: 14
       end: 45
   "fn f() { send(s::HubEvent::SteveDraft { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveDraft { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::LiveEvent::from(steve_types::WorkLiveEvent::SteveDraft { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::SteveDraft { ws, id: make(\"comma,colon:\") }"
       style: primary

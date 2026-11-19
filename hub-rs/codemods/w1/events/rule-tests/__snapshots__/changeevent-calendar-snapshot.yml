@@ -1,14 +1,14 @@
 id: changeevent-calendar
 snapshots:
   "fn f() { send(ChangeEvent::Calendar { id: id }); }":
-    fixed: "fn f() { send(steve_types::AutomationEvent::Calendar { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::AutomationEvent::Calendar { id: id })); }"
     labels:
     - source: "ChangeEvent::Calendar { id: id }"
       style: primary
       start: 14
       end: 46
   "fn f() { send(s::ChangeEvent::Calendar { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::AutomationEvent::Calendar { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::AutomationEvent::Calendar { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Calendar { ws, id: make(\"comma,colon:\") }"
       style: primary

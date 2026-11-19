@@ -1,14 +1,14 @@
 id: hubevent-chanmessage
 snapshots:
   "fn f() { send(HubEvent::ChanMessage { id: id }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::ChanMessage { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::ChanMessage { id: id })); }"
     labels:
     - source: "HubEvent::ChanMessage { id: id }"
       style: primary
       start: 14
       end: 46
   "fn f() { send(s::HubEvent::ChanMessage { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::ChanMessage { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::ChanMessage { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::ChanMessage { ws, id: make(\"comma,colon:\") }"
       style: primary

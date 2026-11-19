@@ -1,14 +1,14 @@
 id: changeevent-tag
 snapshots:
   "fn f() { send(ChangeEvent::Tag { id: id }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Tag { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Tag { ws: steve_types::ws_todo!(), id: id })); }"
     labels:
     - source: "ChangeEvent::Tag { id: id }"
       style: primary
       start: 14
       end: 41
   "fn f() { send(s::ChangeEvent::Tag { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Tag { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Tag { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Tag { ws, id: make(\"comma,colon:\") }"
       style: primary
