@@ -35,13 +35,59 @@ pub enum Outcome {
 /// autocommit and the caller's exclusive storage lock. The two committed phases are
 /// independently retryable; validation writes nothing and never replaces user data.
 pub fn convert(conn: &mut Connection) -> Result<Outcome, Error> {
+    convert_on(conn, None)
+}
+/// Observed layout conversion for the supervisor. A complete event means this
+/// conversion call succeeded, not that subsequent domain upgrades or health checks
+/// finished; use migrate::migrate_observed for the following domain stage.
+pub fn convert_observed(
+    conn: &mut Connection,
+    observer: migrate::Observer,
+) -> Result<Outcome, Error> {
+    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::Validation)?;
+    let outcome = convert_on(conn, Some(&progress))?;
+    progress.report(
+        if matches!(outcome, Outcome::AlreadyCurrent) {
+            migrate::Phase::Validation
+        } else {
+            migrate::Phase::InstallContract
+        },
+        None,
+        true,
+    );
+    Ok(outcome)
+}
+/// Supervisor entry point for one cumulative conversion + domain-upgrade progress
+/// stream. complete is emitted exactly once, only after both operations succeed.
+/// AlreadyCurrent skips conversion but still applies known pending domain upgrades.
+/// The caller still owns storage.lock; this API does not open files or select WAL.
+pub fn convert_and_migrate_observed(
+    conn: &mut Connection,
+    observer: migrate::Observer,
+) -> Result<Outcome, Error> {
+    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::Validation)?;
+    let outcome = convert_on(conn, Some(&progress))?;
+    migrate::migrate_on(conn, Some(&progress))?;
+    progress.finish();
+    Ok(outcome)
+}
+fn convert_on(
+    conn: &Connection,
+    progress: Option<&migrate::ProgressTracker<'_>>,
+) -> Result<Outcome, Error> {
     require_autocommit(conn)?;
     migrate::verify_locks()?;
     if is_current(conn)? {
         return Ok(Outcome::AlreadyCurrent);
     }
-    let from_legacy_version = migrate_legacy(conn)?;
+    let from_legacy_version = migrate_legacy_with(conn, progress)?;
+    if let Some(p) = progress {
+        p.report(migrate::Phase::Validation, None, false);
+    }
     verify_legacy(conn)?;
+    if let Some(p) = progress {
+        p.report(migrate::Phase::InstallContract, None, false);
+    }
     let (revoked_tokens, revoked_clients, revoked_sessions) = install_layout(conn)?;
     Ok(Outcome::Converted {
         from_legacy_version,
@@ -128,6 +174,12 @@ fn check_legacy_layout(conn: &Connection) -> Result<(), Error> {
 /// Older inputs validate structure and quick_check before the old runner commits;
 /// the separate read-only phase repeats both checks on the committed head.
 pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
+    migrate_legacy_with(conn, None)
+}
+fn migrate_legacy_with(
+    conn: &Connection,
+    progress: Option<&migrate::ProgressTracker<'_>>,
+) -> Result<i64, Error> {
     require_autocommit(conn)?;
     if is_current(conn)? {
         return Err(steve_storage_api::error(
@@ -138,8 +190,18 @@ pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
     let version = legacy::version(conn)
         .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
     if version != legacy::SCHEMA_VERSION {
+        if let Some(p) = progress {
+            p.report(migrate::Phase::LegacyReplay, None, false);
+        }
         legacy::migrate_to_head_with(conn, |tx| {
-            verify_legacy(tx).map_err(MigrationError::Validation)
+            if let Some(p) = progress {
+                p.report(migrate::Phase::Validation, None, false);
+            }
+            verify_legacy(tx).map_err(MigrationError::Validation)?;
+            if let Some(p) = progress {
+                p.report(migrate::Phase::LegacyReplay, None, false);
+            }
+            Ok::<_, MigrationError>(())
         })
         .map_err(|e| match e {
             MigrationError::Sqlite(e) => incompatible(&format!("legacy migration failed: {e}")),
@@ -163,9 +225,8 @@ fn verify_legacy(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn install_layout(conn: &mut Connection) -> Result<(usize, usize, usize), Error> {
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+fn install_layout(conn: &Connection) -> Result<(usize, usize, usize), Error> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(db_error)?;
     let has_owner: bool = tx
         .query_row(

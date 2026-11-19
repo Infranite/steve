@@ -25,6 +25,7 @@ pub struct Engine {
     dir: PathBuf,
     file: String,
     runtime: bool,
+    maintenance: Mutex<crate::checkpoint::Maintenance>,
     slot: WriterSlot,
     lock: Arc<File>,
 }
@@ -100,9 +101,32 @@ impl Engine {
             dir,
             file,
             runtime,
+            maintenance: Mutex::new(crate::checkpoint::Maintenance::default()),
             slot,
             lock,
         })
+    }
+    /// Configure maintenance before sharing this Engine with an executor. This does
+    /// not run SQL or start a worker; administrative engines still never maintain.
+    pub fn with_maintenance_policy(
+        mut self,
+        policy: crate::checkpoint::MaintenancePolicy,
+    ) -> Result<Self, Error> {
+        self.maintenance = Mutex::new(crate::checkpoint::Maintenance::new(policy)?);
+        Ok(self)
+    }
+    pub(crate) fn maintain(
+        &self,
+        now: std::time::Duration,
+        idle: bool,
+    ) -> Option<std::time::Duration> {
+        if !self.runtime {
+            return None;
+        }
+        self.maintenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .run(self, now, idle)
     }
     /// Executor-only seam. A grant/batch must hold the guard for its entire writer turn.
     /// The executor must avoid nested locking and schedule checkpoint calls outside grants.
