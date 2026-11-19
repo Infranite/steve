@@ -142,8 +142,8 @@ pub fn recover_legacy(store: &Store, home: &Path, db_path: &Path) -> anyhow::Res
     if candidates.is_empty() {
         return Ok(0);
     }
-    let plan = steve_store_sqlite::backup::BackupPlan::new(
-        home.join("backups"),
+    let plan = crate::backup::plan(
+        home,
         steve_store_sqlite::backup::Reason::PreDestructive {
             what: "delivery-recovery".into(),
         },

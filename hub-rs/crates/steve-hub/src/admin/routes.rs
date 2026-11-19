@@ -160,7 +160,11 @@ async fn make_backup(State(store): State<Store>, input: Option<Json<BackupReques
 async fn backups(State(store): State<Store>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
         steve_store_sqlite::backup::usage(
-            &super::client::backup::home(store.path()).join("backups"),
+            &crate::backup::plan(
+                &super::client::backup::home(store.path()),
+                steve_store_sqlite::backup::Reason::Diagnostic,
+            )
+            .dest_root,
         )
     })
     .await;

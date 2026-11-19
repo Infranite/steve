@@ -77,9 +77,12 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     }
 }}
 
-install! { routes(reg, _cx) [channels, mut module_routes, outbox] => [channels, module_routes, outbox] {
+install! { routes(reg, cx) [channels, mut module_routes, outbox] => [channels, module_routes, outbox] {
     module_routes = module_routes.merge(steve_channels::api::routes(channels.clone()));
-    module_routes = module_routes.merge(steve_channels::channels_api::routes(channels.clone()));
+    let backup: Arc<dyn steve_channels::PreDestructiveBackup> = Arc::new(
+        crate::backup::ChannelBackup::new(cx.steve_home.to_owned(), cx.store.path().to_owned())
+    );
+    module_routes = module_routes.merge(steve_channels::channels_api::routes(channels.clone()).layer(axum::Extension(backup)));
     module_routes = module_routes.merge(crate::wire::chan::routes(channels.clone(), outbox.clone()));
 }}
 

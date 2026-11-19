@@ -6,14 +6,14 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use steve_store_sqlite::backup::{self, BackupPlan, CancelFlag, Reason};
+use steve_store_sqlite::backup::{self, CancelFlag, Reason};
 pub const KEEP_DAYS: u64 = 14;
 const FROM_MINUTE: u32 = 3 * 60 + 30;
 const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(300);
 const RETRY_TICKS: u32 = 6;
 pub fn dir(home: &Path) -> PathBuf {
-    home.join("backups")
+    crate::backup::plan(home, Reason::Daily).dest_root
 }
 /// The local day (`YYYYMMDD`) and minute of the day at `secs` since the epoch.
 fn local(secs: u64) -> (String, u32) {
@@ -56,7 +56,7 @@ pub struct Made {
     pub removed: usize,
 }
 pub fn make(home: &Path, db: &Path, _day: &str) -> Result<Made> {
-    let mut plan = BackupPlan::new(dir(home), Reason::Daily);
+    let mut plan = crate::backup::plan(home, Reason::Daily);
     plan.keep = backup::Keep::All;
     plan.with_files = Some(crate::admin::client::backup::files(home));
     let m = backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?;

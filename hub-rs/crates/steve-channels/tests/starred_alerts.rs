@@ -4,6 +4,8 @@
 //! its own; once per stretch of talk; `digest` still sends it, `log` keeps it in the inbox, quiet
 //! hours hold it unless you let starred contacts through; a space set aside keeps it out.
 
+#[path = "support/cleanup_backup.rs"]
+mod cleanup_backup;
 #[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
@@ -833,7 +835,13 @@ async fn purging_the_message_purges_every_copy_of_it() {
     // 清理记录: the spaces, their messages and the cards on them deleted
     let h = setup().await;
     two_notified(&h).await;
-    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone())
+        .layer(axum::Extension(cleanup_backup::port(
+            h.env.store().path().to_owned(),
+            h.env.dir.path().join("backups"),
+            false,
+        )))
+        .with_state(h.env.modules.clone());
     let who = caller(WS, ME);
     let (st, plan) = call(
         &cleanup,

@@ -27,6 +27,8 @@
 //! `space_identities`, migration 019): a space another live identity still sees is left alone, and
 //! deleting one removes its identities, attention and voice (`space_prefs`) with it.
 
+use std::{path::PathBuf, sync::Arc};
+
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -36,6 +38,12 @@ use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::{self, Viewer};
 
 use crate::{ChannelResult, Channels, spaces};
+
+/// The host must finish a durable backup before cleanup is allowed to mutate data.
+/// The returned location is opaque to channels and is echoed in the response/audit.
+pub trait PreDestructiveBackup: Send + Sync {
+    fn backup(&self, what: &str) -> ApiResult<PathBuf>;
+}
 
 /// What to clean.
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +140,7 @@ async fn preview_route(
 
 async fn run_route(
     Extension(ch): Extension<Channels>,
+    backup: Option<Extension<Arc<dyn PreDestructiveBackup>>>,
     who: Caller,
     Body(r): Body<Request>,
 ) -> ApiResult<Json<Summary>> {
@@ -142,7 +151,17 @@ async fn run_route(
     }
     let v = ch.modules().viewer(&who)?;
     let t = target(&ch, &who, &r)?;
-    Ok(Json(run(&ch, &v, &t, r.level, r.decision_ids).await?))
+    Ok(Json(
+        run(
+            &ch,
+            &v,
+            &t,
+            r.level,
+            r.decision_ids,
+            backup.map(|Extension(port)| port),
+        )
+        .await?,
+    ))
 }
 
 async fn leftovers_route(
@@ -688,40 +707,6 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     Ok(())
 }
 
-/// Where backups go: `<STEVE_HOME>/backups` for a database at `<STEVE_HOME>/data/…`, else a
-/// `backups` folder next to the database.
-fn backup_dir(db: &std::path::Path) -> std::path::PathBuf {
-    let parent = db.parent().unwrap_or_else(|| std::path::Path::new("."));
-    match parent.file_name().and_then(|n| n.to_str()) {
-        Some("data") => parent.parent().unwrap_or(parent).join("backups"),
-        _ => parent.join("backups"),
-    }
-}
-
-/// An independent read-only snapshot, deliberately outside Store::with_conn and its Mutex.
-fn backup(store: &steve_store::Store, _now: i64) -> ApiResult<String> {
-    let root = backup_dir(store.path());
-    let plan = steve_store_sqlite::backup::BackupPlan::new(
-        root.clone(),
-        steve_store_sqlite::backup::Reason::PreDestructive {
-            what: "purge".into(),
-        },
-    );
-    let manifest = steve_store_sqlite::backup::backup(
-        store.path(),
-        &plan,
-        &|_| {},
-        &steve_store_sqlite::backup::CancelFlag::default(),
-    )
-    .map_err(|e| ApiError::Internal(format!("备份失败：{e}")))?;
-    Ok(manifest
-        .database_path()
-        .strip_prefix(root)
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .to_string_lossy()
-        .into_owned())
-}
-
 /// Backup, then the cleanup in one transaction, audited.
 pub async fn run(
     ch: &Channels,
@@ -729,6 +714,7 @@ pub async fn run(
     t: &Target,
     level: Level,
     decision_ids: Vec<String>,
+    backup: Option<Arc<dyn PreDestructiveBackup>>,
 ) -> ApiResult<Summary> {
     let (ch2, v2, t2) = (ch.clone(), v.clone(), t.clone());
     tokio::task::spawn_blocking(steve_i18n::carry(move || -> ApiResult<Summary> {
@@ -736,7 +722,8 @@ pub async fn run(
         // fail before the backup when there is nothing to clean
         ch.store().reader(|c| plan(c, &v, &t, level).map(|_| ()))?;
         let now = ch.now();
-        let file = backup(ch.store(), now)?;
+        let backup = backup.ok_or_else(|| ApiError::Internal("清理前备份能力未配置".into()))?;
+        let file = backup.backup("purge")?.to_string_lossy().into_owned();
         let mut out = ch.store().transaction(|tx| -> ApiResult<Summary> {
             let p = plan(tx, &v, &t, level)?;
             let mut expected = decision_ids.clone(); expected.sort(); expected.dedup();
@@ -810,42 +797,4 @@ pub fn leftovers(c: &Connection, v: &Viewer) -> ChannelResult<Vec<Leftover>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
-}
-
-#[cfg(test)]
-mod backup_tests {
-    #[test]
-    fn backup_finishes_while_the_store_writer_mutex_is_held() {
-        use std::{sync::mpsc, time::Duration};
-        let temp = tempfile::tempdir().unwrap();
-        let store = steve_store::Store::open(
-            temp.path().join("db.sqlite3"),
-            steve_store::FnPublisher(|_| {}),
-        )
-        .unwrap();
-        let (held, ready) = mpsc::channel();
-        let (release, wait) = mpsc::channel();
-        let locked = store.clone();
-        let owner = std::thread::spawn(move || {
-            locked.with_conn(|_| {
-                held.send(()).unwrap();
-                wait.recv().unwrap();
-                Ok(())
-            })
-        });
-        ready.recv().unwrap();
-        let (finished, result) = mpsc::channel();
-        let copying = store.clone();
-        let worker = std::thread::spawn(move || {
-            finished.send(super::backup(&copying, 0)).unwrap();
-        });
-        let completed = result.recv_timeout(Duration::from_secs(5));
-        release.send(()).unwrap();
-        owner.join().unwrap().unwrap();
-        worker.join().unwrap();
-        let relative = completed
-            .expect("backup must not acquire Store's already-held writer mutex")
-            .unwrap();
-        assert!(temp.path().join("backups").join(relative).is_file());
-    }
 }

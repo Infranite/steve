@@ -8,6 +8,8 @@
 //! Safety: no path reaches the adapter without a valid approval, grant, rule or trigger — each is
 //! checked against the store again right before sending.
 
+#[path = "support/cleanup_backup.rs"]
+mod cleanup_backup;
 #[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
@@ -4553,7 +4555,13 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .unwrap();
     assert_eq!(d.status, "sent");
     assert_eq!(d.attempts, 1);
-    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone())
+        .layer(axum::Extension(cleanup_backup::port(
+            h.env.store().path().to_owned(),
+            h.env.dir.path().join("backups"),
+            false,
+        )))
+        .with_state(h.env.modules.clone());
     let (st, result) = call(
         &cleanup,
         Some(&who),
@@ -5101,7 +5109,13 @@ async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receip
         row(&h, "SELECT space_id FROM output_deliveries", &[])[0],
         manual.space_id
     );
-    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone())
+        .layer(axum::Extension(cleanup_backup::port(
+            h.env.store().path().to_owned(),
+            h.env.dir.path().join("backups"),
+            false,
+        )))
+        .with_state(h.env.modules.clone());
     let (st, v) = call(
         &cleanup,
         Some(&caller(WS, ME)),

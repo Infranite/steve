@@ -177,9 +177,9 @@ async fn stop(child: &mut HubChild) -> Result<()> {
 }
 
 /// Verified canonical backup; the operation journal records its actual database path.
-pub(crate) fn backup(db: &Path, root: &Path, from: String, to: String) -> Result<PathBuf> {
-    let plan = steve_store_sqlite::backup::BackupPlan::new(
-        root.to_owned(),
+pub(crate) fn backup(db: &Path, home: &Path, from: String, to: String) -> Result<PathBuf> {
+    let plan = crate::backup::plan(
+        home,
         steve_store_sqlite::backup::Reason::PreUpgrade { from, to },
     );
     Ok(steve_store_sqlite::backup::backup(
@@ -330,13 +330,8 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     u.phase(op, "stopping", None)?;
     stop(child).await?;
     u.phase(op, "backing_up", None)?;
-    let copied = backup(
-        &cfg.db_path(),
-        &cfg.home.join("backups"),
-        from.version,
-        op.version.clone(),
-    )
-    .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
+    let copied = backup(&cfg.db_path(), &cfg.home, from.version, op.version.clone())
+        .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
     if let Err(e) = &copied {
         *child = spawn(cfg, &previous, None)?;
         let old: Manifest = read(&previous.join("release.json"))?;
@@ -876,7 +871,7 @@ server.serve_forever()
             .unwrap()
             .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
             .unwrap();
-        let saved = backup(&db, &t.path().join("backups"), "old".into(), "new".into()).unwrap();
+        let saved = backup(&db, t.path(), "old".into(), "new".into()).unwrap();
         let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
             &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),
         )

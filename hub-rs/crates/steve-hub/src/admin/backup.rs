@@ -7,7 +7,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
-use steve_store_sqlite::backup::{self, BackupPlan, CancelFlag, FileSet, Manifest, Reason};
+use steve_store_sqlite::backup::{self, CancelFlag, FileSet, Manifest, Reason};
 const PARTS: [&str; 6] = [
     "data/files",
     "signing",
@@ -61,7 +61,7 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
     }
 }
 pub(crate) fn run(home: &Path, db: &Path, reason: Reason) -> Result<Manifest> {
-    let mut plan = BackupPlan::new(home.join("backups"), reason);
+    let mut plan = crate::backup::plan(home, reason);
     plan.deadline = Some(std::time::Duration::from_secs(25));
     plan.with_files = Some(files(home));
     Ok(backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?)

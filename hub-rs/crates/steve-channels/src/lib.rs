@@ -165,6 +165,7 @@ pub use channel::{
     PushOutcome, ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
     TenantInfo,
 };
+pub use cleanup::PreDestructiveBackup;
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;
 pub use inbound::{Inbound, Next};
