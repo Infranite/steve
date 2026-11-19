@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::{ChangeEvent, Tx, base, now, uid};
+use steve_store::{Tx, base, now, uid};
 use zeroize::Zeroizing;
 
 use super::repo::{self, FieldRow, ItemFilter, ItemRow, VaultRow};
@@ -138,10 +138,18 @@ pub struct ItemOut {
 }
 
 fn event(tx: &Tx, ws: &str, item: &str) {
-    tx.publish(ChangeEvent::Vault {
-        id: item.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::VaultEvent::Vault {
+            id: {
+                let value: String = item.into();
+                steve_types::VaultItemId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 /// `•••• 4821` for a card number; other secrets show no hint.

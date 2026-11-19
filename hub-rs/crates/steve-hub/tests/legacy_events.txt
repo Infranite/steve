@@ -42,17 +42,4 @@ steve-hub/src/wire/node_runtime/send.rs	ChangeEvent::	2
 steve-hub/src/wire/signals.rs	ChangeEvent::	1
 steve-knowledge/src/steward.rs	ChangeEvent::	1
 steve-mail/src/repo.rs	ChangeEvent::	1
-steve-modules/src/accounts/connections/decision.rs	ChangeEvent::	1
-steve-modules/src/accounts/connections/service.rs	ChangeEvent::	11
-steve-modules/src/accounts/service.rs	ChangeEvent::	2
-steve-modules/src/caps/mod.rs	ChangeEvent::	3
-steve-modules/src/caps/tools.rs	ChangeEvent::	1
-steve-modules/src/contacts/people_repo.rs	ChangeEvent::	1
-steve-modules/src/contacts/service.rs	ChangeEvent::	1
-steve-modules/src/contacts/stewards.rs	ChangeEvent::	1
-steve-modules/src/decisions.rs	ChangeEvent::	1
-steve-modules/src/vault/grants.rs	ChangeEvent::	2
-steve-modules/src/vault/items/credential.rs	ChangeEvent::	2
-steve-modules/src/vault/items/reveal.rs	ChangeEvent::	1
-steve-modules/src/vault/items/service.rs	ChangeEvent::	1
 steve-store/src/bus.rs	ChangeEvent::	36

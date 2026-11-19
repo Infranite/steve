@@ -19,7 +19,7 @@ use axum::extract::{Path, State};
 use regex::Regex;
 use serde_json::{Value, json};
 use steve_store::caps::tools as repo;
-use steve_store::{ChangeEvent, base, now};
+use steve_store::{base, now};
 
 use super::{Capabilities, own_bot};
 use crate::vault::{VaultError, VaultResult};
@@ -120,7 +120,15 @@ impl Capabilities {
                     target,
                     &json!({"bot": bot, "kind": kind, "name": name}),
                 )?;
-                tx.publish(ChangeEvent::Bot { id: bot.into() });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: super::bot_workspace(tx, bot)?.into(),
+                        id: {
+                            let value: String = bot.into();
+                            steve_types::BotId::from(value)
+                        },
+                    },
+                ));
             }
             Ok::<_, VaultError>(json!({"bot": bot, "kind": kind, "target": target, "pinned": on}))
         })

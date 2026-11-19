@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_store::{ChangeEvent, base, now, uid};
+use steve_store::{base, now, uid};
 
 use super::repo::{self, UseRow};
 use super::service::own_item;
@@ -151,10 +151,18 @@ impl Vault {
                 &t.item_id,
                 &json!({"field": t.field_id, "label": field.label, "mode": mode, "use": su}),
             )?;
-            tx.publish(ChangeEvent::Vault {
-                id: t.item_id.clone(),
-                ws: t.ws.clone(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::VaultEvent::Vault {
+                    id: {
+                        let value: String = t.item_id.clone();
+                        steve_types::VaultItemId::from(value)
+                    },
+                    ws: {
+                        let value: String = t.ws.clone();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                },
+            ));
             Ok::<_, VaultError>(())
         })?;
         tracing::info!(ws = %t.ws, item = %t.item_id, mode, "vault field revealed");

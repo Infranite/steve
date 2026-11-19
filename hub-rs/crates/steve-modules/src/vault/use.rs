@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use steve_store::{ChangeEvent, Decision, NewDecision, Tx, base, now, uid};
+use steve_store::{Decision, NewDecision, Tx, base, now, uid};
 use tokio::sync::mpsc;
 
 use super::grants::{self, add_grant};
@@ -876,10 +876,18 @@ enum Prepared {
 }
 
 fn publish(tx: &Tx, u: &UseRecord) {
-    tx.publish(ChangeEvent::Vault {
-        id: u.item_id.clone(),
-        ws: u.workspace_id.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::VaultEvent::Vault {
+            id: {
+                let value: String = u.item_id.clone();
+                steve_types::VaultItemId::from(value)
+            },
+            ws: {
+                let value: String = u.workspace_id.clone();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 /// The `secret_use` decision handler.

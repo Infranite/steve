@@ -19,7 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_store::base::{self, Change, Viewer};
-use steve_store::{Cached, ChangeEvent, Decision, Tx, now};
+use steve_store::{Cached, Decision, Tx, now};
 
 use super::repo::{self, NewParty, Party};
 use crate::changes::{self, ChangeOp, OpCx, Origin, Plan, Prepared};
@@ -293,10 +293,18 @@ pub fn delete(tx: &Tx, ws: &str, k: &Key) -> ApiResult<bool> {
 
 /// The person's page (and a bot party's) shows the change.
 fn changed(tx: &Tx, ws: &str, person: &str) {
-    tx.publish(ChangeEvent::Party {
-        id: person.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = person.into();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 /// Does the object have any steward row at all (confirmed or proposed)? Defaults only go to objects

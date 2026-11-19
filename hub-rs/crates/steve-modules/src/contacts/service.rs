@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use steve_store::base::links::{self, LinkKey, NewLink};
 use steve_store::base::{self, Level, ObjRef, Viewer, Visibility, tags};
-use steve_store::{ChangeEvent, Link, Tx};
+use steve_store::{Link, Tx};
 
 use super::Ports;
 use super::repo::{
@@ -48,10 +48,18 @@ pub(crate) fn pref(id: &str) -> ObjRef {
 }
 
 pub(crate) fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Party {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = id.into();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 // ---------------------------------------------------------------- shapes
