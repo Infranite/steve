@@ -101,6 +101,14 @@ pub struct EngineRunner<E: Send + 'static>(pub Arc<SqliteBatchRunner<E>>);
 impl<E: Send + 'static> BatchRunner<Arc<Engine>> for EngineRunner<E> {
     type Job = Attached<E>;
     type Output = Committed;
+    fn maintenance(
+        &self,
+        engine: &Arc<Engine>,
+        now: std::time::Duration,
+        idle: bool,
+    ) -> Option<std::time::Duration> {
+        engine.maintain(now, idle)
+    }
     fn run(
         &self,
         engine: &Arc<Engine>,
