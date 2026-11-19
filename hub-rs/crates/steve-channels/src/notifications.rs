@@ -867,6 +867,19 @@ impl steve_runtime::due::DueSource for NotificationDue {
     }
 }
 
+// The old pump waits ten seconds after both successful passes and source errors.
+fn recovery_backoff() -> steve_runtime::policy::Backoff {
+    let interval = std::time::Duration::from_secs(10);
+    steve_runtime::policy::Backoff {
+        base: interval,
+        max: interval,
+        factor: 1,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+}
+
 pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
     let clock = ch.modules().clock.clone();
     let source = Arc::new(NotificationDue {
@@ -878,14 +891,7 @@ pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
         source,
         clock,
         Arc::new(tokio::sync::Notify::new()),
-        steve_runtime::policy::Backoff {
-            base: std::time::Duration::from_secs(10),
-            max: std::time::Duration::from_secs(60),
-            factor: 2,
-            jitter: steve_runtime::policy::Jitter::None,
-            attempts: None,
-            reset_after: None,
-        },
+        recovery_backoff(),
     )
     .await;
 }
@@ -1141,6 +1147,20 @@ mod tests {
             assert!(t.sends(&policy(Mode::Now, false, false)));
             assert!(!t.sends(&policy(Mode::Digest, true, true)));
             assert!(!t.quiet_allowed(&policy(Mode::Now, false, true)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_wait_tests {
+    #[test]
+    fn source_errors_keep_the_original_fixed_ten_second_wait() {
+        let policy = super::recovery_backoff();
+        for attempt in [0, 1, 2, 8, 32] {
+            assert_eq!(
+                policy.delay(attempt, &mut rand::rng()),
+                std::time::Duration::from_secs(10)
+            );
         }
     }
 }
