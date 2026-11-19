@@ -323,12 +323,12 @@ pub trait DocLoader: Send + Sync {
     ) -> BoxFuture<'a, Loaded>;
 }
 
-/// Starts the index worker (job `kb.index`) and connects [`Knowledge::enqueue`] to it.
-/// Call once at startup; a second call returns `None`.
-pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle<()>> {
+/// Connects [`Knowledge::enqueue`] during assembly and returns the worker to start after boot.
+/// A second preparation returns `None`; queued documents wait until the worker starts.
+pub fn worker(m: Modules, kb: Knowledge) -> Option<impl std::future::Future<Output = ()> + Send> {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     kb.queue.set(tx).ok()?;
-    Some(tokio::spawn(async move {
+    Some(async move {
         while let Some(first) = rx.recv().await {
             let mut ids = vec![first];
             while ids.len() < BATCH {
@@ -342,7 +342,12 @@ pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle
                 tracing::warn!("kb.index: batch failed: {e}");
             }
         }
-    }))
+    })
+}
+
+/// Starts the prepared index worker (`kb.index`) for standalone callers.
+pub fn spawn_worker(m: Modules, kb: Knowledge) -> Option<tokio::task::JoinHandle<()>> {
+    worker(m, kb).map(tokio::spawn)
 }
 
 impl Knowledge {

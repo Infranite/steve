@@ -77,13 +77,13 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
 }}
 
 install! { clocks(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Box::pin(steve_flow::Scheduler::new(flow.clone()).run()));
-    jobs.push(Box::pin(steve_flow::AlarmClock::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.scheduler", steve_flow::Scheduler::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.alarms", steve_flow::AlarmClock::new(flow.clone()).run()));
 }}
 
 install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {
-    jobs.push(Box::pin(steve_flow::Poller::new(flow.clone()).run()));
-    jobs.push(Box::pin(steve_flow::retention::run(flow.clone())));
+    jobs.push(Job::new("flow.ingest", steve_flow::Poller::new(flow.clone()).run()));
+    jobs.push(Job::new("flow.retention", steve_flow::retention::run(flow.clone())));
 }}
 
 install! { root(reg, _cx) [flow, gh, mut root_routes] => [flow, gh, root_routes] {

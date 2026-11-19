@@ -397,7 +397,7 @@ impl Extension for Probe {
         if self.hello {
             m = m
                 .routes(Router::new().route("/hello", axum::routing::get(|| async { "hi" })))
-                .job(Box::pin(async {}));
+                .job(steve_hub::extension::Job::new("test.extension", async {}));
         }
         for a in &self.hooks {
             m = m.lifecycle(a, Arc::new(Idle));
@@ -472,7 +472,7 @@ async fn feishu_self_wires_without_feishu_bot() {
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
     // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 22);
+    assert_eq!(w.jobs.len(), 22 + 14);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -565,7 +565,7 @@ async fn an_extension_runs_its_own_connection_hook() {
     assert_eq!(rt.adapters(), ["github_pat"]);
     // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 22);
+    assert_eq!(w.jobs.len(), 22 + 14);
 }
 
 #[tokio::test]
@@ -600,7 +600,7 @@ async fn an_assembly_registers_only_its_extensions() {
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // the built-in 21 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar
     // sync and the alarm clock) and the probe's
-    assert_eq!(w.jobs.len(), 24);
+    assert_eq!(w.jobs.len(), 24 + 14);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -635,7 +635,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 21);
+    assert_eq!(w.jobs.len(), 21 + 14);
     assert!(w.lifecycle.is_none());
 }
 
@@ -725,4 +725,85 @@ async fn an_extension_declares_its_own_handle_systems() {
         .expect("wire again");
     assert_eq!(rows(&w).len(), 1);
     assert_eq!(rows(&w)[0].1, "内部 ID");
+}
+
+#[tokio::test]
+async fn all_hub_jobs_are_named_owned_and_stopped_together() {
+    let h = home();
+    let bus = Bus::new();
+    let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
+    let mut names: Vec<_> = w.jobs.iter().map(|j| j.name).collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "calendar.sync",
+        "channels.notifications",
+        "channels.trigger_report",
+        "channels.retention",
+        "channels.lifecycle",
+        "channels.send",
+        "connections.maintenance",
+        "contacts.sync",
+        "contacts.watch",
+        "digest.bot",
+        "digest.intake",
+        "feishu.registrations",
+        "flow.scheduler",
+        "flow.alarms",
+        "flow.ingest",
+        "flow.retention",
+        "github.poll",
+        "github.effects",
+        "kb.index",
+        "kb.sweep",
+        "kb.scans",
+        "kb.expire",
+        "kb.chat",
+        "kb.changes",
+        "library.sweep",
+        "mail.sync",
+        "mail.send",
+        "mail.mailboxes",
+        "nodes.vitals",
+        "outbox.dispatch",
+        "plugins.supervise",
+        "prices.sync",
+        "stats.refresh",
+        "yolo.events",
+        "yolo.ticks",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        names, expected,
+        "21 original descriptions plus 14 formerly detached spawn entries"
+    );
+    let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, w.domain, bus)
+        .with_modules(w.modules);
+    steve_hub::app::boot(&st).await.expect("boot");
+    let handles: Vec<_> = w.jobs.into_iter().map(tokio::spawn).collect();
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    expected.extend([
+        "hub.device",
+        "hub.lifecycle",
+        "hub.presence",
+        "hub.runtimes",
+        "core.releases",
+        "core.housekeeping",
+        "core.workspaces",
+        "core.stalls",
+        "core.judge",
+        "core.backfill",
+    ]);
+    expected.sort_unstable();
+    let mut running = st.jobs.names();
+    running.sort_unstable();
+    assert_eq!(running, expected);
+    st.domain.shutdown().await;
+    assert!(st.jobs.names().is_empty());
+    // Shutdown is idempotent, and no late startup can revive the Hub's tasks.
+    st.domain.shutdown().await;
+    st.jobs.start("late", || {
+        panic!("a stopped Hub must not start another task")
+    });
 }

@@ -38,9 +38,15 @@ install! { install(reg, cx) [conns, declared, draft_link, kb, mail_cfg, mail_hoo
     mail_hooks.bind(&mail);
 }}
 
-install! { start(reg, _cx) [mail] => [mail] {
-    drop(mail.spawn_jobs());
-    drop(mail.spawn_send_queue());
+install! { start(reg, _cx) [mut jobs, mail] => [jobs, mail] {
+    {
+        let mail = mail.clone();
+        jobs.push(Job::spawned("mail.sync", move || vec![mail.spawn_jobs()]));
+    }
+    {
+        let mail = mail.clone();
+        jobs.push(Job::spawned("mail.send", move || vec![mail.spawn_send_queue()]));
+    }
 }}
 
 install! { routes(reg, _cx) [mail, mut module_routes] => [mail, module_routes] {
@@ -50,7 +56,7 @@ install! { routes(reg, _cx) [mail, mut module_routes] => [mail, module_routes] {
 install! { watch(reg, cx) [flow, mut jobs, tools] => [flow, jobs, tools] {
     let Env { bus, .. } = cx.clone();
     // new mailboxes get the triage template
-    jobs.push(Box::pin(crate::wire::signals::watch_mailboxes(
+    jobs.push(Job::new("mail.mailboxes", crate::wire::signals::watch_mailboxes(
         bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))),
         flow.clone(),
         tools.mail.clone(),

@@ -78,6 +78,7 @@ pub struct Inner {
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
     /// Which signed-in clients hold the live stream open now (G6).
     pub presence: Arc<crate::presence::Presence>,
+    pub jobs: Arc<crate::jobs::Tasks>,
 }
 
 impl std::ops::Deref for AppState {
@@ -101,6 +102,7 @@ impl AppState {
             deliveries: None,
             cfg,
             backend,
+            jobs: domain.background_tasks().unwrap_or_default(),
             domain,
             bus,
             runtimes,

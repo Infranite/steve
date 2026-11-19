@@ -730,8 +730,11 @@ pub trait Domain: Send + Sync + 'static {
     }
     /// SIGTERM every live adapter process.
     async fn shutdown(&self) {}
-    /// Starts the domain's own background jobs (release watcher, hourly housekeeping); `false` means it has
-    /// none and the Hub runs its own ports of them.
+    /// Task lifetimes shared by assembly, app boot and domain shutdown.
+    fn background_tasks(&self) -> Option<std::sync::Arc<crate::jobs::Tasks>> {
+        None
+    }
+    /// Starts domain jobs; false asks the Hub to run its fallback release/housekeeping jobs.
     fn spawn_background(&self) -> bool {
         false
     }

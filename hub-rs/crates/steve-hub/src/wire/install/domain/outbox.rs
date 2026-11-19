@@ -41,5 +41,5 @@ install! { install(reg, cx) [flow, gh, mail, outbox, ov] => [dispatcher, flow, g
 
 install! { jobs(reg, cx) [dispatcher, flow, mut jobs] => [flow, jobs] {
     let Env { store, .. } = cx.clone();
-    jobs.push(Box::pin(crate::wire::outbox::run(dispatcher, store.clone(), flow.clone())));
+    jobs.push(Job::new("outbox.dispatch", crate::wire::outbox::run(dispatcher, store.clone(), flow.clone())));
 }}

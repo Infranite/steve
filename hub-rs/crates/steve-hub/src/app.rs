@@ -490,50 +490,64 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     boot_step("seed", st.domain.seed().await)?;
     // registerHub runs scutil/sw_vers/sysctl: in the background, so the Hub listens at once
     let dev = st.clone();
-    tokio::spawn(async move {
-        let (name, os, version) = crate::system::hub_device(&dev.cfg.version).await;
-        let b = dev.backend.clone();
-        let r = tokio::task::spawn_blocking(move || {
-            b.writer()
-                .and_then(|w| crate::system::register_hub(w.as_ref(), &name, &os, &version))
-        })
-        .await;
-        match r {
-            Ok(Ok(())) => {
-                // the Hub device is “我”'s (where “我” exists; otherwise it is
-                // linked when “我” is created)
-                if let Some(m) = dev.modules.clone() {
-                    let r = tokio::task::spawn_blocking(move || {
-                        m.store.transaction(|tx| {
-                            steve_modules::contacts::stewards::adopt_everywhere(tx, "device", "hub")
+    st.jobs.start("hub.device", || {
+        steve_runtime::spawn("hub.device", async move {
+            let (name, os, version) = crate::system::hub_device(&dev.cfg.version).await;
+            let b = dev.backend.clone();
+            let r = tokio::task::spawn_blocking(move || {
+                b.writer()
+                    .and_then(|w| crate::system::register_hub(w.as_ref(), &name, &os, &version))
+            })
+            .await;
+            match r {
+                Ok(Ok(())) => {
+                    // the Hub device is “我”'s (where “我” exists; otherwise it is
+                    // linked when “我” is created)
+                    if let Some(m) = dev.modules.clone() {
+                        let r = tokio::task::spawn_blocking(move || {
+                            m.store.transaction(|tx| {
+                                steve_modules::contacts::stewards::adopt_everywhere(
+                                    tx, "device", "hub",
+                                )
+                            })
                         })
-                    })
-                    .await;
-                    if let Ok(Err(e)) = r {
-                        tracing::warn!("hub device 负责人: {e}");
+                        .await;
+                        if let Ok(Err(e)) = r {
+                            tracing::warn!("hub device 负责人: {e}");
+                        }
                     }
                 }
+                Ok(Err(e)) => tracing::error!("register hub: {e}"),
+                Err(e) => tracing::error!("register hub: {e}"),
             }
-            Ok(Err(e)) => tracing::error!("register hub: {e}"),
-            Err(e) => tracing::error!("register hub: {e}"),
-        }
+        })
     });
     // recover() reports a finished release first, as in TS
     boot_step("recover", st.domain.recover().await)?;
     if !st.domain.spawn_background() {
-        crate::jobs::spawn_release_watcher(st.clone(), st.cfg.release_file());
-        crate::jobs::spawn_housekeeping(st.clone());
+        st.jobs.start("hub.release", || {
+            crate::jobs::spawn_release_watcher(st.clone(), st.cfg.release_file())
+        });
+        st.jobs.start("hub.housekeeping", || {
+            crate::jobs::spawn_housekeeping(st.clone())
+        });
     }
     // closings waiting for something the turn-end callback may never report (queued turns, the hold)
-    crate::jobs::spawn_lifecycle_tick(st.clone());
+    st.jobs.start("hub.lifecycle", || {
+        crate::jobs::spawn_lifecycle_tick(st.clone())
+    });
     // live streams of clients signed out by another process (`steve access revoke`) end too (G11)
     if let Some(m) = &st.modules {
-        tokio::spawn(st.presence.clone().sweep(m.store.clone()));
+        st.jobs.start("hub.presence", || {
+            steve_runtime::spawn("hub.presence", st.presence.clone().sweep(m.store.clone()))
+        });
     }
     // warm the runtimes cache so the first /api/state doesn't wait for `claude --version`
     let rt = st.clone();
-    tokio::spawn(async move {
-        rt.runtimes.get(false).await;
+    st.jobs.start("hub.runtimes", || {
+        steve_runtime::spawn("hub.runtimes", async move {
+            rt.runtimes.get(false).await;
+        })
     });
     Ok(())
 }

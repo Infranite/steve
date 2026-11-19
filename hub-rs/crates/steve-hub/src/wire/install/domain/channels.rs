@@ -31,7 +31,7 @@ install! { outbound(reg, _cx) [declared, mut registry] => [declared, disclosure,
     )));
 }}
 
-install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, modules, outbox, ports, replies, sink] => [channels, conns, declared, directory, flow, modules, outbox, ports] {
+install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, modules, outbox, ports, replies, sink, mut jobs] => [channels, conns, declared, directory, flow, modules, outbox, ports, jobs] {
     let Env { core, .. } = cx.clone();
     let mut channels = steve_channels::Channels::builder(modules.clone(), conns.clone(), sink);
     for a in &declared.channel_adapters {
@@ -71,7 +71,10 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     channels.set_knowledge_store(kstore.clone());
     late.set(&channels);
     core.set_conv_host(Arc::new(crate::wire::chan::ChanConvHost(channels.downgrade())));
-    drop(outbox.clone().spawn_queue(&channels));
+    {
+        let (outbox, channels) = (outbox.clone(), channels.clone());
+        jobs.push(Job::spawned("channels.send", move || vec![outbox.clone().spawn_queue(&channels)]));
+    }
 }}
 
 install! { routes(reg, _cx) [channels, mut module_routes, outbox] => [channels, module_routes, outbox] {
@@ -81,16 +84,16 @@ install! { routes(reg, _cx) [channels, mut module_routes, outbox] => [channels, 
 }}
 
 install! { notifications(reg, _cx) [channels, mut jobs, outbox] => [channels, jobs, outbox] {
-    jobs.push(Box::pin(steve_channels::notifications::run(
+    jobs.push(Job::new("channels.notifications", steve_channels::notifications::run(
             channels.clone(),
             outbox.clone(),
         )));
-    jobs.push(Box::pin(steve_channels::trigger_report::run(
+    jobs.push(Job::new("channels.trigger_report", steve_channels::trigger_report::run(
             channels.clone(),
             outbox.clone(),
         )));
 }}
 
 install! { retention(reg, _cx) [mut jobs, modules] => [jobs, modules] {
-    jobs.push(Box::pin(steve_channels::messages::retention(modules.clone())));
+    jobs.push(Job::new("channels.retention", steve_channels::messages::retention(modules.clone())));
 }}

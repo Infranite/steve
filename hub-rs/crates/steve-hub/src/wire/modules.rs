@@ -15,8 +15,69 @@ use steve_store::Store;
 
 use crate::backend::BackendError;
 
-/// A background job to spawn once the Hub is up.
-pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// A named background task prepared during assembly, started after boot.
+pub struct Job {
+    pub name: &'static str,
+    start: Option<Box<dyn FnOnce() -> steve_runtime::Task + Send>>,
+    owner: std::sync::Weak<crate::jobs::Tasks>,
+    running: Option<steve_runtime::Task>,
+}
+impl Job {
+    pub fn new(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self::task(name, move || steve_runtime::spawn(name, future))
+    }
+    pub fn task(
+        name: &'static str,
+        start: impl FnOnce() -> steve_runtime::Task + Send + 'static,
+    ) -> Self {
+        Self {
+            name,
+            start: Some(Box::new(start)),
+            owner: Default::default(),
+            running: None,
+        }
+    }
+    /// Adopts existing self-spawning domain entry points, including their child handles.
+    pub fn spawned(
+        name: &'static str,
+        start: impl FnOnce() -> Vec<tokio::task::JoinHandle<()>> + Send + 'static,
+    ) -> Self {
+        Self::task(name, move || {
+            struct Children(Vec<tokio::task::JoinHandle<()>>);
+            impl Drop for Children {
+                fn drop(&mut self) {
+                    for child in &self.0 {
+                        child.abort();
+                    }
+                }
+            }
+            let mut children = Children(start());
+            steve_runtime::spawn(name, async move {
+                futures::future::join_all(&mut children.0).await;
+            })
+        })
+    }
+    pub(crate) fn bind(&mut self, owner: &Arc<crate::jobs::Tasks>) {
+        self.owner = Arc::downgrade(owner);
+    }
+}
+// Temporary bridge for the frozen extension::run startup loop (T24).
+impl Future for Job {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if let Some(start) = self.start.take() {
+            if let Some(owner) = self.owner.upgrade() {
+                owner.start(self.name, start);
+                return std::task::Poll::Ready(());
+            }
+            self.running = Some(start());
+        }
+        match self.running.as_mut() {
+            Some(task) => Pin::new(task).poll(cx),
+            None => std::task::Poll::Ready(()),
+        }
+    }
+}
 
 /// What schedules need from steve-core.
 pub struct FlowCore {

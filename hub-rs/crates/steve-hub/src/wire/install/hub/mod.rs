@@ -1,4 +1,5 @@
 //! Hub installation order: storage -> host -> runtime -> core -> modules -> consumers.
+use crate::wire::modules::Job;
 use crate::wire::*;
 
 // An installer is an ordinary function pointer; the macro only moves typed input/output slots.

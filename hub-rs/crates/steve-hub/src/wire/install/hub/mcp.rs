@@ -14,7 +14,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     // connections to the library's MCP servers that no call used for a while close
     {
         let library = built.library.clone();
-        jobs.push(Box::pin(async move {
+        jobs.push(Job::new("library.sweep", async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tick.tick().await;
@@ -35,11 +35,11 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     });
     if let Some(f) = &fleet {
         f.set_service(tool_service.clone());
-        jobs.push(Box::pin(start_fleet(f.clone(), db.clone())));
+        jobs.push(Job::new("nodes.fleet", start_fleet(f.clone(), db.clone())));
     }
     // work waiting for a device that stays away goes on elsewhere (B5)
     if let Some(svc) = &nodes {
-        jobs.push(Box::pin(crate::nodes::handover::run(
+        jobs.push(Job::new("nodes.handover", crate::nodes::handover::run(
             svc.clone(),
             core.clone(),
             crate::nodes::handover::minutes(|k| vars(k)),
@@ -47,7 +47,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
     // how each machine is doing, for the devices page (B3)
-    jobs.push(Box::pin(crate::nodes::vitals::sample(
+    jobs.push(Job::new("nodes.vitals", crate::nodes::vitals::sample(
         db.clone(),
         local_node
             .clone()

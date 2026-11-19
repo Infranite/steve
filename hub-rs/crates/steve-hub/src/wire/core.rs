@@ -1317,6 +1317,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 // ── the HTTP layer's Domain ──
 
 pub struct CoreDomain {
+    pub jobs: Arc<crate::jobs::Tasks>,
     pub core: Core,
     /// The harness adapters the Hub knows, kept fresh from the local Node.
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
@@ -1426,6 +1427,7 @@ impl Domain for CoreDomain {
         blocking(move || c.report_release()).await
     }
     async fn shutdown(&self) {
+        self.jobs.stop().await;
         let node = async {
             match &self.node {
                 Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
@@ -1451,16 +1453,31 @@ impl Domain for CoreDomain {
             tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
     }
+    fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
+        Some(self.jobs.clone())
+    }
     fn spawn_background(&self) -> bool {
-        tokio::spawn(self.core.clone().watch_releases());
-        tokio::spawn(self.core.clone().run_housekeeping());
-        tokio::spawn(self.core.clone().run_workspace_watch());
-        tokio::spawn(self.core.clone().run_stall_watch());
+        self.jobs.start("core.releases", || {
+            steve_runtime::spawn("core.releases", self.core.clone().watch_releases())
+        });
+        self.jobs.start("core.housekeeping", || {
+            steve_runtime::spawn("core.housekeeping", self.core.clone().run_housekeeping())
+        });
+        self.jobs.start("core.workspaces", || {
+            steve_runtime::spawn("core.workspaces", self.core.clone().run_workspace_watch())
+        });
+        self.jobs.start("core.stalls", || {
+            steve_runtime::spawn("core.stalls", self.core.clone().run_stall_watch())
+        });
         // the completion judge in shadow (#335): its own watch, so its model calls never hold up
         // the stall, build and pull request checks
-        tokio::spawn(self.core.clone().run_judge_watch());
+        self.jobs.start("core.judge", || {
+            steve_runtime::spawn("core.judge", self.core.clone().run_judge_watch())
+        });
         // ST-34: items made before the categories, or left without one, get theirs
-        tokio::spawn(self.core.clone().backfill_kinds_all());
+        self.jobs.start("core.backfill", || {
+            steve_runtime::spawn("core.backfill", self.core.clone().backfill_kinds_all())
+        });
         true
     }
 

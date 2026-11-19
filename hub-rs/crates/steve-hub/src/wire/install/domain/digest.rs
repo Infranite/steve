@@ -4,7 +4,10 @@ install! { routes(reg, _cx) [mut module_routes] => [module_routes] {
     module_routes = module_routes.merge(steve_digest::routes());
 }}
 
-install! { start(reg, _cx) [modules] => [modules] {
+install! { start(reg, _cx) [mut jobs, modules] => [jobs, modules] {
     // Deterministic intake; the ordinary digest schedule consumes these packets through tools.
-    drop(steve_digest::job::spawn_job(modules.clone()));
+    {
+        let modules = modules.clone();
+        jobs.push(Job::spawned("digest.intake", move || vec![steve_digest::job::spawn_job(modules.clone())]));
+    }
 }}

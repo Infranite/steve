@@ -290,11 +290,10 @@ fn open_in_process_node(
                 ),
         )),
     );
-    jobs.push(Box::pin(start_node(
-        runtime.clone(),
-        node.clone(),
-        tools.clone(),
-    )));
+    jobs.push(crate::wire::modules::Job::new(
+        "node.local",
+        start_node(runtime.clone(), node.clone(), tools.clone()),
+    ));
     Ok(NodeHost {
         runtime,
         tools,

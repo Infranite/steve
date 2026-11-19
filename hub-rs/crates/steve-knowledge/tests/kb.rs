@@ -734,16 +734,22 @@ async fn queue_worker_reindexes_documents() {
             Ok(())
         })
         .unwrap();
-    let handle = index::spawn_worker(e.env.modules.clone(), e.kb.clone()).unwrap();
+    let worker = index::worker(e.env.modules.clone(), e.kb.clone()).unwrap();
     assert!(index::spawn_worker(e.env.modules.clone(), e.kb.clone()).is_none());
     e.events.lock().unwrap().clear();
     e.kb.enqueue(&id);
-    for _ in 0..100 {
-        if !e.events.lock().unwrap().is_empty() {
-            break;
+    assert!(
+        e.events.lock().unwrap().is_empty(),
+        "preparing a worker does not run it"
+    );
+    let handle = tokio::spawn(worker);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while e.events.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("the document queued before startup is indexed");
     assert_eq!(e.events.lock().unwrap()[0].id, id);
     assert_eq!(ids(&e.search(ME, "第二版").await), vec![id.clone()]);
     assert!(e.search(ME, "第一版").await.is_empty());

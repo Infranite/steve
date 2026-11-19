@@ -1,7 +1,9 @@
 //! Background jobs: hourly housekeeping (housekeeping.ts) and the release watcher (orchestrator `watchReleases`).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+use steve_runtime::{Clock, FirstRun, SystemClock, Task, every};
 
 use serde_json::{Value, json};
 
@@ -12,11 +14,49 @@ use crate::js;
 pub const HOUSEKEEPING_EVERY: Duration = Duration::from_secs(3600);
 pub const RELEASE_POLL: Duration = Duration::from_millis(3000);
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// The Hub owns task lifetimes; this is an ownership bag, not a scheduler.
+#[derive(Default)]
+pub struct Tasks {
+    state: Mutex<TaskState>,
+    stopping: tokio::sync::Mutex<()>,
+}
+#[derive(Default)]
+struct TaskState {
+    stopped: bool,
+    tasks: Vec<Task>,
+}
+impl Tasks {
+    pub fn start(&self, name: &'static str, start: impl FnOnce() -> Task) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.stopped && !state.tasks.iter().any(|t| t.name() == name) {
+            let task = start();
+            assert_eq!(task.name(), name, "task name differs from its registration");
+            state.tasks.push(task);
+        }
+    }
+    pub fn names(&self) -> Vec<&'static str> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tasks
+            .iter()
+            .map(Task::name)
+            .collect()
+    }
+    pub async fn stop(&self) {
+        let _stopping = self.stopping.lock().await;
+        let tasks = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.stopped = true;
+            for task in &state.tasks {
+                task.stop();
+            }
+            std::mem::take(&mut state.tasks)
+        };
+        for task in tasks {
+            task.await;
+        }
+    }
 }
 
 /// Archive finished items after the workspace's archive period (`archDays`, default 30; `0`/NaN = never).
@@ -91,28 +131,37 @@ pub fn housekeeping(r: &dyn Repo, now: i64, exists: impl Fn(&str) -> bool) -> BR
 }
 
 /// Runs housekeeping now and then every hour.
-pub fn spawn_housekeeping(st: AppState) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(HOUSEKEEPING_EVERY);
-        loop {
-            tick.tick().await;
-            let tidy = match st
-                .write(|r| Ok(housekeeping(r, now_ms(), |p| Path::new(p).exists())?))
-                .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!("housekeeping: {e}");
-                    continue;
-                }
-            };
-            for id in tidy {
-                if let Err(e) = st.domain.tidy_branch(&id).await {
-                    tracing::error!("tidy {id} {e}");
+pub fn spawn_housekeeping(st: AppState) -> Task {
+    every(
+        "hub.housekeeping",
+        Arc::new(SystemClock),
+        HOUSEKEEPING_EVERY,
+        FirstRun::Immediate,
+        move || {
+            let st = st.clone();
+            async move {
+                let tidy = match st
+                    .write(|r| {
+                        Ok(housekeeping(r, SystemClock.now(), |p| {
+                            Path::new(p).exists()
+                        })?)
+                    })
+                    .await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("housekeeping: {e}");
+                        return;
+                    }
+                };
+                for id in tidy {
+                    if let Err(e) = st.domain.tidy_branch(&id).await {
+                        tracing::error!("tidy {id} {e}");
+                    }
                 }
             }
-        }
-    });
+        },
+    )
 }
 
 /// What `fs.watchFile` compares: a missing file is a state of its own.
@@ -126,41 +175,118 @@ fn stamp(p: &Path) -> Option<(SystemTime, u64)> {
 pub const LIFECYCLE_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Commits the closings whose gate holds now, every [`LIFECYCLE_TICK`].
-pub fn spawn_lifecycle_tick(st: AppState) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(LIFECYCLE_TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            match st.domain.lifecycle_tick().await {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(closed = n, "lifecycle tick"),
-                Err(e) => tracing::warn!("lifecycle tick: {}", e.message),
+pub fn spawn_lifecycle_tick(st: AppState) -> Task {
+    every(
+        "hub.lifecycle",
+        Arc::new(SystemClock),
+        LIFECYCLE_TICK,
+        FirstRun::Immediate,
+        move || {
+            let st = st.clone();
+            async move {
+                match st.domain.lifecycle_tick().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(closed = n, "lifecycle tick"),
+                    Err(e) => tracing::warn!("lifecycle tick: {}", e.message),
+                }
             }
-        }
-    });
+        },
+    )
 }
 
 /// Polls `last.json` (and the `rollback.json` next to it) every 3 s and calls `reportRelease` on every
 /// change (create, rewrite, delete).
-pub fn spawn_release_watcher(st: AppState, file: PathBuf) {
-    let stamp = |f: &Path| (stamp(f), stamp(&f.with_file_name("rollback.json")));
-    tokio::spawn(async move {
-        let mut last = stamp(&file);
-        let mut tick = tokio::time::interval(RELEASE_POLL);
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            let f = file.clone();
-            let now = tokio::task::spawn_blocking(move || stamp(&f))
-                .await
-                .unwrap_or((None, None));
-            if now != last {
-                last = now;
-                if let Err(e) = st.domain.report_release().await {
-                    tracing::error!("report release: {e}");
+pub fn spawn_release_watcher(st: AppState, file: PathBuf) -> steve_runtime::Task {
+    let stamps = |f: &Path| (stamp(f), stamp(&f.with_file_name("rollback.json")));
+    let last = Arc::new(Mutex::new(stamps(&file)));
+    every(
+        "hub.release",
+        Arc::new(SystemClock),
+        RELEASE_POLL,
+        FirstRun::AfterPeriod,
+        move || {
+            let (st, f, last) = (st.clone(), file.clone(), last.clone());
+            async move {
+                let now = tokio::task::spawn_blocking(move || stamps(&f))
+                    .await
+                    .unwrap_or((None, None));
+                let previous = std::mem::replace(&mut *last.lock().unwrap(), now);
+                if now != previous {
+                    if let Err(e) = st.domain.report_release().await {
+                        tracing::error!("report release: {e}");
+                    }
                 }
             }
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::modules::Job;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn settle() {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
         }
-    });
+    }
+
+    #[tokio::test]
+    async fn stopping_the_hub_cancels_periodic_jobs_and_adopted_children() {
+        struct Dropped(Arc<AtomicUsize>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let jobs = Arc::new(Tasks::default());
+        let clock = Arc::new(steve_runtime::FakeClock::new(0));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let n = runs.clone();
+        let c = clock.clone();
+        jobs.start("period", || {
+            every(
+                "period",
+                c,
+                Duration::from_secs(1),
+                FirstRun::Immediate,
+                move || {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    async {}
+                },
+            )
+        });
+        jobs.start("period", || panic!("duplicate registration must not spawn"));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let d = dropped.clone();
+        let mut job = Job::spawned("children", move || {
+            (0..2)
+                .map(|_| {
+                    let dropped = Dropped(d.clone());
+                    tokio::spawn(async move {
+                        let _dropped = dropped;
+                        std::future::pending::<()>().await;
+                    })
+                })
+                .collect()
+        });
+        job.bind(&jobs);
+        tokio::spawn(job).await.unwrap();
+        settle().await;
+        assert_eq!(jobs.names(), ["period", "children"]);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        jobs.stop().await;
+        clock.advance(100_000);
+        settle().await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            2,
+            "all adopted children were dropped"
+        );
+        jobs.stop().await;
+        jobs.start("late", || panic!("stopped owner must reject new tasks"));
+    }
 }
