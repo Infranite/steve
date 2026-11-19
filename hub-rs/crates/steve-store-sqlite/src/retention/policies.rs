@@ -8,6 +8,9 @@ use std::{
 use steve_storage_api::{Domain, retention::OpName, uow::AnyOp};
 
 pub const DAY: u64 = 86_400_000;
+pub const OUTBOX_KEEP_MS: i64 = 7 * DAY as i64;
+pub const DIAGNOSTIC_RETENTION_DAYS: i64 = 7;
+pub const DIAGNOSTIC_KEEP_MS: i64 = DIAGNOSTIC_RETENTION_DAYS * DAY as i64;
 pub const ITEM_BYTES: i64 = 10 * 1024 * 1024;
 pub const TOTAL_BYTES: i64 = 100 * 1024 * 1024;
 /// Background convergence leaves 10 MiB for new facts before the hard total cap.
@@ -131,7 +134,7 @@ pub struct Outbox {
 }
 impl Outbox {
     pub fn new() -> Self {
-        let mut definition = age_definition("outbox_events", 7 * DAY);
+        let mut definition = age_definition("outbox_events", OUTBOX_KEEP_MS as u64);
         definition.protect = Some(OpName("outbox_in_use".into()));
         Self { definition }
     }
@@ -250,12 +253,15 @@ struct ItemReserve<'a> {
 pub struct Diagnostics<'a> {
     definition: RetentionPolicy,
     reserve: Option<ItemReserve<'a>>,
+    // Reinitialized by each window inside its read/write snapshot, then decremented by deletes.
+    bytes: std::cell::Cell<Option<i64>>,
 }
 impl Diagnostics<'_> {
     pub fn age() -> Self {
         Self {
-            definition: age_definition("diagnostic_events", 7 * DAY),
+            definition: age_definition("diagnostic_events", DIAGNOSTIC_KEEP_MS as u64),
             reserve: None,
+            bytes: std::cell::Cell::new(None),
         }
     }
     pub fn capacity() -> Self {
@@ -282,6 +288,12 @@ impl Diagnostics<'_> {
         });
         policy
     }
+    fn pressured(&self, bytes: i64) -> bool {
+        match &self.reserve {
+            Some(scope) => bytes.saturating_add(scope.incoming) > ITEM_BYTES,
+            None => bytes > BACKGROUND_TOTAL_BYTES,
+        }
+    }
 }
 fn diagnostic_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     let mut row = age_row(r, r.get(1)?)?;
@@ -302,6 +314,28 @@ impl Policy for Diagnostics<'_> {
         after: Option<&i64>,
         limit: u32,
     ) -> rusqlite::Result<Window<i64>> {
+        self.bytes.set(None);
+        if matches!(self.definition.select, Select::Bytes { .. }) {
+            let bytes = match &self.reserve {
+                Some(scope) => c.query_row(
+                    "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
+                    [scope.item],
+                    |r| r.get(0),
+                )?,
+                None => c.query_row(
+                    "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
+                    [],
+                    |r| r.get(0),
+                )?,
+            };
+            self.bytes.set(Some(bytes));
+            if !self.pressured(bytes) {
+                return Ok(Window {
+                    rows: vec![],
+                    more: false,
+                });
+            }
+        }
         let Some(scope) = &self.reserve else {
             return window(
                 c,
@@ -341,22 +375,12 @@ impl Policy for Diagnostics<'_> {
             .unwrap_or(false);
         Ok(Window { rows, more })
     }
-    fn overflow(&self, c: &Connection, _: &Row) -> rusqlite::Result<bool> {
-        if let Some(scope) = &self.reserve {
-            let bytes: i64 = c.query_row(
-                "SELECT bytes FROM diagnostic_item_stats WHERE item_id=?",
-                [scope.item],
-                |r| r.get(0),
-            )?;
-            Ok(bytes.saturating_add(scope.incoming) > ITEM_BYTES)
-        } else {
-            let bytes: i64 = c.query_row(
-                "SELECT coalesce(sum(bytes),0) FROM diagnostic_item_stats",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(bytes > BACKGROUND_TOTAL_BYTES)
-        }
+    fn overflow(&self, _: &Connection, _: &Row) -> rusqlite::Result<bool> {
+        let bytes = self
+            .bytes
+            .get()
+            .ok_or_else(|| invalid("capacity window must initialize bytes"))?;
+        Ok(self.pressured(bytes))
     }
     fn apply(&self, c: &Connection, row: &Row) -> rusqlite::Result<u64> {
         c.execute(
@@ -369,7 +393,14 @@ impl Policy for Diagnostics<'_> {
                 text(row, "item_id")?
             ],
         )?;
-        delete(c, "diagnostic_events", row)
+        let affected = delete(c, "diagnostic_events", row)?;
+        if affected > 0
+            && let Some(bytes) = self.bytes.get()
+        {
+            self.bytes
+                .set(Some(bytes.saturating_sub(integer(row, "bytes")?)));
+        }
+        Ok(affected)
     }
 }
 
@@ -603,6 +634,9 @@ impl Policy for SessionEvents<'_> {
             .transpose()?
             .unwrap_or(false);
         Ok(Window { rows, more })
+    }
+    fn primary_key(&self, row: &Row) -> rusqlite::Result<String> {
+        Ok(integer(row, "rowid")?.to_string())
     }
     fn overflow(&self, _: &Connection, _: &Row) -> rusqlite::Result<bool> {
         Ok(true)

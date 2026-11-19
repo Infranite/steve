@@ -75,6 +75,9 @@ impl Policy for FixturePolicy {
             .unwrap_or(false);
         Ok(Window { rows, more })
     }
+    fn primary_key(&self, row: &Row) -> rusqlite::Result<String> {
+        Ok(id(row).to_string())
+    }
     fn protect(&self, _: &Connection, row: &Row) -> rusqlite::Result<bool> {
         Ok(self.protect.contains(&id(row)))
     }
@@ -124,8 +127,8 @@ fn indexed_windows_bound_inspection_and_advance_past_fresh_and_protected_rows() 
         &p,
         100,
         Budget {
-            rows: 5000,
-            target_ms: 20,
+            rows: r::MAX_SLICE_ROWS * 10,
+            target_ms: r::SLICE_TARGET_MS,
         },
         None,
         || 0,
@@ -133,13 +136,13 @@ fn indexed_windows_bound_inspection_and_advance_past_fresh_and_protected_rows() 
     .unwrap();
     assert_eq!(
         (first.inspected, first.affected, first.next),
-        (500, 0, Some(500))
+        (r::MAX_SLICE_ROWS, 0, Some(i64::from(r::MAX_SLICE_ROWS)))
     );
     let second =
         r::run_slice_timed(&c, &p, 100, Budget::default(), first.next.as_ref(), || 0).unwrap();
     assert_eq!(
         (second.inspected, second.affected, second.next),
-        (105, 4, None)
+        (605 - r::MAX_SLICE_ROWS, 4, None)
     );
     assert_eq!(count(&c), 601);
     let mut cursor = None;
@@ -147,7 +150,7 @@ fn indexed_windows_bound_inspection_and_advance_past_fresh_and_protected_rows() 
     loop {
         let page =
             r::run_slice_timed(&c, &p, 200, Budget::default(), cursor.as_ref(), || 0).unwrap();
-        assert!(page.inspected <= 500);
+        assert!(page.inspected <= r::MAX_SLICE_ROWS);
         cursor = page.next;
         if cursor.is_none() {
             break;
@@ -205,7 +208,7 @@ fn time_budget_returns_the_last_checked_key_and_reports_an_overrun() {
         &p,
         100,
         Budget {
-            rows: 500,
+            rows: r::MAX_SLICE_ROWS,
             target_ms: 1,
         },
         None,
@@ -317,7 +320,7 @@ fn a_slice_inside_the_callers_transaction_does_not_commit_it() {
             100,
             Budget {
                 rows: 0,
-                target_ms: 20
+                target_ms: r::SLICE_TARGET_MS
             },
             None
         )

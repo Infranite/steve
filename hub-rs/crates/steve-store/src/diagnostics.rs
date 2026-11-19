@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 
 use crate::{Inner, Result, Store, StoreError, now};
 
-pub const RETENTION_DAYS: i64 = 7;
+use steve_store_sqlite::retention::policies::DIAGNOSTIC_KEEP_MS as KEEP_MS;
 pub use steve_store_sqlite::retention::policies::{
-    ITEM_BYTES as MAX_ITEM_BYTES, TOTAL_BYTES as MAX_TOTAL_BYTES,
+    DIAGNOSTIC_RETENTION_DAYS as RETENTION_DAYS, ITEM_BYTES as MAX_ITEM_BYTES,
+    TOTAL_BYTES as MAX_TOTAL_BYTES,
 };
 pub const DEFAULT_CAPTURE_MINUTES: u32 = 30;
 pub const MAX_CAPTURE_MINUTES: u32 = 60;
@@ -157,7 +158,6 @@ pub(crate) fn decision_event(d: &crate::Decision, operation: &str, from: Option<
 
 const QUEUE_CAPACITY: usize = 512;
 const MAX_EVENT_BYTES: usize = 8192;
-const KEEP_MS: i64 = RETENTION_DAYS * 86_400_000;
 
 struct Pending {
     at: i64,

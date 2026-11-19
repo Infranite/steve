@@ -214,7 +214,27 @@ fn total_pressure_below_the_hard_cap_converges_to_background_headroom() {
         .unwrap();
         diag(&c, &id, 0, ITEM_BYTES / 2);
     }
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let sums = Arc::new(AtomicUsize::new(0));
+    let count = sums.clone();
+    c.authorizer(Some(move |context: AuthContext<'_>| {
+        if matches!(context.action, AuthAction::Function {function_name} if function_name.eq_ignore_ascii_case("sum")) {
+            count.fetch_add(1,Ordering::SeqCst);
+        }
+        Authorization::Allow
+    })).unwrap();
     let report = slice(&c, Kind::DiagnosticCapacity, 1);
+    assert_eq!(
+        sums.load(Ordering::SeqCst),
+        1,
+        "one aggregate per capacity window, not one per candidate"
+    );
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
     assert_eq!(
         report.affected, 1,
         "cleanup runs before the hard 100 MiB limit"
@@ -227,9 +247,18 @@ fn total_pressure_below_the_hard_cap_converges_to_background_headroom() {
         one(&c, "SELECT sum(bytes) FROM diagnostic_item_stats"),
         one(&c, "SELECT sum(bytes) FROM diagnostic_events")
     );
+    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Read {
+            table_name: "diagnostic_events",
+            ..
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    let quiet = slice(&c, Kind::DiagnosticCapacity, 1);
     assert_eq!(
-        slice(&c, Kind::DiagnosticCapacity, 1).affected,
-        0,
-        "hysteresis target reached"
+        (quiet.inspected, quiet.affected, quiet.next),
+        (0, 0, None),
+        "under the threshold the event table is not even read"
     );
 }

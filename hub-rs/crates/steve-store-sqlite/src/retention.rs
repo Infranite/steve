@@ -2,7 +2,8 @@
 //! The caller owns the write grant. Cursors always name the last inspected candidate,
 //! including protected/non-selected rows; a time-limited slice never skips prefetched rows.
 use rusqlite::Connection;
-use std::time::Instant;
+use sha2::{Digest, Sha256};
+use std::{collections::HashSet, time::Instant};
 pub use steve_storage_api::{
     entity::{Cell, Row},
     retention::{Action, Budget, KeepFrom, RetentionPolicy, Select},
@@ -86,6 +87,10 @@ pub trait Policy {
             Ok(false)
         }
     }
+    /// Stable identity for before hooks; adapters encode composite keys unambiguously.
+    fn primary_key(&self, _: &Row) -> rusqlite::Result<String> {
+        Err(invalid("before hook requires a primary key handler"))
+    }
     fn ready(&self, _: &Row) -> rusqlite::Result<bool> {
         if self.definition().before.is_some() {
             Err(invalid(
@@ -100,11 +105,13 @@ pub trait Policy {
     }
     fn apply(&self, c: &Connection, row: &Row) -> rusqlite::Result<u64>;
 }
-/// External work is deliberately separate from run_slice. Call after releasing the read
-/// connection/write grant. Failed rows are untouched; changed rows lose their preparation.
+/// External work is deliberately separate from run_slice. Release the reader/write grant
+/// before external I/O; pure payload preparation may share the candidate read snapshot.
+/// Failed rows are untouched; changed rows lose their preparation.
 pub struct BeforeCandidates(Vec<Row>);
-/// Read and filter under a read snapshot, then release it before calling prepare.
-/// Fresh/protected rows must never reach an external resource-deletion callback.
+/// Read and filter under a read snapshot; release it before external I/O callbacks.
+/// Pure preparation can use that same snapshot. Fresh/protected rows must never reach
+/// an external resource-deletion callback.
 pub fn before_candidates<P: Policy>(
     c: &Connection,
     p: &P,
@@ -124,7 +131,7 @@ pub fn before_candidates<P: Policy>(
 }
 pub struct Prepared<'a, P: Policy> {
     pub policy: &'a P,
-    ready: Vec<Row>,
+    ready: HashSet<(String, [u8; 32])>,
     pub failed: u32,
 }
 pub fn prepare<'a, P: Policy>(
@@ -134,16 +141,28 @@ pub fn prepare<'a, P: Policy>(
 ) -> Prepared<'a, P> {
     let mut prepared = Prepared {
         policy,
-        ready: vec![],
+        ready: HashSet::new(),
         failed: 0,
     };
     for row in candidates.0 {
-        match before(&row) {
-            Ok(true) => prepared.ready.push(row),
+        let result: rusqlite::Result<_> = (|| {
+            let key = policy.primary_key(&row)?;
+            let fingerprint = row_fingerprint(&row)?;
+            Ok(before(&row)?.then_some((key, fingerprint)))
+        })();
+        match result {
+            Ok(Some(key)) => {
+                prepared.ready.insert(key);
+            }
             _ => prepared.failed += 1,
         }
     }
     prepared
+}
+fn row_fingerprint(row: &Row) -> rusqlite::Result<[u8; 32]> {
+    let bytes = serde_json::to_vec(row)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    Ok(Sha256::digest(bytes).into())
 }
 impl<P: Policy> Policy for Prepared<'_, P> {
     type Cursor = P::Cursor;
@@ -167,8 +186,13 @@ impl<P: Policy> Policy for Prepared<'_, P> {
     fn protect(&self, c: &Connection, r: &Row) -> rusqlite::Result<bool> {
         self.policy.protect(c, r)
     }
+    fn primary_key(&self, r: &Row) -> rusqlite::Result<String> {
+        self.policy.primary_key(r)
+    }
     fn ready(&self, r: &Row) -> rusqlite::Result<bool> {
-        Ok(self.ready.contains(r))
+        Ok(self
+            .ready
+            .contains(&(self.primary_key(r)?, row_fingerprint(r)?)))
     }
     fn preparation_failures(&self) -> u32 {
         self.failed

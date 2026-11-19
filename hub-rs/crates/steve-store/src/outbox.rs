@@ -46,7 +46,7 @@ pub const BATCH: usize = 50;
 /// The longest back-off between attempts.
 pub const BACKOFF_MAX_MS: i64 = 10 * 60_000;
 /// Fully delivered events are kept this long (candidate value), then removed by background retention.
-pub const KEEP_MS: i64 = 7 * 24 * 3_600_000;
+pub use steve_store_sqlite::retention::policies::OUTBOX_KEEP_MS as KEEP_MS;
 
 /// A committed fact.
 #[derive(Debug, Clone, PartialEq)]

@@ -626,36 +626,97 @@ pub mod retention {
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
             };
             let policy = r::policies::SessionEvents::new(session, upper, &action);
-            let candidates = self.reader(|c| {
+            let prepared = self.reader(|c| {
                 super::read_snapshot(c, |snapshot| {
-                    Ok(r::before_candidates(
-                        snapshot,
-                        &policy,
-                        now,
-                        budget,
-                        after.as_ref(),
-                    )?)
+                    let candidates =
+                        r::before_candidates(snapshot, &policy, now, budget, after.as_ref())?;
+                    Ok(r::prepare(&policy, candidates, |row| {
+                        let event = self
+                            .prepare_retention_event(snapshot, row)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                        cache
+                            .borrow_mut()
+                            .insert(r::policies::integer(row, "rowid")?, event);
+                        Ok(true)
+                    }))
                 })
             })?;
-            let prepared = r::prepare(&policy, candidates, |row| {
-                let event = self
-                    .reader(|c| {
-                        super::read_snapshot(c, |snapshot| {
-                            self.prepare_retention_event(snapshot, row)
-                        })
-                    })
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                cache
-                    .borrow_mut()
-                    .insert(r::policies::integer(row, "rowid")?, event);
-                Ok(true)
-            });
             let Some(_guard) = guard() else {
                 return Ok(None);
             };
             let report =
                 self.with_conn(|c| Ok(r::run_slice(c, &prepared, now, budget, after.as_ref())?))?;
             Ok(Some(report))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        #[test]
+        fn payload_page_uses_one_read_snapshot_for_all_candidates() {
+            let dir = tempfile::tempdir().unwrap();
+            let store =
+                Store::open(dir.path().join("retention.sqlite3"), crate::NoPublisher).unwrap();
+            store.ensure_workspace().unwrap();
+            let session = store
+                .sessions()
+                .create(&crate::NewSession {
+                    workspace_id: crate::WS.into(),
+                    harness: "fixture".into(),
+                    cwd: "/tmp".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            for _ in 0..3 {
+                store.events().add(&session.id,"user",serde_json::json!({"text":"screenshot","images":[{"type":"image","mimeType":"image/png","data":"QUJD".repeat(3000)}]})).unwrap();
+            }
+            let upto = store.events().last_seq(&session.id).unwrap();
+            let snapshots = Arc::new(AtomicUsize::new(0));
+            // Instrument every pooled reader, including readers the page may check out later.
+            let readers = (0..store.inner.readers.max_size())
+                .map(|_| store.inner.readers.get().unwrap())
+                .collect::<Vec<_>>();
+            for reader in &readers {
+                let count = snapshots.clone();
+                reader
+                    .authorizer(Some(move |context: AuthContext<'_>| {
+                        if matches!(
+                            context.action,
+                            AuthAction::Transaction {
+                                operation: TransactionOperation::Begin
+                            }
+                        ) {
+                            count.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Authorization::Allow
+                    }))
+                    .unwrap();
+            }
+            drop(readers);
+            let report = store
+                .retention_payload_slice(
+                    &session.id,
+                    upto,
+                    crate::now(),
+                    DEFAULT_BUDGET,
+                    None,
+                    &mut || Some(()),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!((report.affected, report.failures), (3, 0));
+            assert_eq!(
+                snapshots.load(Ordering::SeqCst),
+                1,
+                "candidate selection and all hydration share a page snapshot"
+            );
         }
     }
 }
