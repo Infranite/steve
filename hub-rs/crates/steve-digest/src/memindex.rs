@@ -127,10 +127,12 @@ pub fn link(
         "UPDATE mems SET updated = ? WHERE id = ? AND workspace_id = ?",
         params![steve_store::now(), mem, ws],
     )?;
-    tx.publish(steve_store::ChangeEvent::Mm {
-        id: mem.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Mm {
+            id: mem.into(),
+            ws: ws.into(),
+        },
+    ));
     Ok(added)
 }
 
@@ -186,10 +188,12 @@ pub fn unlink(tx: &Tx, ws: &str, a: &Added) -> Result<()> {
             params![a.mem, ws, r.conv, r.first_id],
         )?;
     }
-    tx.publish(steve_store::ChangeEvent::Mm {
-        id: a.mem.clone(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Mm {
+            id: a.mem.clone().into(),
+            ws: ws.into(),
+        },
+    ));
     Ok(())
 }
 

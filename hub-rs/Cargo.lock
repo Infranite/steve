@@ -5591,6 +5591,7 @@ dependencies = [
  "steve-knowledge",
  "steve-modules",
  "steve-store",
+ "steve-types",
  "tokio",
  "tracing",
 ]
