@@ -14,6 +14,8 @@ policy = ["dep:backon", "dep:governor", "dep:rand"]
 due = ["policy", "dep:metrics", "dep:tracing"]
 # The shared DueSource contract check, for each source's tests (a dev-dependency feature).
 due-contract = ["due"]
+# The cache (R10, DESIGN §6): the Hub turns it on, a Node does not.
+cache = ["dep:moka"]
 
 [dependencies]
 futures = "=0.3.34"
@@ -29,6 +31,7 @@ rand = { version = "=0.10.3", optional = true }
 # due_loop: one lag histogram and a warning when a source fails.
 metrics = { version = "=0.24.6", optional = true }
 tracing = { version = "=0.1.44", optional = true }
+moka = { version = "=0.12.16", default-features = false, features = ["future"], optional = true }
 
 [dev-dependencies]
 steve-runtime = { path = ".", features = ["due-contract"] }
