@@ -12,7 +12,10 @@ use std::{
     collections::BTreeSet,
     fs::File,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use steve_types::{Code, Error};
 
@@ -20,6 +23,7 @@ use steve_types::{Code, Error};
 /// Pool handles may outlive Engine; their connections are strictly read-only.
 pub struct Engine {
     writer: Mutex<Connection>,
+    writer_broken: AtomicBool,
     readers: Pool<SqliteConnectionManager>,
     layout: Layout,
     dir: PathBuf,
@@ -96,6 +100,7 @@ impl Engine {
             })?;
         Ok(Self {
             writer: Mutex::new(writer),
+            writer_broken: AtomicBool::new(false),
             readers,
             layout,
             dir,
@@ -132,15 +137,40 @@ impl Engine {
     /// The executor must avoid nested locking and schedule checkpoint calls outside grants.
     pub(crate) fn writer_conn(&self) -> Result<MutexGuard<'_, Connection>, Error> {
         let c = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if self.writer_broken.load(Ordering::Acquire) {
+            return Err(broken_writer());
+        }
         // RootGuard rolls back during unwind. Only recover a poisoned writer
         // after confirming it cannot leak the previous caller's transaction.
         if self.writer.is_poisoned() {
             if !c.is_autocommit() {
-                c.execute_batch("ROLLBACK").map_err(db_error)?;
+                self.rollback_root(&c)?;
             }
+            // No allocator is recreated here. RevAllocator persists reservation
+            // bounds before issuance, never refunds issued revisions, and skips
+            // the durable tail on reopen; rollback can only leave harmless gaps.
             self.writer.clear_poison();
         }
         Ok(c)
+    }
+    /// Guard cleanup must fail closed even if SQLite refuses ROLLBACK. Keep the
+    /// broken flag for this Engine's lifetime; never reset allocator state or
+    /// lend the still-active transaction to a subsequent root/batch/maintenance.
+    pub(crate) fn rollback_root(&self, conn: &Connection) -> Result<(), Error> {
+        if self.writer_broken.load(Ordering::Acquire) {
+            return Err(broken_writer());
+        }
+        if let Err(error) = conn.execute_batch("ROLLBACK") {
+            self.writer_broken.store(true, Ordering::Release);
+            tracing::error!(%error, "root rollback failed; storage writer is unusable");
+            return Err(broken_writer());
+        }
+        if !conn.is_autocommit() {
+            self.writer_broken.store(true, Ordering::Release);
+            tracing::error!("root rollback left a transaction active; storage writer is unusable");
+            return Err(broken_writer());
+        }
+        Ok(())
     }
     pub fn layout(&self) -> &Layout {
         &self.layout
@@ -191,6 +221,13 @@ impl Engine {
     pub fn data_dir(&self) -> &Path {
         &self.dir
     }
+}
+
+fn broken_writer() -> Error {
+    steve_storage_api::error(
+        Code::Internal,
+        "storage writer is unusable after rollback failure; reopen storage",
+    )
 }
 
 #[cfg(test)]
