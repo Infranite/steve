@@ -68,6 +68,7 @@ edge	steve-hub	steve-node-api
 edge	steve-hub	steve-node-cli
 edge	steve-hub	steve-node-wire
 edge	steve-hub	steve-research
+edge	steve-hub	steve-runtime
 edge	steve-hub	steve-stats
 edge	steve-hub	steve-store
 edge	steve-hub	steve-store-sqlite
@@ -112,6 +113,7 @@ edge	steve-stats	steve-store
 edge	steve-storage-api	steve-types
 edge	steve-store	steve-i18n
 edge	steve-store	steve-node-api
+edge	steve-store	steve-store-sqlite
 edge	steve-store	steve-types
 edge	steve-store-sqlite	steve-storage-api
 edge	steve-store-sqlite	steve-types

@@ -472,7 +472,7 @@ async fn feishu_self_wires_without_feishu_bot() {
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
     // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 21);
+    assert_eq!(w.jobs.len(), 22);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -565,7 +565,7 @@ async fn an_extension_runs_its_own_connection_hook() {
     assert_eq!(rt.adapters(), ["github_pat"]);
     // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
     // and the alarm clock) and connection runtime
-    assert_eq!(w.jobs.len(), 21);
+    assert_eq!(w.jobs.len(), 22);
 }
 
 #[tokio::test]
@@ -600,7 +600,7 @@ async fn an_assembly_registers_only_its_extensions() {
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // the built-in 21 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar
     // sync and the alarm clock) and the probe's
-    assert_eq!(w.jobs.len(), 23);
+    assert_eq!(w.jobs.len(), 24);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -635,7 +635,7 @@ async fn an_empty_assembly_still_wires_the_hub() {
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
     // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
     // alarm clock remain in the base wiring.
-    assert_eq!(w.jobs.len(), 20);
+    assert_eq!(w.jobs.len(), 21);
     assert!(w.lifecycle.is_none());
 }
 
