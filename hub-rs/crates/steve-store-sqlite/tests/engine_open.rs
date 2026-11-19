@@ -1,0 +1,181 @@
+use rusqlite::Connection;
+use steve_store_sqlite::{
+    layout::{self, CORE_FILE, Layout, META_DOMAIN},
+    migrate, open, pragmas,
+};
+use steve_types::Code;
+
+#[test]
+fn fresh_database_has_all_domains_and_reopens_without_metadata_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open::open_runtime(dir.path()).unwrap();
+    let c = engine.read_conn().unwrap();
+    let count: u32 = c
+        .query_row(
+            "SELECT count(*) FROM domain_schema WHERE version=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 3);
+    for table in [
+        "users",
+        "events",
+        "chan_messages",
+        "meta",
+        "uow_applied",
+        "cursor",
+    ] {
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name=?1",
+                [table],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+    let original = engine.layout().clone();
+    assert_eq!(original.generation, 2);
+    assert_ne!(original.store_generation, original.files[CORE_FILE]);
+    assert_eq!(Layout::read(&c).unwrap(), original);
+    assert!((4..=16).contains(&engine.readers().max_size()));
+    for (name, expected) in [
+        ("foreign_keys", 1),
+        ("busy_timeout", 5_000),
+        ("synchronous", 1),
+        ("temp_store", 2),
+        ("cache_size", -16_384),
+        ("mmap_size", pragmas::MMAP_SIZE),
+        ("wal_autocheckpoint", 0),
+    ] {
+        assert_eq!(
+            c.pragma_query_value(None, name, |r| r.get::<_, i64>(0))
+                .unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+    assert!(c.is_readonly("main").unwrap());
+    drop(c);
+    let writer = Connection::open(engine.path()).unwrap();
+    writer.execute_batch("CREATE TRIGGER engine_no_versions BEFORE UPDATE ON domain_schema BEGIN SELECT RAISE(ABORT,'versions rewritten'); END;
+        CREATE TRIGGER engine_no_meta BEFORE UPDATE ON meta BEGIN SELECT RAISE(ABORT,'meta rewritten'); END;").unwrap();
+    drop(writer);
+    drop(engine);
+    let engine = open::open_runtime(dir.path()).unwrap();
+    assert_eq!(*engine.layout(), original);
+    drop(engine);
+    assert_eq!(*open::open_admin(dir.path()).unwrap().layout(), original);
+}
+
+#[test]
+fn future_min_reader_is_rejected_before_wal_or_any_database_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CORE_FILE);
+    let mut c = Connection::open(&path).unwrap();
+    c.execute_batch(steve_store_sqlite::schema::CONTRACT)
+        .unwrap();
+    let tx = c.transaction().unwrap();
+    Layout::single_file()
+        .write_file_meta(&tx, CORE_FILE)
+        .unwrap();
+    migrate::stamp_current(&tx).unwrap();
+    layout::put_meta(&tx, META_DOMAIN, "min_reader", "3").unwrap();
+    tx.commit().unwrap();
+    drop(c);
+    let bytes = std::fs::read(&path).unwrap();
+    for result in [open::open_runtime(dir.path()), open::open_admin(dir.path())] {
+        assert_eq!(result.err().unwrap().code, Code::Incompatible);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!dir.path().join("steve.sqlite3-wal").exists());
+    }
+    let c = open::open_readonly(&path).unwrap();
+    assert_eq!(
+        c.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+            .unwrap(),
+        "delete"
+    );
+}
+
+#[test]
+fn legacy_and_unknown_databases_require_conversion_but_readonly_can_inspect_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CORE_FILE);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        "CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(112);",
+    )
+    .unwrap();
+    drop(c);
+    let bytes = std::fs::read(&path).unwrap();
+    let error = open::open_runtime(dir.path()).err().unwrap();
+    assert_eq!(error.code, Code::Incompatible);
+    assert!(error.safe_detail.contains("requires conversion"));
+    let c = open::open_readonly(&path).unwrap();
+    assert_eq!(
+        c.query_row("SELECT v FROM schema_version", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        112
+    );
+    assert!(
+        c.execute("INSERT INTO schema_version VALUES(113)", [])
+            .is_err()
+    );
+    drop(c);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(!dir.path().join("steve.sqlite3-wal").exists());
+    assert!(open::open_readonly(dir.path().join("missing.sqlite3")).is_err());
+    assert!(!dir.path().join("missing.sqlite3").exists());
+}
+
+#[test]
+fn exclusive_lock_lives_with_engine_and_admin_requires_the_current_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open::open_runtime(dir.path()).unwrap();
+    let error = open::open_runtime(dir.path()).err().unwrap();
+    assert_eq!(error.code, Code::Busy);
+    assert!(error.safe_detail.contains("another process"));
+    assert_eq!(open::open_admin(dir.path()).err().unwrap().code, Code::Busy);
+    drop(engine);
+    let c = Connection::open(dir.path().join(CORE_FILE)).unwrap();
+    c.execute(
+        "UPDATE domain_schema SET version=0 WHERE domain='stream'",
+        [],
+    )
+    .unwrap();
+    c.execute_batch("PRAGMA journal_mode=DELETE").unwrap();
+    drop(c);
+    let before = std::fs::read(dir.path().join(CORE_FILE)).unwrap();
+    assert_eq!(
+        open::open_admin(dir.path()).err().unwrap().code,
+        Code::Incompatible
+    );
+    assert_eq!(std::fs::read(dir.path().join(CORE_FILE)).unwrap(), before);
+}
+
+#[test]
+fn admin_does_not_migrate_stamp_optimize_or_select_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(open::open_runtime(dir.path()).unwrap());
+    let path = dir.path().join(CORE_FILE);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("ANALYZE; DELETE FROM sqlite_stat1; PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    drop(c);
+    let before = std::fs::read(&path).unwrap();
+    let engine = open::open_admin(dir.path()).unwrap();
+    assert_eq!(
+        engine
+            .read_conn()
+            .unwrap()
+            .query_row("SELECT count(*) FROM sqlite_stat1", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!dir.path().join("steve.sqlite3-wal").exists());
+}
