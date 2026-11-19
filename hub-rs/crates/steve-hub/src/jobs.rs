@@ -28,11 +28,16 @@ struct TaskState {
 impl Tasks {
     pub fn start(&self, name: &'static str, start: impl FnOnce() -> Task) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.stopped && !state.tasks.iter().any(|t| t.name() == name) {
-            let task = start();
-            assert_eq!(task.name(), name, "task name differs from its registration");
-            state.tasks.push(task);
+        if state.stopped {
+            return;
         }
+        if state.tasks.iter().any(|t| t.name() == name) {
+            drop(state);
+            panic!("duplicate background job: {name}");
+        }
+        let task = start();
+        assert_eq!(task.name(), name, "task name differs from its registration");
+        state.tasks.push(task);
     }
     pub fn names(&self) -> Vec<&'static str> {
         self.state
@@ -258,7 +263,16 @@ mod tests {
                 },
             )
         });
-        jobs.start("period", || panic!("duplicate registration must not spawn"));
+        let duplicate = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            jobs.start("period", || panic!("duplicate factory must never run"));
+        }))
+        .expect_err("duplicate job names must fail at registration");
+        assert!(
+            duplicate
+                .downcast_ref::<String>()
+                .unwrap()
+                .contains("duplicate background job: period")
+        );
         let dropped = Arc::new(AtomicUsize::new(0));
         let d = dropped.clone();
         let job = Job::spawned("children", move || {
