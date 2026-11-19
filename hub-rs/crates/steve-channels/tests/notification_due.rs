@@ -111,23 +111,6 @@ async fn notification_source_obeys_the_shared_contract_with_retention_tombstones
 }
 
 #[tokio::test]
-async fn the_owned_name_job_is_singleton_and_can_restart_after_cancellation() {
-    let f = Notifications::new();
-    let task = f.source.channels.spawn_names().unwrap();
-    assert_eq!(task.name(), "channels.names");
-    assert!(f.source.channels.spawn_names().is_none());
-    task.stop();
-    task.await;
-    let restarted = f
-        .source
-        .channels
-        .spawn_names()
-        .expect("cancelled job released its running flag");
-    restarted.stop();
-    restarted.await;
-}
-
-#[tokio::test]
 async fn unknown_topics_advance_and_obey_the_shared_contract() {
     use steve_runtime::due::DueSource;
     let new = || {

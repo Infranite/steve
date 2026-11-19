@@ -13,20 +13,12 @@ steve-acp/src/usage.rs	timer-loop	usage::Sampler::finish	1
 steve-calendar/src/sync.rs	timer-loop	sync::Calendar::run	1
 steve-channels/src/adapters/ext_ws/feed.rs	timer-loop	adapters::ext_ws::feed::ExtWsHook as ConnectionHook::run	1
 steve-channels/src/adapters/ext_ws/provider.rs	timer-loop	adapters::ext_ws::provider::ExtWs::pace	1
-steve-channels/src/adapters/ext_ws/provider.rs	timer-loop	adapters::ext_ws::provider::ExtWs::read	1
-steve-channels/src/adapters/ext_ws/provider.rs	timer-loop	adapters::ext_ws::provider::ExtWs::write	1
 steve-channels/src/adapters/ext_ws/session.rs	timer-loop	adapters::ext_ws::session::ping_loop	1
 steve-channels/src/adapters/feishu/app_registration/service.rs	timer-loop	adapters::feishu::app_registration::service::Registrations::poll_until_done	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::cancel	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::start_with	1
-steve-channels/src/adapters/feishu/ratelimit.rs	timer-loop	adapters::feishu::ratelimit::with_retries_capped	1
 steve-channels/src/adapters/feishu/self_poll.rs	timer-loop	adapters::feishu::self_poll::SelfPoller::run	1
 steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner::serve	1
-steve-channels/src/messages.rs	timer-loop	messages::retention	1
-steve-channels/src/names.rs	timer-loop	names::Channels::spawn_names	1
-steve-channels/src/notifications.rs	timer-loop	notifications::run	1
-steve-channels/src/outbound.rs	timer-loop	outbound::Outbox::queue	1
-steve-channels/src/trigger_report.rs	timer-loop	trigger_report::run	1
 steve-core/src/judge.rs	timer-loop	judge::Core::run_judge_watch	1
 steve-core/src/stall.rs	timer-loop	stall::Core::stall_watch	1
 steve-core/src/workspace.rs	timer-loop	workspace::Core::run_workspace_watch	1

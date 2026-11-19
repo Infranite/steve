@@ -1003,3 +1003,41 @@ async fn a_due_retry_asks_the_address_book_through_its_cache() {
         "only the address book was asked"
     );
 }
+
+#[tokio::test]
+async fn the_owned_name_job_is_singleton_and_can_restart_after_cancellation() {
+    let h = setup().await;
+    let task = h.ch.spawn_names().unwrap();
+    assert_eq!(task.name(), "channels.names");
+    assert!(h.ch.spawn_names().is_none());
+    task.stop();
+    task.await;
+    let restarted =
+        h.ch.spawn_names()
+            .expect("cancelled job released its running flag");
+    restarted.stop();
+    restarted.await;
+}
+
+#[tokio::test]
+async fn name_job_finishes_when_channels_is_released() {
+    let h = setup().await;
+    let weak = h.ch.downgrade();
+    let task = h.ch.spawn_names().unwrap();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    drop(h);
+    assert!(weak.upgrade().is_none());
+    for _ in 0..100 {
+        if task.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        task.is_finished(),
+        "released Channels must end its name job without a timer tick"
+    );
+    task.await;
+}

@@ -13,11 +13,13 @@ use tokio::task::JoinHandle;
 pub struct Task {
     name: &'static str,
     handle: JoinHandle<()>,
+    watcher: Option<JoinHandle<()>>,
 }
 impl Task {
     fn start(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
             name,
+            watcher: None,
             handle: tokio::spawn(async move {
                 if let Err(payload) = std::panic::AssertUnwindSafe(future).catch_unwind().await {
                     let message = payload
@@ -36,7 +38,24 @@ impl Task {
     }
     pub fn stop(&self) {
         self.handle.abort();
+        if let Some(watcher) = &self.watcher {
+            watcher.abort();
+        }
     }
+    /// Stop this owned job when its domain owner disappears. Dropping this wrapper still
+    /// cancels both the job and its lifetime watcher; no detached task survives cancellation.
+    pub fn until(mut self, ended: impl Future<Output = ()> + Send + 'static) -> Self {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.abort();
+        }
+        let abort = self.handle.abort_handle();
+        self.watcher = Some(tokio::spawn(async move {
+            ended.await;
+            abort.abort();
+        }));
+        self
+    }
+
     pub fn is_finished(&self) -> bool {
         self.handle.is_finished()
     }
@@ -167,8 +186,13 @@ where
                 f().await;
             };
             match cadence {
-                Cadence::FromStart => { futures::future::join(clock.sleep(period), run).await; }
-                Cadence::AfterWork => { run.await; clock.sleep(period).await; }
+                Cadence::FromStart => {
+                    futures::future::join(clock.sleep(period), run).await;
+                }
+                Cadence::AfterWork => {
+                    run.await;
+                    clock.sleep(period).await;
+                }
             }
         }
     })

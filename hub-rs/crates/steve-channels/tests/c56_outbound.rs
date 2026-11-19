@@ -7355,7 +7355,7 @@ impl QueueFixture {
             .unwrap()
             .to_string();
         let source = steve_channels::outbound::QueueDue {
-            channels: h.ch.clone(),
+            channels: h.ch.downgrade(),
             outbox: h.outbox.clone(),
         };
         Self { h, source, space }
@@ -7514,5 +7514,32 @@ async fn committed_approval_wakes_the_idle_send_loop_without_advancing_time() {
     }
     assert!(f.done().contains(&id));
     task.stop();
+    task.await;
+}
+
+#[tokio::test]
+async fn send_job_and_source_do_not_keep_channels_alive() {
+    use steve_runtime::due::DueSource;
+    let f = QueueFixture::new().await;
+    let weak = f.h.ch.downgrade();
+    let task = f.h.outbox.clone().spawn_queue(&f.h.ch);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let source = f.source;
+    drop(f.h);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(source.next_due().await.unwrap(), None);
+    source.run_due(0).await.unwrap();
+    for _ in 0..100 {
+        if task.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        task.is_finished(),
+        "queue must stop when its domain owner is released"
+    );
     task.await;
 }

@@ -3521,7 +3521,7 @@ impl Outbox {
     /// Keep this task until shutdown; dropping it cancels both loops.
     pub fn spawn_queue(self: Arc<Self>, ch: &Channels) -> steve_runtime::Task {
         let source = Arc::new(QueueDue {
-            channels: ch.clone(),
+            channels: ch.downgrade(),
             outbox: self.clone(),
         });
         let clock = ch.modules().clock.clone();
@@ -3534,10 +3534,13 @@ impl Outbox {
             "notification_policies",
             "output_deliveries",
         ]);
+        let ended = weak.clone().closed();
         steve_runtime::spawn("channels.send", async move {
             struct Scope(Arc<Outbox>);
             impl Drop for Scope {
-                fn drop(&mut self) { self.0.stop_background(); }
+                fn drop(&mut self) {
+                    self.0.stop_background();
+                }
             }
             let _scope = Scope(self.clone());
             let _maintenance = steve_runtime::every(
@@ -3570,6 +3573,7 @@ impl Outbox {
             )
             .await;
         })
+        .until(ended)
     }
 
     /// Back to the source: an item made from a chat message finished → “<编号> 已完成：<结果>”
@@ -4580,7 +4584,7 @@ const QUEUE_CANDIDATES: &str = "WITH candidates AS (
 /// Approved sends and abandoned direct claims: the earliest executable durable deadline.
 /// A refused send already enters the existing failed/manual-review state; no migration is needed.
 pub struct QueueDue {
-    pub channels: Channels,
+    pub channels: crate::WeakChannels,
     pub outbox: Arc<Outbox>,
 }
 impl steve_runtime::due::DueSource for QueueDue {
@@ -4588,7 +4592,10 @@ impl steve_runtime::due::DueSource for QueueDue {
         "channels.send"
     }
     async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
-        self.channels
+        let Some(channels) = self.channels.upgrade() else {
+            return Ok(None);
+        };
+        channels
             .store()
             .reader(|c| -> ChannelResult<_> {
                 Ok(c.query_row(
@@ -4597,7 +4604,7 @@ impl steve_runtime::due::DueSource for QueueDue {
                         CLAIM_STALE_MS,
                         SUBJECT_MESSAGE,
                         UNCLAIMED_MS,
-                        self.outbox.retry_deadlines(self.channels.now())
+                        self.outbox.retry_deadlines(channels.now())
                     ],
                     |r| r.get(0),
                 )?)
@@ -4605,8 +4612,11 @@ impl steve_runtime::due::DueSource for QueueDue {
             .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
     async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
-        self.outbox.bind(&self.channels);
-        self.outbox.send_ready(&self.channels, now).await;
+        let Some(channels) = self.channels.upgrade() else {
+            return Ok(());
+        };
+        self.outbox.bind(&channels);
+        self.outbox.send_ready(&channels, now).await;
         Ok(())
     }
 }

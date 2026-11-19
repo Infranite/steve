@@ -614,6 +614,7 @@ impl Channels {
         }
         let running = std::sync::Arc::new(Running(self.downgrade()));
         let me = self.downgrade();
+        let ended = me.clone().closed();
         Some(steve_runtime::every_after(
             "channels.names",
             self.modules().clock.clone(),
@@ -659,7 +660,7 @@ impl Channels {
                     }
                 }
             },
-        ))
+        ).until(ended))
     }
 
     /// One run over `ws` (module doc). Safe to call any time; the provider lookups are cached.
