@@ -1,7 +1,4 @@
 # Remaining production legacy publications. Shrink per crate; remove with the last legacy path.
-steve-github/src/accept.rs	ChangeEvent::	2
-steve-github/src/link.rs	ChangeEvent::	2
-steve-github/src/sync.rs	ChangeEvent::	3
 steve-hub/src/bus.rs	publish_value(	2
 steve-knowledge/src/steward.rs	ChangeEvent::	1
 steve-mail/src/repo.rs	ChangeEvent::	1

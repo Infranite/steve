@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_modules::accounts::connections::Health;
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::GitHub;
 use crate::events::{Actor, SignalEvent};
@@ -890,7 +890,15 @@ impl GitHub {
             repo::upsert_pr(tx, &row)?;
             fx.gh.insert(row.id.clone());
             if let Some(item) = &row.item_id {
-                tx.publish(ChangeEvent::Item { id: item.clone() });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: row.workspace_id.clone().into(),
+                        id: {
+                            let value: String = item.clone();
+                            steve_types::ItemId::from(value)
+                        },
+                    },
+                ));
             }
         }
         if let Some((item, source)) = &linked {
@@ -1031,7 +1039,15 @@ impl GitHub {
             repo::upsert_pr(tx, &pr)?;
             fx.gh.insert(pr.id.clone());
             if let Some(item) = &pr.item_id {
-                tx.publish(ChangeEvent::Item { id: item.clone() });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: pr.workspace_id.clone().into(),
+                        id: {
+                            let value: String = item.clone();
+                            steve_types::ItemId::from(value)
+                        },
+                    },
+                ));
             }
         }
         if p["action"].as_str() != Some("submitted") {
@@ -1341,7 +1357,15 @@ impl GitHub {
                 pr.updated = pr.updated.max(now);
                 repo::upsert_pr(tx, &pr)?;
                 if let Some(item) = &pr.item_id {
-                    tx.publish(ChangeEvent::Item { id: item.clone() });
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: pr.workspace_id.clone().into(),
+                            id: {
+                                let value: String = item.clone();
+                                steve_types::ItemId::from(value)
+                            },
+                        },
+                    ));
                 }
             }
             fx.gh.insert(pr.id.clone());

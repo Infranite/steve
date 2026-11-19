@@ -5659,6 +5659,7 @@ dependencies = [
  "steve-modules",
  "steve-node-api",
  "steve-store",
+ "steve-types",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

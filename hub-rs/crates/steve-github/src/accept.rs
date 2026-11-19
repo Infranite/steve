@@ -211,7 +211,21 @@ impl GitHub {
         let now = self.now();
         let r = self.store().transaction(|tx| {
             repo::add_timeline(tx, item, text, now)?;
-            tx.publish(steve_store::ChangeEvent::Item { id: item.into() });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: tx
+                        .query_row::<String, _, _>(
+                            "SELECT workspace_id FROM items WHERE id = ?",
+                            [item],
+                            |r| r.get(0),
+                        )?
+                        .into(),
+                    id: {
+                        let value: String = item.into();
+                        steve_types::ItemId::from(value)
+                    },
+                },
+            ));
             Ok::<_, ApiError>(())
         });
         if let Err(e) = r {
@@ -346,9 +360,15 @@ impl GitHub {
                         &format!("验收后自动开草稿 PR（{}：私有仓库）", r.full_name),
                         now,
                     )?;
-                    tx.publish(steve_store::ChangeEvent::Item {
-                        id: item.id.clone(),
-                    });
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: item.workspace_id.clone().into(),
+                            id: {
+                                let value: String = item.id.clone();
+                                steve_types::ItemId::from(value)
+                            },
+                        },
+                    ));
                     Ok::<_, ApiError>(())
                 })
                 .map_err(|e| e.to_string())?;
