@@ -1,7 +1,8 @@
 //! Replaces retry, window/bucket and trailing-throttle shapes in W2b §1.2–1.3.
 //! Limiter::check scans the entire key table to evict recovered entries (O(number of keys)).
 //! Callers should periodically prune even when requests stop; no background task is started.
-//! Durations use monotonic Tokio time; persisted deadlines use Backoff::delay plus Clock::now.
+//! Default durations use monotonic Tokio time; with_clock injects the domain millisecond clock.
+//! Backward wall-clock jumps do not replenish quotas or move limiter time backwards.
 use backon::Retryable;
 use rand::RngExt;
 use std::{
@@ -9,7 +10,10 @@ use std::{
     future::Future,
     hash::Hash,
     num::NonZeroU32,
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::time::Instant;
@@ -121,40 +125,80 @@ pub enum RateLimit {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wait(pub Duration);
-#[derive(Debug, Clone, Copy, Default)]
-struct MonoClock;
-impl governor::clock::Clock for MonoClock {
-    type Instant = std::time::Instant;
+/// A request larger than the bucket can never succeed; waiting cannot fix it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckError {
+    Wait(Wait),
+    InsufficientCapacity { capacity: u32 },
+}
+#[derive(Clone)]
+struct PolicyClock {
+    source: Option<Arc<dyn crate::clock::Clock>>,
+    origin: Instant,
+    epoch: i64,
+    high_water: Arc<AtomicU64>,
+}
+impl PolicyClock {
+    fn new(source: Option<Arc<dyn crate::clock::Clock>>) -> Self {
+        Self {
+            epoch: source.as_ref().map_or(0, |c| c.now()),
+            source,
+            origin: Instant::now(),
+            high_water: Arc::default(),
+        }
+    }
+    fn now(&self) -> Duration {
+        let elapsed = match &self.source {
+            Some(c) => Duration::from_millis(c.now().saturating_sub(self.epoch).max(0) as u64),
+            None => self.origin.elapsed(),
+        };
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        Duration::from_nanos(
+            self.high_water
+                .fetch_max(nanos, Ordering::Relaxed)
+                .max(nanos),
+        )
+    }
+}
+impl governor::clock::Clock for PolicyClock {
+    type Instant = Duration;
     fn now(&self) -> Self::Instant {
-        Instant::now().into_std()
+        self.now()
     }
 }
 type Bucket = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
-    MonoClock,
-    governor::middleware::NoOpMiddleware<std::time::Instant>,
+    PolicyClock,
+    governor::middleware::NoOpMiddleware<Duration>,
 >;
 enum State {
     Bucket(Bucket),
     Window {
-        start: Instant,
-        hits: VecDeque<Instant>,
+        start: Duration,
+        hits: VecDeque<Duration>,
     },
 }
 struct Entry {
     state: State,
-    expires: Instant,
+    expires: Duration,
 }
 pub struct Limiter<K> {
     rate: RateLimit,
     sliding: bool,
+    clock: PolicyClock,
     keys: Mutex<HashMap<K, Entry>>,
 }
 impl<K: Hash + Eq + Clone> Limiter<K> {
-    /// Fixed windows begin with the first accepted event for each key.
+    /// Fixed windows begin with the first recorded event for each key.
     /// Panics for zero capacity/period or a GCRA recovery horizon that overflows Duration.
     pub fn new(rate: RateLimit) -> Self {
+        Self::build(rate, None)
+    }
+    pub fn with_clock(rate: RateLimit, clock: Arc<dyn crate::clock::Clock>) -> Self {
+        Self::build(rate, Some(clock))
+    }
+    fn build(rate: RateLimit, clock: Option<Arc<dyn crate::clock::Clock>>) -> Self {
         match rate {
             RateLimit::Gcra { per, burst } => {
                 assert!(!per.is_zero() && burst > 0);
@@ -165,22 +209,22 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         Self {
             rate,
             sliding: false,
+            clock: PolicyClock::new(clock),
             keys: Mutex::new(HashMap::new()),
         }
     }
     pub fn sliding(rate: RateLimit) -> Self {
-        assert!(matches!(rate, RateLimit::Window { .. }));
-        Self {
-            sliding: true,
-            ..Self::new(rate)
-        }
+        Self::new(rate).into_sliding()
+    }
+    pub fn into_sliding(mut self) -> Self {
+        assert!(matches!(self.rate, RateLimit::Window { .. }));
+        self.sliding = true;
+        self
     }
     /// Prunes fully recovered keys even if no further requests arrive for those keys.
     pub fn prune(&self) {
-        self.keys
-            .lock()
-            .unwrap()
-            .retain(|_, e| e.expires > Instant::now());
+        let now = self.clock.now();
+        self.keys.lock().unwrap().retain(|_, e| e.expires > now);
     }
     pub fn len(&self) -> usize {
         self.prune();
@@ -190,57 +234,152 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         self.len() == 0
     }
     pub fn check(&self, key: &K) -> Result<(), Wait> {
-        let now = Instant::now();
+        self.check_n(key, NonZeroU32::new(1).unwrap())
+            .map_err(|e| match e {
+                CheckError::Wait(w) => w,
+                CheckError::InsufficientCapacity { .. } => unreachable!("capacity is nonzero"),
+            })
+    }
+    /// Atomically admits all units or consumes none. An oversized request is permanent failure.
+    pub fn check_n(&self, key: &K, n: NonZeroU32) -> Result<(), CheckError> {
+        let capacity = match self.rate {
+            RateLimit::Gcra { burst, .. } => burst,
+            RateLimit::Window { max, .. } => max,
+        };
+        if n.get() > capacity {
+            return Err(CheckError::InsufficientCapacity { capacity });
+        }
+        let now = self.clock.now();
         let mut keys = self.keys.lock().unwrap();
         keys.retain(|_, e| e.expires > now);
-        let e = keys.entry(key.clone()).or_insert_with(|| Entry {
-            expires: now,
-            state: match self.rate {
-                RateLimit::Gcra { per, burst } => State::Bucket(Bucket::direct_with_clock(
-                    governor::Quota::with_period(per)
-                        .expect("GCRA period out of range")
-                        .allow_burst(NonZeroU32::new(burst).unwrap()),
-                    MonoClock,
-                )),
-                RateLimit::Window { .. } => State::Window {
-                    start: now,
-                    hits: VecDeque::new(),
-                },
-            },
-        });
+        let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
         match (&mut e.state, self.rate) {
             (State::Bucket(b), RateLimit::Gcra { per, burst }) => {
                 let result = b
-                    .check()
-                    .map_err(|w| Wait(w.wait_time_from(now.into_std())));
+                    .check_n(n)
+                    .map_err(|_| CheckError::InsufficientCapacity { capacity: burst })?
+                    .map_err(|w| CheckError::Wait(Wait(w.wait_time_from(now))));
                 if result.is_ok() {
                     e.expires = now + per * burst;
                 }
                 result
             }
             (State::Window { start, hits }, RateLimit::Window { len, max }) => {
-                if self.sliding {
-                    while hits.front().is_some_and(|t| now.duration_since(*t) >= len) {
-                        hits.pop_front();
-                    }
-                } else if now.duration_since(*start) >= len {
-                    hits.clear();
-                    *start = now;
+                self.refresh(start, hits, now, len);
+                if hits.len().saturating_add(n.get() as usize) > max as usize {
+                    return Err(CheckError::Wait(Wait(
+                        self.until(*start, hits, now, len, max, n.get())
+                            .saturating_sub(now),
+                    )));
                 }
-                let until = if self.sliding {
-                    hits.front().copied().unwrap_or(now) + len
+                hits.extend(std::iter::repeat_n(now, n.get() as usize));
+                e.expires = if self.sliding {
+                    now + len
                 } else {
                     *start + len
                 };
-                if hits.len() >= max as usize {
-                    return Err(Wait(until - now));
-                }
-                hits.push_back(now);
-                e.expires = if self.sliding { now + len } else { until };
                 Ok(())
             }
             _ => unreachable!(),
         }
+    }
+    fn entry(&self, now: Duration) -> Entry {
+        Entry {
+            expires: now,
+            state: match self.rate {
+                RateLimit::Gcra { per, burst } => State::Bucket(Bucket::direct_with_clock(
+                    governor::Quota::with_period(per)
+                        .expect("GCRA period out of range")
+                        .allow_burst(NonZeroU32::new(burst).unwrap()),
+                    self.clock.clone(),
+                )),
+                RateLimit::Window { .. } => State::Window {
+                    start: now,
+                    hits: VecDeque::new(),
+                },
+            },
+        }
+    }
+    fn refresh(
+        &self,
+        start: &mut Duration,
+        hits: &mut VecDeque<Duration>,
+        now: Duration,
+        len: Duration,
+    ) {
+        if self.sliding {
+            while hits.front().is_some_and(|t| now.saturating_sub(*t) >= len) {
+                hits.pop_front();
+            }
+        } else if now.saturating_sub(*start) >= len {
+            hits.clear();
+            *start = now;
+        }
+    }
+    fn until(
+        &self,
+        start: Duration,
+        hits: &VecDeque<Duration>,
+        now: Duration,
+        len: Duration,
+        capacity: u32,
+        units: u32,
+    ) -> Duration {
+        if self.sliding {
+            let needed = hits
+                .len()
+                .saturating_add(units as usize)
+                .saturating_sub(capacity as usize);
+            hits.get(needed.saturating_sub(1)).copied().unwrap_or(now) + len
+        } else {
+            start + len
+        }
+    }
+    /// Window-only query. Does not record an event or allocate an idle key.
+    pub fn peek(&self, key: &K) -> Result<(), Wait> {
+        let RateLimit::Window { len, max } = self.rate else {
+            panic!("peek requires a Window");
+        };
+        let now = self.clock.now();
+        let mut keys = self.keys.lock().unwrap();
+        keys.retain(|_, e| e.expires > now);
+        let Some(e) = keys.get_mut(key) else {
+            return Ok(());
+        };
+        let State::Window { start, hits } = &mut e.state else {
+            unreachable!()
+        };
+        self.refresh(start, hits, now, len);
+        if hits.len() >= max as usize {
+            Err(Wait(
+                self.until(*start, hits, now, len, max, 1)
+                    .saturating_sub(now),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    /// Window-only record, including failures racing with an earlier peek. Never denies a hit.
+    pub fn hit(&self, key: &K) {
+        let RateLimit::Window { len, max } = self.rate else {
+            panic!("hit requires a Window");
+        };
+        let now = self.clock.now();
+        let mut keys = self.keys.lock().unwrap();
+        keys.retain(|_, e| e.expires > now);
+        let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
+        let State::Window { start, hits } = &mut e.state else {
+            unreachable!()
+        };
+        self.refresh(start, hits, now, len);
+        if self.sliding || hits.len() < max as usize {
+            hits.push_back(now);
+        }
+        e.expires = if self.sliding {
+            now + len
+        } else {
+            *start + len
+        };
     }
 }
 /// One stream's leading event and latest trailing event; callers wait on deadline then call due.

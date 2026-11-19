@@ -267,3 +267,134 @@ async fn ext_ws_retry_after_extra_jitter_table_and_budget() {
     assert_eq!(p.delay(0, &mut EdgeRng(0)), Duration::from_nanos(5));
     assert_eq!(p.delay(0, &mut EdgeRng(u64::MAX)), Duration::from_nanos(9));
 }
+
+#[test]
+fn weighted_checks_are_atomic_and_oversize_is_permanent() {
+    use std::num::NonZeroU32;
+    use steve_runtime::{FakeClock, policy::CheckError};
+    let clock = Arc::new(FakeClock::new(100));
+    let l = Limiter::with_clock(
+        RateLimit::Gcra {
+            per: sec(1),
+            burst: 5,
+        },
+        clock.clone(),
+    );
+    for (ms, n, expected) in [
+        (0, 6, Err(CheckError::InsufficientCapacity { capacity: 5 })),
+        (0, 4, Ok(())),
+        (0, 2, Err(CheckError::Wait(Wait(sec(1))))),
+        (0, 1, Ok(())),
+        (
+            999,
+            1,
+            Err(CheckError::Wait(Wait(Duration::from_millis(1)))),
+        ),
+        (1000, 1, Ok(())),
+        (1000, 1, Err(CheckError::Wait(Wait(sec(1))))),
+    ] {
+        clock.set(100 + ms);
+        assert_eq!(l.check_n(&"node", NonZeroU32::new(n).unwrap()), expected);
+    }
+    clock.set(100 + 6000);
+    assert!(l.is_empty());
+}
+
+#[test]
+fn window_peek_hit_and_injected_clock_table() {
+    use steve_runtime::FakeClock;
+    let clock = Arc::new(FakeClock::new(-50));
+    let l = Limiter::with_clock(
+        RateLimit::Window {
+            len: sec(600),
+            max: 10,
+        },
+        clock.clone(),
+    );
+    for _ in 0..100 {
+        assert_eq!(l.peek(&"ip"), Ok(()));
+    }
+    assert!(l.is_empty(), "query does not allocate or consume");
+    for n in 1..=12 {
+        l.hit(&"ip");
+        assert_eq!(l.peek(&"ip").is_err(), n >= 10);
+    }
+    for (elapsed, wait_ms) in [(599_999, Some(1)), (600_000, None)] {
+        clock.set(-50 + elapsed);
+        assert_eq!(
+            l.peek(&"ip"),
+            wait_ms.map_or(Ok(()), |ms| Err(Wait(Duration::from_millis(ms))))
+        );
+    }
+    assert!(l.is_empty());
+    l.hit(&"ip");
+    clock.advance(1);
+    clock.set(-50); // rollback cannot reopen a window or refill a bucket
+    assert_eq!(l.check(&"ip"), Ok(()));
+    assert_eq!(l.len(), 1);
+}
+
+#[test]
+fn injected_gcra_and_sliding_windows_keep_boundaries_and_keys_separate() {
+    use steve_runtime::FakeClock;
+    let clock = Arc::new(FakeClock::new(1_000_000));
+    let l = Limiter::with_clock(
+        RateLimit::Window {
+            len: sec(60),
+            max: 2,
+        },
+        clock.clone(),
+    )
+    .into_sliding();
+    for (ms, allowed) in [
+        (0, true),
+        (30_000, true),
+        (59_999, false),
+        (60_000, true),
+        (60_000, false),
+        (90_000, true),
+    ] {
+        clock.set(1_000_000 + ms);
+        assert_eq!(l.check(&"a").is_ok(), allowed);
+    }
+    assert!(l.check(&"b").is_ok());
+    clock.advance(60_000);
+    assert!(l.is_empty());
+}
+
+#[test]
+fn byte_rate_quantization_is_explicit_at_one_mib_per_second() {
+    use std::num::NonZeroU32;
+    use steve_runtime::{FakeClock, policy::CheckError};
+    const MIB: u32 = 1024 * 1024;
+    // Duration cannot represent the exact 953.67431640625 ns per byte.
+    // Verify BOTH roundings, rather than silently weakening the old guard's table.
+    for (nanos, accepted_at_one_second, wait_ns) in [(953, true, 0), (954, false, 341_504)] {
+        let clock = Arc::new(FakeClock::new(0));
+        let l = Limiter::with_clock(
+            RateLimit::Gcra {
+                per: Duration::from_nanos(nanos),
+                burst: 64 * MIB,
+            },
+            clock.clone(),
+        );
+        assert_eq!(
+            l.check_n(&"node", NonZeroU32::new(64 * MIB).unwrap()),
+            Ok(())
+        );
+        clock.advance(1000);
+        let actual = l.check_n(&"node", NonZeroU32::new(MIB).unwrap());
+        assert_eq!(actual.is_ok(), accepted_at_one_second);
+        if wait_ns != 0 {
+            assert_eq!(
+                actual,
+                Err(CheckError::Wait(Wait(Duration::from_nanos(wait_ns))))
+            );
+        } else {
+            assert!(
+                l.check_n(&"node", NonZeroU32::new(741).unwrap()).is_ok(),
+                "floor rounding admits extra bytes"
+            );
+        }
+    }
+}
