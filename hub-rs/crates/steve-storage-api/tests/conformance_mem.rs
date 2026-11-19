@@ -3,7 +3,11 @@ use steve_storage_api::verify::{MemHarness, Status, run};
 fn verify(loopback: bool) {
     let report = run(&MemHarness::new(loopback));
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
-    assert_eq!(report.items.len(), 25);
+    let implemented = steve_storage_api::registry::ENTRIES
+        .iter()
+        .filter(|entry| entry.implemented)
+        .count();
+    assert_eq!(report.items.len(), 25 + implemented);
     let skipped: Vec<_> = report
         .items
         .iter()
@@ -39,7 +43,7 @@ fn verify(loopback: bool) {
             .filter(|item| item.status == Status::Failed)
             .collect::<Vec<_>>()
     );
-    assert_eq!(report.passed(), 21);
+    assert_eq!(report.passed(), 21 + implemented);
     assert_eq!(report.skipped(), 4);
     assert!(!report.all_passed());
     assert_eq!(report.measurements.len(), 2);

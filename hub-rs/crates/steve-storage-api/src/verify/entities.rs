@@ -104,13 +104,15 @@ pub fn descriptors() -> Vec<EntityDesc> {
         protect: None,
         budget: Budget::default(),
     });
-    vec![
+    let mut entities = vec![
         CORE.to_wire(),
         COMMS.to_wire(),
         STREAM.to_wire(),
         CORE_STREAM.to_wire(),
         log,
-    ]
+    ];
+    entities.extend(super::digest::descriptors());
+    entities
 }
 /// Fully populated mutable fixture row; null secondary keys may repeat.
 pub fn row(id: impl Into<String>, value: i64) -> Row {

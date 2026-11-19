@@ -1,5 +1,6 @@
 //! Reusable storage conformance suite and reference backends (feature `conformance`).
 //! Harnesses provide isolated namespaces and explicitly report unavailable capabilities.
+pub mod digest;
 pub mod entities;
 pub mod loopback;
 pub mod mem;
@@ -34,4 +35,12 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => thread::park(),
         }
     }
+}
+
+/// Terminate and reap a harness-owned storage child. On supported Unix installations,
+/// Child::kill is SIGKILL; callers must synchronize on an in-flight commit first.
+/// Reaping the child is part of the contract check, so no zombie is left behind.
+pub fn kill_and_reap(child: &mut std::process::Child) -> std::io::Result<std::process::ExitStatus> {
+    child.kill()?;
+    child.wait()
 }

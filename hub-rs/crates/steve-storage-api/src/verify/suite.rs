@@ -207,6 +207,8 @@ fn lookup(domain: Domain, entity: &str, id: &str) -> AnyQuery {
 fn get(store: &dyn DomainStore, id: &str) -> Option<(Row, Rev)> {
     result(store, lookup(Domain::Core, CORE.name, id))
 }
+// This fixture builder mirrors the independent fields of the public Scan DTO.
+#[allow(clippy::too_many_arguments)]
 fn scan(
     domain: Domain,
     entity: &str,
@@ -260,7 +262,7 @@ fn update(id: &str, n: i64) -> Mutation {
         set: Row(vec![("value".into(), Cell::Int(n))]),
     }
 }
-fn uow(
+pub(super) fn uow(
     h: &dyn Harness,
     domain: Domain,
     id: impl Into<String>,
@@ -329,7 +331,18 @@ fn fact(id: &str) -> crate::fact::FactRecord {
 /// Run every scenario in stable order. Panics become failures; unavailable lifecycle
 /// capabilities alone become skips. The result is intentionally not an activation decision.
 pub fn run(h: &dyn Harness) -> Report {
-    run_with_named(h, &[])
+    let named: Vec<_> = super::digest::named_checks()
+        .into_iter()
+        .filter(|check| {
+            ENTRIES.iter().any(|e| {
+                e.implemented
+                    && e.name == check.name
+                    && e.domain == check.domain
+                    && e.kind == check.kind
+            })
+        })
+        .collect();
+    run_with_named(h, &named)
 }
 pub fn run_with_named(h: &dyn Harness, named: &[NamedCheck]) -> Report {
     let cases: &[(&str, Option<Capability>, Check)] = &[
@@ -412,7 +425,8 @@ pub fn run_with_named(h: &dyn Harness, named: &[NamedCheck]) -> Report {
     }
     // Advisory measurements live outside correctness statuses and never gate activation.
     if let Ok(store) = h.open() {
-        report.measurements = measure(h, store.as_ref());
+        report.measurements =
+            catch_unwind(AssertUnwindSafe(|| measure(h, store.as_ref()))).unwrap_or_default();
     }
     report
 }
@@ -598,23 +612,30 @@ fn write_skew(h: &dyn Harness, store: Arc<dyn DomainStore>) {
                     let barrier = &barrier;
                     let store = store.clone();
                     scope.spawn(move || {
-                        assert!(get(store.as_ref(), &names[0]).is_none());
-                        assert!(get(store.as_ref(), &names[1]).is_none());
-                        let mut unit = uow(
-                            h,
-                            Domain::Core,
-                            format!("skew-{round}-{worker}"),
-                            vec![insert(CORE.name, &names[worker], 1)],
-                        );
-                        unit.preconditions = names
-                            .iter()
-                            .map(|id| Precondition::Absent {
-                                entity: CORE.name.into(),
-                                key: vec![Cell::Text(id.clone())],
-                            })
-                            .collect();
-                        sign(&mut unit);
+                        let prepared = catch_unwind(AssertUnwindSafe(|| {
+                            assert!(get(store.as_ref(), &names[0]).is_none());
+                            assert!(get(store.as_ref(), &names[1]).is_none());
+                            let mut unit = uow(
+                                h,
+                                Domain::Core,
+                                format!("skew-{round}-{worker}"),
+                                vec![insert(CORE.name, &names[worker], 1)],
+                            );
+                            unit.preconditions = names
+                                .iter()
+                                .map(|id| Precondition::Absent {
+                                    entity: CORE.name.into(),
+                                    key: vec![Cell::Text(id.clone())],
+                                })
+                                .collect();
+                            sign(&mut unit);
+                            unit
+                        }));
+                        // Every client reaches the rendezvous even if its initial read
+                        // fails; a bad backend must produce a report, not hang its peer.
                         barrier.wait();
+                        let unit =
+                            prepared.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
                         block_on(store.commit(unit))
                     })
                 })
@@ -775,6 +796,7 @@ fn durability(h: &dyn Harness, store: Arc<dyn DomainStore>) {
     assert!(replay.replayed);
     replay.replayed = false;
     assert_eq!(replay, original);
+    probe_fact(h, reopened.as_ref(), "durable", true);
 }
 fn crash_unit(h: &dyn Harness) -> UnitOfWork {
     let mut unit = uow(
@@ -796,7 +818,7 @@ fn crash_unit(h: &dyn Harness) -> UnitOfWork {
     sign(&mut unit);
     unit
 }
-fn check_crash_state(store: &dyn DomainStore) {
+fn check_crash_state(store: &dyn DomainStore) -> usize {
     let count = page(store, Domain::Core, CORE.name).rows.len();
     assert!(count == 0 || count == 128);
     assert_eq!(
@@ -804,13 +826,25 @@ fn check_crash_state(store: &dyn DomainStore) {
         usize::from(count != 0)
     );
     assert_eq!(cursor(store, "crash").is_some(), count != 0);
+    count
+}
+fn probe_fact(h: &dyn Harness, store: &dyn DomainStore, fact_id: &str, exists: bool) {
+    let mut probe = uow(h, Domain::Core, format!("probe-{fact_id}"), vec![]);
+    probe.facts.push(fact(fact_id));
+    sign(&mut probe);
+    match block_on(store.commit(probe)) {
+        Err(CommitError::Unique { .. }) if exists => {}
+        Ok(_) if !exists => {}
+        result => panic!("fact presence disagrees with transaction outcome: {result:?}"),
+    }
 }
 fn crash_atomicity(h: &dyn Harness, _store: Arc<dyn DomainStore>) {
     for _ in 0..50 {
         let store = h.open().unwrap();
         let outcome = h.crash_commit(store, crash_unit(h)).unwrap();
         assert!(outcome.killed_during_commit, "kill was not during commit");
-        check_crash_state(outcome.store.as_ref());
+        let count = check_crash_state(outcome.store.as_ref());
+        probe_fact(h, outcome.store.as_ref(), "crash", count != 0);
     }
 }
 fn idempotency_recorded(h: &dyn Harness, store: Arc<dyn DomainStore>) {
@@ -1179,16 +1213,16 @@ fn unique_and_c_order(h: &dyn Harness, store: Arc<dyn DomainStore>) {
             500,
             500,
             None,
-            vec![Pred::Gt {
-                field: "value".into(),
-                value: Cell::Int(6),
+            vec![Pred::In {
+                field: "id".into(),
+                values: vec![Cell::Text("num-2".into()), Cell::Text("num-10".into())],
             }],
             Order::Asc,
         ),
     );
     assert_eq!(
         out.rows.iter().map(|(r, _)| value(r)).collect::<Vec<_>>(),
-        vec![10]
+        vec![2, 10]
     );
 }
 fn encoding_precision(h: &dyn Harness, store: Arc<dyn DomainStore>) {
@@ -1632,7 +1666,7 @@ fn scan_window(h: &dyn Harness, store: Arc<dyn DomainStore>) {
     ));
 }
 fn transfer_roundtrip(h: &dyn Harness, store: Arc<dyn DomainStore>) {
-    let original = uow(
+    let mut original = uow(
         h,
         Domain::Core,
         "export-original",
@@ -1645,6 +1679,8 @@ fn transfer_roundtrip(h: &dyn Harness, store: Arc<dyn DomainStore>) {
             },
         ],
     );
+    original.facts.push(fact("export-original"));
+    sign(&mut original);
     let original_result = commit(store.as_ref(), original.clone());
     for domain in [Domain::Core, Domain::Comms, Domain::Stream] {
         let entity = if domain == Domain::Core {
@@ -1735,6 +1771,7 @@ fn transfer_roundtrip(h: &dyn Harness, store: Arc<dyn DomainStore>) {
     let replay = commit(destination.as_ref(), original);
     assert!(replay.replayed);
     assert_eq!(replay.rev, original_result.rev);
+    probe_fact(h, destination.as_ref(), "export-original", true);
     let seq = commit(
         destination.as_ref(),
         uow(

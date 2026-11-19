@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicI64, Ordering as AtomicOrdering},
+        atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering},
     },
     time::Instant,
 };
@@ -46,10 +46,10 @@ impl Clock for ManualClock {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct Data {
-    rows: BTreeMap<String, Vec<(Row, Rev)>>,
+pub(super) struct Data {
+    pub(super) rows: BTreeMap<String, Vec<(Row, Rev)>>,
     cursors: BTreeMap<(Domain, String), Position>,
-    seqs: BTreeMap<(Domain, String), u64>,
+    pub(super) seqs: BTreeMap<(Domain, String), u64>,
     facts: BTreeMap<(Domain, String), crate::fact::FactRecord>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,6 +77,7 @@ struct State {
     data: Data,
     rev: u64,
     next_handle: u64,
+    last_cleanup: i64,
     receipts: BTreeMap<ReceiptKey, Receipt>,
     natural: BTreeMap<NaturalKey, Receipt>,
     leases: BTreeMap<String, (LeaseId, Domain, Data)>,
@@ -85,6 +86,8 @@ struct State {
     retention_after: BTreeMap<String, Vec<Cell>>,
 }
 type Codec = fn(Row) -> Result<RawJson, Error>;
+type IndexedRow<'a> = (&'a (Row, Rev), Vec<Cell>);
+static INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// DomainStore fake with real CAS, receipts, immutable snapshots and bounded scans.
 pub struct MemStore {
@@ -93,6 +96,7 @@ pub struct MemStore {
     topics: BTreeMap<String, Domain>,
     hello: Hello,
     clock: Arc<dyn Clock>,
+    instance: u64,
     state: Mutex<State>,
 }
 fn invalid(detail: &str) -> Error {
@@ -216,18 +220,7 @@ impl MemStore {
                 return Err(invalid("duplicate entity"));
             }
         }
-        let domains = [Domain::Core, Domain::Stream, Domain::Comms]
-            .into_iter()
-            .map(|domain| DomainOffer {
-                domain,
-                versions: (ContractVersion(1), ContractVersion(1)),
-                isolation: Isolation::Serializable,
-                features: ["cas", "append_order", "snapshot_read", "export"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-            })
-            .collect();
+        let domains = Self::offers(&descriptions);
         Ok(Self {
             entities: descriptions,
             codecs: BTreeMap::new(),
@@ -243,23 +236,59 @@ impl MemStore {
                 domains,
             },
             clock,
+            instance: INSTANCE.fetch_add(1, AtomicOrdering::Relaxed),
             state: Mutex::new(State::default()),
         })
+    }
+    fn offers(descriptions: &BTreeMap<String, EntityDesc>) -> Vec<DomainOffer> {
+        [Domain::Core, Domain::Stream, Domain::Comms]
+            .into_iter()
+            .map(|domain| {
+                let mut features: BTreeSet<String> = ["cas", "append_order", "snapshot_read"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                // For this fake, the supplied descriptors ARE the complete namespace.
+                if descriptions.values().any(|entity| entity.domain == domain) {
+                    features.insert("export".into());
+                }
+                if domain == Domain::Comms
+                    && crate::ops::comms::digest::SYNC_PENDING_MEMBERSHIP.implemented
+                    && super::digest::descriptors()
+                        .iter()
+                        .all(|entity| descriptions.get(&entity.name) == Some(entity))
+                {
+                    features.insert(format!(
+                        "op:{}",
+                        crate::ops::comms::digest::SYNC_PENDING_MEMBERSHIP.name
+                    ));
+                }
+                DomainOffer {
+                    domain,
+                    versions: (ContractVersion(1), ContractVersion(1)),
+                    isolation: Isolation::Serializable,
+                    features,
+                }
+            })
+            .collect()
     }
     /// Register a typed row codec before sharing the store. Existing descriptors must match.
     pub fn register<E: StoredEntity>(&mut self) -> Result<(), Error> {
         let desc = E::ENTITY.to_wire();
         Self::validate_descriptor(&desc)?;
-        if let Some(existing) = self.entities.get(&desc.name) {
-            if existing != &desc {
-                return Err(invalid("entity descriptor mismatch"));
-            }
+        if self
+            .entities
+            .get(&desc.name)
+            .is_some_and(|existing| existing != &desc)
+        {
+            return Err(invalid("entity descriptor mismatch"));
         }
         fn encode_row<E: StoredEntity>(row: Row) -> Result<RawJson, Error> {
             encode(&E::from_row(row)?)
         }
         self.codecs.insert(desc.name.clone(), encode_row::<E>);
         self.entities.insert(desc.name.clone(), desc);
+        self.hello.domains = Self::offers(&self.entities);
         Ok(())
     }
     pub fn register_topic(&mut self, name: String, domain: Domain) -> Result<(), Error> {
@@ -308,24 +337,54 @@ impl MemStore {
                 }
                 continue;
             }
-            let valid = match (&field.ty, value) {
-                (FieldType::Int, Cell::Int(_))
-                | (FieldType::Text, Cell::Text(_))
-                | (FieldType::Bytes, Cell::Bytes(_))
-                | (FieldType::Bool, Cell::Bool(_))
-                | (FieldType::Millis, Cell::Millis(_))
-                | (FieldType::Json, Cell::Json(_)) => true,
-                (FieldType::Real, Cell::Real(v)) => v.is_finite(),
-                (FieldType::Enum(codes), Cell::Text(v)) => {
-                    if !codes.contains(v) {
-                        return Err(error(Code::Incompatible, "unknown enum code"));
-                    }
-                    true
+            Self::check_cell(field, value)?;
+        }
+        Ok(())
+    }
+    fn check_cell(field: &FieldDesc, value: &Cell) -> Result<(), Error> {
+        value.validate()?;
+        let valid = match (&field.ty, value) {
+            (_, Cell::Null) => field.nullable,
+            (FieldType::Int, Cell::Int(_))
+            | (FieldType::Real, Cell::Real(_))
+            | (FieldType::Text, Cell::Text(_))
+            | (FieldType::Bytes, Cell::Bytes(_))
+            | (FieldType::Bool, Cell::Bool(_))
+            | (FieldType::Millis, Cell::Millis(_))
+            | (FieldType::Json, Cell::Json(_)) => true,
+            (FieldType::Enum(codes), Cell::Text(value)) => {
+                if !codes.contains(value) {
+                    return Err(error(Code::Incompatible, "unknown enum code"));
                 }
-                _ => false,
-            };
-            if !valid {
-                return Err(invalid("invalid field type"));
+                true
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(invalid("invalid field type"))
+        }
+    }
+    fn check_key(
+        &self,
+        entity: &EntityDesc,
+        fields: &[String],
+        key: &[Cell],
+        prefix: bool,
+    ) -> Result<(), Error> {
+        if key.len() > fields.len() || (!prefix && key.len() != fields.len()) || key.is_empty() {
+            return Err(invalid("invalid index key shape"));
+        }
+        for (field, value) in fields.iter().zip(key) {
+            let field = entity
+                .fields
+                .iter()
+                .find(|f| f.name == *field)
+                .ok_or_else(|| invalid("invalid index field"))?;
+            Self::check_cell(field, value)?;
+            if entity.key.contains(&field.name) && *value == Cell::Null {
+                return Err(invalid("null primary key"));
             }
         }
         Ok(())
@@ -360,8 +419,26 @@ impl MemStore {
                 | Pred::In { field, .. }
                 | Pred::IsNull { field, .. } => field,
             };
-            if !e.fields.iter().any(|f| f.name == *field) {
-                return Err(unsupported("unknown filter field"));
+            let field = e
+                .fields
+                .iter()
+                .find(|f| f.name == *field)
+                .ok_or_else(|| unsupported("unknown filter field"))?;
+            let values: Vec<&Cell> = match pred {
+                Pred::Eq { value, .. }
+                | Pred::Ne { value, .. }
+                | Pred::Lt { value, .. }
+                | Pred::Le { value, .. }
+                | Pred::Gt { value, .. }
+                | Pred::Ge { value, .. } => vec![value],
+                Pred::In { values, .. } => values.iter().collect(),
+                Pred::IsNull { .. } => vec![],
+            };
+            for value in values {
+                Self::check_cell(field, value)?;
+                if *value == Cell::Null {
+                    return Err(invalid("null predicates require IsNull"));
+                }
             }
         }
         Ok(())
@@ -373,8 +450,13 @@ impl MemStore {
         index: &str,
         range: &KeyRange,
         order: Order,
-    ) -> Result<Vec<(&'a (Row, Rev), Vec<Cell>)>, Error> {
+    ) -> Result<Vec<IndexedRow<'a>>, Error> {
         let fields = self.index_fields(e, index)?;
+        for bound in [&range.start, &range.end] {
+            if let KeyBound::Included(key) | KeyBound::Excluded(key) = bound {
+                self.check_key(e, &fields, key, true)?;
+            }
+        }
         let mut rows: Vec<_> = data
             .rows
             .get(&e.name)
@@ -390,9 +472,7 @@ impl MemStore {
         Ok(rows)
     }
     fn locate(&self, data: &Data, e: &EntityDesc, key: &[Cell]) -> Result<Option<usize>, Error> {
-        if key.len() != e.key.len() {
-            return Err(invalid("invalid primary key shape"));
-        }
+        self.check_key(e, &e.key, key, false)?;
         Ok(data
             .rows
             .get(&e.name)
@@ -491,6 +571,9 @@ impl MemStore {
                     .is_some_and(|r| r.key.len() != fields.len())
                 {
                     return Err(invalid("invalid resume key"));
+                }
+                if let Some(resume) = &request.resume {
+                    self.check_key(e, &fields, &resume.key, false)?;
                 }
                 let rows: Vec<_> = self
                     .ordered(data, e, &request.index.name, &request.range, order)?
@@ -637,6 +720,14 @@ impl MemStore {
                     {
                         return Err(fatal(invalid("invalid update fields")));
                     }
+                    for (name, value) in &patch.0 {
+                        let field = e
+                            .fields
+                            .iter()
+                            .find(|f| f.name == *name)
+                            .expect("validated update field");
+                        Self::check_cell(field, value).map_err(fatal)?;
+                    }
                     if let Some(n) = found {
                         let mut row = data.rows[entity][n].0.clone();
                         for (field, value) in &patch.0 {
@@ -726,7 +817,7 @@ impl MemStore {
                     if op.domain != uow.domain {
                         return Err(fatal(invalid("mixed-domain operation")));
                     }
-                    return Err(fatal(unsupported("named operation not implemented")));
+                    super::digest::apply(data, &self.entities, op, rev).map_err(fatal)?;
                 }
             }
         }
@@ -750,6 +841,44 @@ impl MemStore {
             }
         }
         Ok(sequences)
+    }
+    fn validate_references(&self, unit: &UnitOfWork) -> Result<(), Error> {
+        for condition in &unit.preconditions {
+            match condition {
+                Precondition::Rev { entity, .. }
+                | Precondition::Present { entity, .. }
+                | Precondition::Absent { entity, .. } => {
+                    self.entity(entity, unit.domain)?;
+                }
+                _ => {}
+            }
+        }
+        for mutation in &unit.mutations {
+            match mutation {
+                Mutation::Insert { entity, .. }
+                | Mutation::Upsert { entity, .. }
+                | Mutation::Update { entity, .. }
+                | Mutation::Delete { entity, .. }
+                | Mutation::DeleteWhere { entity, .. } => {
+                    self.entity(entity, unit.domain)?;
+                }
+                Mutation::Append { stream, .. } => {
+                    self.entity(&stream.0, unit.domain)?;
+                }
+                Mutation::Op(op) if op.domain != unit.domain => {
+                    return Err(invalid("mixed-domain operation"));
+                }
+                _ => {}
+            }
+        }
+        for fact in &unit.facts {
+            match self.topics.get(&fact.topic) {
+                Some(domain) if *domain != unit.domain => return Err(invalid("mixed-domain fact")),
+                None => return Err(unsupported("unknown fact topic")),
+                _ => {}
+            }
+        }
+        Ok(())
     }
     fn natural_key(&self, uow: &UnitOfWork) -> Result<Option<NaturalKey>, CommitError> {
         let Idempotency::Natural { entity, index } = &uow.idempotency else {
@@ -850,7 +979,7 @@ impl DomainStore for MemStore {
             .retain(|_, (lease, _, _)| lease.expires_at.0 > now.0);
         state.next_handle += 1;
         let lease = LeaseId {
-            id: format!("lease-{}", state.next_handle),
+            id: format!("lease-{}-{}", self.instance, state.next_handle),
             expires_at: Millis(
                 now.0
                     .checked_add(2000)
@@ -868,14 +997,15 @@ impl DomainStore for MemStore {
             .state
             .lock()
             .map_err(|_| error(Code::Internal, "memory lock poisoned"))?;
-        if self.clock.now().0 >= lease.expires_at.0 {
-            state.leases.remove(&lease.id);
-            return Err(stale());
-        }
-        let (actual, domain, data) = state.leases.get(&lease.id).ok_or_else(stale)?;
+        let (actual, _, _) = state.leases.get(&lease.id).ok_or_else(stale)?;
         if actual != &lease {
             return Err(stale());
         }
+        if self.clock.now().0 >= actual.expires_at.0 {
+            state.leases.remove(&lease.id);
+            return Err(stale());
+        }
+        let (_, domain, data) = state.leases.get(&lease.id).ok_or_else(stale)?;
         if *domain != q.domain {
             return Err(invalid("mixed-domain lease"));
         }
@@ -902,6 +1032,7 @@ impl DomainStore for MemStore {
     async fn commit(&self, uow: UnitOfWork) -> Result<Committed, CommitError> {
         uow.validate_age(self.clock.now())?;
         uow.verify_digest().map_err(fatal)?;
+        self.validate_references(&uow).map_err(fatal)?;
         let natural = self.natural_key(&uow)?;
         let mut state = self
             .state
@@ -938,6 +1069,13 @@ impl DomainStore for MemStore {
         };
         state.data = candidate;
         state.rev = rev.0;
+        let now = self.clock.now().0;
+        if i128::from(now) - i128::from(state.last_cleanup) >= 86_400_000 {
+            state
+                .receipts
+                .retain(|key, _| i128::from(now) - i128::from(key.1) <= 31 * 86_400_000);
+            state.last_cleanup = now;
+        }
         if let Some(natural) = natural {
             state.natural.insert(natural, receipt);
         } else {
@@ -962,7 +1100,7 @@ impl DomainStore for MemStore {
         }
         state.next_handle += 1;
         let session = ExportSession {
-            id: format!("export-{}", state.next_handle),
+            id: format!("export-{}-{}", self.instance, state.next_handle),
             domain,
             version: ContractVersion(1),
             layout: 1,
@@ -1200,9 +1338,7 @@ impl DomainStore for MemStore {
         }
         let keep = match policy.keep_from {
             KeepFrom::Fixed { millis } => millis,
-            KeepFrom::Setting { .. } => {
-                return Err(unsupported("retention setting resolver not registered"));
-            }
+            KeepFrom::Setting { default_ms, .. } => default_ms,
         };
         let mut state = self
             .state
@@ -1259,13 +1395,38 @@ impl DomainStore for MemStore {
                         .position(|(_, k)| k == key)
                         .is_some_and(|n| n as u64 >= *keep)
                 }
-                Select::Bytes { .. } => {
-                    return Err(unsupported(
-                        "byte retention requires a declared size/order contract",
-                    ));
+                Select::Bytes { group, max } => {
+                    // The reference fake measures encoded row bytes and keeps the newest
+                    // primary keys, consistently with its deterministic export ordering.
+                    let group_key = values(row, group);
+                    let mut bytes = 0u64;
+                    let mut selected = false;
+                    for ((peer, _), peer_key) in ordered
+                        .iter()
+                        .rev()
+                        .filter(|((peer, _), _)| values(peer, group) == group_key)
+                    {
+                        bytes = bytes.saturating_add(
+                            serde_json::to_vec(peer)
+                                .map_err(|_| invalid("invalid retention row"))?
+                                .len() as u64,
+                        );
+                        if *peer_key == *key {
+                            selected = bytes > *max;
+                            break;
+                        }
+                    }
+                    selected
                 }
             };
-            if selected {
+            if selected
+                && match &policy.action {
+                    Action::Purge { fields } => fields
+                        .iter()
+                        .any(|field| cell(row, field).is_some_and(|value| *value != Cell::Null)),
+                    _ => true,
+                }
+            {
                 eligible.push((*key).clone());
             }
         }
