@@ -414,15 +414,19 @@ impl Mail {
                 tracing::warn!(error = %e, "mail runners");
             }
             if last_retention.is_none_or(|t| t.elapsed() >= RETENTION_EVERY) {
-                let mm = m.clone();
-                match tokio::task::spawn_blocking(move || mm.retention()).await {
-                    Ok(Err(e)) => tracing::warn!(error = %e, "mail retention"),
-                    Err(e) => tracing::warn!(error = %e, "mail retention task"),
-                    Ok(Ok(_)) => {}
-                }
+                m.run_retention().await;
                 last_retention = Some(tokio::time::Instant::now());
             }
             tokio::time::sleep(SCAN).await;
+        }
+    }
+
+    async fn run_retention(&self) {
+        let mm = self.clone();
+        match tokio::task::spawn_blocking(move || mm.retention()).await {
+            Ok(Err(e)) => tracing::warn!(error = %e, "mail retention"),
+            Err(e) => tracing::warn!(error = %e, "mail retention task"),
+            Ok(Ok(_)) => {}
         }
     }
 }

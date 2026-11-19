@@ -608,33 +608,7 @@ pub(crate) fn command_with_default_user(
     let mut out = String::new();
     match words.as_slice() {
         ["token", "create"] => {
-            let u = user_for(store, flag(args, "--user"), default_user)?;
-            let name = flag(args, "--name").unwrap_or("cli");
-            let expires = flag(args, "--days")
-                .map(|d| d.parse::<i64>())
-                .transpose()?
-                .map(|d| steve_store::now() + d * 86_400_000);
-            let (t, token) = store.access().token_create(&u.id, name, expires)?;
-            store.audit(
-                &u.id,
-                "token.create",
-                &t.id,
-                &json!({"name": name}),
-                steve_store::WS,
-            )?;
-            if json {
-                writeln!(
-                    out,
-                    "{}",
-                    json!({"id": t.id, "user": u.name, "token": token})
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "user:  {}\ntoken: {token}\n(shown once; sign a client in with the user and this token)",
-                    u.name
-                )?;
-            }
+            write_created_token(store, args, default_user, json, &mut out)?;
         }
         ["token", "list"] => {
             let ts = store.access().tokens(None)?;
@@ -701,6 +675,44 @@ pub(crate) fn command_with_default_user(
         _ => anyhow::bail!("{USAGE}"),
     }
     Ok(out)
+}
+
+fn write_created_token(
+    store: &Store,
+    args: &[String],
+    default_user: &str,
+    json: bool,
+    out: &mut String,
+) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+    let u = user_for(store, flag(args, "--user"), default_user)?;
+    let name = flag(args, "--name").unwrap_or("cli");
+    let expires = flag(args, "--days")
+        .map(|d| d.parse::<i64>())
+        .transpose()?
+        .map(|d| steve_store::now() + d * 86_400_000);
+    let (t, token) = store.access().token_create(&u.id, name, expires)?;
+    store.audit(
+        &u.id,
+        "token.create",
+        &t.id,
+        &json!({"name": name}),
+        steve_store::WS,
+    )?;
+    if json {
+        writeln!(
+            out,
+            "{}",
+            json!({"id": t.id, "user": u.name, "token": token})
+        )?;
+    } else {
+        writeln!(
+            out,
+            "user:  {}\ntoken: {token}\n(shown once; sign a client in with the user and this token)",
+            u.name
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn usage() -> anyhow::Error {

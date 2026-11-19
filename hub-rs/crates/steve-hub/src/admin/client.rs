@@ -146,6 +146,10 @@ pub(super) fn exchange(
         }
         bytes.extend_from_slice(&buffer[..n]);
     }
+    decode_response(&bytes)
+}
+
+fn decode_response(bytes: &[u8]) -> Result<(u16, Vec<u8>)> {
     let split = bytes
         .windows(4)
         .position(|v| v == b"\r\n\r\n")

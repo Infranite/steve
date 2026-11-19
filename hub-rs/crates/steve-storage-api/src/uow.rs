@@ -273,139 +273,140 @@ fn canonical_row(row: &mut Row) -> Result<(), Error> {
     Ok(())
 }
 
+struct Encoder<'a> {
+    text: &'a str,
+    pos: usize,
+}
+impl Encoder<'_> {
+    fn invalid() -> Error {
+        crate::error(steve_types::Code::Invalid, "invalid canonical JSON")
+    }
+    fn ws(&mut self) {
+        while self
+            .text
+            .as_bytes()
+            .get(self.pos)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.pos += 1;
+        }
+    }
+    fn take(&mut self, byte: u8) -> bool {
+        self.ws();
+        if self.text.as_bytes().get(self.pos) == Some(&byte) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn string(&mut self) -> Result<String, Error> {
+        self.ws();
+        let start = self.pos;
+        if !self.take(b'"') {
+            return Err(Self::invalid());
+        }
+        while let Some(&byte) = self.text.as_bytes().get(self.pos) {
+            self.pos += 1;
+            match byte {
+                b'\\' => self.pos += 1,
+                b'"' => {
+                    return serde_json::from_str(&self.text[start..self.pos])
+                        .map_err(|_| Self::invalid());
+                }
+                _ => {}
+            }
+        }
+        Err(Self::invalid())
+    }
+    fn value(&mut self, depth: u32) -> Result<Vec<u8>, Error> {
+        if depth > 128 {
+            return Err(Self::invalid());
+        }
+        self.ws();
+        match self.text.as_bytes().get(self.pos) {
+            Some(b'{') => {
+                self.pos += 1;
+                let mut fields = std::collections::BTreeMap::new();
+                if !self.take(b'}') {
+                    loop {
+                        let key = self.string()?;
+                        if !self.take(b':') {
+                            return Err(Self::invalid());
+                        }
+                        let value = self.value(depth + 1)?;
+                        if fields.insert(key, value).is_some() {
+                            return Err(Self::invalid());
+                        }
+                        if self.take(b'}') {
+                            break;
+                        }
+                        if !self.take(b',') {
+                            return Err(Self::invalid());
+                        }
+                    }
+                }
+                let mut out = vec![b'{'];
+                for (key, value) in fields {
+                    if out.len() > 1 {
+                        out.push(b',');
+                    }
+                    out.extend(serde_json::to_vec(&key).map_err(|_| Self::invalid())?);
+                    out.push(b':');
+                    out.extend(value);
+                }
+                out.push(b'}');
+                Ok(out)
+            }
+            Some(b'[') => {
+                self.pos += 1;
+                let mut out = vec![b'['];
+                if !self.take(b']') {
+                    loop {
+                        if out.len() > 1 {
+                            out.push(b',');
+                        }
+                        out.extend(self.value(depth + 1)?);
+                        if self.take(b']') {
+                            break;
+                        }
+                        if !self.take(b',') {
+                            return Err(Self::invalid());
+                        }
+                    }
+                }
+                out.push(b']');
+                Ok(out)
+            }
+            Some(b'"') => serde_json::to_vec(&self.string()?).map_err(|_| Self::invalid()),
+            Some(_) => {
+                let start = self.pos;
+                // RawJson has already validated every primitive, including arbitrary-size
+                // number lexemes. Copy them exactly instead of reparsing with loss of precision.
+                while self
+                    .text
+                    .as_bytes()
+                    .get(self.pos)
+                    .is_some_and(|b| !b.is_ascii_whitespace() && !b",]}".contains(b))
+                {
+                    self.pos += 1;
+                }
+                if start == self.pos {
+                    return Err(Self::invalid());
+                }
+                Ok(self.text.as_bytes()[start..self.pos].to_vec())
+            }
+            None => Err(Self::invalid()),
+        }
+    }
+}
+
 /// Deterministic JSON encoding for request digests, not ordinary DTO roundtrips.
 /// Object keys sort recursively; duplicate keys are invalid. Array order and numeric
 /// lexemes remain significant. Strings normalize escape spelling; whitespace is removed.
 /// Keeping number lexemes avoids collisions from converting large opaque JSON integers
 /// to f64. Only encoded fragments are retained; no general-purpose JSON tree is exposed.
 pub fn canonical_json(raw: &RawJson) -> Result<Vec<u8>, Error> {
-    struct Encoder<'a> {
-        text: &'a str,
-        pos: usize,
-    }
-    impl Encoder<'_> {
-        fn invalid() -> Error {
-            crate::error(steve_types::Code::Invalid, "invalid canonical JSON")
-        }
-        fn ws(&mut self) {
-            while self
-                .text
-                .as_bytes()
-                .get(self.pos)
-                .is_some_and(u8::is_ascii_whitespace)
-            {
-                self.pos += 1;
-            }
-        }
-        fn take(&mut self, byte: u8) -> bool {
-            self.ws();
-            if self.text.as_bytes().get(self.pos) == Some(&byte) {
-                self.pos += 1;
-                true
-            } else {
-                false
-            }
-        }
-        fn string(&mut self) -> Result<String, Error> {
-            self.ws();
-            let start = self.pos;
-            if !self.take(b'"') {
-                return Err(Self::invalid());
-            }
-            while let Some(&byte) = self.text.as_bytes().get(self.pos) {
-                self.pos += 1;
-                match byte {
-                    b'\\' => self.pos += 1,
-                    b'"' => {
-                        return serde_json::from_str(&self.text[start..self.pos])
-                            .map_err(|_| Self::invalid());
-                    }
-                    _ => {}
-                }
-            }
-            Err(Self::invalid())
-        }
-        fn value(&mut self, depth: u32) -> Result<Vec<u8>, Error> {
-            if depth > 128 {
-                return Err(Self::invalid());
-            }
-            self.ws();
-            match self.text.as_bytes().get(self.pos) {
-                Some(b'{') => {
-                    self.pos += 1;
-                    let mut fields = std::collections::BTreeMap::new();
-                    if !self.take(b'}') {
-                        loop {
-                            let key = self.string()?;
-                            if !self.take(b':') {
-                                return Err(Self::invalid());
-                            }
-                            let value = self.value(depth + 1)?;
-                            if fields.insert(key, value).is_some() {
-                                return Err(Self::invalid());
-                            }
-                            if self.take(b'}') {
-                                break;
-                            }
-                            if !self.take(b',') {
-                                return Err(Self::invalid());
-                            }
-                        }
-                    }
-                    let mut out = vec![b'{'];
-                    for (key, value) in fields {
-                        if out.len() > 1 {
-                            out.push(b',');
-                        }
-                        out.extend(serde_json::to_vec(&key).map_err(|_| Self::invalid())?);
-                        out.push(b':');
-                        out.extend(value);
-                    }
-                    out.push(b'}');
-                    Ok(out)
-                }
-                Some(b'[') => {
-                    self.pos += 1;
-                    let mut out = vec![b'['];
-                    if !self.take(b']') {
-                        loop {
-                            if out.len() > 1 {
-                                out.push(b',');
-                            }
-                            out.extend(self.value(depth + 1)?);
-                            if self.take(b']') {
-                                break;
-                            }
-                            if !self.take(b',') {
-                                return Err(Self::invalid());
-                            }
-                        }
-                    }
-                    out.push(b']');
-                    Ok(out)
-                }
-                Some(b'"') => serde_json::to_vec(&self.string()?).map_err(|_| Self::invalid()),
-                Some(_) => {
-                    let start = self.pos;
-                    // RawJson has already validated every primitive, including arbitrary-size
-                    // number lexemes. Copy them exactly instead of reparsing with loss of precision.
-                    while self
-                        .text
-                        .as_bytes()
-                        .get(self.pos)
-                        .is_some_and(|b| !b.is_ascii_whitespace() && !b",]}".contains(b))
-                    {
-                        self.pos += 1;
-                    }
-                    if start == self.pos {
-                        return Err(Self::invalid());
-                    }
-                    Ok(self.text.as_bytes()[start..self.pos].to_vec())
-                }
-                None => Err(Self::invalid()),
-            }
-        }
-    }
     let text = serde_json::to_string(raw).map_err(|_| Encoder::invalid())?;
     let mut encoder = Encoder {
         text: &text,

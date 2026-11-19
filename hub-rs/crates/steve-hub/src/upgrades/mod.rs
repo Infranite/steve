@@ -245,14 +245,18 @@ pub async fn run_auto_check(cfg: Config) {
     }
     tokio::time::sleep(Duration::from_secs(30)).await;
     loop {
-        match Updates::new(&cfg) {
-            Ok(u) => match u.check().await {
-                Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
-                Err(e) => tracing::info!("update check: {e:#}"),
-            },
-            Err(e) => tracing::warn!("update check: {e:#}"),
-        }
+        check_release(&cfg).await;
         tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+    }
+}
+
+async fn check_release(cfg: &Config) {
+    match Updates::new(cfg) {
+        Ok(u) => match u.check().await {
+            Ok(c) => tracing::info!("update check: {} {:?}", c.status, c.version),
+            Err(e) => tracing::info!("update check: {e:#}"),
+        },
+        Err(e) => tracing::warn!("update check: {e:#}"),
     }
 }
 

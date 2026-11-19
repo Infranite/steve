@@ -229,36 +229,7 @@ pub fn backup(
         sha256: copied.sha256,
         quick_check: Some(copied.quick_check),
     };
-    let mut files = Files {
-        consistency: "best_effort".into(),
-        complete: true,
-        artifacts: vec![],
-        error: None,
-    };
-    if let Some(set) = &plan.with_files {
-        for attempt in 0..3 {
-            check(start, plan.deadline, cancel)?;
-            match (set.archive)(&set.home, &partial)
-                .and_then(|path| path.map(|p| artifact(&p)).transpose())
-            {
-                Ok(file) => {
-                    files.artifacts.extend(file);
-                    files.error = None;
-                    break;
-                }
-                Err(error) => {
-                    files.complete = false;
-                    files.error = Some(error.to_string());
-                    if attempt == 2 {
-                        break;
-                    }
-                }
-            }
-        }
-        if files.error.is_none() {
-            files.complete = true;
-        }
-    }
+    let files = archive_files(plan, &partial, start, cancel)?;
     check(start, plan.deadline, cancel)?;
     let manifest = Manifest {
         format: 1,
@@ -302,6 +273,45 @@ pub fn backup(
     }
     Ok(manifest)
 }
+fn archive_files(
+    plan: &BackupPlan,
+    partial: &Path,
+    start: Instant,
+    cancel: &CancelFlag,
+) -> Result<Files, PlanError> {
+    let mut files = Files {
+        consistency: "best_effort".into(),
+        complete: true,
+        artifacts: vec![],
+        error: None,
+    };
+    if let Some(set) = &plan.with_files {
+        for attempt in 0..3 {
+            check(start, plan.deadline, cancel)?;
+            match (set.archive)(&set.home, partial)
+                .and_then(|path| path.map(|p| artifact(&p)).transpose())
+            {
+                Ok(file) => {
+                    files.artifacts.extend(file);
+                    files.error = None;
+                    break;
+                }
+                Err(error) => {
+                    files.complete = false;
+                    files.error = Some(error.to_string());
+                    if attempt == 2 {
+                        break;
+                    }
+                }
+            }
+        }
+        if files.error.is_none() {
+            files.complete = true;
+        }
+    }
+    Ok(files)
+}
+
 fn single_name(name: &str) -> bool {
     Path::new(name).file_name().is_some_and(|n| n == name) && name != "." && name != ".."
 }

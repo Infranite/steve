@@ -204,17 +204,7 @@ fn backup_with_elapsed(
             }
         }
     }
-    let checks = target
-        .prepare("PRAGMA quick_check")
-        .and_then(|mut query| {
-            query
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .map_err(|error| BackupError::QuickCheckFailed(error.to_string()))?;
-    if checks != ["ok"] {
-        return Err(BackupError::QuickCheckFailed(checks.join("; ")));
-    }
+    quick_check(&target)?;
     target.close().map_err(|(_, error)| error)?;
     source.close().map_err(|(_, error)| error)?;
     checkpoint(elapsed(), opts, cancel)?;
@@ -247,6 +237,21 @@ fn backup_with_elapsed(
         quick_check: "ok".into(),
         elapsed: elapsed(),
     })
+}
+
+fn quick_check(target: &Connection) -> Result<(), BackupError> {
+    let checks = target
+        .prepare("PRAGMA quick_check")
+        .and_then(|mut query| {
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| BackupError::QuickCheckFailed(error.to_string()))?;
+    if checks != ["ok"] {
+        return Err(BackupError::QuickCheckFailed(checks.join("; ")));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -119,15 +119,13 @@ steve-github	crates/steve-github/src/accept.rs	cognitive_complexity	38,37,27
 steve-github	crates/steve-github/src/accept.rs	too_many_lines	165,152,126
 steve-github	crates/steve-github/src/automation.rs	too_many_lines	246
 steve-github	crates/steve-github/src/hooks.rs	cognitive_complexity	27
-steve-github	crates/steve-github/src/poll.rs	cognitive_complexity	30
-steve-github	crates/steve-github/src/poll.rs	too_many_lines	191
+steve-github	crates/steve-github/src/poll.rs	too_many_lines	117
 steve-github	crates/steve-github/src/repos.rs	cognitive_complexity	38
 steve-github	crates/steve-github/src/repos.rs	too_many_lines	103
 steve-github	crates/steve-github/src/sync.rs	too_many_lines	185,119,117,109
 steve-hub	crates/steve-hub/src/a2a_server.rs	too_many_lines	154
 steve-hub	crates/steve-hub/src/access.rs	cognitive_complexity	31,27
-steve-hub	crates/steve-hub/src/access.rs	too_many_lines	205,132,103
-steve-hub	crates/steve-hub/src/admin/client.rs	too_many_lines	105
+steve-hub	crates/steve-hub/src/access.rs	too_many_lines	205,132
 steve-hub	crates/steve-hub/src/api/harness_updates.rs	too_many_lines	155,103
 steve-hub	crates/steve-hub/src/api/items.rs	too_many_lines	124
 steve-hub	crates/steve-hub/src/api/misc.rs	too_many_lines	105
@@ -150,7 +148,6 @@ steve-hub	crates/steve-hub/src/nodes/vitals.rs	cognitive_complexity	33
 steve-hub	crates/steve-hub/src/plugins/mod.rs	cognitive_complexity	28
 steve-hub	crates/steve-hub/src/upgrades/cli.rs	too_many_lines	140,137
 steve-hub	crates/steve-hub/src/upgrades/maintenance.rs	too_many_lines	105
-steve-hub	crates/steve-hub/src/upgrades/mod.rs	cognitive_complexity	29
 steve-hub	crates/steve-hub/src/upgrades/runner.rs	too_many_lines	194
 steve-hub	crates/steve-hub/src/upgrades/signing.rs	cognitive_complexity	41
 steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	cognitive_complexity	32
@@ -203,7 +200,6 @@ steve-mail	crates/steve-mail/src/compose.rs	too_many_lines	156,145
 steve-mail	crates/steve-mail/src/mcp.rs	too_many_lines	118
 steve-mail	crates/steve-mail/src/send.rs	too_many_lines	113
 steve-mail	crates/steve-mail/src/store.rs	too_many_lines	149
-steve-mail	crates/steve-mail/src/sync.rs	cognitive_complexity	27
 steve-modules	crates/steve-modules/src/accounts/connections/integration.rs	too_many_lines	108
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive_complexity	26
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	279,101
@@ -252,11 +248,8 @@ steve-stats	crates/steve-stats/src/refresh.rs	too_many_lines	145
 steve-stats	crates/steve-stats/src/views.rs	cognitive_complexity	45,31
 steve-stats	crates/steve-stats/src/views.rs	too_many_lines	324,138
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
-steve-storage-api	crates/steve-storage-api/src/uow.rs	too_many_lines	136
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
 steve-store	crates/steve-store/src/repo/gateway_ledger.rs	too_many_lines	169
 steve-store	crates/steve-store/src/repo/kinds.rs	too_many_lines	129
 steve-store	crates/steve-store/src/repo/workflows.rs	too_many_lines	117,115,108
-steve-store-sqlite	crates/steve-store-sqlite/src/backup/offline.rs	too_many_lines	106
-steve-store-sqlite	crates/steve-store-sqlite/src/backup/plan.rs	too_many_lines	116
 steve-types	crates/steve-types/src/fact.rs	too_many_lines	120
