@@ -18,8 +18,11 @@ pub fn install(c: &Connection) -> rusqlite::Result<()> {
     // handwritten source schema. The reference connection is never a writer file.
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(schema::COMMS)?;
-    // Only a comms-local FK parent is needed. It intentionally has no core workspace
-    // dependency: cross-domain ids are soft references, not fake core tables here.
+    // Keep only the id from schema/comms/0001_baseline.sql's connections parent.
+    // Its account_id references accounts, whose workspace_id reaches CORE.workspaces
+    // (the accounts -> workspaces cross-domain FK is listed in schema/debt_comms.txt).
+    // The fixture keeps only the comms-local id needed by mail_threads/messages;
+    // it must not manufacture core tables to satisfy that legacy dependency.
     c.execute_batch(
         "CREATE TABLE connections(id TEXT PRIMARY KEY); INSERT INTO connections VALUES('fixture');",
     )?;
@@ -75,14 +78,14 @@ pub fn put(
     at: i64,
     insert_only: bool,
 ) -> rusqlite::Result<()> {
-    let (table, column, time, prefix) = match source {
-        Source::ChanMessage => ("chan_messages", "space_id", "created", "space:"),
-        Source::MailMessage => ("mail_messages", "thread_id", "date", "mail_thread:"),
-    };
+    let shape = source.shape();
+    let table = shape.table;
+    let column = shape.conv_column;
+    let time = shape.time_column;
     let local = conv
-        .strip_prefix(prefix)
+        .strip_prefix(shape.prefix)
         .ok_or(rusqlite::Error::InvalidQuery)?;
-    let (sql, columns, values) = match source {
+    let (extra_columns, extra_values) = match source {
         Source::ChanMessage => {
             c.execute(
                 "INSERT OR IGNORE INTO spaces
@@ -90,11 +93,7 @@ pub fn put(
                  VALUES(?1,?2,'fixture','group',?1,'fixture',0,0)",
                 params![local, ws],
             )?;
-            (
-                "chan_messages",
-                "id,workspace_id,space_id,status,created,direction",
-                "?1,?2,?3,?4,?5,'in'",
-            )
+            ("direction", "'in'")
         }
         Source::MailMessage => {
             c.execute(
@@ -104,9 +103,8 @@ pub fn put(
                 params![local, ws],
             )?;
             (
-                "mail_messages",
-                "id,workspace_id,thread_id,status,date,connection_id,ext_id,direction,from_addr,created",
-                "?1,?2,?3,?4,?5,'fixture',?1,'in','fixture@example.invalid',0",
+                "connection_id,ext_id,direction,from_addr,created",
+                "'fixture',?1,'in','fixture@example.invalid',0",
             )
         }
     };
@@ -118,25 +116,24 @@ pub fn put(
         )
     };
     c.execute(
-        &format!("INSERT INTO {sql}({columns}) VALUES({values}){upsert}"),
+        &format!(
+            "INSERT INTO {table}(id,workspace_id,{column},status,{time},{extra_columns})
+             VALUES(?1,?2,?3,?4,?5,{extra_values}){upsert}"
+        ),
         params![id, ws, local, status, at],
     )?;
     // All source writes are raw fixture arrangement, deliberately without digest
     // triggers: only a registered operation may maintain the derived tables.
-    debug_assert_eq!(table, sql);
     Ok(())
 }
 pub fn delete(c: &Connection, source: Source, id: &str) -> rusqlite::Result<()> {
-    let table = match source {
-        Source::ChanMessage => "chan_messages",
-        Source::MailMessage => "mail_messages",
-    };
+    let table = source.shape().table;
     c.execute(&format!("DELETE FROM {table} WHERE id=?"), [id])?;
     Ok(())
 }
 
 #[cfg(sqlite_conformance)]
-mod backend {
+pub mod backend {
     use super::*;
     use std::sync::Arc;
     use steve_storage_api::{
@@ -470,5 +467,3 @@ mod backend {
         }
     }
 }
-#[cfg(sqlite_conformance)]
-pub use backend::NativeFixture;
