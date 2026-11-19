@@ -66,7 +66,7 @@ install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
                     .to_string()
             };
             // Transitional Value tap -> legacy subscriber bridge. The subscriber still accepts
-            // ChangeEvent until W1.3c; do not invent a ws for legacy Bot notices (they have none).
+            // ChangeEvent until the final W1.3b commit; do not invent a ws for legacy Bot notices (they have none).
             let e = match s("type").as_str() {
                 "mm" => steve_store::ChangeEvent::Mm {
                     id: s("id"),

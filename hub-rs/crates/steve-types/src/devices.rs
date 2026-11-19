@@ -28,3 +28,15 @@ impl Scoped for DevicesEvent {
         }
     }
 }
+
+impl DevicesEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::ReleaseHold { .. } => "release.hold",
+            Self::Device { .. } => "device",
+            Self::Node { .. } => "node",
+            Self::Client { .. } => "client",
+        }
+    }
+}
