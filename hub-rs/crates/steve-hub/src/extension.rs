@@ -657,6 +657,18 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
             id,
         ));
     }
+    // Every other mode was dispatched above; what is left starts a Hub in STEVE_HOME (or ~/.steve).
+    // An argument this binary does not know (a test filter, a typo) must not do that.
+    match args.get(1..).unwrap_or_default() {
+        [] => {}
+        [one] if one == "--supervise" || one == "--local-node" => {}
+        other => {
+            eprintln!(
+                "steve-hub: unknown arguments {other:?}; run it without arguments to start the Hub"
+            );
+            std::process::exit(2);
+        }
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("STEVE_LOG")

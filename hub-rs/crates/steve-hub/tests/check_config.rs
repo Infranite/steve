@@ -199,3 +199,41 @@ fn removed_variables_also_stop_normal_startup_before_creating_data() {
     );
     assert!(!tmp.path().join("data").exists());
 }
+
+/// An argument the binary does not know (for example a test filter passed to it by mistake) is
+/// refused before anything is created: no Hub starts, in STEVE_HOME or in the default home.
+#[test]
+fn unknown_arguments_are_refused_before_a_hub_starts() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path().join("home");
+    let steve = tmp.path().join("steve");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("free port")
+        .port();
+    for args in [
+        &["some_test_name", "--exact", "--nocapture"][..],
+        &["--verison"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("STEVE_HOME", &steve)
+            .env("STEVE_PORT", port.to_string())
+            .output()
+            .expect("run steve-hub");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!steve.exists(), "{args:?}: STEVE_HOME is not made");
+        assert!(
+            !home.join(".steve").exists(),
+            "{args:?}: the default home is not made"
+        );
+    }
+}
