@@ -12,6 +12,7 @@ extern crate self as steve_hub;
 
 pub mod a2a_server;
 pub mod access;
+mod admin;
 pub mod api;
 pub mod app;
 pub mod avatar;
