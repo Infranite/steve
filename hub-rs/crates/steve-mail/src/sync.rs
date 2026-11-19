@@ -135,7 +135,9 @@ impl Mail {
             .unwrap_or_else(|_| Err(AdapterError::Transient("邮件同步太久没有完成".into())));
         let changed = std::mem::take(&mut sink.changed);
         drop(sink);
-        // what got stored is kept, also after an error midway
+        // What got stored is kept, also after an error midway. Adapters must leave cursors at
+        // the successfully stored prefix: a failed put_batch may already have stored some mail,
+        // which is safe to fetch again (the store dedupes), but must never be skipped here.
         {
             let mut checks = lock(&self.0.flag_checks);
             for f in &state.folders {

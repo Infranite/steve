@@ -1659,3 +1659,196 @@ async fn recover_deliveries_racing_with_worker_completion_queues_each_once() {
         json!(total as i64)
     );
 }
+
+fn cursor_prs(h: &H, count: usize) {
+    for i in 0..count {
+        h.fake
+            .open_pr(
+                REPO,
+                &format!("cursor-{i}"),
+                PR_SHA,
+                &format!("Cursor {i}"),
+                "",
+                "someone",
+            )
+            .unwrap();
+    }
+    h.fake.with(|w| {
+        for (i, pr) in w.pulls.iter_mut().enumerate() {
+            pr.state = "closed".into(); // keep this test about pulls, without check polling
+            pr.updated = 1_800_000_000 + i as i64;
+        }
+    });
+}
+
+fn poll_state(h: &H, repo: &str) -> Value {
+    serde_json::from_str(
+        q(h, "SELECT poll_state FROM gh_repos WHERE id = ?", &[&repo])
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn poll_follows_all_pages_of_120_updates_and_replays_no_deliveries() {
+    let (h, _, repo) = ready().await;
+    cursor_prs(&h, 120);
+    assert_eq!(h.gh.poll_repo(&repo).await.unwrap().applied, 120);
+    h.fake.with(|w| {
+        for pr in &mut w.pulls {
+            pr.updated += 86_400;
+            pr.head_sha = format!("updated-{}", pr.number);
+        }
+    });
+    h.fake.clear_calls();
+    let r = h.gh.poll_repo(&repo).await.unwrap();
+    assert_eq!((r.applied, r.seen), (120, 0));
+    let calls = h.fake.calls_to("GET", &format!("/repos/{REPO}/pulls"));
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].if_none_match.is_some());
+    assert!(calls[1..].iter().all(|c| c.if_none_match.is_none()));
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
+            &[&repo]
+        ),
+        json!(120)
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_deliveries WHERE repo_id = ? AND event = 'pull_request'",
+            &[&repo]
+        ),
+        json!(240)
+    );
+    assert!(h.gh.poll_repo(&repo).await.unwrap().pulls_unchanged);
+    // A pre-fix installation has an ETag but no watermark: it must scan older pages once.
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE gh_repos SET poll_state = json_remove(poll_state, '$.pulls_since') WHERE id = ?",
+                [&repo],
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    h.fake.clear_calls();
+    let r = h.gh.poll_repo(&repo).await.unwrap();
+    assert_eq!((r.applied, r.seen), (0, 120));
+    assert!(
+        h.fake.calls_to("GET", &format!("/repos/{REPO}/pulls"))[0]
+            .if_none_match
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn poll_page_budget_persists_and_continues_without_a_first_page_304() {
+    let (h, _, repo) = ready().await;
+    cursor_prs(&h, 520);
+    let r = h.gh.poll_repo(&repo).await.unwrap();
+    assert_eq!(r.applied, 500);
+    assert!(r.pulls_deferred);
+    assert!(
+        poll_state(&h, &repo)["pulls_scan"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("page=11")
+    );
+    assert_eq!(
+        poll_state(&h, &repo)["pulls_since"].as_i64().unwrap_or(0),
+        0
+    );
+    h.fake.clear_calls();
+    let r = h.gh.poll_repo(&repo).await.unwrap();
+    assert_eq!((r.applied, r.seen), (20, 0));
+    assert!(!r.pulls_deferred);
+    let calls = h.fake.calls_to("GET", &format!("/repos/{REPO}/pulls"));
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].query.contains("page=11"));
+    assert!(calls[0].if_none_match.is_none());
+    assert!(poll_state(&h, &repo)["pulls_scan"].is_null());
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
+            &[&repo]
+        ),
+        json!(520)
+    );
+    assert!(h.gh.poll_repo(&repo).await.unwrap().pulls_unchanged);
+}
+
+#[tokio::test]
+async fn poll_same_second_boundary_is_inclusive_across_pages() {
+    let (h, _, repo) = ready().await;
+    cursor_prs(&h, 120);
+    h.fake.with(|w| {
+        for pr in &mut w.pulls {
+            pr.updated = 1_800_000_000;
+        }
+    });
+    assert_eq!(h.gh.poll_repo(&repo).await.unwrap().applied, 120);
+    // Same timestamp, different head: page one changes so the inclusive watermark must cover
+    // the other two pages too, even though every timestamp equals the previous watermark.
+    h.fake.with(|w| {
+        for pr in &mut w.pulls {
+            pr.head_sha = "new-head".into();
+        }
+    });
+    assert_eq!(h.gh.poll_repo(&repo).await.unwrap().applied, 120);
+}
+
+#[tokio::test]
+async fn failed_poll_replays_durable_half_without_duplicate_effects() {
+    let (h, _, repo) = ready().await;
+    cursor_prs(&h, 120);
+    let before = poll_state(&h, &repo);
+    h.env.store().with_conn(|c| c.execute_batch(
+        "CREATE TRIGGER fail_cursor_delivery BEFORE INSERT ON gh_deliveries WHEN NEW.event = 'pull_request' AND (SELECT COUNT(*) FROM gh_deliveries WHERE event = 'pull_request') >= 60 BEGIN SELECT RAISE(FAIL, 'injected receipt failure'); END;"
+    ).map_err(Into::into)).unwrap();
+    assert!(h.gh.poll_repo(&repo).await.is_err());
+    assert_eq!(
+        poll_state(&h, &repo),
+        before,
+        "no cursor or ETag committed after failure"
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
+            &[&repo]
+        ),
+        json!(60)
+    );
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DROP TRIGGER fail_cursor_delivery")
+                .map_err(Into::into)
+        })
+        .unwrap();
+    let r = h.gh.poll_repo(&repo).await.unwrap();
+    assert_eq!((r.applied, r.seen), (60, 60));
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_deliveries WHERE repo_id = ? AND event = 'pull_request'",
+            &[&repo]
+        ),
+        json!(120)
+    );
+    assert_eq!(
+        q(
+            &h,
+            "SELECT COUNT(*) FROM gh_prs WHERE repo_id = ?",
+            &[&repo]
+        ),
+        json!(120)
+    );
+    assert!(h.sink.duplicates().is_empty());
+}

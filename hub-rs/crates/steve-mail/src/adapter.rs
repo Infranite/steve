@@ -62,7 +62,7 @@ pub struct FolderState {
     pub uidvalidity: Option<i64>,
     pub last_uid: Option<i64>,
     pub modseq: Option<i64>,
-    /// Graph delta link.
+    /// Graph delta link; IMAP's unresolved `(uid, attempts)` JSON tuple, if any.
     pub cursor: Option<String>,
     /// Unix ms of the last completed sync of this folder; `None` = never (the next sync backfills).
     pub synced: Option<i64>,
@@ -92,6 +92,8 @@ pub struct SyncReport {
     pub removed: usize,
     /// Folders whose UIDVALIDITY changed (rescanned).
     pub reset: Vec<String>,
+    /// IMAP messages still unavailable after the bounded fetch retries (also logged).
+    pub skipped: Vec<String>,
 }
 
 /// An attachment as seen in a `BODYSTRUCTURE` (messages too big to fetch whole).
