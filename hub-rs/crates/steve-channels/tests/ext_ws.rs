@@ -60,6 +60,10 @@ struct H {
 }
 
 async fn setup() -> H {
+    setup_with_ids(steve_channels::ext::MessageIds::None).await
+}
+
+async fn setup_with_ids(ids: steve_channels::ext::MessageIds) -> H {
     let fake = FakeExtWs::start().await.expect("fake service");
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core);
@@ -99,7 +103,7 @@ async fn setup() -> H {
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
-        .decl(ext_ws::decl())
+        .decl(ext_ws::decl().message_ids(ids))
         .decl(ext_ws::bot_decl())
         .adapter(bot.clone())
         .media(bot.clone())
@@ -2548,4 +2552,132 @@ async fn a_rejected_reaction_keeps_its_target_scope_and_leaves_other_chats_writa
         1,
         "only the accepted reaction had a side effect"
     );
+}
+
+// No polling delay: let the socket and store workers make progress and bound the whole wait.
+async fn feed_wait(mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(T, async {
+        while !ready() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("feed progress");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn permanently_invalid_inbound_is_retained_and_diagnosed_before_ack() {
+    // Exercise an inbound contract refusal with the real pipeline (the normal external
+    // adapter accepts absent platform ids; this fixture deliberately requires one).
+    let h = setup_with_ids(steve_channels::ext::MessageIds::Platform).await;
+    let id = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    feed_wait(|| h.subscribes().len() == 1).await;
+    let mut invalid = msg(&h, "c_dead", "dead_1", "u_7", "retain this input", 1);
+    // The wire accepts this message; the stricter fixture contract refuses it.
+    invalid["id"] = Value::Null;
+    let seq = h.fake.push_message(invalid);
+    feed_wait(|| h.fake.acked() == seq).await;
+    assert_eq!(h.messages("c_dead").len(), 0);
+    let dead = h.rows(
+        "SELECT source_id, payload FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
+        &[&id],
+    );
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0][0], "dead_1");
+    assert!(dead[0][1].as_str().unwrap().contains("retain this input"));
+    assert_eq!(
+        h.rows(
+            "SELECT action FROM audit WHERE target = ? AND action = 'channel.dead_letter'",
+            &[&id]
+        )
+        .len(),
+        1
+    );
+    h.fake.redeliver();
+    let next = h
+        .fake
+        .push_message(msg(&h, "c_dead", "good_2", "u_7", "next input", 2));
+    feed_wait(|| h.fake.acked() == next).await;
+    assert_eq!(
+        h.rows(
+            "SELECT source_id FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
+            &[&id]
+        )
+        .len(),
+        1
+    );
+    assert_eq!(h.messages("c_dead").len(), 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_internal_transient_error_keeps_batch_cursor_for_retry() {
+    let h = setup().await;
+    let id = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    feed_wait(|| h.subscribes().len() == 1).await;
+    let initial = h
+        .fake
+        .push_message(msg(&h, "c_retry", "initial", "u_7", "first", 1));
+    feed_wait(|| h.fake.acked() == initial).await;
+    // A temporarily unavailable connection produces NotFound rather than Internal.
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET workspace_id = 'w2' WHERE id = ?",
+                [&id],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let retry = h
+        .fake
+        .push_message(msg(&h, "c_retry", "retry", "u_7", "retry me", 2));
+    feed_wait(|| h.fake.sockets() == 0).await;
+    rt.shutdown().await;
+    assert_eq!(h.fake.acked(), initial);
+    assert_eq!(h.cursor(&id).unwrap()["cursor"], format!("c:{initial}"));
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET workspace_id = 'default' WHERE id = ?",
+                [&id],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let (rt, _tx) = h.runtime();
+    feed_wait(|| h.fake.acked() == retry).await;
+    assert_eq!(h.messages("c_retry").len(), 2);
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_feed_message_is_retained_before_ack() {
+    let h = setup().await;
+    let id = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    feed_wait(|| h.subscribes().len() == 1).await;
+    let seq = h.fake.push(vec![
+        json!({"type": "message", "chat_id": "c_bad", "source_id": "bad"}),
+    ]);
+    feed_wait(|| h.fake.acked() == seq).await;
+    let dead = h.rows(
+        "SELECT payload FROM chan_ext_ws_dead_letters WHERE connection_id = ?",
+        &[&id],
+    );
+    assert_eq!(dead.len(), 1);
+    assert!(dead[0][0].as_str().unwrap().contains("bad"));
+    assert_eq!(
+        h.rows(
+            "SELECT action FROM audit WHERE target = ? AND action = 'channel.dead_letter'",
+            &[&id]
+        )
+        .len(),
+        1
+    );
+    rt.shutdown().await;
 }
