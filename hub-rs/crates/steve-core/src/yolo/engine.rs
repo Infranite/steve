@@ -39,7 +39,7 @@ use super::{WORKSPACE, Yolo};
 use crate::Core;
 use crate::repo::Decision;
 
-/// How often scheduled actions and waiting cards are looked at again.
+/// Open-card reconciliation and transient scheduled-action retry cadence.
 pub const TICK: Duration = Duration::from_secs(15);
 /// The workspace setting with the user's [`Policy`] (JSON; missing keys keep their default).
 pub const POLICY_KEY: &str = "yolo.policy";
@@ -96,6 +96,7 @@ struct Claim<'a>(&'a Engine, String);
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
         lock(&self.0.0.inflight).remove(&self.1);
+        self.0.yolo().0.due_wake.notify_one();
     }
 }
 
@@ -616,21 +617,97 @@ impl Engine {
     }
 
     fn tick_admitted(&self) -> Vec<ActionRow> {
-        let mut out = Vec::new();
-        let now = self.yolo().now();
-        match self.yolo().store().reader(|c| repo::due_actions(c, now)) {
-            Ok(due) => {
-                for a in due {
-                    let id = a.decision_id.clone().unwrap_or_default();
-                    match self.run_due_row(a) {
-                        Ok(Some(a)) => out.push(a),
-                        Ok(None) => {}
-                        Err(e) => self.fail_hard(&id, &e),
-                    }
+        let (mut out, _) = self.scheduled_pass(self.yolo().now(), usize::MAX);
+        out.extend(self.waiting_admitted());
+        out
+    }
+
+    fn claimed_decisions(&self) -> String {
+        let claimed: Vec<String> = lock(&self.0.inflight).iter().cloned().collect();
+        serde_json::json!(claimed).to_string()
+    }
+
+    fn scheduled_rows(&self, now: i64, limit: usize) -> steve_store::Result<Vec<ActionRow>> {
+        if limit == usize::MAX {
+            // The public/manual tick keeps its former unbounded pass.
+            return self.yolo().store().reader(|c| repo::due_actions(c, now));
+        }
+        let claimed = self.claimed_decisions();
+        self.yolo().store().reader(|c| {
+            // Keep eligibility identical to Scheduled::next_due. Both filters precede LIMIT.
+            let ids = c
+                .prepare_cached(
+                    "SELECT id FROM yolo_actions WHERE outcome='scheduled' AND due_at<=?1
+                 AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?2)))
+                 ORDER BY due_at, rowid LIMIT ?3",
+                )?
+                .query_map((now, &claimed, limit as i64), |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // Keep decoding in the store API; the batch bounds the per-row lookups.
+            let mut rows = Vec::new();
+            for id in ids {
+                if let Some(row) = repo::action_get(c, &id)? {
+                    rows.push(row);
                 }
             }
-            Err(e) => tracing::error!("yolo due actions: {e}"),
+            Ok(rows)
+        })
+    }
+
+    fn scheduled_pass(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> (Vec<ActionRow>, Option<steve_runtime::due::DueError>) {
+        let mut out = Vec::new();
+        let due = self.scheduled_rows(now, limit);
+        let due = match due {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("yolo due actions: {e}");
+                return (out, Some(steve_runtime::due::DueError(e.to_string())));
+            }
+        };
+        let mut error = None;
+        for a in due {
+            let row = a.id.clone();
+            let id = a.decision_id.clone().unwrap_or_default();
+            match self.run_due_row(a) {
+                Ok(Some(a)) => out.push(a),
+                Ok(None) => {
+                    // A claim acquired after the query wakes us on release. Other unsettled
+                    // failures retain the former retry cadence rather than spinning.
+                    if self.reread(&row).is_ok_and(|a| {
+                        let claimed = a
+                            .decision_id
+                            .as_ref()
+                            .is_some_and(|id| lock(&self.0.inflight).contains(id));
+                        a.outcome == "scheduled" && a.due_at.is_some_and(|at| at <= now) && !claimed
+                    }) {
+                        error = Some(steve_runtime::due::DueError(
+                            "scheduled action has not settled".into(),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    error = Some(steve_runtime::due::DueError(e.to_string()));
+                    self.fail_hard(&id, &e);
+                }
+            }
         }
+        (out, error)
+    }
+
+    fn tick_waiting(&self) -> Vec<ActionRow> {
+        let store = self.core().store().store();
+        let Some(_permit) = store.try_activity("yolo_tick") else {
+            return vec![];
+        };
+        store.admitted_sync(|| self.waiting_admitted())
+    }
+
+    fn waiting_admitted(&self) -> Vec<ActionRow> {
+        let mut out = Vec::new();
         if self.yolo().forced().is_some() {
             return out;
         }
@@ -676,16 +753,34 @@ impl Engine {
             .collect()
     }
 
-    /// Every [`TICK`]. Runs forever.
+    /// Follows stored action deadlines; open-card reconciliation retains [`TICK`].
     pub async fn run_ticks(self) {
-        let mut t = tokio::time::interval(TICK);
-        loop {
-            t.tick().await;
-            let e = self.clone();
-            if let Err(err) = tokio::task::spawn_blocking(move || e.tick()).await {
-                tracing::error!("yolo tick task: {err}");
+        let scheduled = steve_runtime::due::due_loop(
+            Arc::new(Scheduled(self.clone())),
+            self.yolo().0.clock.clone(),
+            self.yolo().0.due_wake.clone(),
+            steve_runtime::policy::Backoff {
+                base: TICK,
+                max: TICK,
+                factor: 1,
+                jitter: steve_runtime::policy::Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        );
+        // The open-card reconciliation retains its existing Burst cadence until the
+        // periodic runtime can express it; it no longer executes scheduled actions.
+        let waiting = async {
+            let mut t = tokio::time::interval(TICK);
+            loop {
+                t.tick().await;
+                let e = self.clone();
+                if let Err(err) = tokio::task::spawn_blocking(move || e.tick_waiting()).await {
+                    tracing::error!("yolo tick task: {err}");
+                }
             }
-        }
+        };
+        tokio::join!(scheduled, waiting);
     }
 
     /// Looks at every decision a `{type:"decision", id}` event names. Runs until the sender is gone.
@@ -714,5 +809,233 @@ impl Engine {
             let e = self.clone();
             tokio::task::spawn_blocking(move || e.kick(&id));
         }
+    }
+}
+
+/// Persisted scheduled actions; terminal outcomes are naturally excluded by both queries.
+struct Scheduled(Engine);
+const DUE_BATCH: usize = 64;
+impl steve_runtime::due::DueSource for Scheduled {
+    fn name(&self) -> &'static str {
+        "yolo.scheduled"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        let claimed = self.0.claimed_decisions();
+        self.0
+            .yolo()
+            .store()
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT min(due_at) FROM yolo_actions WHERE outcome='scheduled'
+                 AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?1)))",
+                    [claimed],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let e = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = e.core().store().store();
+            let _permit = store
+                .try_activity("yolo_tick")
+                .ok_or_else(|| steve_runtime::due::DueError("store is busy".into()))?;
+            store.admitted_sync(|| {
+                let (_, error) = e.scheduled_pass(now, DUE_BATCH);
+                error.map_or(Ok(()), Err)
+            })
+        })
+        .await
+        .map_err(|e| steve_runtime::due::DueError(e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod due_contract_tests {
+    use super::*;
+    use crate::repo::WS;
+    use crate::testkit::Kit;
+    use steve_runtime::due::{DueSource, contract};
+
+    struct Fixture {
+        _kit: Kit,
+        source: Scheduled,
+        clock: Arc<steve_runtime::FakeClock>,
+        poison: Mutex<HashSet<String>>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let kit = Kit::new();
+            let clock = Arc::new(steve_runtime::FakeClock::new(1000));
+            let yolo = Yolo::with_clock(kit.db().clone(), None, kit.home(), clock.clone());
+            let source = Scheduled(Engine::new(kit.core.clone(), yolo));
+            Self {
+                _kit: kit,
+                source,
+                clock,
+                poison: Mutex::default(),
+            }
+        }
+        fn terminal(&self, poison: bool) -> Vec<String> {
+            let ids = self
+                .source
+                .0
+                .yolo()
+                .store()
+                .reader(|c| {
+                    Ok::<_, steve_store::StoreError>(
+                        c.prepare("SELECT id FROM yolo_actions WHERE outcome<>'scheduled'")?
+                            .query_map([], |r| r.get::<_, String>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?,
+                    )
+                })
+                .unwrap();
+            ids.into_iter()
+                .filter(|id| lock(&self.poison).contains(id) == poison)
+                .collect()
+        }
+    }
+    impl contract::Fixture for Fixture {
+        type Source = Scheduled;
+        fn source(&self) -> &Scheduled {
+            &self.source
+        }
+        fn batch(&self) -> usize {
+            DUE_BATCH
+        }
+        fn add(&self, at: i64, poison: bool) -> String {
+            let a = self
+                .source
+                .0
+                .yolo()
+                .record(&repo::NewAction {
+                    workspace_id: WS.into(),
+                    kind: "approve".into(),
+                    subject_type: "release".into(),
+                    rule: "release.self".into(),
+                    outcome: "scheduled".into(),
+                    due_at: Some(at),
+                    // A missing decision id is malformed and is retired by the existing executor.
+                    // A no-longer-existing card is a successful stale-action reconciliation.
+                    decision_id: if poison {
+                        None
+                    } else {
+                        Some("already-handled".into())
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+            if poison {
+                lock(&self.poison).insert(a.id.clone());
+            }
+            a.id
+        }
+        fn done(&self) -> Vec<String> {
+            self.terminal(false)
+        }
+        fn dead(&self) -> Vec<String> {
+            self.terminal(true)
+        }
+    }
+    #[tokio::test]
+    async fn r7_scheduled_actions_obey_the_real_store_due_contract() {
+        contract::check(Fixture::new, 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7_terminal_actions_are_not_due_and_writes_wake_the_runner() {
+        let f = Fixture::new();
+        let yolo = f.source.0.yolo();
+        let id = contract::Fixture::add(&f, 1000, true);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1000));
+        f.source.run_due(1000).await.unwrap();
+        assert!(contract::Fixture::dead(&f).contains(&id));
+        assert_eq!(f.source.next_due().await.unwrap(), None);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, yolo.0.due_wake.notified())
+                .await
+                .is_ok()
+        );
+    }
+    async fn until(f: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !f() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("due runner made progress");
+    }
+    #[tokio::test]
+    async fn r7_due_runner_uses_the_real_clock_deadline_and_commit_wakeup() {
+        let f = Fixture::new();
+        let task = steve_runtime::spawn("test.yolo.due", f.source.0.clone().run_ticks());
+        until(|| f.clock.observed(1000)).await;
+        let id = contract::Fixture::add(&f, 1100, false);
+        f.clock.advance(99);
+        until(|| f.clock.observed(1099)).await;
+        assert!(!contract::Fixture::done(&f).contains(&id));
+        f.clock.advance(1);
+        until(|| contract::Fixture::done(&f).contains(&id)).await;
+        task.stop();
+        task.await;
+        let later = contract::Fixture::add(&f, 1200, false);
+        f.clock.advance(1000);
+        assert!(!contract::Fixture::done(&f).contains(&later));
+    }
+    #[tokio::test]
+    async fn r7_a_busy_claim_waits_for_release_without_blocking_the_rest_of_the_batch() {
+        let f = Fixture::new();
+        let busy = contract::Fixture::add(&f, 999, false);
+        let malformed = contract::Fixture::add(&f, 1000, true);
+        let claim = f.source.0.claim("already-handled").unwrap();
+        f.source.run_due(1000).await.unwrap();
+        assert!(contract::Fixture::dead(&f).contains(&malformed));
+        assert_eq!(f.source.next_due().await.unwrap(), None);
+        f.source.run_due(1000).await.unwrap();
+        drop(claim);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(999));
+        f.source.run_due(1000).await.unwrap();
+        assert!(contract::Fixture::done(&f).contains(&busy));
+        assert_eq!(f.source.next_due().await.unwrap(), None);
+    }
+    #[tokio::test]
+    async fn r7_more_than_a_batch_of_claimed_actions_cannot_hide_an_available_row() {
+        let f = Fixture::new();
+        let mut claims = Vec::new();
+        for n in 0..DUE_BATCH + 10 {
+            let decision = format!("busy-{n}");
+            f.source
+                .0
+                .yolo()
+                .record(&repo::NewAction {
+                    workspace_id: WS.into(),
+                    kind: "approve".into(),
+                    outcome: "scheduled".into(),
+                    due_at: Some(999),
+                    decision_id: Some(decision.clone()),
+                    ..Default::default()
+                })
+                .unwrap();
+            claims.push(f.source.0.claim(&decision).unwrap());
+        }
+        let available = contract::Fixture::add(&f, 1000, false);
+        f.source.run_due(1000).await.unwrap();
+        assert!(contract::Fixture::done(&f).contains(&available));
+        assert_eq!(
+            f.source.next_due().await.unwrap(),
+            None,
+            "claimed rows are not runnable"
+        );
+        f.source.run_due(1000).await.unwrap();
+        // Drain previous write/settlement wakes, then prove releasing a claim wakes the runner.
+        let _ = tokio::time::timeout(Duration::ZERO, f.source.0.yolo().0.due_wake.notified()).await;
+        drop(claims);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(999));
+        assert!(
+            tokio::time::timeout(Duration::ZERO, f.source.0.yolo().0.due_wake.notified())
+                .await
+                .is_ok()
+        );
     }
 }

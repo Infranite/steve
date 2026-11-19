@@ -71,6 +71,7 @@ struct Inner {
     db: Db,
     forced: Option<Forced>,
     clock: Arc<dyn Clock>,
+    due_wake: Arc<tokio::sync::Notify>,
     env: Env,
 }
 
@@ -163,6 +164,7 @@ impl Yolo {
             db,
             forced,
             clock,
+            due_wake: Arc::default(),
             env: Env {
                 steve_home: steve_home.to_path_buf(),
                 home,

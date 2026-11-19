@@ -129,17 +129,23 @@ pub fn result_with_yolo(result: &Value, action: &ActionRow) -> Value {
 }
 
 impl Yolo {
-    /// Writes one action row.
+    /// Writes one action row, then wakes the scheduled-action runner after commit.
     pub fn record(&self, a: &NewAction) -> ApiResult<ActionRow> {
         let now = self.now();
         self.store()
             .transaction(|tx| repo::action_add(tx, a, now).map_err(Into::into))
+            .inspect(|_| self.0.due_wake.notify_one())
     }
 
     /// Moves a scheduled action to `due_at` (still scheduled); false when it was no longer scheduled.
     pub fn postpone(&self, id: &str, due_at: i64, reason: &str) -> ApiResult<bool> {
         self.store()
             .transaction(|tx| repo::action_postpone(tx, id, due_at, reason).map_err(Into::into))
+            .inspect(|changed| {
+                if *changed {
+                    self.0.due_wake.notify_one();
+                }
+            })
     }
 
     /// Settles a scheduled action; false when it was no longer scheduled.

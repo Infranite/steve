@@ -40,7 +40,7 @@ tracing = "=0.1.44"
 uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
-steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit", "due-contract"] }
 
 # node_git against a real local Node
 steve-node = { path = "../steve-node" }
