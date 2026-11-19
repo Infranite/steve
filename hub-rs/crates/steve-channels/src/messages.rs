@@ -471,8 +471,8 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 }
 
 /// Messages of a space older than `before` (all when `None`), newest first.
-/// A page of space `space` as user `me` sees it: the messages one of the identities `me` may see
-/// received ([`crate::spaces::viewer_mask`]; the caller checked the space itself).
+/// Single-user reads include every receiving identity; the caller checks the workspace.
+/// G2-T7: retain the legacy mask parameter until these predicates are removed in wave 4.
 pub fn page(
     c: &Connection,
     space: &str,
@@ -483,7 +483,7 @@ pub fn page(
     let mask = crate::spaces::viewer_mask(c, space, me)?;
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
-            AND (m.seen_by = 0 OR (m.seen_by & ?4) <> 0)
+            AND (1 OR (m.seen_by = 0 OR (m.seen_by & ?4) <> 0))
           ORDER BY m.created DESC, m.id DESC LIMIT ?3"
     ))?;
     let mut rows = st
@@ -512,7 +512,7 @@ pub fn page_before(
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
             AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
-            AND (m.seen_by = 0 OR (m.seen_by & ?5) <> 0)
+            AND (1 OR (m.seen_by = 0 OR (m.seen_by & ?5) <> 0))
           ORDER BY m.created DESC, m.id DESC LIMIT ?4"
     ))?;
     let mut rows = st

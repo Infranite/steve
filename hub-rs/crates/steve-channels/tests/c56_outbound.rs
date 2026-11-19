@@ -5497,7 +5497,6 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
         ),
         format!("UPDATE parties SET user_id=NULL WHERE id='{party}'"),
         format!("UPDATE parties SET status='deleted' WHERE id='{party}'"),
-        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
         format!("UPDATE parties SET contact_kind='bot' WHERE id='{party}'"),
         format!("UPDATE parties SET type='bot' WHERE id='{party}'"),
         format!("DELETE FROM space_members WHERE space_id='{space}'"),
@@ -5523,9 +5522,6 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
         format!(
             "UPDATE parties SET user_id='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
         ),
-        format!(
-            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
-        ),
         format!("UPDATE space_members SET workspace_id='{WS2}' WHERE space_id='{space}'"),
         format!("UPDATE spaces SET workspace_id='{WS2}' WHERE id='{space}'"),
     ];
@@ -5540,6 +5536,20 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
             "{sql}: {result:?}"
         );
         assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    }
+    // Visibility metadata no longer removes an otherwise valid, authenticated own-DM route.
+    for sql in [
+        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
+        format!(
+            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+    ] {
+        let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute_batch(&sql)?;
+            assert_eq!(n::targets(&h.ch, &caller(WS, ME))?.len(), 1, "{sql}");
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(matches!(result, Err(ApiError::Conflict(_))));
     }
     let result = h.env.store().transaction(|tx| -> ApiResult<()> {
         tx.execute(

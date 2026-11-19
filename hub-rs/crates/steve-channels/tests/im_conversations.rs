@@ -2442,7 +2442,7 @@ async fn the_record_shows_every_message_with_what_steve_did() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_record_of_your_own_account_is_yours_alone() {
+async fn single_user_reads_personal_records_without_changing_account_ownership() {
     let h = setup(false).await;
     let me = h.me.clone();
     let i = push(&h, &me, msg("D_LI", "d1", "ulilei", "在吗", false, false)).await;
@@ -2455,21 +2455,16 @@ async fn a_record_of_your_own_account_is_yours_alone() {
     let r = record_of(&h, ME, &space, &Default::default()).unwrap();
     assert_eq!(rec(&r, &i.message_id)["direction"], "in");
     let other = steve_modules::testkit::OTHER;
-    assert!(record_of(&h, other, &space, &Default::default()).is_err());
+    let other_record = record_of(&h, other, &space, &Default::default()).unwrap();
+    assert_eq!(rec(&other_record, &i.message_id)["direction"], "in");
     let conv = conversations::conv_space(&space);
-    assert!(
-        h.env
-            .store()
-            .transaction(|tx| steve_channels::conv_record::mark_read(
-                tx,
-                WS,
-                &Viewer::bare(WS, other),
-                &conv,
-                1,
-                2
-            ))
-            .is_err()
-    );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, other), &conv, 1, 2)
+        })
+        .unwrap();
+    // Account ownership is identity semantics, independent of reading its stored history.
     let theirs = h
         .env
         .store()
@@ -2489,7 +2484,7 @@ async fn a_record_of_your_own_account_is_yours_alone() {
     assert!(
         l.conversations
             .iter()
-            .all(|x| x["space_id"] != space.as_str())
+            .any(|x| x["space_id"] == space.as_str())
     );
 }
 

@@ -665,7 +665,7 @@ async fn message_shows_on_the_contact_timeline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
+async fn single_user_keeps_disconnected_history_visible_after_account_disappears() {
     let h = setup();
     let r = push(
         &h,
@@ -704,7 +704,7 @@ async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
     assert_eq!(st, 200);
 
-    // the account no longer resolves: fail closed, only the workspace owner (ME) still sees it
+    // Single-user reads retain disconnected history even when the account no longer resolves.
     h.env
         .store()
         .with_conn(|c| {
@@ -716,16 +716,16 @@ async fn a_disconnected_space_whose_account_is_gone_is_the_owners_alone() {
         })
         .unwrap();
     let (st, _) = call(&h.api, Some(&caller(WS, OTHER)), "GET", &path, None).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
     let (_, v) = call(&h.api, Some(&caller(WS, OTHER)), "GET", "/spaces", None).await;
     assert!(
         v.as_array()
             .unwrap()
             .iter()
-            .all(|x| x["id"] != r.space_id.as_str()),
+            .any(|x| x["id"] == r.space_id.as_str()),
         "{v}"
     );
-    assert_eq!(lines(&timeline(OTHER).await.1), 0);
+    assert_eq!(lines(&timeline(OTHER).await.1), 1);
     let (st, _) = call(&h.api, Some(&caller(WS, ME)), "GET", &path, None).await;
     assert_eq!(st, 200);
     assert_eq!(lines(&timeline(ME).await.1), 1);
@@ -866,9 +866,9 @@ async fn space_routes_list_detail_patch_and_404s() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn spaces_of_a_personal_connection_are_private_to_its_owner() {
+async fn single_user_reads_other_accounts_spaces_with_fixed_bindings() {
     let h = setup();
-    let (mine, _) = FakeChannel::seed_connection(h.env.store(), &caller(WS, ME), Some("ume"))
+    let (mine, _) = FakeChannel::seed_connection(h.env.store(), &caller(WS, OTHER), Some("ume"))
         .expect("personal");
     let r =
         h.ch.on_inbound(
@@ -905,7 +905,31 @@ async fn spaces_of_a_personal_connection_are_private_to_its_owner() {
         None,
     )
     .await;
-    assert_eq!(s, 404);
+    assert_eq!(s, 200);
+    h.env
+        .store()
+        .reader(|c| -> steve_modules::ApiResult<()> {
+            let viewer = steve_store::base::Viewer::bare(WS, ME);
+            let context = steve_channels::compose::viewer(c, WS, &mine, &r.space_id)?;
+            assert_eq!(
+                context.user, OTHER,
+                "reply identity still follows the connected account"
+            );
+            assert!(context.scopes.is_empty());
+            // This executes spaces::visible's real ?1/?2/?3 query and bindings.
+            assert!(steve_channels::spaces::visible(c, &viewer, &r.space_id)?);
+            assert!(!steve_channels::spaces::visible(
+                c,
+                &steve_store::base::Viewer::bare(WS2, ME),
+                &r.space_id
+            )?);
+            assert!(!steve_channels::spaces::visible(c, &viewer, "missing")?);
+            assert!(steve_channels::spaces::visible_ids(c, &viewer)?.contains(&r.space_id));
+            let provider = steve_channels::spaces::SpaceScopes;
+            assert!(steve_modules::ViewerScopes::scopes(&provider, c, &viewer)?.is_empty());
+            Ok(())
+        })
+        .unwrap();
     // the event is private too (S1: a connection of someone's “我”)
     let evt = r.event.as_ref().and_then(|e| e.id()).unwrap().to_string();
     assert_eq!(

@@ -1,7 +1,7 @@
 //! One space per platform chat (migration 88): your account through a channel service that names
 //! the bot's platform joins the bot's space as one more identity, whichever came first; a message
 //! both received is stored once and carries both identities (`seen_by`); another member of the
-//! workspace sees what the bot received, you see everything that reached you. A generic service
+//! workspace can read all stored copies in single-user mode, with identity records preserved. A generic service
 //! that names no platform keeps its own space.
 
 #[path = "support/digest_env.rs"]
@@ -258,9 +258,51 @@ async fn the_bot_and_your_account_through_a_service_share_one_space_and_one_copy
         .reader(move |c| steve_channels::spaces::voice(c, &space))
         .expect("voice");
     assert_eq!(voice.as_deref(), Some(h.bot.as_str()));
-    // the workspace sees what the bot received; you see everything that reached you
-    assert_eq!(page_as(&h, &spaces[0], "someone_else"), ["今天发布吗"]);
+    // Single-user reads include both identities; receipt and outbound voice identity stay intact.
+    assert_eq!(
+        page_as(&h, &spaces[0], "someone_else"),
+        ["今天发布吗", "我先看一下"]
+    );
     assert_eq!(page_as(&h, &spaces[0], ME), ["今天发布吗", "我先看一下"]);
+    let before_reads = seen(&h);
+    h.env
+        .store()
+        .reader(|c| -> steve_modules::ApiResult<()> {
+            assert_eq!(
+                steve_channels::spaces::viewer_mask(c, &spaces[0], "someone_else")?,
+                0b11
+            );
+            let page = messages::page_before(c, &spaces[0], "someone_else", None, 50)?;
+            assert_eq!(page.len(), 2);
+            let older = messages::page_before(
+                c,
+                &spaces[0],
+                "someone_else",
+                Some((page[0].created, &page[0].id)),
+                50,
+            )?;
+            assert_eq!(older.len(), 1);
+            assert_eq!(older[0].text.as_deref(), Some("今天发布吗"));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        seen(&h),
+        before_reads,
+        "reads must not rewrite receiving identity bits"
+    );
+    // A historical bit with no remaining identity row must not hide the message either.
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE chan_messages SET seen_by = 4 WHERE text = '我先看一下'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(page_as(&h, &spaces[0], "someone_else").len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -270,8 +312,11 @@ async fn a_bot_that_comes_later_joins_the_space_your_account_made() {
     push(&h, &h.bot, bot_copy("om_2", "大家好", T + 10_000)).await;
     let spaces = spaces_of_g1(&h);
     assert_eq!(spaces.len(), 1, "{spaces:?}");
-    // what reached only you stays yours when the bot joins
-    assert_eq!(page_as(&h, &spaces[0], "someone_else"), ["大家好"]);
+    // Joining a bot does not restrict single-user reads of the earlier personal copy.
+    assert_eq!(
+        page_as(&h, &spaces[0], "someone_else"),
+        ["只有我看到的", "大家好"]
+    );
     assert_eq!(page_as(&h, &spaces[0], ME), ["只有我看到的", "大家好"]);
 }
 

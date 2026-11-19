@@ -100,8 +100,7 @@ pub trait DigestNotes: Send + Sync {
     fn take(&self, ws: &str) -> Vec<String>;
 }
 
-/// Extra visibility scopes a module grants a viewer (channels: `space:<id>` of the spaces they see).
-/// Added by [`Modules::viewer`].
+/// Legacy scope provider API. Single-user viewers do not load visibility scopes.
 pub trait ViewerScopes: Send + Sync {
     fn scopes(&self, c: &rusqlite::Connection, viewer: &Viewer) -> ApiResult<Vec<String>>;
 }
@@ -292,16 +291,10 @@ impl Modules {
             .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
     }
 
-    /// The viewer for a caller, with its team scopes and the registered [`ViewerScopes`] loaded.
+    /// Single-user read visibility needs no team/space providers or database reads.
+    /// The caller's identity and workspace still govern identity-specific operations.
     pub fn viewer(&self, c: &Caller) -> ApiResult<Viewer> {
-        self.store.reader(|conn| {
-            let mut v = Viewer::load(conn, &c.ws, &c.me)?;
-            for p in &self.registry.scopes {
-                let extra = p.scopes(conn, &v)?;
-                v = v.with_scopes(extra);
-            }
-            Ok(v)
-        })
+        Ok(Viewer::bare(&c.ws, &c.me))
     }
 }
 

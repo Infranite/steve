@@ -461,13 +461,8 @@ async fn people_join_contacts_you_already_have() {
         fx.text("SELECT a.party_id FROM account_handles h JOIN accounts a ON a.id = h.account_id WHERE h.handle = 'wang.fang@corp.example.com'"),
         wang
     );
-    // “我” leads 研发部: the team scope reaches me
-    let viewer = fx.t.modules.viewer(&me()).unwrap();
-    assert!(
-        viewer
-            .scopes
-            .contains(&format!("team:{}", fx.team_id("od-eng")))
-    );
+    // Directory membership remains stored, but read viewers no longer load its scopes.
+    assert!(fx.t.modules.viewer(&me()).unwrap().scopes.is_empty());
     // the own organization's app bot account is not a person
     assert_eq!(
         fx.count(

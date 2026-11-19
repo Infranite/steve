@@ -1696,7 +1696,7 @@ async fn delete_org_closes_jobs_and_frees_domains() {
 // ---------------------------------------------------------------- visibility
 
 #[tokio::test]
-async fn private_contacts_of_another_user_are_invisible() {
+async fn single_user_reads_private_contacts_and_organizations_in_the_same_workspace() {
     let t = env();
     let r = app(&t, Ports::default());
     let secret = new_contact(
@@ -1705,147 +1705,32 @@ async fn private_contacts_of_another_user_are_invisible() {
         json!({"name": "Secret Sarah", "visibility": "private"}),
     )
     .await;
-    let secret_org = {
-        let o = new_org(&r, &other(), json!({"name": "Hidden"})).await;
-        exec(
-            &t,
-            &format!(
-                "UPDATE parties SET visibility = 'private' WHERE id = '{}'",
-                id(&o)
-            ),
-        );
-        o
-    };
     let sid = id(&secret);
-    // the creator sees it
-    let (s, _) = req(&r, &other(), "GET", &format!("/contacts/{sid}"), None).await;
-    assert_eq!(s, 200);
-    let (_, l) = req(&r, &other(), "GET", "/contacts?q=Secret", None).await;
-    assert_eq!(ids(&l), vec![sid.clone()]);
-    // nobody else does, anywhere
-    let (_, l) = req(&r, &me(), "GET", "/contacts?q=Secret", None).await;
-    assert_eq!(l, json!([]));
-    let (_, l) = req(&r, &me(), "GET", "/contacts", None).await;
-    assert!(!ids(&l).contains(&sid));
-    for (method, path, body) in [
-        ("GET", format!("/contacts/{sid}"), None),
-        (
-            "PATCH",
-            format!("/contacts/{sid}"),
-            Some(json!({"name": "x"})),
-        ),
-        ("DELETE", format!("/contacts/{sid}"), None),
-        ("POST", format!("/contacts/{sid}/confirm"), None),
-        (
-            "POST",
-            format!("/contacts/{sid}/jobs"),
-            Some(json!({"org_id": "org_x"})),
-        ),
-        (
-            "POST",
-            format!("/parties/{sid}/attrs"),
-            Some(json!({"key": "phone", "value": "1"})),
-        ),
-    ] {
-        let (s, b) = req(&r, &me(), method, &path, body).await;
-        assert_eq!((s, b), (404, err("没有这个联系人")), "{method} {path}");
-    }
-    let (_, b) = req(
+    let (status, detail) = req(&r, &me(), "GET", &format!("/contacts/{sid}"), None).await;
+    assert_eq!(status, 200, "{detail}");
+    let (_, list) = req(&r, &me(), "GET", "/contacts?q=Secret", None).await;
+    assert_eq!(ids(&list), vec![sid.clone()]);
+    let (status, _) = req(
         &r,
-        &other(),
-        "POST",
-        &format!("/parties/{sid}/attrs"),
-        Some(json!({"key": "phone", "value": "1"})),
+        &caller(WS2, ME),
+        "GET",
+        &format!("/contacts/{sid}"),
+        None,
     )
     .await;
-    let av = id(&b["attrs"][0]);
-    let (s, _) = req(
-        &r,
-        &me(),
-        "PATCH",
-        &format!("/attrs/{av}"),
-        Some(json!({"value": "2"})),
-    )
-    .await;
-    assert_eq!(s, 404);
-    let (s, _) = req(&r, &me(), "DELETE", &format!("/attrs/{av}"), None).await;
-    assert_eq!(s, 404);
-    // a private organization can be neither seen nor referenced
-    let (s, b) = req(
-        &r,
-        &me(),
-        "POST",
-        "/contacts",
-        Some(json!({"name": "a", "org_id": id(&secret_org)})),
-    )
-    .await;
-    assert_eq!((s, b), (404, err("没有这个组织")));
-    let (_, l) = req(&r, &me(), "GET", "/orgs", None).await;
-    assert!(!ids(&l).contains(&id(&secret_org)));
-    // its jobs do not leak the organization name either
-    let (_, c) = req(
-        &r,
-        &other(),
-        "POST",
-        "/contacts",
-        Some(json!({"name": "Pub", "org_id": id(&secret_org)})),
-    )
-    .await;
-    let (_, seen) = req(&r, &me(), "GET", &format!("/contacts/{}", id(&c)), None).await;
-    assert_eq!(
-        (seen["jobs"].clone(), seen["org"].clone()),
-        (json!([]), Value::Null)
-    );
-    // and the private contact is not among an organization's people
-    let acme = new_org(&r, &me(), json!({"name": "Acme"})).await;
-    req(
-        &r,
-        &other(),
-        "POST",
-        &format!("/contacts/{sid}/jobs"),
-        Some(json!({"org_id": id(&acme)})),
-    )
-    .await;
-    let (_, o) = req(&r, &me(), "GET", &format!("/orgs/{}", id(&acme)), None).await;
-    assert_eq!(o["people"], json!([]));
-    let (_, o) = req(&r, &other(), "GET", &format!("/orgs/{}", id(&acme)), None).await;
-    assert_eq!(ids(&o["people"]), vec![sid]);
-}
-
-#[tokio::test]
-async fn team_visibility_reaches_team_members() {
-    let t = env();
-    let r = app(&t, Ports::default());
-    let (_, other_me) = req(&r, &other(), "GET", "/me/contact", None).await;
+    assert_eq!(status, 404);
+    let org = new_org(&r, &other(), json!({"name": "Previously hidden"})).await;
     exec(
         &t,
         &format!(
-            "INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES ('tm_a', 'default', 'team', 'A 组', 'usr_dev', 1, 1);
-             INSERT INTO team_details (party_id, workspace_id, kind) VALUES ('tm_a', 'default', 'virtual');
-             INSERT INTO team_members (workspace_id, team_id, contact_id, joined) VALUES ('default', 'tm_a', '{}', 1);",
-            id(&other_me)
+            "UPDATE parties SET visibility='private' WHERE id='{}'",
+            id(&org)
         ),
     );
-    let c = new_contact(
-        &r,
-        &me(),
-        json!({"name": "团队可见", "visibility": "team:tm_a"}),
-    )
-    .await;
-    assert_eq!(c["visibility"], "team:tm_a");
-    let (s, _) = req(&r, &other(), "GET", &format!("/contacts/{}", id(&c)), None).await;
-    assert_eq!(s, 200, "a member of the team");
-    exec(
-        &t,
-        &format!(
-            "DELETE FROM team_members WHERE contact_id = '{}'",
-            id(&other_me)
-        ),
-    );
-    let (s, _) = req(&r, &other(), "GET", &format!("/contacts/{}", id(&c)), None).await;
-    assert_eq!(s, 404, "no longer a member");
-    let (s, _) = req(&r, &me(), "GET", &format!("/contacts/{}", id(&c)), None).await;
-    assert_eq!(s, 200, "the creator");
+    let (status, _) = req(&r, &me(), "GET", &format!("/orgs/{}", id(&org)), None).await;
+    assert_eq!(status, 200);
+    let (_, list) = req(&r, &me(), "GET", "/orgs", None).await;
+    assert!(ids(&list).contains(&id(&org)));
 }
 
 // ---------------------------------------------------------------- fakes

@@ -223,7 +223,7 @@ async fn a_feishu_chat_opens_in_the_feishu_client_on_its_brand() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_link_without_an_open_chat_id_or_for_a_space_you_do_not_see() {
+async fn open_links_require_chat_ids_but_not_member_read_visibility() {
     let h = setup(None);
     let plain = h.push("G-plain", "om_test2").await;
     h.turn(&plain.space_id, &plain.message_id);
@@ -231,7 +231,7 @@ async fn no_link_without_an_open_chat_id_or_for_a_space_you_do_not_see() {
     let none = h.urls(&plain.space_id).await;
     assert!(none.iter().all(Value::is_null), "{none:?}");
 
-    // your own account's chat: someone else sees no link to it
+    // A personal account's chat is readable in single-user mode.
     let h = setup(Some("utest-me"));
     let mine = h.push(CHAT, "om_test3").await;
     h.connection("feishu_app", json!({}));
@@ -242,5 +242,10 @@ async fn no_link_without_an_open_chat_id_or_for_a_space_you_do_not_see() {
             .map(String::as_str),
         Some(FEISHU)
     );
-    assert!(h.decision_links(OTHER, &ids).is_empty());
+    assert_eq!(
+        h.decision_links(OTHER, &ids)
+            .get(&mine.message_id)
+            .map(String::as_str),
+        Some(FEISHU)
+    );
 }

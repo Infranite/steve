@@ -789,7 +789,7 @@ async fn space_members_paged_with_contacts_and_external() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn members_of_your_own_spaces_are_yours_alone() {
+async fn single_user_reads_personal_space_members_after_disconnect() {
     let h = setup().await;
     let _bot = h.connect_bot(None).await;
     let ucon = h.authorize_me().await;
@@ -810,9 +810,9 @@ async fn members_of_your_own_spaces_are_yours_alone() {
         None,
     )
     .await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
 
-    // still yours alone once your account is disconnected; messages kept
+    // Stored history and members remain readable after disconnect.
     h.exec(&format!(
         "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created) VALUES ('m_keep', '{WS}', '{}', 'in', '留着', 1)",
         c.space_id
@@ -835,14 +835,14 @@ async fn members_of_your_own_spaces_are_yours_alone() {
         format!("/spaces/{}/members", c.space_id),
     ] {
         let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &path, None).await;
-        assert_eq!(st, 404, "{path}");
+        assert_eq!(st, 200, "{path}");
     }
     let (_, v) = send(&h.api, &caller(WS, OTHER), "GET", "/spaces", None).await;
     assert!(
         v.as_array()
             .expect("spaces")
             .iter()
-            .all(|x| x["id"] != c.space_id.as_str()),
+            .any(|x| x["id"] == c.space_id.as_str()),
         "{v}"
     );
 }
@@ -1006,7 +1006,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     // a bot account's spaces are the workspace's: another member sees them …
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 200);
-    // … until the account itself is deleted: then only the workspace owner does
+    // Deleting the account still leaves its history readable in single-user mode.
     h.env.store().with_conn(|c| {
         c.execute_batch(&format!(
         "PRAGMA foreign_keys = OFF;
@@ -1018,7 +1018,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
         Ok(())
     }).unwrap();
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
     let (st, _) = h.call("GET", &one, None).await;
     assert_eq!(st, 200);
     publish(&h, &tx);

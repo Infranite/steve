@@ -1,6 +1,6 @@
 //! Slice P2 acceptance: virtual teams (fewer than two members → 400), member changes
 //! write revisions, org-chart teams refuse a new name with 400, `headcount` includes sub-teams, and
-//! `team:<id>` visibility reaches members — plus the other branches of the `/teams` routes.
+//! legacy visibility metadata is retained — plus the other branches of the `/teams` routes.
 
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +8,7 @@ use axum::Router;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use steve_modules::contacts::{self, Ports, SpacePort, TeamSync};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiResult, Caller};
 use steve_store::base::Viewer;
 
@@ -24,10 +24,6 @@ fn app(t: &TestEnv, ports: Ports) -> Router {
 
 fn me() -> Caller {
     caller(WS, ME)
-}
-
-fn other() -> Caller {
-    caller(WS, OTHER)
 }
 
 async fn req(
@@ -244,20 +240,9 @@ async fn create_virtual_team_and_validation() {
     )
     .await;
     assert_eq!((s, b), (400, err("参数不对：members.1.contact_id")));
-    // unknown, foreign-workspace and invisible contacts
+    // Unknown, foreign-workspace and non-contact identities remain invalid.
     let w2 = contact(&r, &caller(WS2, ME), "别处的人").await;
-    let hidden = {
-        let (_, b) = req(
-            &r,
-            &other(),
-            "POST",
-            "/contacts",
-            Some(json!({"name": "别人的私人联系人", "visibility": "private"})),
-        )
-        .await;
-        id(&b)
-    };
-    for bad in ["ct_nope", w2.as_str(), hidden.as_str(), id(&tm).as_str()] {
+    for bad in ["ct_nope", w2.as_str(), id(&tm).as_str()] {
         let (s, b) = req(
             &r,
             &me(),
@@ -543,20 +528,6 @@ async fn patch_virtual_team() {
     .await;
     assert_eq!(same["revision"], 2);
     assert!(party_events(&t).is_empty());
-    // private now: the other user cannot see or change it
-    let (s, e) = req(&r, &other(), "GET", &format!("/teams/{tid}"), None).await;
-    assert_eq!((s, e), (404, err("没有这个团队")));
-    let (s, _) = req(
-        &r,
-        &other(),
-        "PATCH",
-        &format!("/teams/{tid}"),
-        Some(json!({"purpose": "x"})),
-    )
-    .await;
-    assert_eq!(s, 404);
-    let (_, list) = req(&r, &other(), "GET", "/teams", None).await;
-    assert_eq!(list["virtual"], json!([]));
     // validation
     let (s, e) = req(
         &r,
@@ -930,95 +901,6 @@ async fn sync_label_and_scheduling_go_through_the_sync_port() {
             .unwrap()
             .starts_with("飞书通讯录 · "),
         "{list}"
-    );
-}
-
-// ---------------------------------------------------------------- team:<id> visibility
-
-/// Can the other user see contact `sid`, in its detail and in the list alike?
-async fn sees(r: &Router, sid: &str) -> bool {
-    let (s, _) = req(r, &other(), "GET", &format!("/contacts/{sid}"), None).await;
-    let (_, list) = req(r, &other(), "GET", "/contacts", None).await;
-    let listed = list.as_array().unwrap().iter().any(|c| c["id"] == sid);
-    assert_eq!(s == 200, listed, "detail and list agree");
-    listed
-}
-
-#[tokio::test]
-async fn team_visibility_reaches_members_and_parent_teams() {
-    let t = env();
-    let r = app(&t, Ports::default());
-    let other_me = me_id(&r, &other()).await;
-    let a = contact(&r, &me(), "甲").await;
-    let tm = new_team(
-        &r,
-        json!({"name": "小组", "members": [{"contact_id": "me"}, {"contact_id": a}]}),
-    )
-    .await;
-    let tid = id(&tm);
-    let (_, secret) = req(
-        &r,
-        &me(),
-        "POST",
-        "/contacts",
-        Some(json!({"name": "只对小组可见", "visibility": format!("team:{tid}")})),
-    )
-    .await;
-    let sid = id(&secret);
-    assert!(!sees(&r, &sid).await, "not a member yet");
-    // adding the other user's “我” to the team opens it
-    let (s, _) = req(
-        &r,
-        &me(),
-        "PUT",
-        &format!("/teams/{tid}/members"),
-        Some(json!([{"contact_id": "me"}, {"contact_id": a}, {"contact_id": other_me}])),
-    )
-    .await;
-    assert_eq!(s, 200);
-    assert!(sees(&r, &sid).await, "a member");
-    let (_, list) = req(&r, &other(), "GET", "/teams", None).await;
-    assert_eq!(list["virtual"][0]["id"], tid.as_str());
-    req(
-        &r,
-        &me(),
-        "PUT",
-        &format!("/teams/{tid}/members"),
-        Some(json!([{"contact_id": "me"}, {"contact_id": a}])),
-    )
-    .await;
-    assert!(!sees(&r, &sid).await, "removed again");
-    // the creator always sees it
-    let (s, _) = req(&r, &me(), "GET", &format!("/contacts/{sid}"), None).await;
-    assert_eq!(s, 200);
-
-    // a member of a sub-team counts as a member of the parent
-    chart_team(&t, "tm_root", "公司", None, &[]);
-    chart_team(&t, "tm_sub", "研发", Some("tm_root"), &[&other_me]);
-    let (_, rooted) = req(
-        &r,
-        &me(),
-        "POST",
-        "/contacts",
-        Some(json!({"name": "全公司可见", "visibility": "team:tm_root"})),
-    )
-    .await;
-    let (s, _) = req(
-        &r,
-        &other(),
-        "GET",
-        &format!("/contacts/{}", id(&rooted)),
-        None,
-    )
-    .await;
-    assert_eq!(s, 200, "member of a sub-team");
-    let viewer = t
-        .store()
-        .reader(|c| Viewer::load(c, WS, OTHER))
-        .expect("viewer");
-    assert_eq!(
-        viewer.scopes,
-        vec!["team:tm_root".to_string(), "team:tm_sub".to_string()]
     );
 }
 

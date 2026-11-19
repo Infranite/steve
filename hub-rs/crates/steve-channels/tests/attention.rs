@@ -63,10 +63,10 @@ fn channel_attention_is_personal_visible_enabled_and_quiet_is_not_mute() {
     let other = list(&e, OTHER);
     assert_eq!(
         other.len(),
-        3,
-        "other sees closed conversation but not private DM"
+        4,
+        "single-user reads include the personal DM; closed state remains per identity"
     );
-    assert!(!other.iter().any(|x| x.id == "chan:private"));
+    assert!(other.iter().any(|x| x.id == "chan:private"));
     assert!(
         e.store()
             .reader(|c| conversations::attention(c, WS2, &Viewer::bare(WS2, OTHER), 200))

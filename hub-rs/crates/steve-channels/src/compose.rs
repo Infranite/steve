@@ -584,10 +584,10 @@ pub fn owner_user(c: &Connection, ws: &str, conn: &str) -> ChannelResult<String>
     .ok_or_else(|| ApiError::not_found("连接"))
 }
 
-/// The owner's viewer, with the space's scope (its own memories are visible in it).
-pub fn viewer(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<Viewer> {
+/// Preserve the connection owner's identity without loading legacy visibility scopes.
+pub fn viewer(c: &Connection, ws: &str, conn: &str, _space: &str) -> ChannelResult<Viewer> {
     let user = owner_user(c, ws, conn)?;
-    Ok(Viewer::load(c, ws, &user)?.with_scopes([format!("space:{space}")]))
+    Ok(Viewer::bare(ws, &user))
 }
 
 /// The sender's items in progress (`raised_by` links): `编号 · 标题 · 状态 · 现在`.

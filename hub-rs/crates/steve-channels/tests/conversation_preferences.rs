@@ -68,12 +68,12 @@ fn closure_is_persistent_personal_reversible_and_does_not_change_history() {
 }
 
 #[test]
-fn hidden_cross_workspace_and_removed_members_cannot_write_preferences() {
+fn single_user_preferences_keep_workspace_and_membership_checks() {
     let h = setup();
     add(&h, WS, "private-space", Some("private"), 1);
     add(&h, WS2, "other-space", None, 1);
-    assert!(list(&h, WS, OTHER).is_empty());
-    assert!(close(&h, WS, OTHER, "chan:private-space", true).is_err());
+    assert_eq!(list(&h, WS, OTHER).len(), 1);
+    close(&h, WS, OTHER, "chan:private-space", true).unwrap();
     assert!(close(&h, WS, ME, "chan:other-space", true).is_err());
     assert!(close(&h, WS2, ME, "chan:private-space", true).is_err());
     assert!(close(&h, WS, ME, "steve", true).is_err());
@@ -102,16 +102,16 @@ fn hidden_cross_workspace_and_removed_members_cannot_write_preferences() {
 }
 
 #[test]
-fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
+fn single_user_pagination_includes_shared_and_personal_conversations() {
     let h = setup();
     for n in 0..215 {
         add(&h, WS, &format!("shared-{n:03}"), Some("shared"), 1);
     }
-    // Invisible newer conversations must not consume the first page or hide old visible ones.
+    // Both personal and shared conversations participate in pagination without omissions.
     for n in 0..205 {
         add(&h, WS, &format!("private-{n:03}"), Some("private"), 100);
     }
-    assert_eq!(list(&h, WS, OTHER).len(), 215);
+    assert_eq!(list(&h, WS, OTHER).len(), 420);
     close(&h, WS, OTHER, "chan:shared-214", true).unwrap();
     let page = |q: ListQuery| {
         h.store()
@@ -126,7 +126,7 @@ fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
             offset: Some(offset),
             ..Default::default()
         });
-        assert_eq!(p.total, 215);
+        assert_eq!(p.total, 420);
         all.extend(
             p.conversations
                 .into_iter()
@@ -145,7 +145,7 @@ fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
     }
     all.sort();
     all.dedup();
-    assert_eq!(all.len(), 215);
+    assert_eq!(all.len(), 420);
     let p = page(ListQuery {
         q: Some("shared-214".into()),
         state: Some("closed".into()),
@@ -160,7 +160,7 @@ fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
             ..Default::default()
         })
         .total,
-        214
+        419
     );
     assert_eq!(
         page(ListQuery {
@@ -176,7 +176,7 @@ fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
             ..Default::default()
         })
         .total,
-        215
+        420
     );
     assert_eq!(
         page(ListQuery {
@@ -403,7 +403,7 @@ fn replied_is_filtered_before_pagination_and_combines_with_search_and_channel() 
 }
 
 #[test]
-fn replied_does_not_reveal_other_users_sends_or_drafts() {
+fn single_user_replied_reads_include_all_receiving_identities() {
     let h = setup();
     for id in ["visible-sent", "hidden-sent", "hidden-draft"] {
         add(&h, WS, id, Some("shared"), 1);
@@ -428,7 +428,6 @@ fn replied_does_not_reveal_other_users_sends_or_drafts() {
         Ok(())
     }).unwrap();
     let other = replied(&h, OTHER, ListQuery::default());
-    assert_eq!(other.total, 1);
-    assert_eq!(other.conversations[0]["space_id"], "visible-sent");
+    assert_eq!(other.total, 4);
     assert_eq!(replied(&h, ME, ListQuery::default()).total, 4);
 }
