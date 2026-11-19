@@ -19,5 +19,6 @@ pub mod rev;
 pub mod scan;
 pub mod schema;
 pub mod snapshot;
+pub mod store;
 pub mod transfer;
 pub mod uow;
