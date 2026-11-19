@@ -2,10 +2,13 @@ name: CI
 # Each platform runs the Rust tests in parallel shards, one runner each (RUST_TEST_SHARDS below); a last
 # job per platform proves that together they ran every test exactly once and it passed on its first try.
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
-# there instead of holding a runner for GitHub's six hours.
+# there instead of holding a runner for GitHub's six hours. GitHub counts the time a job waits for a
+# runner against its job limit, and macOS runners are few: macOS work therefore limits its steps, which
+# count only running time, and its job limit only stops a runaway queue.
 # A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
 # client they bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
-# and a merge queue run cover both platforms. Main pushes share one running and at most one pending run;
+# and a merge queue run cover both platforms, with three macOS jobs: two Rust shards (the first also runs the
+# release and boundary scripts) and the Apple job. The web checks are the same TypeScript on both, so Linux runs them. Main pushes share one running and at most one pending run;
 # a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
 # cut-release.py releases the newest main commit whose own push run passed, with its release notes on top,
 # so nothing reaches a release untested on macOS. Branch rules on main
@@ -26,12 +29,9 @@ concurrency:
   group: ci-${{ github.event_name == 'push' && 'main' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # The same checks run on macOS in the first macOS Rust shard, which saves a macOS runner.
   scripts:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -39,37 +39,13 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install Linux test prerequisites
-        if: runner.os == 'Linux'
         run: sh scripts/install-ci-zsh.sh
-      - name: Verify public boundary
-        run: |
-          python3 scripts/check-public-boundary.py --strict
-          python3 scripts/test-public-boundary.py
-          python3 scripts/test-package-release.py
-          python3 packaging/homebrew/test-sync.py
-          python3 scripts/test-install-nextest.py
-          python3 scripts/test-affected.py
-      - name: Release scripts
-        run: |
-          python3 ops/test-schema-gate.py
-          python3 ops/test-local-release-journal.py
-          python3 ops/test-migration-probe.py
-          python3 ops/test-local-release-prune.py
-          python3 ops/test-prepare-bundle.py
-          python3 ops/test-steve-service.py
-          python3 ops/test-upgrade.py
-          python3 ops/test-cut-release.py
-          python3 -m py_compile ops/local-release.py ops/test-local-release.py ops/upgrade.py
-          bash ops/check-migration-lock.sh
-          python3 scripts/test-nextest-summary.py
-          python3 scripts/test-nextest-partitions.py
-          python3 scripts/test-skip-rust-jobs.py
+      - name: Boundary and release scripts
+        run: sh scripts/ci-script-checks.sh
+  # Linux only: the type checks, unit tests and build are the same TypeScript on every platform, and the
+  # Apple job builds the web client again on macOS for the apps.
   web:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -79,11 +55,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-      # A few fast browser tests of the app in headless Chromium (web/test/browser-smoke.mjs lists them), on Linux
-      # only: they answer the API themselves, so they need no Hub, and macOS draws the same pages. The other
-      # web/test/*.browser.mjs tests are run by hand where they need a test Hub or take minutes.
+      # A few fast browser tests of the app in headless Chromium (web/test/browser-smoke.mjs lists them): they
+      # answer the API themselves, so they need no Hub. The other web/test/*.browser.mjs tests are run by hand
+      # where they need a test Hub or take minutes.
       - name: Browser smoke tests
-        if: runner.os == 'Linux'
         timeout-minutes: 6
         run: |
           npx playwright install --only-shell chromium
@@ -153,7 +128,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.rust-plan.outputs.shards) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # Linux runners start at once; a macOS shard may queue for an hour, which GitHub counts against this
+    # limit, so there the steps below carry the limit on running time.
+    timeout-minutes: ${{ startsWith(matrix.runner, 'macos') && 240 || 45 }}
     # Linux builds without debug info: that halved compiling the workspace's tests (464 s with line
     # tables, 213 s without, on otherwise identical runners). Panic messages still carry file and line,
     # and a backtrace, when RUST_BACKTRACE asks for one, still names functions (symbols stay). macOS keeps
@@ -171,6 +148,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
+      # The `scripts` job's checks, on macOS, before compiling: they need nothing built and fail within a minute.
+      - name: Boundary and release scripts (macOS)
+        if: runner.os == 'macOS' && matrix.shard == 1
+        timeout-minutes: 10
+        run: sh scripts/ci-script-checks.sh
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
@@ -208,6 +190,7 @@ jobs:
       # tests the partition selects.
       - name: Compile all Rust tests and record the inventory
         id: rust-build
+        timeout-minutes: 40
         run: |
           mkdir -p ci-artifacts
           cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --no-run --timings
@@ -216,6 +199,7 @@ jobs:
           cp hub-rs/target/cargo-timings/cargo-timing.html ci-artifacts/
       - name: Rust tests
         id: rust-tests
+        timeout-minutes: 30
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
       - name: Rust test report (first-attempt failures remain failures)
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
@@ -225,6 +209,7 @@ jobs:
       # The doctests are not partitioned: the first shard of each platform runs all of them.
       - name: Rust doctests (reuse the compiled workspace)
         if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && matrix.shard == 1 }}
+        timeout-minutes: 15
         run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
@@ -282,7 +267,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.changes.outputs.apple != 'false' }}
     runs-on: macos-15
-    timeout-minutes: 30
+    # The queue for a macOS runner counts against the job limit; the steps limit the running time.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -290,13 +276,18 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+        timeout-minutes: 10
       - name: Build the web client the apps bundle
+        timeout-minutes: 10
         run: npm run build:web
       - name: Swift package tests
+        timeout-minutes: 15
         run: scripts/build-apple-client.sh test
       - name: Build SteveMac
+        timeout-minutes: 15
         run: scripts/build-apple-client.sh mac
       - name: Build SteveIOS for the simulator
+        timeout-minutes: 15
         run: scripts/build-apple-client.sh ios-sim
   test:
     name: CI gate
