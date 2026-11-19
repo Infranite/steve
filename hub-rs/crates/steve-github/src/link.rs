@@ -17,9 +17,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 use steve_modules::vault::VaultResult;
 use steve_modules::{ApiError, Body, Caller, Modules};
+use steve_store::Tx;
 use steve_store::base::links::{self, LinkKey, NewLink};
 use steve_store::base::{self, ObjRef};
-use steve_store::{ChangeEvent, Tx};
 
 use crate::GitHub;
 use crate::repo::{self, PrRow, RepoRow};
@@ -90,7 +90,15 @@ pub fn attach(
     if let Some(t) = timeline {
         repo::add_timeline(tx, item, t, now)?;
     }
-    tx.publish(ChangeEvent::Item { id: item.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: ws.to_string().into(),
+            id: {
+                let value: String = item.into();
+                steve_types::ItemId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 
@@ -110,7 +118,15 @@ fn detach(tx: &Tx, ws: &str, pr: &PrRow, item: &str) -> Result<(), ApiError> {
             object: pr_ref(pr),
         },
     )?;
-    tx.publish(ChangeEvent::Item { id: item.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: ws.to_string().into(),
+            id: {
+                let value: String = item.into();
+                steve_types::ItemId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 

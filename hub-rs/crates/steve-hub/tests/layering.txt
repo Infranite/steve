@@ -47,6 +47,7 @@ edge	steve-github	steve-i18n
 edge	steve-github	steve-modules
 edge	steve-github	steve-node-api
 edge	steve-github	steve-store
+edge	steve-github	steve-types
 edge	steve-hub	steve-acp
 edge	steve-hub	steve-auth
 edge	steve-hub	steve-calendar
