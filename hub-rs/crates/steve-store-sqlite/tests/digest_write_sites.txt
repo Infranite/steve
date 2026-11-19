@@ -121,6 +121,7 @@ write	crates/steve-channels/tests/ext_media.rs	1
 write	crates/steve-channels/tests/im_conversations.rs	6
 write	crates/steve-channels/tests/lifecycle.rs	1
 write	crates/steve-channels/tests/media.rs	9
+write	crates/steve-channels/tests/one_space_per_chat.rs	1
 write	crates/steve-channels/tests/owner_decisions.rs	1
 write	crates/steve-channels/tests/owner_presence.rs	2
 write	crates/steve-channels/tests/starred_alerts.rs	1
