@@ -32,10 +32,8 @@ steve-core/src/stall.rs	timer-loop	stall::Core::stall_watch	1
 steve-core/src/workspace.rs	timer-loop	workspace::Core::run_workspace_watch	1
 steve-core/src/yolo/engine.rs	timer-loop	yolo::engine::Engine::run_ticks	1
 steve-digest/src/job.rs	timer-loop	job::run	1
-steve-flow/src/alarms.rs	timer-loop	alarms::AlarmClock::run	1
 steve-flow/src/ingest.rs	timer-loop	ingest::Poller::run	1
 steve-flow/src/retention.rs	timer-loop	retention::run	1
-steve-flow/src/scheduler.rs	timer-loop	scheduler::Scheduler::run	1
 steve-github/src/api.rs	timer-loop	api::GhClient::request	1
 steve-github/src/effects.rs	timer-loop	effects::GitHub::run_effects_job	1
 steve-github/src/poll.rs	timer-loop	poll::GitHub::run_jobs	1
