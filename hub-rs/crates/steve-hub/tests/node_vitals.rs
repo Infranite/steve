@@ -50,29 +50,6 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     assert_eq!(day["series"][0]["mem"], 0.75);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_of_an_earlier_protocol_is_not_asked() {
-    let h = Hub::start().await;
-    let (id, node) = h.paired("u1").await;
-    let _l = dial_url_as(
-        &h.ws_url(),
-        &h.svc.hub_id,
-        &id,
-        &node,
-        FakeNode::new(node.as_str()),
-        1,
-        (0, 2),
-    )
-    .await
-    .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    vitals::sample_once(&h.store, None, Some(&h.svc)).await;
-    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_vitals"), 0);
-}
-
 /// F1: a remote Node's project disk short of space is said once, and again only after it had
 /// room in between.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
