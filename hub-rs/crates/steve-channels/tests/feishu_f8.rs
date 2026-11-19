@@ -840,3 +840,52 @@ async fn your_account_reads_a_chats_history_on_demand() {
         "{reads:?}"
     );
 }
+
+#[tokio::test]
+async fn more_than_fifty_messages_in_one_second_are_paged_and_not_repeated() {
+    let h = setup().await;
+    set_setting(&h, "quiet", "关闭");
+    let mut p = poller(&h);
+    assert!(p.round().await.error.is_none());
+    let at = add(
+        &h,
+        "om_page0",
+        ids::USER_P2P_CHAT,
+        ids::BOB.open_id,
+        "page 0",
+        5,
+        None,
+        None,
+    );
+    for i in 1..125 {
+        let id = format!("om_page{i}");
+        add(
+            &h,
+            &id,
+            ids::USER_P2P_CHAT,
+            ids::BOB.open_id,
+            "same second",
+            0,
+            None,
+            None,
+        );
+    }
+    // Every added message has exactly the same create_time, spanning three pages.
+    h.fake.world(|w| {
+        for msg in w
+            .messages
+            .iter_mut()
+            .filter(|m| m.message_id.starts_with("om_page"))
+        {
+            msg.create_time = at.to_string();
+        }
+    });
+    let r = p.round().await;
+    assert!(r.error.is_none(), "{r:?}");
+    assert_eq!(r.new_messages, 125, "{r:?}");
+    let messages = self_messages(&h);
+    assert_eq!(messages.len(), 125);
+    let r = p.round().await;
+    assert_eq!(r.new_messages, 0, "{r:?}");
+    assert_eq!(self_messages(&h).len(), 125);
+}

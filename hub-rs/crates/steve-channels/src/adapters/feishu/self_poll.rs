@@ -592,33 +592,55 @@ impl SelfPoller {
                 ("page_size", MESSAGES_PAGE),
             ]),
         }
-        r.requests += 1;
-        let res = client.get(cx, "/open-apis/im/v1/messages", &q).await;
-        k.polled = Some(now);
-        let v = match res {
-            Ok(v) => v,
-            Err(e) => {
-                let e = stop_of(e)?;
-                // refused for this chat (no scope for its kind, the bot is not in it …)
-                tracing::info!(
-                    conn,
-                    chat = k.container,
-                    "feishu self poll: not readable: {e}"
-                );
-                r.failed += 1;
-                k.error = Some(e.to_string());
-                k.error_at = Some(now);
-                self.save(&k);
-                return Ok(());
+        // The API returns an opaque page_token with has_more (including thread containers,
+        // which do not support start_time). Keep all query parameters fixed across pages.
+        let mut pages = HashSet::new();
+        let mut token: Option<String> = None;
+        let mut items = Vec::new();
+        loop {
+            let mut page_q = q.clone();
+            if let Some(t) = &token {
+                page_q.push(("page_token", t.as_str()));
             }
-        };
+            r.requests += 1;
+            let res = client.get(cx, "/open-apis/im/v1/messages", &page_q).await;
+            k.polled = Some(now);
+            let v = match res {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = stop_of(e)?;
+                    // refused for this chat (no scope for its kind, the bot is not in it …)
+                    tracing::info!(
+                        conn,
+                        chat = k.container,
+                        "feishu self poll: not readable: {e}"
+                    );
+                    r.failed += 1;
+                    k.error = Some(e.to_string());
+                    k.error_at = Some(now);
+                    self.save(&k);
+                    return Ok(());
+                }
+            };
+            let data = client::data(&v);
+            items.extend(
+                data.get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            if first || data.get("has_more").and_then(Value::as_bool) != Some(true) {
+                break;
+            }
+            let next = opt(data, "page_token")
+                .filter(|t| pages.insert(t.clone()))
+                .ok_or_else(|| Stop::Fatal("message pagination returned no new token".into()))?;
+            token = Some(next);
+        }
         k.error = None;
         k.error_at = None;
-        let items: Vec<Value> = client::data(&v)
-            .get("items")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        items.sort_by_key(|m| (ms(m, "create_time"), opt(m, "message_id")));
 
         if first {
             r.first_seen += 1;
