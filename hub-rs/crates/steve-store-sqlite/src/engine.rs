@@ -131,9 +131,16 @@ impl Engine {
     /// Executor-only seam. A grant/batch must hold the guard for its entire writer turn.
     /// The executor must avoid nested locking and schedule checkpoint calls outside grants.
     pub(crate) fn writer_conn(&self) -> Result<MutexGuard<'_, Connection>, Error> {
-        self.writer
-            .lock()
-            .map_err(|_| steve_storage_api::error(Code::Internal, "storage writer was poisoned"))
+        let c = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        // RootGuard rolls back during unwind. Only recover a poisoned writer
+        // after confirming it cannot leak the previous caller's transaction.
+        if self.writer.is_poisoned() {
+            if !c.is_autocommit() {
+                c.execute_batch("ROLLBACK").map_err(db_error)?;
+            }
+            self.writer.clear_poison();
+        }
+        Ok(c)
     }
     pub fn layout(&self) -> &Layout {
         &self.layout
@@ -168,6 +175,7 @@ impl Engine {
         if self.runtime {
             pragmas::runtime_writer(&writer).map_err(db_error)?;
         } else {
+            pragmas::no_checkpoint_on_close(&writer).map_err(db_error)?;
             pragmas::connection(&writer, true).map_err(db_error)?;
         }
         Self::from_opened(

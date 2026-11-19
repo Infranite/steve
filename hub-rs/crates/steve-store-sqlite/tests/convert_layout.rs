@@ -25,6 +25,9 @@ fn old(conn: &Connection, version: Option<i64>) {
             .unwrap();
         conn.execute("INSERT INTO schema_compat VALUES(?1)", [version])
             .unwrap();
+        if version == 113 {
+            legacy::migrate_to_head(conn).unwrap();
+        }
     } else {
         legacy::final_structure(conn).unwrap();
     }
@@ -91,9 +94,17 @@ fn has(conn: &Connection, table: &str) -> bool {
 fn assert_current(conn: &Connection) {
     migrate::check_versions(conn, true).unwrap();
     Layout::read(conn).unwrap();
-    for t in schema::LEGACY_TABLES {
-        assert!(!has(conn, t));
-    }
+    assert!(has(conn, "schema_compat"));
+    assert_eq!(
+        conn.query_row("SELECT min_reader FROM schema_compat", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        114
+    );
+    assert!(matches!(
+        steve_store_sqlite::open::inspect(conn).unwrap(),
+        steve_store_sqlite::compat::StorageState::Current { .. }
+    ));
     for t in schema::CONTRACT_TABLES {
         assert!(has(conn, t));
     }
@@ -101,19 +112,21 @@ fn assert_current(conn: &Connection) {
 
 #[test]
 fn converts_released_prefix_and_head_preserving_data_and_all_owners() {
-    for version in [Some(112), None] {
+    for version in [Some(113), None] {
         let mut conn = Connection::open_in_memory().unwrap();
         old(&conn, version);
         data(&conn);
-        let before = counts(&conn);
+        let mut before = counts(&conn);
+        before[1] -= 2;
+        before[2] -= 2;
         let from = legacy::version(&conn).unwrap();
         assert_eq!(
             convert::convert(&mut conn).unwrap(),
             Outcome::Converted {
                 from_legacy_version: from,
-                revoked_tokens: 1,
-                revoked_clients: 1,
-                revoked_sessions: 2,
+                deleted_tokens: 2,
+                deleted_clients: 2,
+                deleted_sessions: 2,
             }
         );
         assert_current(&conn);
@@ -137,8 +150,15 @@ fn converts_released_prefix_and_head_preserving_data_and_all_owners() {
             };
             assert_eq!(revoked("owner"), None);
             assert_eq!(revoked("second"), None);
-            assert_eq!(revoked("prior"), Some(7));
-            assert!(revoked("member").unwrap() > 7);
+            assert_eq!(
+                conn.query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE id IN ('prior','member')"),
+                    [],
+                    |r| r.get::<_, u32>(0)
+                )
+                .unwrap(),
+                0
+            );
         }
         for (table, column) in [("chan_messages", "text"), ("items", "title")] {
             let text: String = conn
@@ -161,12 +181,14 @@ fn restarts_after_the_legacy_transaction_without_a_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steve.sqlite3");
     let conn = Connection::open(&path).unwrap();
-    old(&conn, Some(112));
+    old(&conn, Some(113));
     data(&conn);
-    let before = counts(&conn);
-    assert_eq!(convert::migrate_legacy(&conn).unwrap(), 112);
+    let mut before = counts(&conn);
+    before[1] -= 2;
+    before[2] -= 2;
+    assert_eq!(convert::migrate_legacy(&conn).unwrap(), 113);
     let head = legacy::version(&conn).unwrap();
-    assert!(head > 112);
+    assert!(head == 113);
     assert!(!has(&conn, "meta"));
     // A read-only verification phase creates no additional durable restart state.
     schema::verify_baseline(&conn).unwrap();
@@ -176,9 +198,9 @@ fn restarts_after_the_legacy_transaction_without_a_log() {
         convert::convert(&mut conn).unwrap(),
         Outcome::Converted {
             from_legacy_version: head,
-            revoked_tokens: 1,
-            revoked_clients: 1,
-            revoked_sessions: 2,
+            deleted_tokens: 2,
+            deleted_clients: 2,
+            deleted_sessions: 2,
         }
     );
     assert_current(&conn);
@@ -187,7 +209,7 @@ fn restarts_after_the_legacy_transaction_without_a_log() {
 
 #[test]
 fn schema_drift_is_diagnostic_and_rejection_does_not_change_file_bytes() {
-    for version in [Some(112), None] {
+    for version in [Some(113), None] {
         for (sql, object) in [
             ("ALTER TABLE users ADD COLUMN unexpected TEXT", "users"),
             ("DROP INDEX access_tokens_user", "access_tokens_user"),
@@ -264,8 +286,8 @@ fn a_failure_after_contract_creation_rolls_back_and_can_be_retried() {
     data(&conn);
     let before = counts(&conn);
     conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-        AuthAction::DropTable {
-            table_name: "schema_version",
+        AuthAction::Delete {
+            table_name: "schema_compat",
         } => Authorization::Deny,
         _ => Authorization::Allow,
     }))
@@ -287,42 +309,26 @@ fn a_failure_after_contract_creation_rolls_back_and_can_be_retried() {
 }
 
 #[test]
-fn initial_legacy_metadata_rolls_back_with_a_failed_migration() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    conn.pragma_update(None, "foreign_keys", true).unwrap();
-    conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-        AuthAction::CreateTable {
-            table_name: "access_tokens",
-        } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }))
-    .unwrap();
-    assert!(convert::convert(&mut conn).is_err());
-    assert!(conn.is_autocommit());
-    assert!(
-        schema::normalized_structure(&conn, false)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        conn.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))
-            .unwrap()
-    );
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-        .unwrap();
-    // Empty conversions now refuse to install a layout without an instance owner.
-    // New installations will use initialize when the caller is wired in W2a.6a.
-    assert_eq!(
-        convert::convert(&mut conn).unwrap_err().code,
-        Code::Incompatible
-    );
-    assert!(!has(&conn, "meta"));
-    data(&conn);
-    assert!(matches!(
-        convert::convert(&mut conn).unwrap(),
-        Outcome::Converted { .. }
-    ));
-    assert_current(&conn);
+fn empty_and_older_prefixes_are_rejected_without_writes() {
+    // Keep the former 112 prefix as an explicit refusal, not an accepted input.
+    for version in [None, Some(1), Some(108), Some(112)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steve.sqlite3");
+        let c = Connection::open(&path).unwrap();
+        if let Some(v) = version {
+            old(&c, Some(v));
+        }
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+        let mut c = Connection::open(&path).unwrap();
+        let e = convert::convert(&mut c).unwrap_err();
+        assert_eq!(e.code, Code::Incompatible);
+        if version.is_some() {
+            assert!(e.safe_detail.contains("先升级到上一个发布版"));
+        }
+        drop(c);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }
 
 #[test]
@@ -374,7 +380,7 @@ fn credentials(conn: &Connection) -> Vec<Vec<(String, Option<i64>)>> {
 
 #[test]
 fn missing_instance_owner_preserves_all_credentials_and_legacy_layout() {
-    for version in [Some(112), None] {
+    for version in [Some(113), None] {
         let mut conn = Connection::open_in_memory().unwrap();
         old(&conn, version);
         data(&conn);
@@ -397,7 +403,7 @@ fn missing_instance_owner_preserves_all_credentials_and_legacy_layout() {
         assert!(matches!(
             convert::convert(&mut conn).unwrap(),
             Outcome::Converted {
-                revoked_sessions: 2,
+                deleted_sessions: 2,
                 ..
             }
         ));
@@ -427,9 +433,9 @@ fn session_invalidation_failure_rolls_back_tokens_clients_and_layout() {
     assert!(matches!(
         convert::convert(&mut conn).unwrap(),
         Outcome::Converted {
-            revoked_tokens: 1,
-            revoked_clients: 1,
-            revoked_sessions: 2,
+            deleted_tokens: 2,
+            deleted_clients: 2,
+            deleted_sessions: 2,
             ..
         }
     ));
@@ -440,7 +446,7 @@ fn quick_check_failure_rolls_back_pending_migrations_before_commit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steve.sqlite3");
     let conn = Connection::open(&path).unwrap();
-    old(&conn, Some(112));
+    old(&conn, Some(113));
     data(&conn);
     // Create an actual CHECK violation without changing schema or relying on sleeps.
     conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO attention_meta(id,epoch) VALUES(2,'fixture'); PRAGMA ignore_check_constraints=OFF;").unwrap();
@@ -455,7 +461,7 @@ fn quick_check_failure_rolls_back_pending_migrations_before_commit() {
     let error = convert::convert(&mut conn).unwrap_err();
     assert_eq!(error.code, Code::Incompatible);
     assert_eq!(error.safe_detail, "legacy storage quick_check failed");
-    assert_eq!(legacy::version(&conn).unwrap(), 112);
+    assert_eq!(legacy::version(&conn).unwrap(), 113);
     assert!(!has(&conn, "meta"));
     assert!(conn.is_autocommit());
     assert!(
@@ -464,4 +470,111 @@ fn quick_check_failure_rolls_back_pending_migrations_before_commit() {
     );
     drop(conn);
     assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), before);
+}
+
+#[test]
+fn independent_owner_client_survives_with_deleted_token_reference_cleared() {
+    let mut c = Connection::open_in_memory().unwrap();
+    old(&c, Some(113));
+    data(&c);
+    c.execute("UPDATE clients SET token_id='member' WHERE id='owner'", [])
+        .unwrap();
+    let mut references = Vec::new();
+    let tables = c
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table'")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for table in tables {
+        let mut stmt = c
+            .prepare(&format!(
+                "PRAGMA foreign_key_list(\"{}\")",
+                table.replace('"', "\"\"")
+            ))
+            .unwrap();
+        for fk in stmt
+            .query_map([], |r| Ok((r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
+            .unwrap()
+        {
+            let (parent, column) = fk.unwrap();
+            if ["access_tokens", "clients", "auth_sessions"].contains(&parent.as_str()) {
+                references.push((table.clone(), column, parent));
+            }
+        }
+    }
+    assert_eq!(
+        references,
+        [("clients".into(), "token_id".into(), "access_tokens".into())]
+    );
+    assert!(matches!(
+        convert::convert(&mut c).unwrap(),
+        Outcome::Converted {
+            deleted_tokens: 2,
+            deleted_clients: 2,
+            deleted_sessions: 2,
+            ..
+        }
+    ));
+    assert_eq!(
+        c.query_row("SELECT token_id FROM clients WHERE id='owner'", [], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+            .get::<_, u32>(
+            0
+        ))
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM users", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn final_commit_failure_preserves_legacy_input_credentials_and_references_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steve.sqlite3");
+    let c = Connection::open(&path).unwrap();
+    old(&c, Some(113));
+    data(&c);
+    c.execute("UPDATE clients SET token_id='member' WHERE id='owner'", [])
+        .unwrap();
+    let before_credentials = credentials(&c);
+    drop(c);
+    let before = std::fs::read(&path).unwrap();
+    let mut c = Connection::open(&path).unwrap();
+    c.commit_hook(Some(|| true)).unwrap();
+    assert!(convert::convert(&mut c).is_err());
+    assert_eq!(legacy::version(&c).unwrap(), 113);
+    assert_eq!(credentials(&c), before_credentials);
+    assert_eq!(
+        c.query_row("SELECT token_id FROM clients WHERE id='owner'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap(),
+        "member"
+    );
+    assert!(!has(&c, "meta"));
+    assert!(c.is_autocommit());
+    drop(c);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let mut c = Connection::open(&path).unwrap();
+    assert!(matches!(
+        convert::convert(&mut c).unwrap(),
+        Outcome::Converted {
+            deleted_tokens: 2,
+            deleted_clients: 2,
+            deleted_sessions: 2,
+            ..
+        }
+    ));
 }
