@@ -15,7 +15,6 @@ edge steve-digest steve-types	1
 edge steve-flow steve-runtime	1
 edge steve-flow steve-types	1
 edge steve-flow steve-work-api	1
-edge steve-github steve-node-api	1
 edge steve-github steve-runtime	1
 edge steve-github steve-types	1
 edge steve-hub steve-auth	1
@@ -28,7 +27,6 @@ edge steve-hub steve-runtime	1
 edge steve-hub steve-types	1
 edge steve-hub steve-vault	1
 edge steve-install steve-i18n	1
-edge steve-knowledge steve-node-api	1
 edge steve-knowledge steve-runtime	1
 edge steve-knowledge steve-types	1
 edge steve-mail steve-runtime	1

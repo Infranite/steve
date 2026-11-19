@@ -1,6 +1,7 @@
 # Edges to remove; only this segment ratchets.
 # removal wave<TAB>responsible group<TAB>edge-or-rusqlite key<TAB>count
-# g5 coordinates domain/plugin reconstruction; g2 owns the legacy storage facade retirement.
+# c1 awaits context ownership at wave-4 C1; wave is the edge removal deadline.
+# g0/g2/g4 rows have active owners; g2 owns the legacy storage facade retirement.
 # STEVE_GUARD_BLESS=1 rewrites after removals; new or growing edges always fail.
 w3	g4	edge steve-acp steve-i18n	1
 w3	g4	edge steve-acp steve-vault	1
@@ -14,6 +15,42 @@ w3	g4	edge steve-node-cli steve-install	1
 w3	g4	edge steve-node-cli steve-node	1
 w3	g4	edge steve-node-cli steve-node-wire	1
 w3	g4	rusqlite steve-node	1
+w4	c1	edge steve-channels steve-flow	1
+w4	c1	edge steve-channels steve-i18n	1
+w4	c1	edge steve-channels steve-knowledge	1
+w4	c1	edge steve-channels steve-modules	1
+w4	c1	edge steve-channels steve-node-wire	1
+w4	c1	edge steve-channels steve-store	1
+w4	c1	edge steve-channels steve-store-sqlite	1
+w4	c1	edge steve-core steve-i18n	1
+w4	c1	edge steve-digest steve-channels	1
+w4	c1	edge steve-digest steve-flow	1
+w4	c1	edge steve-digest steve-i18n	1
+w4	c1	edge steve-digest steve-knowledge	1
+w4	c1	edge steve-digest steve-modules	1
+w4	c1	edge steve-digest steve-store	1
+w4	c1	edge steve-flow steve-i18n	1
+w4	c1	edge steve-flow steve-modules	1
+w4	c1	edge steve-flow steve-store	1
+w4	c1	edge steve-hub steve-modules	1
+w4	c1	edge steve-hub steve-stats	1
+w4	c1	edge steve-hub steve-store	1
+w4	c1	edge steve-knowledge steve-i18n	1
+w4	c1	edge steve-knowledge steve-modules	1
+w4	c1	edge steve-knowledge steve-node-api	1
+w4	c1	edge steve-knowledge steve-store	1
+w4	c1	edge steve-modules steve-i18n	1
+w4	c1	edge steve-modules steve-store	1
+w4	c1	edge steve-stats steve-acp	1
+w4	c1	edge steve-stats steve-i18n	1
+w4	c1	edge steve-stats steve-store	1
+w4	c1	rusqlite steve-channels	1
+w4	c1	rusqlite steve-digest	1
+w4	c1	rusqlite steve-flow	1
+w4	c1	rusqlite steve-hub	1
+w4	c1	rusqlite steve-knowledge	1
+w4	c1	rusqlite steve-modules	1
+w4	c1	rusqlite steve-stats	1
 w4	g0	edge steve-core steve-acp	1
 w4	g0	edge steve-core steve-modules	1
 w4	g0	edge steve-core steve-stats	1
@@ -30,61 +67,27 @@ w4	g2	edge steve-store steve-node-api	1
 w4	g2	edge steve-store steve-store-sqlite	1
 w4	g2	edge steve-store steve-types	1
 w4	g2	rusqlite steve-store	1
-w4	g5	edge steve-channels steve-flow	1
-w4	g5	edge steve-channels steve-i18n	1
-w4	g5	edge steve-channels steve-knowledge	1
-w4	g5	edge steve-channels steve-modules	1
-w4	g5	edge steve-channels steve-node-wire	1
-w4	g5	edge steve-channels steve-store	1
-w4	g5	edge steve-channels steve-store-sqlite	1
-w4	g5	edge steve-core steve-i18n	1
-w4	g5	edge steve-digest steve-channels	1
-w4	g5	edge steve-digest steve-flow	1
-w4	g5	edge steve-digest steve-i18n	1
-w4	g5	edge steve-digest steve-knowledge	1
-w4	g5	edge steve-digest steve-modules	1
-w4	g5	edge steve-digest steve-store	1
-w4	g5	edge steve-flow steve-i18n	1
-w4	g5	edge steve-flow steve-modules	1
-w4	g5	edge steve-flow steve-store	1
-w4	g5	edge steve-hub steve-modules	1
-w4	g5	edge steve-hub steve-stats	1
-w4	g5	edge steve-hub steve-store	1
-w4	g5	edge steve-knowledge steve-i18n	1
-w4	g5	edge steve-knowledge steve-modules	1
-w4	g5	edge steve-knowledge steve-store	1
-w4	g5	edge steve-modules steve-i18n	1
-w4	g5	edge steve-modules steve-store	1
-w4	g5	edge steve-stats steve-acp	1
-w4	g5	edge steve-stats steve-i18n	1
-w4	g5	edge steve-stats steve-store	1
-w4	g5	rusqlite steve-channels	1
-w4	g5	rusqlite steve-digest	1
-w4	g5	rusqlite steve-flow	1
-w4	g5	rusqlite steve-hub	1
-w4	g5	rusqlite steve-knowledge	1
-w4	g5	rusqlite steve-modules	1
-w4	g5	rusqlite steve-stats	1
+w5	c1	edge steve-calendar steve-flow	1
+w5	c1	edge steve-calendar steve-i18n	1
+w5	c1	edge steve-calendar steve-modules	1
+w5	c1	edge steve-calendar steve-store	1
+w5	c1	edge steve-github steve-flow	1
+w5	c1	edge steve-github steve-i18n	1
+w5	c1	edge steve-github steve-modules	1
+w5	c1	edge steve-github steve-node-api	1
+w5	c1	edge steve-github steve-store	1
+w5	c1	edge steve-hub steve-calendar	1
+w5	c1	edge steve-hub steve-digest	1
+w5	c1	edge steve-hub steve-github	1
+w5	c1	edge steve-hub steve-mail	1
+w5	c1	edge steve-hub steve-mcp	1
+w5	c1	edge steve-mail steve-flow	1
+w5	c1	edge steve-mail steve-i18n	1
+w5	c1	edge steve-mail steve-knowledge	1
+w5	c1	edge steve-mail steve-modules	1
+w5	c1	edge steve-mail steve-store	1
+w5	c1	rusqlite steve-calendar	1
+w5	c1	rusqlite steve-github	1
+w5	c1	rusqlite steve-mail	1
 w5	g0	edge steve-auth steve-i18n	1
 w5	g0	edge steve-hub steve-install	1
-w5	g5	edge steve-calendar steve-flow	1
-w5	g5	edge steve-calendar steve-i18n	1
-w5	g5	edge steve-calendar steve-modules	1
-w5	g5	edge steve-calendar steve-store	1
-w5	g5	edge steve-github steve-flow	1
-w5	g5	edge steve-github steve-i18n	1
-w5	g5	edge steve-github steve-modules	1
-w5	g5	edge steve-github steve-store	1
-w5	g5	edge steve-hub steve-calendar	1
-w5	g5	edge steve-hub steve-digest	1
-w5	g5	edge steve-hub steve-github	1
-w5	g5	edge steve-hub steve-mail	1
-w5	g5	edge steve-hub steve-mcp	1
-w5	g5	edge steve-mail steve-flow	1
-w5	g5	edge steve-mail steve-i18n	1
-w5	g5	edge steve-mail steve-knowledge	1
-w5	g5	edge steve-mail steve-modules	1
-w5	g5	edge steve-mail steve-store	1
-w5	g5	rusqlite steve-calendar	1
-w5	g5	rusqlite steve-github	1
-w5	g5	rusqlite steve-mail	1
