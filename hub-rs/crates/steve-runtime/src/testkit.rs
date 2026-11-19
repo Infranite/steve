@@ -123,3 +123,7 @@ mod tests {
         worker.await.unwrap();
     }
 }
+
+/// Unix test process ownership, opt-in with this testkit module.
+#[cfg(unix)]
+pub mod process;
