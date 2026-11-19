@@ -2,6 +2,7 @@
 pub mod digest;
 pub mod fixtures;
 mod reads;
+pub(crate) mod retention;
 mod sql;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params, types::Value};
 pub use sql::{cell_value, read_cell};

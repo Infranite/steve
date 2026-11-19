@@ -12,11 +12,10 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
-    time::Instant,
 };
 use steve_storage_api::{
-    query::{self, IndexName, KeyRange, Order, Page, ResumeToken, Scan, ScanBudget},
-    retention::{Action, Budget, KeepFrom, RetentionPolicy, RetentionReport, Select},
+    query::ResumeToken,
+    retention::{Budget, RetentionReport},
     *,
 };
 fn invalid(s: &str) -> Error {
@@ -345,148 +344,46 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             .entities()
             .find(|e| e.desc.name == name)
             .ok_or_else(|| error(steve_types::Code::Unsupported, "unknown retention entity"))?;
-        let policy = e.desc.retention.as_ref().ok_or_else(|| {
-            error(
-                steve_types::Code::Unsupported,
-                "entity has no retention policy",
-            )
-        })?;
-        if policy.before.is_some()
-            || policy.protect.is_some()
-            || !matches!(
-                policy.select,
-                Select::MaxAge { .. } | Select::Terminal { .. }
-            )
-            || matches!(policy.action, Action::Op(_))
-        {
-            return Err(error(
-                steve_types::Code::Unsupported,
-                "retention policy requires a domain handler",
-            ));
-        }
+        let definition = crate::domains::retention::authorize(e)?;
         let mut after = lock(&self.after);
-        let (affected, resume, start) =
-            self.write(e.desc.domain, Lane::Background, |c, runner| {
-                let start = Instant::now();
-                let root = runner.reserve_root(c).map_err(Error::from)?;
-                let tx = rusqlite::Transaction::new_unchecked(
-                    c,
-                    rusqlite::TransactionBehavior::Immediate,
-                )
-                .map_err(crate::domains::sql_error)
-                .map_err(Error::from)?;
-                let (affected, resume) = retention_slice(
-                    &tx,
-                    e,
-                    policy,
-                    budget,
-                    after.get(&name).cloned(),
-                    self.clock.now(),
-                    root.rev(),
-                )?;
-                tx.commit()
+        let report = self.write(e.desc.domain, Lane::Background, |c, runner| {
+            let root = runner.reserve_root(c).map_err(Error::from)?;
+            let tx =
+                rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
                     .map_err(crate::domains::sql_error)
                     .map_err(Error::from)?;
-                Ok((affected, resume, start))
-            })?;
-        let more = resume.is_some();
-        if let Some(next) = resume {
+            let policy = crate::domains::retention::EntityPolicy {
+                entity: e,
+                definition,
+                rev: root.rev(),
+            };
+            let report = crate::retention::run_slice(
+                &tx,
+                &policy,
+                self.clock.now().0,
+                budget,
+                after.get(&name),
+            )
+            .map_err(crate::domains::retention::read_error)?;
+            tx.commit()
+                .map_err(crate::domains::sql_error)
+                .map_err(Error::from)?;
+            Ok(report)
+        })?;
+        let more = report.more();
+        // Publish continuation only after the outer transaction has committed.
+        if let Some(next) = report.next {
             after.insert(name.clone(), next);
         } else {
             after.remove(&name);
         }
-        let ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
         Ok(RetentionReport {
             entity: name,
-            affected,
+            affected: report.affected,
             slices: 1,
-            max_slice_ms: ms,
-            overruns: u32::from(ms > budget.target_ms),
+            max_slice_ms: report.elapsed_ms.min(u64::from(u32::MAX)) as u32,
+            overruns: report.overruns,
             more,
         })
-    }
-}
-
-/// Apply one bounded slice inside the caller's writer transaction. Purge updates use
-/// the reserved root revision; continuation is published only after the caller commits.
-fn retention_slice(
-    tx: &rusqlite::Transaction<'_>,
-    entity: &crate::domains::SqlEntity,
-    policy: &RetentionPolicy,
-    budget: Budget,
-    resume: Option<ResumeToken>,
-    now: Millis,
-    rev: Rev,
-) -> Result<(u64, Option<ResumeToken>), Error> {
-    let mut physical = entity.desc.clone();
-    physical.name = entity.table.clone();
-    let request = Scan::<Row> {
-        index: IndexName {
-            entity: entity.table.clone(),
-            name: String::new(),
-        },
-        range: KeyRange::default(),
-        filter: vec![],
-        order: Order::Asc,
-        limit: budget.rows.min(500),
-        budget: ScanBudget(budget.rows),
-        resume,
-        marker: std::marker::PhantomData,
-    };
-    let page: Page<Row> = crate::scan::query(
-        tx,
-        &physical,
-        AnyQuery {
-            name: "scan".into(),
-            domain: entity.desc.domain,
-            body: Payload::Json(query::encode(&request)?),
-        },
-    )?
-    .body
-    .decode()?;
-    let mut affected = 0;
-    for (row, _) in page.rows {
-        if !retention_selected(&row, policy, now) {
-            continue;
-        }
-        let key = crate::domains::values(&row, &entity.desc.key);
-        match &policy.action {
-            Action::Delete => {
-                entity.delete(tx, &key).map_err(Error::from)?;
-                affected += 1;
-            }
-            Action::Purge { fields } => {
-                if fields
-                    .iter()
-                    .any(|f| crate::domains::value(&row, f).is_some_and(|v| *v != Cell::Null))
-                {
-                    let patch = Row(fields.iter().map(|f| (f.clone(), Cell::Null)).collect());
-                    entity
-                        .update(tx, &key, &patch, rev, None)
-                        .map_err(Error::from)?;
-                    affected += 1;
-                }
-            }
-            Action::Op(_) => unreachable!("validated before acquiring the grant"),
-        }
-    }
-    Ok((affected, page.resume))
-}
-
-fn retention_selected(row: &Row, policy: &RetentionPolicy, now: Millis) -> bool {
-    let keep = match policy.keep_from {
-        KeepFrom::Fixed { millis } => millis,
-        KeepFrom::Setting { default_ms, .. } => default_ms,
-    };
-    let old = |field: &str| {
-        matches!(crate::domains::value(row, field), Some(Cell::Millis(at))
-            if i128::from(now.0) - i128::from(*at) > i128::from(keep))
-    };
-    match &policy.select {
-        Select::MaxAge { field, .. } => old(field),
-        Select::Terminal {
-            state, done, since, ..
-        } => crate::domains::value(row, state).is_some_and(|v| done.contains(v)) && old(since),
-        _ => false,
     }
 }
