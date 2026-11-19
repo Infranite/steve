@@ -1,4 +1,4 @@
-//! Runtime ratchet: move timers and wall-time policy into steve-runtime. This is a
+//! Runtime ratchet: move timers, TTL caches and wall-time policy into steve-runtime. This is a
 //! syntax guard, not a Rust type checker: review `.earliest()` receivers in the inventory.
 //! Scan module trees, not tests/examples or disconnected source files.
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,8 +9,8 @@ use syn::{Expr, Item, Meta, Token};
 
 type Counts = BTreeMap<(String, String, String), usize>;
 const LIST: &str = "tests/runtime_guard.txt";
-const LIST_HEADER: &str = "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard\n# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its\n# private sleep_until wrapper; this guard does not follow helper calls.\n# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does\n# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and\n# same-function interval construction plus unknown loop tick receivers are recognized.\n";
-const HELP: &str = "use steve-runtime due_loop / every / clock / tz, or explain in the task card before rewriting with STEVE_RUNTIME_BLESS=1";
+const LIST_HEADER: &str = "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock, TTL maps to Cached and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard\n# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its\n# private sleep_until wrapper; this guard does not follow helper calls.\n# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does\n# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and\n# same-function interval construction plus unknown loop tick receivers are recognized.\n";
+const HELP: &str = "use steve-runtime due_loop / every / clock / tz / Cached, or explain in the task card before rewriting with STEVE_RUNTIME_BLESS=1";
 
 fn test_meta(meta: &Meta) -> bool {
     match meta {
@@ -665,7 +665,340 @@ impl<'ast> Visit<'ast> for Guard {
     }
 }
 
+struct TtlGuard<'a> { imports: &'a BTreeMap<String, Imports> }
+impl TtlGuard<'_> {
+    // Match the upstream guard's bounded explicit-import expansion. TTL value
+    // declarations additionally need crate/self/super paths to locate their types.
+    fn resolve_in(&self, raw: &str, module: &str, _depth: usize) -> String {
+        let mut resolved = raw.to_owned();
+        for _ in 0..128 {
+            let (head, rest) = resolved.split_once("::").unwrap_or((&resolved, ""));
+            match head {
+                "crate" => return format!("@::{rest}"),
+                "self" => return format!("@::{}", join(module, rest)),
+                "super" => return format!("@::{}", join(module.rsplit_once("::").map_or("", |(parent, _)| parent), rest)),
+                _ => {}
+            }
+            let Some(target) = self.imports.get(module).and_then(|i| i.names.get(head)) else { break };
+            if target == head || target.starts_with(&format!("{head}::")) { break; }
+            resolved = if rest.is_empty() { target.clone() } else { join(target, rest) };
+        }
+        resolved
+    }
+}
+
+// Structural TTL inventory: lock-protected maps whose values contain a timestamp used
+// for age checks. Expand aliases and display-value structs, but do not descend into a
+// struct's own locks: those are independent lifecycle/authoritative state (connections,
+// observations), rather than a cached value. This is deliberately a syntax guard;
+// review the inventory when changing storage shapes, just like `.earliest()` receivers.
+#[derive(Default)]
+struct Ages {
+    names: BTreeSet<String>,
+    any: bool,
+}
+impl Ages {
+    fn age(&mut self, expr: &Expr) {
+        self.any = true;
+        match expr {
+            Expr::Path(p) => {
+                self.names.insert(path(&p.path));
+            }
+            Expr::Field(f) => {
+                self.names.insert(match &f.member {
+                    syn::Member::Named(n) => ident(n),
+                    syn::Member::Unnamed(n) => n.index.to_string(),
+                });
+            }
+            Expr::Reference(r) => self.age(&r.expr),
+            Expr::Paren(p) => self.age(&p.expr),
+            _ => {}
+        }
+    }
+}
+impl<'ast> Visit<'ast> for Ages {
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if !test_attrs(&f.attrs) {
+            visit::visit_impl_item_fn(self, f);
+        }
+    }
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        if production(item) {
+            visit::visit_item(self, item);
+        }
+    }
+    fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+        if m.method == "elapsed" {
+            self.age(&m.receiver);
+        }
+        if [
+            "saturating_sub",
+            "duration_since",
+            "saturating_duration_since",
+        ]
+        .iter()
+        .any(|n| m.method == *n)
+        {
+            for arg in &m.args {
+                self.age(arg);
+            }
+        }
+        visit::visit_expr_method_call(self, m);
+    }
+    fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+        if matches!(b.op, syn::BinOp::Sub(_)) {
+            self.age(&b.right);
+        }
+        visit::visit_expr_binary(self, b);
+    }
+}
+type TtlTypes = BTreeMap<String, (String, bool, Vec<(Option<String>, syn::Type)>)>;
+fn type_args(p: &syn::TypePath) -> Vec<&syn::Type> {
+    p.path
+        .segments
+        .iter()
+        .flat_map(|s| match &s.arguments {
+            syn::PathArguments::AngleBracketed(a) => a
+                .args
+                .iter()
+                .filter_map(|a| match a {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![],
+        })
+        .collect()
+}
+fn contains_map(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(p) => {
+            p.path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "HashMap" || s.ident == "BTreeMap")
+                || type_args(p).into_iter().any(contains_map)
+        }
+        syn::Type::Tuple(t) => t.elems.iter().any(contains_map),
+        syn::Type::Reference(r) => contains_map(&r.elem),
+        _ => false,
+    }
+}
+impl TtlGuard<'_> {
+    fn ttl_type(
+        &self,
+        ty: &syn::Type,
+        types: &TtlTypes,
+        ages: &Ages,
+        module: &str,
+        stage: u8,
+        field: Option<&str>,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        match ty {
+            syn::Type::Reference(r) => {
+                self.ttl_type(&r.elem, types, ages, module, stage, field, seen)
+            }
+            syn::Type::Tuple(t) => {
+                // Some caches stamp the entire map rather than each entry.
+                let stamped_map = stage == 1
+                    && t.elems.iter().any(|ty| contains_map(ty))
+                    && t.elems
+                        .iter()
+                        .any(|ty| self.ttl_type(ty, types, ages, module, 2, None, seen));
+                stamped_map
+                    || t.elems
+                        .iter()
+                        .any(|ty| self.ttl_type(ty, types, ages, module, stage, field, seen))
+            }
+            syn::Type::Path(p) => {
+                let resolved = self.resolve_in(&path(&p.path), module, 0);
+                let name = resolved.rsplit("::").next().unwrap();
+                let args = type_args(p);
+                if stage == 2 && (name == "Instant" || name == "i64" || name == "u64") {
+                    return ages.any && field.is_none_or(|f| ages.names.contains(f));
+                }
+                if ["Mutex", "RwLock"].contains(&name) {
+                    if stage == 2 && field.is_some() {
+                        return false;
+                    }
+                    return args.iter().any(|t| {
+                        self.ttl_type(
+                            t,
+                            types,
+                            ages,
+                            module,
+                            if stage == 0 { 1 } else { stage },
+                            field,
+                            seen,
+                        )
+                    });
+                }
+                if ["HashMap", "BTreeMap"].contains(&name) {
+                    return stage == 1
+                        && args
+                            .get(1)
+                            .is_some_and(|t| self.ttl_type(t, types, ages, module, 2, None, seen));
+                }
+                if [
+                    "Arc", "Box", "Option", "LazyLock", "OnceLock", "Vec", "VecDeque",
+                ]
+                .contains(&name)
+                {
+                    return args
+                        .iter()
+                        .any(|t| self.ttl_type(t, types, ages, module, stage, field, seen));
+                }
+                let key = resolved.trim_start_matches("@::");
+                let key = if types.contains_key(key) {
+                    key.to_owned()
+                } else {
+                    join(module, key)
+                };
+                if !seen.insert(key.clone()) {
+                    return false;
+                }
+                let result = types.get(&key).is_some_and(|(scope, alias, fields)| {
+                    // Inventory the declaration that owns the map, not every object
+                    // transitively containing that owner (Core, Auth, etc.).
+                    if !alias && stage != 2 {
+                        return false;
+                    }
+                    fields.iter().any(|(name, ty)| {
+                        self.ttl_type(
+                            ty,
+                            types,
+                            ages,
+                            scope,
+                            stage,
+                            name.as_deref().or(field),
+                            seen,
+                        )
+                    })
+                });
+                seen.remove(&key);
+                result
+            }
+            _ => false,
+        }
+    }
+}
+fn ttl_inventory(source: &Source, guard: &TtlGuard<'_>, types: &TtlTypes) -> Counts {
+    let mut ages = Ages::default();
+    for item in &source.items {
+        ages.visit_item(item);
+    }
+    let mut out = Counts::new();
+    let mut record = |name: String, ty: &syn::Type| {
+        if guard.ttl_type(
+            ty,
+            types,
+            &ages,
+            &source.module,
+            0,
+            None,
+            &mut BTreeSet::new(),
+        ) {
+            out.insert(
+                (
+                    source.rel.clone(),
+                    "ttl-cache".into(),
+                    join(&source.module, &name),
+                ),
+                1,
+            );
+        }
+    };
+    #[derive(Default)]
+    struct LocalStatics(Vec<(String, syn::Type)>);
+    impl<'ast> Visit<'ast> for LocalStatics {
+        fn visit_item(&mut self, i: &'ast Item) {
+            if production(i) {
+                visit::visit_item(self, i);
+            }
+        }
+        fn visit_item_static(&mut self, s: &'ast syn::ItemStatic) {
+            self.0.push((ident(&s.ident), *s.ty.clone()));
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if !test_attrs(&f.attrs) {
+                visit::visit_impl_item_fn(self, f);
+            }
+        }
+    }
+    let mut statics = LocalStatics::default();
+    for item in &source.items {
+        statics.visit_item(item);
+    }
+    for (name, ty) in &statics.0 {
+        record(name.clone(), ty);
+    }
+    for item in source.items.iter().filter(|i| production(i)) {
+        match item {
+            Item::Struct(s) => {
+                for (i, f) in s
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| !test_attrs(&f.attrs))
+                {
+                    record(
+                        join(
+                            &ident(&s.ident),
+                            &f.ident.as_ref().map_or(i.to_string(), ident),
+                        ),
+                        &f.ty,
+                    );
+                }
+            }
+            Item::Type(t) => record(ident(&t.ident), &t.ty),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn scan_sources(sources: &[Source]) -> Counts {
+    let envs: BTreeMap<_, _> = sources
+        .iter()
+        .map(|s| (s.module.clone(), Imports::items(&s.items)))
+        .collect();
+    let mut types = TtlTypes::new();
+    for source in sources {
+        for item in source.items.iter().filter(|i| production(i)) {
+            let declaration = match item {
+                Item::Struct(s) => Some((
+                    &s.ident,
+                    false,
+                    s.fields
+                        .iter()
+                        .filter(|f| !test_attrs(&f.attrs))
+                        .map(|f| (f.ident.as_ref().map(ident), f.ty.clone()))
+                        .collect(),
+                )),
+                Item::Enum(e) => Some((
+                    &e.ident,
+                    false,
+                    e.variants
+                        .iter()
+                        .filter(|v| !test_attrs(&v.attrs))
+                        .flat_map(|v| v.fields.iter())
+                        .filter(|f| !test_attrs(&f.attrs))
+                        .map(|f| (f.ident.as_ref().map(ident), f.ty.clone()))
+                        .collect(),
+                )),
+                Item::Type(t) => Some((&t.ident, true, vec![(None, *t.ty.clone())])),
+                _ => None,
+            };
+            if let Some((name, alias, fields)) = declaration {
+                types.insert(
+                    join(&source.module, &ident(name)),
+                    (source.module.clone(), alias, fields),
+                );
+            }
+        }
+    }
     let mut out = Counts::new();
     for source in sources {
         let mut g = Guard {
@@ -693,6 +1026,7 @@ fn scan_sources(sources: &[Source]) -> Counts {
                 g.fields.insert(ident(&s.ident), fields);
             }
         }
+        out.extend(ttl_inventory(source, &TtlGuard { imports: &envs }, &types));
         for item in &source.items {
             g.visit_item(item);
         }
@@ -1016,4 +1350,54 @@ fn constructor_tick_pairing_stays_within_its_function() {
     );
     let functions: BTreeSet<_> = actual.into_keys().map(|(_, _, f)| f).collect();
     assert_eq!(functions, BTreeSet::from(["inline_factory".into()]));
+}
+
+#[test]
+fn ttl_maps_follow_aliases_value_structs_and_locks_without_counting_connections() {
+    let fixture = r#"
+        use std::collections::{HashMap as Map, BTreeMap};
+        use std::sync::{Mutex as Lock, Arc};
+        use std::time::Instant as Stamp;
+        type Entries = Map<String, (Stamp, String)>;
+        struct Cached { at: i64, body: String }
+        struct Connection { last: Lock<Stamp> }
+        struct Caches {
+            direct: Lock<Entries>,
+            named: tokio::sync::RwLock<BTreeMap<String, Arc<Cached>>>,
+            whole: Lock<Option<(Stamp, std::collections::HashMap<String, String>)>>,
+            connections: Lock<Map<String, Arc<Connection>>>,
+            ordinary: Lock<Map<String, String>>,
+            #[cfg(test)] test: Lock<Entries>,
+        }
+        static TTL: Lock<Map<String, (Stamp, bool)>> = todo!();
+        fn cached() { static LOCAL: Lock<Map<String, (Stamp, bool)>> = todo!(); }
+        enum Slot { Running, Done(Stamp, String) }
+        type Slots = Lock<Map<String, Slot>>;
+        fn read(at: i64, stamp: Stamp) { if now() - at < TTL_MS { } stamp.elapsed(); }
+        #[cfg(test)] static TEST: Lock<Map<String, (Stamp, bool)>> = todo!();
+    "#;
+    let result = scan_sources(&[Source {
+        rel: "fixture/src/lib.rs".into(),
+        module: "".into(),
+        items: syn::parse_file(fixture).unwrap().items,
+    }]);
+    let actual: BTreeSet<_> = result
+        .into_keys()
+        .filter(|(_, c, _)| c == "ttl-cache")
+        .map(|(_, _, f)| f)
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            "Caches::direct",
+            "Caches::named",
+            "Caches::whole",
+            "TTL",
+            "LOCAL",
+            "Slots"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
 }
