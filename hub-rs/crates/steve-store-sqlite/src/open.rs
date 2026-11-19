@@ -69,77 +69,89 @@ fn object_kind(conn: &Connection, name: &str) -> Result<Option<String>, Error> {
 /// for raw diagnosis even when this structured inspection refuses the schema.
 pub fn inspect(conn: &Connection) -> Result<StorageState, Error> {
     if object_kind(conn, "meta")?.is_some() {
-        for table in schema::CONTRACT_TABLES {
-            if object_kind(conn, table)?.as_deref() != Some("table") {
-                return Err(incompatible("storage contract metadata is incomplete"));
-            }
-        }
-        // The sole allowed old metadata is an explicit old-reader fence, plus
-        // the runner head row retained pending previous-release verification.
-        if object_kind(conn, "schema_compat")?.as_deref() != Some("table") {
-            return Err(incompatible(
-                "current storage is missing its legacy reader fence",
-            ));
-        }
-        let (rows, minimum): (u32, i64) = conn
-            .query_row(
-                "SELECT count(*), coalesce(min(min_reader),0) FROM schema_compat",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(db_error)?;
-        if rows != 1 || minimum <= crate::compat::LEGACY_INPUT {
-            return Err(incompatible("mixed legacy and current storage metadata"));
-        }
-        if object_kind(conn, "schema_version")?.is_some() {
-            let (rows, version): (u32, i64) = conn
-                .query_row(
-                    "SELECT count(*), coalesce(min(v),0) FROM schema_version",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(db_error)?;
-            if rows != 1
-                || !(crate::compat::LEGACY_INPUT..=crate::legacy::SCHEMA_VERSION).contains(&version)
-            {
-                return Err(incompatible("mixed legacy and current storage metadata"));
-            }
-        }
-        let layout = Layout::read_state(conn)?;
-        let domains = conn
-            .prepare("SELECT domain,version FROM domain_schema")
-            .map_err(db_error)?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(db_error)?
-            .collect::<rusqlite::Result<std::collections::BTreeMap<String, u32>>>()
-            .map_err(db_error)?;
-        if domains.len() != 3
-            || crate::layout::DOMAINS
-                .iter()
-                .any(|d| !domains.contains_key(crate::layout::domain_name(*d)))
-        {
-            return Err(incompatible("incomplete or unknown domain schema"));
-        }
-        let contract_schema = crate::layout::meta(
-            conn,
-            crate::layout::META_DOMAIN,
-            migrate::CONTRACT_SCHEMA_KEY,
-        )?
-        .parse()
-        .map_err(|_| incompatible("invalid contract schema version"))?;
-        return Ok(StorageState::Current {
-            layout,
-            domains,
-            contract_schema,
-        });
+        inspect_current(conn)
+    } else {
+        inspect_legacy_or_empty(conn)
     }
+}
+fn inspect_current(conn: &Connection) -> Result<StorageState, Error> {
+    for table in schema::CONTRACT_TABLES {
+        if object_kind(conn, table)?.as_deref() != Some("table") {
+            return Err(incompatible("storage contract metadata is incomplete"));
+        }
+    }
+    check_reader_fence(conn)?;
+    let layout = Layout::read_state(conn)?;
+    let domains = conn
+        .prepare("SELECT domain,version FROM domain_schema")
+        .map_err(db_error)?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<std::collections::BTreeMap<String, u32>>>()
+        .map_err(db_error)?;
+    crate::compat::require_domains(&domains)?;
+    let contract_schema = crate::layout::meta(
+        conn,
+        crate::layout::META_DOMAIN,
+        migrate::CONTRACT_SCHEMA_KEY,
+    )?
+    .parse()
+    .map_err(|_| incompatible("invalid contract schema version"))?;
+    Ok(StorageState::Current {
+        layout,
+        domains,
+        contract_schema,
+    })
+}
+fn check_reader_fence(conn: &Connection) -> Result<(), Error> {
+    if object_kind(conn, "schema_version")?.is_some() {
+        return Err(incompatible("mixed legacy and current storage metadata"));
+    }
+    if object_kind(conn, "schema_compat")?.as_deref() != Some("table") {
+        return Err(incompatible(
+            "current storage is missing its legacy reader fence",
+        ));
+    }
+    let columns = conn
+        .prepare("PRAGMA table_info(schema_compat)")
+        .map_err(db_error)?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, u32>(5)?,
+            ))
+        })
+        .map_err(db_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db_error)?;
+    if columns != [("min_reader".into(), "INTEGER".into(), true, None, 0)] {
+        return Err(incompatible("invalid legacy reader fence shape"));
+    }
+    let (rows, minimum): (u32, i64) = conn
+        .query_row(
+            "SELECT count(*), coalesce(min(min_reader),0) FROM schema_compat",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db_error)?;
+    if rows != 1 || minimum != crate::compat::LEGACY_READER_FENCE {
+        return Err(incompatible("invalid legacy reader fence"));
+    }
+    Ok(())
+}
+fn inspect_legacy_or_empty(conn: &Connection) -> Result<StorageState, Error> {
     for table in schema::CONTRACT_TABLES.into_iter().filter(|t| *t != "meta") {
         if object_kind(conn, table)?.is_some() {
             return Err(incompatible("storage contract metadata is incomplete"));
         }
     }
     if object_kind(conn, "schema_version")?.as_deref() == Some("table") {
-        let schema_version = crate::legacy::version(conn).map_err(|_| incompatible("legacy version rejected; first upgrade to the previous published release (先升级到上一个发布版)"))?;
+        // Distinguish future schema/min_reader from unsupported older inputs.
+        // version validates both headers without changing persistent state.
+        let schema_version = crate::legacy::version(conn).map_err(|_| incompatible("legacy storage requires a newer program or valid version metadata (需要更新的程序)"))?;
         return Ok(StorageState::Legacy { schema_version });
     }
     let count: u32 = conn
@@ -161,7 +173,7 @@ fn preflight(dir: &Path, state: &StorageState, exact: bool) -> Result<(), Error>
     }
     Ok(())
 }
-fn open(dir: &Path, runtime: bool) -> Result<Engine, Error> {
+fn open(dir: &Path, runtime: bool, observer: Option<migrate::Observer>) -> Result<Engine, Error> {
     // Verify every embedded directory before creating a database or selecting WAL mode.
     migrate::verify_locks()?;
     if !runtime && !dir.exists() {
@@ -178,55 +190,104 @@ fn open(dir: &Path, runtime: bool) -> Result<Engine, Error> {
         StorageState::Empty
     };
     preflight(&dir, &state, !runtime)?;
+    let mut writer = open_writer(&path, runtime, matches!(&state, StorageState::Empty))?;
+    let layout = prepare_writer(&dir, &mut writer, state, runtime, observer)?;
+    Engine::from_opened(dir, layout, CORE_FILE.into(), writer, lock, runtime, None)
+}
+fn open_writer(path: &Path, runtime: bool, empty: bool) -> Result<Connection, Error> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | if runtime && matches!(&state, StorageState::Empty) {
+        | if runtime && empty {
             OpenFlags::SQLITE_OPEN_CREATE
         } else {
             OpenFlags::empty()
         };
-    let mut writer = Connection::open_with_flags(&path, flags).map_err(db_error)?;
-    // Suppress last-close checkpoint from the instant an admin writer exists,
-    // including any failing assembly path. No persistent pragma has run yet.
+    let writer = Connection::open_with_flags(path, flags).map_err(db_error)?;
     if !runtime {
         pragmas::no_checkpoint_on_close(&writer).map_err(db_error)?;
     }
-    let layout = match state {
-        StorageState::Empty => {
-            let layout = Layout::single_file();
-            migrate::initialize(&mut writer, &layout)?;
-            layout
-        }
-        StorageState::Legacy { .. } => {
-            // Same storage.lock, before WAL or connection tuning. Conversion
-            // never acquires the lock again or opens another writer.
-            crate::convert::convert(&mut writer)?;
-            let state = inspect(&writer)?;
-            preflight(&dir, &state, false)?;
-            match state {
-                StorageState::Current { layout, .. } => layout,
-                _ => unreachable!(),
-            }
-        }
-        StorageState::Current { layout, .. } => layout,
-    };
-    if runtime {
-        pragmas::runtime_writer(&writer).map_err(db_error)?;
-        migrate::migrate(&mut writer)?;
-    } else {
-        pragmas::connection(&writer, true).map_err(db_error)?;
+    Ok(writer)
+}
+fn prepare_writer(
+    dir: &Path,
+    writer: &mut Connection,
+    state: StorageState,
+    runtime: bool,
+    observer: Option<migrate::Observer>,
+) -> Result<Layout, Error> {
+    if matches!(state, StorageState::Empty) {
+        let layout = Layout::single_file();
+        migrate::initialize(writer, &layout)?;
+        pragmas::runtime_writer(writer).map_err(db_error)?;
+        return Ok(layout);
     }
-    Engine::from_opened(dir, layout, CORE_FILE.into(), writer, lock, runtime, None)
+    let phase = if matches!(&state, StorageState::Legacy { .. }) {
+        migrate::Phase::LegacyReplay
+    } else {
+        migrate::Phase::DomainMigration
+    };
+    let progress = observer
+        .map(|o| migrate::ProgressTracker::new(writer, o, phase))
+        .transpose()?;
+    let layout = match state {
+        StorageState::Legacy { .. } => prepare_legacy(dir, writer, progress.as_ref())?,
+        StorageState::Current { layout, .. } => layout,
+        StorageState::Empty => return Err(incompatible("unexpected empty storage")),
+    };
+    prepare_current(writer, runtime, progress.as_ref())?;
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    Ok(layout)
+}
+fn prepare_current(
+    writer: &Connection,
+    runtime: bool,
+    progress: Option<&migrate::ProgressTracker<'_>>,
+) -> Result<(), Error> {
+    if runtime {
+        pragmas::runtime_writer(writer).map_err(db_error)?;
+        migrate::migrate_on(writer, progress)?;
+    } else {
+        pragmas::connection(writer, true).map_err(db_error)?;
+    }
+    Ok(())
+}
+fn prepare_legacy(
+    dir: &Path,
+    writer: &Connection,
+    progress: Option<&migrate::ProgressTracker<'_>>,
+) -> Result<Layout, Error> {
+    // Same lifetime-held storage.lock; no second writer or WAL before conversion.
+    crate::convert::convert_on(writer, progress)?;
+    let state = inspect(writer)?;
+    preflight(dir, &state, false)?;
+    if let StorageState::Current { layout, .. } = state {
+        Ok(layout)
+    } else {
+        Err(incompatible("conversion did not install current storage"))
+    }
 }
 /// Hub open: lifetime-held process lock, read-only compatibility preflight, then WAL and
 /// pending migrations. Legacy conversion shares the same lifetime-held lock.
 /// Callers acquire instance.lock before this storage lock, never in reverse order.
 pub fn open_runtime(dir: impl AsRef<Path>) -> Result<Engine, Error> {
-    open(dir.as_ref(), true)
+    open(dir.as_ref(), true, None)
 }
 /// Offline administration: lifetime-held lock and exact schema checks, no migration,
 /// metadata stamping, optimize, diagnostic task, or persistent pragma changes.
 pub fn open_admin(dir: impl AsRef<Path>) -> Result<Engine, Error> {
-    open(dir.as_ref(), false)
+    open(dir.as_ref(), false, None)
+}
+
+/// Runtime open with one cumulative conversion/domain-migration progress stream.
+/// The caller holds instance.lock before entering; this acquires storage.lock
+/// exactly once. complete denotes committed storage preparation, not Hub health.
+/// Empty initialization has no conversion work and emits no progress events.
+pub fn open_runtime_observed(
+    dir: impl AsRef<Path>,
+    observer: migrate::Observer,
+) -> Result<Engine, Error> {
+    open(dir.as_ref(), true, Some(observer))
 }

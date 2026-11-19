@@ -42,7 +42,7 @@ fn prefix(c: &Connection) {
 fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
     let mut c = Connection::open_in_memory().unwrap();
     prefix(&c);
-    // A long statement inside contract installation; TEMP objects
+    // A long statement in legacy stamping before the final hook; TEMP objects
     // do not change the main schema under validation.
     c.execute_batch("CREATE TEMP TRIGGER progress_legacy BEFORE DELETE ON main.schema_compat BEGIN SELECT (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) SELECT sum(x) FROM n); END;").unwrap();
     let (events, observe) = observer();
@@ -59,7 +59,7 @@ fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
     assert_eq!(log.last().unwrap().phase, Phase::InstallContract);
     assert!(
         log.iter()
-            .filter(|p| p.phase == Phase::InstallContract && p.vm_steps > 0)
+            .filter(|p| p.phase == Phase::LegacyReplay && p.vm_steps > 0)
             .count()
             > 2
     );

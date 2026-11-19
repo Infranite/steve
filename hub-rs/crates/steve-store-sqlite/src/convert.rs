@@ -73,7 +73,7 @@ pub fn convert_and_migrate_observed(
     progress.finish();
     Ok(outcome)
 }
-fn convert_on(
+pub(crate) fn convert_on(
     conn: &Connection,
     progress: Option<&migrate::ProgressTracker<'_>>,
 ) -> Result<Outcome, Error> {
@@ -82,6 +82,14 @@ fn convert_on(
     if is_current(conn)? {
         return Ok(Outcome::AlreadyCurrent);
     }
+    migrate_legacy(conn, progress)
+}
+/// Internal atomic legacy conversion only. No public entry can commit replay
+/// separately and strand an input version outside the accepted window.
+pub(crate) fn migrate_legacy(
+    conn: &Connection,
+    progress: Option<&migrate::ProgressTracker<'_>>,
+) -> Result<Outcome, Error> {
     let from_legacy_version = legacy_input(conn)?;
     let mut deleted = None;
     // Reuse the frozen runner's transaction and validation callback, never a
@@ -124,39 +132,6 @@ fn is_current(conn: &Connection) -> Result<bool, Error> {
     Ok(matches!(state, StorageState::Current { .. }))
 }
 
-/// Standalone legacy replay/verification for diagnostic callers. Conversion
-/// itself never commits this intermediate phase: a head beyond 113 is not a new
-/// conversion input. Runtime callers must use convert or the observed combination.
-pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
-    migrate_legacy_with(conn, None)
-}
-fn migrate_legacy_with(
-    conn: &Connection,
-    progress: Option<&migrate::ProgressTracker<'_>>,
-) -> Result<i64, Error> {
-    require_autocommit(conn)?;
-    if is_current(conn)? {
-        return Err(steve_storage_api::error(
-            Code::Invalid,
-            "storage is already converted",
-        ));
-    }
-    let version = legacy_input(conn)?;
-    if version != legacy::SCHEMA_VERSION {
-        if let Some(p) = progress {
-            p.report(migrate::Phase::LegacyReplay, None, false);
-        }
-        legacy::migrate_to_head_with(conn, |tx| {
-            // Precommit validation belongs to replay; Validation starts only
-            // after this legacy transaction commits, keeping stages monotonic.
-            verify_legacy(tx).map_err(MigrationError::Validation)?;
-            Ok::<_, MigrationError>(())
-        })
-        .map_err(migration_error)?;
-    }
-    Ok(version)
-}
-
 fn verify_legacy(conn: &Connection) -> Result<(), Error> {
     schema::verify_baseline(conn)?;
     let mut stmt = conn.prepare("PRAGMA quick_check").map_err(db_error)?;
@@ -173,11 +148,10 @@ fn verify_legacy(conn: &Connection) -> Result<(), Error> {
 
 fn install_layout_on(tx: &Connection) -> Result<(usize, usize, usize), Error> {
     // The sole legacy runner owns the enclosing BEGIN IMMEDIATE and rollback.
-    // Its precommit hook installs everything before the runner's final stamps.
-    require_owner(tx)?;
+    // Its final hook installs everything after the runner's legacy stamps.
     tx.execute_batch(schema::CONTRACT).map_err(db_error)?;
-    // Retain schema_version until the real previous-release probe determines
-    // whether removal is safe. The fence is mandatory in both shapes.
+    // The legacy runner has already stamped its head. Replacing its metadata
+    // in the final hook is atomic; the runner writes no old tables afterward.
     Layout::single_file().write_file_meta(tx, CORE_FILE)?;
     migrate::stamp_current(tx)?;
     // FK inventory of the frozen baseline: only clients.token_id references
@@ -216,9 +190,7 @@ fn legacy_input(conn: &Connection) -> Result<i64, Error> {
     let version = legacy::version(conn)
         .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
     if version != LEGACY_INPUT {
-        return Err(incompatible(
-            "legacy conversion accepts only schema 113; first upgrade to the previous published release (先升级到上一个发布版)",
-        ));
+        return Err(crate::compat::legacy_refusal(version, LEGACY_INPUT));
     }
     require_owner(conn)?;
     Ok(version)
