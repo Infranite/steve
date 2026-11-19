@@ -1,8 +1,8 @@
 //! Conformance scenarios and implementation constraints.
 //!
-//! This is a source-comment draft, prepared before the storage contract skeleton.
-//! It deliberately declares no alternate contract types. Wire this module into
-//! `verify` after the public DomainStore signatures and DTOs are available.
+//! This inventory was prepared before the storage contract and now accompanies the
+//! executable scenarios in suite.rs. DomainStore and its DTOs remain the only public
+//! storage contract; this module documents coverage and reference-backend constraints.
 //!
 //! # Execution model
 //!
@@ -198,7 +198,7 @@
 //! Compute request digests using the public canonicalization helper, not a second
 //! implementation. Check expiry before receipt lookup. Replay the original full
 //! result; it must not allocate another revision or append sequence. Interpret
-//! Natural according to its final public contract, including content conflicts.
+//! Natural according to its public contract, including content conflicts.
 //!
 //! Implement typed cell/index comparison, SQL-compatible null treatment, C text
 //! order, and deterministic primary-key tiebreakers. Never sort numeric keys by
