@@ -618,6 +618,11 @@ impl Registry {
         }
         Ok(())
     }
+    /// Register the production comms operation against the real comms schema.
+    /// This does not enroll legacy tables for generic CRUD or full-domain export.
+    pub fn register_digest(&mut self) -> Result<(), CommitError> {
+        self.register_typed_op(digest::apply)
+    }
     pub fn verification() -> Result<Self, CommitError> {
         let mut r = Self::default();
         for e in fixtures::descriptors() {
@@ -642,7 +647,6 @@ impl Registry {
                 |raw| query::decode(raw).map_err(CommitError::Fatal),
             )?;
         }
-        r.register_typed_op(digest::apply)?;
         for d in [Domain::Core, Domain::Stream, Domain::Comms] {
             r.allow_export(d)?;
         }

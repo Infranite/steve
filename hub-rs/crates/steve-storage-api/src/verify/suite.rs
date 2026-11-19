@@ -39,6 +39,13 @@ pub struct CrashOutcome {
 pub trait Harness: Send + Sync {
     fn open(&self) -> Result<Arc<dyn DomainStore>, String>;
     fn now(&self) -> Millis;
+    /// Backend-owned source tables and transaction arrangement for shared digest assertions.
+    fn digest_fixture(
+        &self,
+        store: Arc<dyn DomainStore>,
+    ) -> Result<Box<dyn super::digest::Fixture>, String> {
+        Ok(super::digest::memory_fixture(store))
+    }
     fn unavailable(&self, capability: Capability) -> Option<String> {
         Some(format!("harness does not provide {capability:?}"))
     }

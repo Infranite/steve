@@ -1,9 +1,12 @@
-//! Digest semantic fixture for the first named operation. These verify_* rows model source
-//! changes without depending on production schemas. Every registry entry, including this
-//! operation, runs its semantic check through the full conformance suite.
+//! Shared digest assertions over backend-owned source/transaction fixtures.
+//! Mem uses verify_* rows; SQLite supplies real comms tables through the Harness hook.
 use super::{Harness, NamedCheck, block_on, entities::cell, mem::Data};
 use crate::{entity::*, ops::comms::digest::*, query::*, registry::EntryKind, uow::*, *};
-use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+    sync::Arc,
+};
 
 const TEXT: StaticFieldType = StaticFieldType::Text;
 const INT: StaticFieldType = StaticFieldType::Int;
@@ -11,7 +14,7 @@ macro_rules! fields {($($name:literal : $ty:expr),* $(,)?)=>{&[$(Field{name:$nam
 crate::entity_desc!(pub SOURCE={name:"verify_digest_source",domain:Domain::Comms,key:&["source","id"],fields:fields!["source":TEXT,"id":TEXT,"workspace_id":TEXT,"conv":TEXT,"status":TEXT,"at":INT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
 crate::entity_desc!(pub RECEIPT={name:"verify_digest_receipt",domain:Domain::Comms,key:&["workspace_id","conv","message_id"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"message_id":TEXT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
 crate::entity_desc!(pub PENDING={name:"verify_digest_pending",domain:Domain::Comms,key:&["workspace_id","conv","message_id"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"message_id":TEXT,"at":INT,"position":INT],indexes:&[],kind:StaticEntityKind::Log,retention:None});
-crate::entity_desc!(pub CONVS={name:"verify_digest_convs",domain:Domain::Comms,key:&["workspace_id","conv"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"messages":INT,"oldest":INT,"newest":INT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
+crate::entity_desc!(pub CONVS={name:"verify_digest_convs",domain:Domain::Comms,key:&["workspace_id","conv"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"messages":INT,"oldest":INT,"newest":INT,"marker":INT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
 pub fn descriptors() -> Vec<EntityDesc> {
     vec![
         SOURCE.to_wire(),
@@ -70,7 +73,8 @@ pub(super) fn apply(
         ));
     }
     let request: SyncPendingMembership = op.decode()?;
-    if request.entry == EntryPoint::DequeueOnReceipt {
+    request.validate()?;
+    if request.source == Source::Receipt {
         let (conv, id) = request.receipt_identity()?;
         let key = (request.workspace_id.as_str().to_owned(), conv, id);
         if !data
@@ -85,11 +89,13 @@ pub(super) fn apply(
                 "receipt must be inserted in the same work unit",
             ));
         }
-        data.rows
-            .entry(PENDING.name.into())
-            .or_default()
-            .retain(|(row, _)| identity(row) != key);
-    } else if request.entry == EntryPoint::EnqueueDigestible {
+        if request.entry == EntryPoint::DequeueOnReceipt {
+            data.rows
+                .entry(PENDING.name.into())
+                .or_default()
+                .retain(|(row, _)| identity(row) != key);
+        }
+    } else {
         let (source, prefix) = match request.source {
             Source::ChanMessage => ("chan_message", "space:"),
             Source::MailMessage => ("mail_message", "mail_thread:"),
@@ -107,67 +113,96 @@ pub(super) fn apply(
             .flatten()
             .find(|(row, _)| text(row, "source") == source && text(row, "id") == request.id)
             .map(|(row, _)| row.clone());
-        let desired = source.filter(|row| {
-            text(row, "workspace_id") == request.workspace_id.as_str()
-                && text(row, "conv").starts_with(prefix)
-                && ["received", "sent"].contains(&text(row, "status").as_str())
-        });
-        let desired = desired.filter(|row| {
-            !data
-                .rows
-                .get(RECEIPT.name)
-                .into_iter()
-                .flatten()
-                .any(|(receipt, _)| {
-                    identity(receipt)
-                        == (
-                            text(row, "workspace_id"),
-                            text(row, "conv"),
-                            request.id.clone(),
-                        )
-                })
-        });
-        let pending = data.rows.entry(PENDING.name.into()).or_default();
-        pending.retain(|(row, _)| {
-            text(row, "message_id") != request.id
-                || !text(row, "conv").starts_with(prefix)
-                || desired.as_ref().is_some_and(|source| {
-                    identity(row)
-                        == (
-                            text(source, "workspace_id"),
-                            text(source, "conv"),
-                            request.id.clone(),
-                        )
-                        && int(row, "at") == int(source, "at")
-                })
-        });
-        if let Some(source) = desired {
-            let key = (
-                text(&source, "workspace_id"),
-                text(&source, "conv"),
-                request.id.clone(),
-            );
-            if !pending.iter().any(|(row, _)| identity(row) == key) {
-                let next = data
-                    .seqs
-                    .entry((Domain::Comms, PENDING.name.into()))
-                    .or_default();
-                *next = next
-                    .checked_add(1)
-                    .filter(|v| *v <= i64::MAX as u64)
-                    .ok_or_else(|| {
-                        error(steve_types::Code::Exhausted, "digest position exhausted")
-                    })?;
-                pending.push((
-                    record(&[
-                        ("workspace_id", string(&key.0)),
-                        ("conv", string(&key.1)),
-                        ("message_id", string(&key.2)),
-                        ("at", Cell::Int(int(&source, "at"))),
-                        ("position", Cell::Int(*next as i64)),
-                    ]),
-                    rev,
-                ));
+        let old_workspaces: Vec<_> = data
+            .rows
+            .get(PENDING.name)
+            .into_iter()
+            .flatten()
+            .filter(|(row, _)| {
+                text(row, "message_id") == request.id && text(row, "conv").starts_with(prefix)
+            })
+            .map(|(row, _)| text(row, "workspace_id"))
+            .collect();
+        if source
+            .as_ref()
+            .is_some_and(|row| text(row, "workspace_id") != request.workspace_id.as_str())
+            || (source.is_none()
+                && old_workspaces
+                    .iter()
+                    .any(|ws| ws != request.workspace_id.as_str()))
+        {
+            return Err(error(
+                steve_types::Code::Invalid,
+                "digest source workspace mismatch",
+            ));
+        }
+        if request.entry == EntryPoint::EnqueueDigestible {
+            let desired = source.filter(|row| {
+                text(row, "workspace_id") == request.workspace_id.as_str()
+                    && text(row, "conv").starts_with(prefix)
+                    && ["received", "sent"].contains(&text(row, "status").as_str())
+            });
+            let desired = desired.filter(|row| {
+                !data
+                    .rows
+                    .get(RECEIPT.name)
+                    .into_iter()
+                    .flatten()
+                    .any(|(receipt, _)| {
+                        identity(receipt)
+                            == (
+                                text(row, "workspace_id"),
+                                text(row, "conv"),
+                                request.id.clone(),
+                            )
+                    })
+            });
+            let pending = data.rows.entry(PENDING.name.into()).or_default();
+            pending.retain(|(row, _)| {
+                text(row, "message_id") != request.id
+                    || !text(row, "conv").starts_with(prefix)
+                    || desired.as_ref().is_some_and(|source| {
+                        identity(row)
+                            == (
+                                text(source, "workspace_id"),
+                                text(source, "conv"),
+                                request.id.clone(),
+                            )
+                    })
+            });
+            if let Some(source) = desired {
+                let key = (
+                    text(&source, "workspace_id"),
+                    text(&source, "conv"),
+                    request.id.clone(),
+                );
+                if let Some((row, old_rev)) =
+                    pending.iter_mut().find(|(row, _)| identity(row) == key)
+                {
+                    super::entities::set(row, "at", Cell::Int(int(&source, "at")));
+                    *old_rev = rev;
+                } else {
+                    let next = data
+                        .seqs
+                        .entry((Domain::Comms, PENDING.name.into()))
+                        .or_default();
+                    *next = next
+                        .checked_add(1)
+                        .filter(|v| *v <= i64::MAX as u64)
+                        .ok_or_else(|| {
+                            error(steve_types::Code::Exhausted, "digest position exhausted")
+                        })?;
+                    pending.push((
+                        record(&[
+                            ("workspace_id", string(&key.0)),
+                            ("conv", string(&key.1)),
+                            ("message_id", string(&key.2)),
+                            ("at", Cell::Int(int(&source, "at"))),
+                            ("position", Cell::Int(*next as i64)),
+                        ]),
+                        rev,
+                    ));
+                }
             }
         }
     }
@@ -191,6 +226,20 @@ pub(super) fn apply(
                     ("messages", Cell::Int(messages)),
                     ("oldest", Cell::Int(oldest)),
                     ("newest", Cell::Int(newest)),
+                    (
+                        "marker",
+                        Cell::Int(
+                            data.rows
+                                .get(CONVS.name)
+                                .into_iter()
+                                .flatten()
+                                .find(|(row, _)| {
+                                    text(row, "workspace_id") == workspace
+                                        && text(row, "conv") == conv
+                                })
+                                .map_or(0, |(row, _)| int(row, "marker")),
+                        ),
+                    ),
                 ]),
                 rev,
             )
@@ -199,16 +248,53 @@ pub(super) fn apply(
     data.rows.insert(CONVS.name.into(), rows);
     Ok(())
 }
-/// Semantic test for the registered digest operation, run by the full conformance suite.
-pub fn named_checks() -> Vec<NamedCheck> {
-    vec![NamedCheck {
-        name: SYNC_PENDING_MEMBERSHIP.name,
-        domain: Domain::Comms,
-        kind: EntryKind::Operation,
-        check,
-    }]
+
+/// Test-only fixture actions. Backends arrange source mutations and named operations in
+/// one transaction, without pretending real message tables implement generic StoredEntity.
+#[derive(Clone, Debug)]
+pub enum Change {
+    Write {
+        row: Row,
+        insert_only: bool,
+    },
+    Delete {
+        source: Source,
+        id: String,
+    },
+    Receipt {
+        workspace: String,
+        conv: String,
+        id: String,
+    },
+    Marker {
+        workspace: String,
+        conv: String,
+        value: i64,
+    },
+    SkewProjection {
+        workspace: String,
+        conv: String,
+    },
+    Op(SyncPendingMembership),
 }
-fn rows(store: &dyn DomainStore, entity: &str) -> Vec<Row> {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct State {
+    pub sources: Vec<Row>,
+    pub receipts: Vec<Row>,
+    pub pending: Vec<Row>,
+    pub conversations: Vec<Row>,
+}
+pub trait Fixture: Send + Sync {
+    fn transact(&self, h: &dyn Harness, id: &str, changes: Vec<Change>) -> Result<(), CommitError>;
+    fn state(&self) -> Result<State, Error>;
+    /// Every scenario endpoint audits the real backend; SQLite calls verify_pending.
+    fn audit(&self) -> Result<(), String>;
+}
+struct MemoryFixture(Arc<dyn DomainStore>);
+pub(super) fn memory_fixture(store: Arc<dyn DomainStore>) -> Box<dyn Fixture> {
+    Box::new(MemoryFixture(store))
+}
+fn rows(store: &dyn DomainStore, entity: &str) -> Result<Vec<Row>, Error> {
     let query = Scan::<Row> {
         index: IndexName {
             entity: entity.into(),
@@ -225,22 +311,149 @@ fn rows(store: &dyn DomainStore, entity: &str) -> Vec<Row> {
     let output = block_on(store.query(AnyQuery {
         name: "scan".into(),
         domain: Domain::Comms,
-        body: Payload::Json(encode(&query).unwrap()),
-    }))
-    .unwrap();
-    let page: Page<Row> = output.body.decode().unwrap();
-    page.rows.into_iter().map(|(row, _)| row).collect()
+        body: Payload::Json(encode(&query)?),
+    }))?;
+    let page: Page<Row> = output.body.decode()?;
+    Ok(page.rows.into_iter().map(|(row, _)| row).collect())
 }
-fn message(id: &str, source: Source, workspace: &str, conv: &str, status: &str, at: i64) -> Row {
+impl Fixture for MemoryFixture {
+    fn transact(&self, h: &dyn Harness, id: &str, changes: Vec<Change>) -> Result<(), CommitError> {
+        let mutations = changes
+            .into_iter()
+            .map(|change| {
+                Ok(match change {
+                    Change::Write {
+                        row,
+                        insert_only: true,
+                    } => Mutation::Insert {
+                        entity: SOURCE.name.into(),
+                        row,
+                    },
+                    Change::Write {
+                        row,
+                        insert_only: false,
+                    } => Mutation::Upsert {
+                        entity: SOURCE.name.into(),
+                        row,
+                    },
+                    Change::Delete { source, id } => Mutation::Delete {
+                        entity: SOURCE.name.into(),
+                        key: vec![string(source_name(source)), string(&id)],
+                    },
+                    Change::Receipt {
+                        workspace,
+                        conv,
+                        id,
+                    } => Mutation::Insert {
+                        entity: RECEIPT.name.into(),
+                        row: record(&[
+                            ("workspace_id", string(&workspace)),
+                            ("conv", string(&conv)),
+                            ("message_id", string(&id)),
+                        ]),
+                    },
+                    Change::Marker {
+                        workspace,
+                        conv,
+                        value,
+                    } => Mutation::Update {
+                        entity: CONVS.name.into(),
+                        key: vec![string(&workspace), string(&conv)],
+                        set: record(&[("marker", Cell::Int(value))]),
+                    },
+                    Change::SkewProjection { workspace, conv } => Mutation::Update {
+                        entity: CONVS.name.into(),
+                        key: vec![string(&workspace), string(&conv)],
+                        set: record(&[
+                            ("messages", Cell::Int(-1)),
+                            ("oldest", Cell::Int(-1)),
+                            ("newest", Cell::Int(-1)),
+                        ]),
+                    },
+                    Change::Op(op) => Mutation::Op(op.to_wire().map_err(CommitError::Fatal)?),
+                })
+            })
+            .collect::<Result<Vec<_>, CommitError>>()?;
+        block_on(
+            self.0
+                .commit(super::suite::uow(h, Domain::Comms, id, mutations)),
+        )
+        .map(|_| ())
+    }
+    fn state(&self) -> Result<State, Error> {
+        Ok(State {
+            sources: rows(self.0.as_ref(), SOURCE.name)?,
+            receipts: rows(self.0.as_ref(), RECEIPT.name)?,
+            pending: rows(self.0.as_ref(), PENDING.name)?,
+            conversations: rows(self.0.as_ref(), CONVS.name)?,
+        })
+    }
+    fn audit(&self) -> Result<(), String> {
+        let state = self.state().map_err(|e| e.to_string())?;
+        let receipts: BTreeSet<_> = state.receipts.iter().map(identity).collect();
+        let expected: BTreeMap<_, _> = state
+            .sources
+            .iter()
+            .filter(|r| ["received", "sent"].contains(&text(r, "status").as_str()))
+            .map(|r| {
+                (
+                    (text(r, "workspace_id"), text(r, "conv"), text(r, "id")),
+                    int(r, "at"),
+                )
+            })
+            .filter(|(k, _)| !receipts.contains(k))
+            .collect();
+        let actual: BTreeMap<_, _> = state
+            .pending
+            .iter()
+            .map(|r| (identity(r), int(r, "at")))
+            .collect();
+        if actual != expected {
+            return Err("memory digest membership mismatch".into());
+        }
+        let mut groups: BTreeMap<_, Vec<i64>> = BTreeMap::new();
+        for ((ws, conv, _), at) in actual {
+            groups.entry((ws, conv)).or_default().push(at);
+        }
+        if groups.len() != state.conversations.len() {
+            return Err("memory digest conversation mismatch".into());
+        }
+        for row in state.conversations {
+            let ats = groups
+                .get(&(text(&row, "workspace_id"), text(&row, "conv")))
+                .ok_or("unexpected conversation")?;
+            if (
+                int(&row, "messages"),
+                int(&row, "oldest"),
+                int(&row, "newest"),
+            ) != (
+                ats.len() as i64,
+                *ats.iter().min().unwrap(),
+                *ats.iter().max().unwrap(),
+            ) {
+                return Err("memory digest projection mismatch".into());
+            }
+        }
+        Ok(())
+    }
+}
+pub fn source_name(source: Source) -> &'static str {
+    match source {
+        Source::ChanMessage => "chan_message",
+        Source::MailMessage => "mail_message",
+        Source::Receipt => "receipt",
+    }
+}
+pub fn message(
+    id: &str,
+    source: Source,
+    workspace: &str,
+    conv: &str,
+    status: &str,
+    at: i64,
+) -> Row {
     record(&[
-        (
-            "source",
-            string(if source == Source::ChanMessage {
-                "chan_message"
-            } else {
-                "mail_message"
-            }),
-        ),
+        ("source", string(source_name(source))),
         ("id", string(id)),
         ("workspace_id", string(workspace)),
         ("conv", string(conv)),
@@ -248,215 +461,345 @@ fn message(id: &str, source: Source, workspace: &str, conv: &str, status: &str, 
         ("at", Cell::Int(at)),
     ])
 }
-fn command(id: &str, source: Source, workspace: &str) -> Mutation {
-    Mutation::Op(
-        SyncPendingMembership::enqueue_digestible(source, id.into(), workspace.into())
-            .unwrap()
-            .to_wire()
-            .unwrap(),
+fn write(id: &str, source: Source, workspace: &str, conv: &str, status: &str, at: i64) -> Change {
+    Change::Write {
+        row: message(id, source, workspace, conv, status, at),
+        insert_only: false,
+    }
+}
+fn command(id: &str, source: Source, workspace: &str) -> Change {
+    Change::Op(
+        SyncPendingMembership::enqueue_digestible(source, id.into(), workspace.into()).unwrap(),
     )
 }
-fn submit(h: &dyn Harness, store: &dyn DomainStore, id: &str, mutations: Vec<Mutation>) {
-    let unit = super::suite::uow(h, Domain::Comms, id, mutations);
-    block_on(store.commit(unit)).unwrap();
+fn transact(
+    f: &dyn Fixture,
+    h: &dyn Harness,
+    id: &str,
+    changes: Vec<Change>,
+) -> Result<(), CommitError> {
+    let result = f.transact(h, id, changes);
+    f.audit().unwrap();
+    result
 }
-/// Covers intake, repeat, receipt scope, moves, recalls, deletions, mail and FIFO metadata.
+fn pending<'a>(s: &'a State, id: &str) -> &'a Row {
+    s.pending
+        .iter()
+        .find(|r| text(r, "message_id") == id)
+        .unwrap()
+}
+fn conversation<'a>(s: &'a State, ws: &str, conv: &str) -> &'a Row {
+    s.conversations
+        .iter()
+        .find(|r| text(r, "workspace_id") == ws && text(r, "conv") == conv)
+        .unwrap()
+}
+fn rejected(result: Result<(), CommitError>) {
+    assert!(
+        matches!(result, Err(CommitError::Fatal(e)) if e.code == steve_types::Code::Invalid),
+        "invalid scope or missing receipt must produce the contract's Invalid error"
+    );
+}
+/// The sole assertion set for Mem, Loopback<Mem> and both SQLite physical layouts.
 pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
+    let f = h.digest_fixture(store).unwrap();
+    let f = f.as_ref();
     let source = Source::ChanMessage;
     for (id, at) in [("a", 30), ("b", 10), ("c", 20)] {
-        submit(
+        transact(
+            f,
             h,
-            store.as_ref(),
             id,
             vec![
-                Mutation::Insert {
-                    entity: SOURCE.name.into(),
-                    row: message(id, source, "ws", "space:old", "received", at),
-                },
+                write(id, source, "ws", "space:old", "received", at),
                 command(id, source, "ws"),
             ],
-        );
+        )
+        .unwrap();
     }
-    let pending = rows(store.as_ref(), PENDING.name);
-    assert_eq!(pending.len(), 3);
-    let conv = rows(store.as_ref(), CONVS.name);
+    transact(
+        f,
+        h,
+        "marker",
+        vec![Change::Marker {
+            workspace: "ws".into(),
+            conv: "space:old".into(),
+            value: 73,
+        }],
+    )
+    .unwrap();
+    let first = f.state().unwrap();
+    let conv = conversation(&first, "ws", "space:old");
     assert_eq!(
         (
-            int(&conv[0], "messages"),
-            int(&conv[0], "oldest"),
-            int(&conv[0], "newest")
+            int(conv, "messages"),
+            int(conv, "oldest"),
+            int(conv, "newest")
         ),
         (3, 10, 30)
     );
-    submit(
+    transact(f, h, "repeat", vec![command("a", source, "ws")]).unwrap();
+    assert_eq!(f.state().unwrap(), first);
+    transact(
+        f,
         h,
-        store.as_ref(),
-        "repeat",
-        vec![command("a", source, "ws")],
+        "timestamp",
+        vec![
+            write("a", source, "ws", "space:old", "received", 35),
+            command("a", source, "ws"),
+        ],
+    )
+    .unwrap();
+    let changed = f.state().unwrap();
+    assert_eq!(
+        int(pending(&changed, "a"), "position"),
+        int(pending(&first, "a"), "position")
     );
-    assert_eq!(rows(store.as_ref(), PENDING.name), pending);
-    let acknowledge =
-        SyncPendingMembership::dequeue_on_receipt("space:old", "b", "ws".into()).unwrap();
-    submit(
+    assert_eq!(int(conversation(&changed, "ws", "space:old"), "marker"), 73);
+    assert_eq!(int(conversation(&changed, "ws", "space:old"), "newest"), 35);
+    let ack = SyncPendingMembership::dequeue_on_receipt("space:old", "b", "ws".into()).unwrap();
+    rejected(transact(
+        f,
         h,
-        store.as_ref(),
+        "missing-receipt",
+        vec![Change::Op(ack.clone())],
+    ));
+    assert_eq!(f.state().unwrap(), changed);
+    for (n, ws, conv) in [
+        ("wrong-conv", "ws", "space:else"),
+        ("wrong-ws", "other", "space:old"),
+    ] {
+        transact(
+            f,
+            h,
+            n,
+            vec![
+                Change::Receipt {
+                    workspace: ws.into(),
+                    conv: conv.into(),
+                    id: "b".into(),
+                },
+                Change::Op(
+                    SyncPendingMembership::dequeue_on_receipt(conv, "b", ws.into()).unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(f.state().unwrap().pending, changed.pending);
+    }
+    transact(
+        f,
+        h,
         "ack",
         vec![
-            Mutation::Insert {
-                entity: RECEIPT.name.into(),
-                row: record(&[
-                    ("workspace_id", string("ws")),
-                    ("conv", string("space:old")),
-                    ("message_id", string("b")),
-                ]),
+            Change::Receipt {
+                workspace: "ws".into(),
+                conv: "space:old".into(),
+                id: "b".into(),
             },
-            Mutation::Op(acknowledge.to_wire().unwrap()),
+            Change::Op(ack),
         ],
+    )
+    .unwrap();
+    transact(f, h, "no-requeue", vec![command("b", source, "ws")]).unwrap();
+    let acknowledged = f.state().unwrap();
+    assert_eq!(acknowledged.pending.len(), 2);
+    assert_eq!(
+        int(conversation(&acknowledged, "ws", "space:old"), "marker"),
+        73
     );
-    submit(
+    transact(
+        f,
         h,
-        store.as_ref(),
-        "no-requeue",
-        vec![command("b", source, "ws")],
-    );
-    assert_eq!(rows(store.as_ref(), PENDING.name).len(), 2);
-    let conv = rows(store.as_ref(), CONVS.name);
-    assert_eq!((int(&conv[0], "oldest"), int(&conv[0], "newest")), (20, 30));
-    submit(
-        h,
-        store.as_ref(),
         "move",
         vec![
-            Mutation::Upsert {
-                entity: SOURCE.name.into(),
-                row: message("a", source, "other", "space:new", "sent", 5),
-            },
+            write("a", source, "other", "space:new", "sent", 5),
             command("a", source, "other"),
         ],
+    )
+    .unwrap();
+    let moved = f.state().unwrap();
+    assert_eq!(moved.pending.len(), 2);
+    assert_eq!(text(pending(&moved, "a"), "workspace_id"), "other");
+    assert!(
+        int(pending(&moved, "a"), "position")
+            > first
+                .pending
+                .iter()
+                .map(|r| int(r, "position"))
+                .max()
+                .unwrap()
     );
-    let moved = rows(store.as_ref(), PENDING.name);
-    assert_eq!(moved.len(), 2);
-    let moved_a = moved
-        .iter()
-        .find(|row| text(row, "message_id") == "a")
-        .unwrap();
-    assert_eq!(text(moved_a, "workspace_id"), "other");
-    assert!(int(moved_a, "position") > pending.iter().map(|r| int(r, "position")).max().unwrap());
-    submit(
+    transact(
+        f,
         h,
-        store.as_ref(),
         "recall",
         vec![
-            Mutation::Upsert {
-                entity: SOURCE.name.into(),
-                row: message("c", source, "ws", "space:old", "recalled", 20),
-            },
+            write("c", source, "ws", "space:old", "recalled", 20),
             command("c", source, "ws"),
         ],
-    );
-    assert_eq!(rows(store.as_ref(), CONVS.name).len(), 1);
-    submit(
+    )
+    .unwrap();
+    assert_eq!(f.state().unwrap().conversations.len(), 1);
+    transact(
+        f,
         h,
-        store.as_ref(),
         "delete",
         vec![
-            Mutation::Delete {
-                entity: SOURCE.name.into(),
-                key: vec![string("chan_message"), string("a")],
+            Change::Delete {
+                source,
+                id: "a".into(),
             },
             command("a", source, "other"),
         ],
-    );
-    assert!(rows(store.as_ref(), PENDING.name).is_empty());
-    assert!(rows(store.as_ref(), CONVS.name).is_empty());
-    submit(
+    )
+    .unwrap();
+    let empty = f.state().unwrap();
+    assert!(empty.pending.is_empty() && empty.conversations.is_empty());
+    let source = Source::MailMessage;
+    transact(
+        f,
         h,
-        store.as_ref(),
         "mail",
         vec![
-            Mutation::Insert {
-                entity: SOURCE.name.into(),
-                row: message(
-                    "mail",
-                    Source::MailMessage,
-                    "ws",
-                    "mail_thread:t",
-                    "queued",
-                    40,
-                ),
-            },
-            command("mail", Source::MailMessage, "ws"),
+            write("mail", source, "ws", "mail_thread:t", "queued", 40),
+            command("mail", source, "ws"),
         ],
-    );
-    assert!(rows(store.as_ref(), PENDING.name).is_empty());
-    submit(
+    )
+    .unwrap();
+    assert!(f.state().unwrap().pending.is_empty());
+    transact(
+        f,
         h,
-        store.as_ref(),
         "mail-sent",
         vec![
-            Mutation::Upsert {
-                entity: SOURCE.name.into(),
-                row: message(
-                    "mail",
-                    Source::MailMessage,
-                    "ws",
-                    "mail_thread:t",
-                    "sent",
-                    40,
-                ),
-            },
-            command("mail", Source::MailMessage, "ws"),
+            write("mail", source, "ws", "mail_thread:t", "sent", 40),
+            command("mail", source, "ws"),
         ],
-    );
-    let mail = rows(store.as_ref(), PENDING.name);
-    assert_eq!(mail.len(), 1);
-    assert!(int(&mail[0], "position") > int(moved_a, "position"));
-    let reconcile = SyncPendingMembership::sync_pending_conversation(
-        Source::MailMessage,
-        "mail".into(),
-        "ws".into(),
-    );
-    submit(
+    )
+    .unwrap();
+    let mail = f.state().unwrap();
+    assert_eq!(mail.pending.len(), 1);
+    assert!(int(&mail.pending[0], "position") > int(pending(&moved, "a"), "position"));
+    transact(
+        f,
         h,
-        store.as_ref(),
+        "mail-marker",
+        vec![Change::Marker {
+            workspace: "ws".into(),
+            conv: "mail_thread:t".into(),
+            value: 91,
+        }],
+    )
+    .unwrap();
+    let mail = f.state().unwrap();
+    let reconcile =
+        SyncPendingMembership::sync_pending_conversation(source, "mail".into(), "ws".into());
+    transact(
+        f,
+        h,
         "reconcile",
-        vec![Mutation::Op(reconcile.to_wire().unwrap())],
-    );
-    assert_eq!(rows(store.as_ref(), PENDING.name), mail);
-    // Late uniqueness failure rolls back both source changes and derived inbox metadata.
-    let unit = super::suite::uow(
+        vec![
+            Change::SkewProjection {
+                workspace: "ws".into(),
+                conv: "mail_thread:t".into(),
+            },
+            Change::Op(reconcile.clone()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(f.state().unwrap(), mail);
+    for (id, entry) in [
+        ("bad-ws-enqueue", EntryPoint::EnqueueDigestible),
+        ("bad-ws-sync", EntryPoint::SyncPendingConversation),
+    ] {
+        let mut bad = reconcile.clone();
+        bad.workspace_id = "wrong".into();
+        bad.entry = entry;
+        rejected(transact(f, h, id, vec![Change::Op(bad)]));
+        assert_eq!(f.state().unwrap(), mail);
+    }
+    rejected(transact(
+        f,
         h,
-        Domain::Comms,
+        "bad-ws-delete",
+        vec![
+            Change::Delete {
+                source,
+                id: "mail".into(),
+            },
+            command("mail", source, "wrong"),
+        ],
+    ));
+    assert_eq!(f.state().unwrap(), mail);
+    // A channel and mail message may have the same id: old scope recovery is source-specific.
+    transact(
+        f,
+        h,
+        "collision",
+        vec![
+            write(
+                "mail",
+                Source::ChanMessage,
+                "ws",
+                "space:collision",
+                "received",
+                8,
+            ),
+            command("mail", Source::ChanMessage, "ws"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(f.state().unwrap().pending.len(), 2);
+    transact(
+        f,
+        h,
+        "delete-collision",
+        vec![
+            Change::Delete {
+                source: Source::ChanMessage,
+                id: "mail".into(),
+            },
+            command("mail", Source::ChanMessage, "ws"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(f.state().unwrap(), mail);
+    let failure = transact(
+        f,
+        h,
         "digest-atomic",
         vec![
-            Mutation::Upsert {
-                entity: SOURCE.name.into(),
-                row: message(
-                    "new",
-                    Source::MailMessage,
-                    "ws",
-                    "mail_thread:t",
-                    "received",
-                    50,
-                ),
-            },
-            command("new", Source::MailMessage, "ws"),
-            Mutation::Insert {
-                entity: SOURCE.name.into(),
-                row: message(
-                    "mail",
-                    Source::MailMessage,
-                    "ws",
-                    "mail_thread:t",
-                    "sent",
-                    40,
-                ),
+            write("new", source, "ws", "mail_thread:t", "received", 50),
+            command("new", source, "ws"),
+            Change::Write {
+                row: message("mail", source, "ws", "mail_thread:t", "sent", 40),
+                insert_only: true,
             },
         ],
     );
-    assert!(matches!(
-        block_on(store.commit(unit)),
-        Err(CommitError::Unique { .. })
-    ));
-    assert_eq!(rows(store.as_ref(), PENDING.name), mail);
+    assert!(failure.is_err());
+    assert_eq!(
+        f.state().unwrap(),
+        mail,
+        "late failure rolls source, membership and metadata back together"
+    );
+    let mut receipt_sync =
+        SyncPendingMembership::dequeue_on_receipt("space:old", "b", "ws".into()).unwrap();
+    receipt_sync.entry = EntryPoint::SyncPendingConversation;
+    transact(f, h, "receipt-reconcile", vec![Change::Op(receipt_sync)]).unwrap();
+    assert_eq!(
+        f.state().unwrap(),
+        mail,
+        "receipt reconciliation never re-enqueues acknowledged messages"
+    );
+}
+/// The registry still names one semantic check; backends supply fixtures, not assertions.
+pub fn named_checks() -> Vec<NamedCheck> {
+    vec![NamedCheck {
+        name: SYNC_PENDING_MEMBERSHIP.name,
+        domain: Domain::Comms,
+        kind: EntryKind::Operation,
+        check,
+    }]
 }
