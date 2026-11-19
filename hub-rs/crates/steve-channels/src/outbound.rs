@@ -547,7 +547,7 @@ fn seen_of(
     let label = |m: &cx::Msg| cx::label(&m.name, m.side, mode, "");
     let clock = cx::Clock {
         now,
-        tz: chrono_tz::UTC,
+        tz: steve_modules::zone::Zone::of_owner(c, ws)?.tz,
     };
     let conv = cx::arrange(
         &t,

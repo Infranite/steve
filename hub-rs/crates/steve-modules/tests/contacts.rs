@@ -1631,6 +1631,15 @@ async fn own_organization_rules() {
 #[tokio::test]
 async fn delete_org_closes_jobs_and_frees_domains() {
     let t = env();
+    // The caller's policy wins over the workspace clock at a month boundary.
+    t.clock.set(
+        chrono::DateTime::parse_from_rfc3339("2027-02-28T23:30:00Z")
+            .unwrap()
+            .timestamp_millis(),
+    );
+    exec(&t, "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default','tz','\"Europe/London\"',1);
+        INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated)
+        VALUES ('default','usr_dev',1,'now','Asia/Tokyo',1,0,1)");
     let r = app(&t, Ports::default());
     let acme = new_org(
         &r,
@@ -1648,7 +1657,7 @@ async fn delete_org_closes_jobs_and_frees_domains() {
     assert_eq!((s, b), (200, json!({"ok": true})));
     let (_, got) = req(&r, &me(), "GET", &format!("/contacts/{}", id(&c)), None).await;
     assert_eq!(got["org"], Value::Null);
-    assert_eq!(got["jobs"][0]["to"], contacts::service::this_month());
+    assert_eq!(got["jobs"][0]["to"], "2027-03");
     assert_eq!(
         got["jobs"][0]["org_name"], "Acme",
         "the name stays for display"
