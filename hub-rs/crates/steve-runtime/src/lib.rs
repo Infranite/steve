@@ -9,3 +9,8 @@ pub mod policy;
 pub mod schedule;
 #[cfg(feature = "tz")]
 pub mod tz;
+
+#[cfg(feature = "jobs")]
+pub mod jobs;
+#[cfg(feature = "jobs")]
+pub use jobs::{FirstRun, Task, every, spawn};

@@ -7,7 +7,7 @@ description = "Steve's runtime facilities: clock, time zones, schedules, retry a
 
 # A Node binary takes only what it needs (clock, policy); the Hub enables everything.
 [features]
-default = ["tz", "schedule", "policy", "due"]
+default = ["tz", "schedule", "policy", "due", "jobs"]
 tz = ["dep:chrono", "dep:chrono-tz", "dep:iana-time-zone"]
 schedule = ["tz", "dep:croner"]
 policy = ["dep:backon", "dep:rand"]
@@ -16,6 +16,7 @@ due = ["policy", "dep:metrics", "dep:tracing"]
 due-contract = ["due"]
 # The cache (R10, DESIGN §6): the Hub turns it on, a Node does not.
 cache = ["dep:moka"]
+jobs = ["dep:metrics", "tokio/rt"]
 
 [dependencies]
 futures = "=0.3.34"
