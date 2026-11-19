@@ -325,6 +325,7 @@ const ALLOWED: &[Entry] = &[
     e(Dir, "steve-hub/src/upgrades/mod.rs", 1, Hub, "upgrade operations in the Hub data dir"),
     e(Dir, "steve-hub/src/daily_backup.rs", 4, Hub, "the daily copy: the parts of the Hub's own home its tar takes, and its backups directory (old copies, what an interrupted copy left, the newest one)"),
     e(Fs, "steve-store-sqlite/src/backup/offline.rs", 8, Hub, "the single backup implementation copies the Hub's own database file into its backups directory: a 0700 directory, a create_new 0600 partial, fsync, and a no-replace hard-link publish (replaces the daily copy's own file handling in W2a.9)"),
+    e(Fs, "steve-hub/src/admin/paths.rs", 11, Hub, "the Hub's own management socket: its private 0700 run directory (or a per-user fallback under TMPDIR when the path is too long), the 0600 pointer file to it, and removing only a stale socket of this user that no longer answers"),
     e(Dir, "steve-modules/src/vault/inject.rs", 1, Hub, "the vault's scratch dirs in the Hub data dir"),
     e(Dir, "steve-knowledge/src/eval.rs", 1, Hub, "the offline retrieval eval corpus"),
     e(Fs, "steve-knowledge/src/eval.rs", 3, Hub, "the offline retrieval eval corpus"),
