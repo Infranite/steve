@@ -68,9 +68,6 @@ export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & 
 export type CloneProgress = { phase: "connecting" | "receiving" | "resolving" | "checkout" | "registering"; percent?: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
-/** an item whose category Steve filled in unsure (ST-34) */
-export type RKindReview = { id: string; kind: string; why: string }
-export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
 /** a device's room for sessions as the Hub keeps to it: running now, at most `max` (its saved concurrent-turn limit, 1–256), the rest waiting */
 export type RRoom = { running: number; max: number; waiting: number; reason?: "capacity" | "node"; /** actual Node refusal, not a guessed capacity cause */ detail?: string | null }
@@ -387,8 +384,6 @@ export const api = {
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),
-  kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
-  kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),
   settings: (p: Record<string, string>) => patch("/settings", p),
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
   draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),

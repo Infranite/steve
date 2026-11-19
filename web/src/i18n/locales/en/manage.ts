@@ -728,14 +728,6 @@ export default {
   danger: {
     confirm: "{{label}} for good",
   },
-  kinds: {
-    backfill: "Check past items",
-    pending: "Categories to confirm · {{n}}",
-    intro: "Steve filled in these categories without being sure. Change one or click “Looks right” and it leaves the list.",
-    ok: "Looks right",
-    okAll: "All look right",
-    allSet: "Every item has a category. Nothing to confirm.",
-  },
   tagCat: {
     all: "All",
     project: "Project",

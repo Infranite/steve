@@ -1481,10 +1481,6 @@ impl Domain for CoreDomain {
         self.jobs.start("core.judge", || {
             steve_runtime::spawn("core.judge", self.core.clone().run_judge_watch())
         });
-        // ST-34: items made before the categories, or left without one, get theirs
-        self.jobs.start("core.backfill", || {
-            steve_runtime::spawn("core.backfill", self.core.clone().backfill_kinds_all())
-        });
     }
 
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
@@ -1509,10 +1505,6 @@ impl Domain for CoreDomain {
         };
         to_obj(blocking(move || c.create_item(n)).await?)
     }
-    async fn kinds_backfill(&self, ws: &str, dry: bool) -> BResult<Value> {
-        let r = self.core.backfill_kinds(ws, dry).await.map_err(cerr)?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
     async fn disk_report(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.disk_report()).await?;
@@ -1521,16 +1513,6 @@ impl Domain for CoreDomain {
     async fn reclaim_workspaces(&self) -> BResult<Value> {
         let c = self.core.clone();
         let r = blocking(move || c.reclaim_workspaces()).await?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
-    async fn kinds_review(&self, ws: &str) -> BResult<Value> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        let r = blocking(move || c.kinds_review(&ws)).await?;
-        serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
-    }
-    async fn kinds_reviewed(&self, ws: &str, ids: Vec<String>) -> BResult<Value> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        let r = blocking(move || c.kinds_reviewed(&ws, &ids)).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {

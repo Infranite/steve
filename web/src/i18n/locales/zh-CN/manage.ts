@@ -721,14 +721,6 @@ export default {
   danger: {
     confirm: "确认{{label}}",
   },
-  kinds: {
-    backfill: "检查历史事项",
-    pending: "待确认的分类 · {{n}}",
-    intro: "这些事项的分类是 Steve 补的，没有把握。改一个分类或点“没问题”，它就离开这个列表。",
-    ok: "没问题",
-    okAll: "全部没问题",
-    allSet: "所有事项都有一个分类，没有待确认的。",
-  },
   /* tag categories; the stored value stays the Chinese word (store TAG_CATS) */
   tagCat: {
     all: "全部",

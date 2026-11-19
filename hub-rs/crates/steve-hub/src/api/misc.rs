@@ -1610,36 +1610,6 @@ pub async fn device_patch(
 pub(crate) const SMART: Tier = Tier::Smart;
 pub(crate) const FAST: Tier = Tier::Fast;
 
-// ── item categories (ST-34) ──
-
-pub async fn kinds_backfill(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    b: Bytes,
-) -> ApiResult {
-    let v = if b.is_empty() { json!({}) } else { body(&b)? };
-    let mut k = Check::object(&v);
-    let dry = k.opt_bool("dry").unwrap_or(false);
-    k.finish()?;
-    ok(st.domain.kinds_backfill(&c.ws, dry).await?)
-}
-
-pub async fn kinds_review(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
-    ok(st.domain.kinds_review(&c.ws).await?)
-}
-
-pub async fn kinds_reviewed(
-    State(st): State<AppState>,
-    Extension(c): Extension<Ctx>,
-    b: Bytes,
-) -> ApiResult {
-    let v = body(&b)?;
-    let mut k = Check::object(&v);
-    let ids = k.opt_str_array("ids", None, None).unwrap_or_default();
-    k.finish()?;
-    ok(st.domain.kinds_reviewed(&c.ws, ids).await?)
-}
-
 /// Routes mounted behind the shared API login and body-limit layers.
 pub(crate) fn routes() -> axum::Router<super::AppState> {
     use super::*;
@@ -1679,11 +1649,6 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
             patch(misc::tag_patch).delete(misc::tag_remove),
         )
         .route("/tags/{id}/merge", post(misc::tag_merge))
-        .route("/tags/kinds/backfill", post(misc::kinds_backfill))
-        .route(
-            "/tags/kinds/review",
-            get(misc::kinds_review).post(misc::kinds_reviewed),
-        )
         .route("/access", get(crate::access::overview))
         .route(
             "/access/oidc",

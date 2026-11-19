@@ -596,7 +596,7 @@ async fn pause_finish_drop_and_new_cycles() {
 }
 
 /// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;
-/// the categories themselves cannot be deleted, merged or joined; a backfill finds nothing to do.
+/// the categories themselves cannot be deleted, merged or joined.
 async fn an_item_keeps_exactly_one_category(e: &Env) {
     let (_, state) = e.call("GET", "/api/state", None).await;
     let tags = state["tags"].as_array().expect("tags").clone();
@@ -702,17 +702,21 @@ async fn an_item_keeps_exactly_one_category(e: &Env) {
         .await;
     assert_eq!(s, 409);
 
-    // every item already has one: the backfill touches nothing, however often it runs
-    for _ in 0..2 {
-        let (s, r) = e
-            .call("POST", "/api/tags/kinds/backfill", Some(json!({})))
+    // The one-time compatibility API and its review list are gone.
+    for (method, path) in [
+        ("POST", "/api/tags/kinds/backfill"),
+        ("GET", "/api/tags/kinds/review"),
+        ("POST", "/api/tags/kinds/review"),
+    ] {
+        let missing = e
+            .call(method, "/api/__missing_kind_workflow__", Some(json!({})))
             .await;
-        assert_eq!(s, 200, "{r}");
-        assert_eq!(r["filled"], json!([]), "{r}");
-        assert_eq!(r["checked"], r["kept"], "{r}");
+        let removed = e.call(method, path, Some(json!({}))).await;
+        assert_eq!(
+            removed, missing,
+            "{method} {path} must use the ordinary missing-route fallback"
+        );
     }
-    let (s, r) = e.call("GET", "/api/tags/kinds/review", None).await;
-    assert_eq!((s, r), (200, json!([])));
 }
 
 /// The page says which workspace a request is for (`x-steve-ws`). A workspace the user is not a member of

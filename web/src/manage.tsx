@@ -23,11 +23,11 @@ import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt,
 } from "@/store"
-import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { api } from "@/api"
+import { go, Page, BotAvatar, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
@@ -551,25 +551,6 @@ function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; s
 
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
-/* the items whose category Steve filled in unsure: switch it or confirm it, then they leave the list */
-function KindsReview({ xs, setXs }: { xs: RKindReview[] | null; setXs: (x: RKindReview[]) => void }) {
-  const t = useT()
-  const done = async (ids: string[]) => { const left = await kindsReviewed(ids); if (left) setXs(left) }
-  const rows = (xs ?? []).filter((x) => st.items.some((i) => i.id === x.id))
-  /* nothing to confirm is the usual case: then there is nothing here, not a box that says so */
-  if (!rows.length) return null
-  return <Section data-kinds-review label={t("manage:kinds.pending", { n: rows.length })}>
-    <>
-      <p className="mb-3 px-1 type-callout text-muted-foreground">{t("manage:kinds.intro")}</p>
-      <Panel>{rows.map((x) => { const i = it(x.id); return (
-        <Row key={x.id} title={<span className="inline-flex min-w-0 items-center gap-2"><ItemNo id={i.id} /><span className="truncate">{i.t}</span></span>} sub={x.why || undefined} data-kind-review={x.id}>
-          <Select quiet testId={"review-kind-" + x.id} value={kindOf(i) ?? ""} onChange={(k) => { setKind(i.id, k); void done([x.id]) }} options={kindTags().map((kt) => ({ v: kt.id, l: <KindTag id={kt.id} className="border-0 bg-transparent px-0" /> }))} />
-          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done([x.id])} data-kind-ok={x.id}>{t("manage:kinds.ok")}</Button>
-        </Row>) })}</Panel>
-      {rows.length > 1 && <div className="mt-2 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done(rows.map((x) => x.id))} data-kind-ok-all>{t("manage:kinds.okAll")}</Button></div>}
-    </>
-  </Section>
-}
 function TagsPane() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
@@ -577,15 +558,11 @@ function TagsPane() {
   const cats = ["全部", ...TAG_CATS.filter((c) => st.tags.some((tg) => tg.cat === c))]
   const d = del ? tag(del) : null, m = merge ? tag(merge) : null
   const domain = st.tags.filter((x) => !isKind(x))
-  const [review, setReview] = useState<RKindReview[] | null>(null), [checking, setChecking] = useState(false)
-  useEffect(() => { void loadKindsReview().then(setReview) }, [])
-  const backfill = <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={checking} onClick={async () => { setChecking(true); await kindsBackfill(); const left = await loadKindsReview(); setReview(left); setChecking(false); if (!left?.length) toast(t("manage:kinds.allSet")) }} data-kinds-backfill>{checking && <Spinner className="size-3" />}{t("manage:kinds.backfill")}</Button>
   return <div className="flex flex-col gap-8" data-tags-pane>
-    <KindsReview xs={review} setXs={setReview} />
     <div className="flex flex-wrap items-center gap-2"><Segmented size="sm" value={cats.includes(tagCat) ? tagCat : "全部"} onChange={(v) => { tagCat = v; r() }} options={cats.map((c) => [c, catLabel(t, c)] as const)} /><span className="flex-1" /><Button size="sm" onClick={() => openSheet("tag", {})} data-new-tag-btn><PlusIcon />{t("manage:tags.new")}</Button></div>
     {!st.tags.length && <Empty title={t("manage:tags.empty")} sub={t("manage:tags.emptySub")} />}
     {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
-      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} right={kind ? backfill : undefined} note={kind ? t("manage:tags.intro") : undefined}>
+      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} note={kind ? t("manage:tags.intro") : undefined}>
         <Panel>{xs.map((tg) => (
           <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{!kind && tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-tag-menu={tg.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>

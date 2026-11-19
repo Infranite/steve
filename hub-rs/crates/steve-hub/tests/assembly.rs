@@ -843,7 +843,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "23 original descriptions plus 14 formerly detached spawn entries"
+        "installed jobs retain their declared names"
     );
     let st = steve_hub::api::AppState::new(h.cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules);
@@ -861,7 +861,6 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "core.workspaces",
         "core.stalls",
         "core.judge",
-        "core.backfill",
     ]);
     expected.sort_unstable();
     let mut running = st.jobs.names();
