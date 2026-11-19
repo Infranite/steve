@@ -38,7 +38,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-pub use bus::{ChangeEvent, FnPublisher, NoPublisher, Publisher};
+pub use bus::{ChangeEvent, FnPublisher, NoPublisher, Published, Publisher};
 pub use repo::*;
 pub use tx::Tx;
 pub use types::*;
@@ -142,8 +142,8 @@ pub(crate) struct W<'a> {
 }
 
 impl W<'_> {
-    pub fn publish(&self, e: ChangeEvent) {
-        self.store.emit_event(e)
+    pub fn publish(&self, e: impl Into<Published>) {
+        self.store.emit_event(e.into())
     }
 
     /// A write transaction on the write connection (or a nested `SAVEPOINT` inside [`Store::atomic`]).
@@ -242,8 +242,8 @@ impl Store {
     }
 
     /// Publishes an event that is not tied to a store write (`steve.thinking`, imports finishing).
-    pub fn publish(&self, e: ChangeEvent) {
-        self.emit_event(e)
+    pub fn publish(&self, e: impl Into<Published>) {
+        self.emit_event(e.into())
     }
 
     #[track_caller]

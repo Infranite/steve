@@ -1,14 +1,14 @@
 id: changeevent-channel
 snapshots:
   "fn f() { send(ChangeEvent::Channel { id: id }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Channel { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Channel { id: id })); }"
     labels:
     - source: "ChangeEvent::Channel { id: id }"
       style: primary
       start: 14
       end: 45
   "fn f() { send(s::ChangeEvent::Channel { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Channel { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Channel { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Channel { ws, id: make(\"comma,colon:\") }"
       style: primary

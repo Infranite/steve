@@ -1,14 +1,14 @@
 id: hubevent-space
 snapshots:
   "fn f() { send(HubEvent::Space { id: id }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Space { id: id })); }"
     labels:
     - source: "HubEvent::Space { id: id }"
       style: primary
       start: 14
       end: 40
   "fn f() { send(s::HubEvent::Space { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Space { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Space { ws, id: make(\"comma,colon:\") }"
       style: primary

@@ -1,14 +1,14 @@
 id: changeevent-stats
 snapshots:
   "fn f() { send(ChangeEvent::Stats { id: id }); }":
-    fixed: "fn f() { send(steve_types::StatsEvent::Stats { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::StatsEvent::Stats { id: id })); }"
     labels:
     - source: "ChangeEvent::Stats { id: id }"
       style: primary
       start: 14
       end: 43
   "fn f() { send(s::ChangeEvent::Stats { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::StatsEvent::Stats { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::StatsEvent::Stats { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Stats { ws, id: make(\"comma,colon:\") }"
       style: primary

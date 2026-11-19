@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
-use crate::{ChangeEvent, Store, StoreError};
+use crate::{Published, Store, StoreError};
 
 static NEXT_SAVEPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
 struct Staged {
-    events: Vec<ChangeEvent>,
+    events: Vec<Published>,
     diagnostics: Vec<crate::diagnostics::Record>,
     diagnostic_until: i64,
     outbox: bool,
@@ -156,7 +156,7 @@ impl Drop for NestedFrameGuard {
 pub struct Tx<'a> {
     c: &'a Connection,
     store: Option<&'a Store>,
-    events: RefCell<Vec<ChangeEvent>>,
+    events: RefCell<Vec<Published>>,
     diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
     /// New item capture windows become visible to producers only after commit.
     diagnostic_until: Cell<i64>,
@@ -166,7 +166,8 @@ pub struct Tx<'a> {
 
 impl Tx<'_> {
     /// Queues an event for after the commit.
-    pub fn publish(&self, e: ChangeEvent) {
+    pub fn publish(&self, e: impl Into<Published>) {
+        let e = e.into();
         if let Some(store) = self.store {
             if let Err(e) = store.try_stage_event(e) {
                 self.events.borrow_mut().push(e);
@@ -266,7 +267,7 @@ impl Store {
         Some(unsafe { ptr.as_ref() })
     }
 
-    pub(crate) fn try_stage_event(&self, e: ChangeEvent) -> Result<(), ChangeEvent> {
+    pub(crate) fn try_stage_event(&self, e: Published) -> Result<(), Published> {
         let store_id = self.inner_id();
         ACTIVE_WRITES.with(|cell| {
             let mut list = cell.borrow_mut();
@@ -280,9 +281,9 @@ impl Store {
         })
     }
 
-    pub(crate) fn emit_event(&self, e: ChangeEvent) {
+    pub(crate) fn emit_event(&self, e: Published) {
         if let Err(e) = self.try_stage_event(e) {
-            self.inner.bus.publish(e);
+            self.inner.bus.publish_batch(vec![e]);
         }
     }
 
@@ -413,9 +414,7 @@ impl Store {
         for event in staged.diagnostics {
             self.diagnostics().record(event);
         }
-        for e in staged.events {
-            self.inner.bus.publish(e);
-        }
+        self.inner.bus.publish_batch(staged.events);
         if staged.outbox {
             self.inner.outbox_wake.notify_one();
         }
@@ -474,8 +473,14 @@ impl WrappedEffects {
         for d in s.diagnostics {
             store.stage_diagnostic(d);
         }
+        let mut immediate = Vec::new();
         for e in s.events {
-            store.emit_event(e);
+            if let Err(e) = store.try_stage_event(e) {
+                immediate.push(e);
+            }
+        }
+        if !immediate.is_empty() {
+            store.inner.bus.publish_batch(immediate);
         }
         if s.outbox && !store.try_stage_outbox() {
             store.inner.outbox_wake.notify_one();

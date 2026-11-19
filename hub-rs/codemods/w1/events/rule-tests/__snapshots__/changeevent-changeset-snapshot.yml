@@ -1,14 +1,14 @@
 id: changeevent-changeset
 snapshots:
   "fn f() { send(ChangeEvent::Changeset { id: id }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Changeset { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Changeset { id: id })); }"
     labels:
     - source: "ChangeEvent::Changeset { id: id }"
       style: primary
       start: 14
       end: 47
   "fn f() { send(s::ChangeEvent::Changeset { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Changeset { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Changeset { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Changeset { ws, id: make(\"comma,colon:\") }"
       style: primary

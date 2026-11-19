@@ -55,6 +55,8 @@ fn consume(e: ChangeEvent) { match e { ChangeEvent::Item { id } => (), _ => () }
             self.assertIn("no rule for this legacy constructor", first)
             applied = run("--apply", "--crate", "steve-fixture")
             changed = src.read_text()
+            self.assertIn("send(steve_types::DomainEvent::from(steve_types::WorkEvent::Item", changed)
+            self.assertIn("send(steve_types::LiveEvent::from(steve_types::WorkLiveEvent::SteveThinking", changed)
             self.assertIn('let value: String = format!("a,{}", "b").into()', changed)
             self.assertIn('ws: { let value: String = ws;', changed)
             self.assertIn('send(ChangeEvent::Future { id });', changed)

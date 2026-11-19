@@ -1,14 +1,14 @@
 id: changeevent-item
 snapshots:
   "fn f() { send(ChangeEvent::Item { id: id }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), id: id })); }"
     labels:
     - source: "ChangeEvent::Item { id: id }"
       style: primary
       start: 14
       end: 42
   "fn f() { send(s::ChangeEvent::Item { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Item { ws, id: make(\"comma,colon:\") }"
       style: primary

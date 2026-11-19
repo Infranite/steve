@@ -1,14 +1,14 @@
 id: hubevent-persona
 snapshots:
   "fn f() { send(HubEvent::Persona { id: id }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Persona { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Persona { id: id })); }"
     labels:
     - source: "HubEvent::Persona { id: id }"
       style: primary
       start: 14
       end: 42
   "fn f() { send(s::HubEvent::Persona { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Persona { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Persona { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Persona { ws, id: make(\"comma,colon:\") }"
       style: primary

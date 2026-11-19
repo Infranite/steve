@@ -206,10 +206,297 @@ impl ChangeEvent {
     }
 }
 
+/// Transitional publication: legacy producers keep their wire contract until the sweep finishes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Published {
+    Legacy(ChangeEvent),
+    Domain(steve_types::DomainEvent),
+    Live(steve_types::LiveEvent),
+}
+
+impl From<ChangeEvent> for Published {
+    fn from(event: ChangeEvent) -> Self {
+        Self::Legacy(event)
+    }
+}
+impl From<steve_types::DomainEvent> for Published {
+    fn from(event: steve_types::DomainEvent) -> Self {
+        Self::Domain(event)
+    }
+}
+impl From<steve_types::LiveEvent> for Published {
+    fn from(event: steve_types::LiveEvent) -> Self {
+        Self::Live(event)
+    }
+}
+
+impl Published {
+    /// Compatibility for old test collectors and optional legacy subscribers only. The Hub overrides
+    /// publish_batch and never downgrades typed events. Removed with ChangeEvent in W1.3c.
+    fn into_legacy(self) -> ChangeEvent {
+        match self {
+            Self::Legacy(event) => event,
+            Self::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Item {
+                id,
+                ..
+            })) => ChangeEvent::Item { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+                id,
+                item_id,
+                ..
+            })) => ChangeEvent::Decision {
+                id: id.to_string(),
+                item_id: item_id.map(|value| value.map(|id| id.to_string())),
+            },
+            Self::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
+                id,
+                item_id,
+                ..
+            })) => ChangeEvent::Session {
+                id: id.to_string(),
+                item_id: item_id.map(|value| value.map(|id| id.to_string())),
+            },
+            Self::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::Event {
+                session_id,
+                seq,
+                kind,
+                data,
+                ..
+            })) => ChangeEvent::Event {
+                session_id: session_id.to_string(),
+                seq: seq.0,
+                kind: kind,
+                data: serde_json::to_value(data).expect("validated JSON"),
+            },
+            Self::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Message {
+                id,
+                ..
+            })) => ChangeEvent::Message { id: id.to_string() },
+            Self::Live(steve_types::LiveEvent::Work(
+                steve_types::WorkLiveEvent::SteveThinking { on, ws, phase },
+            )) => ChangeEvent::SteveThinking {
+                on: on,
+                ws: Some(ws.to_string()),
+                phase: phase,
+            },
+            Self::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::SteveDraft {
+                ws,
+                mid,
+                thought,
+                text,
+            })) => ChangeEvent::SteveDraft {
+                ws: ws.to_string(),
+                mid: mid.to_string(),
+                thought: thought,
+                text: text,
+            },
+            Self::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::SteveTool {
+                ws,
+                mid,
+                run,
+                name,
+                brief,
+                ok,
+                kind,
+                running,
+                call,
+                started_at,
+                at,
+            })) => ChangeEvent::SteveTool {
+                ws: ws.to_string(),
+                mid: mid.to_string(),
+                run: run.to_string(),
+                name: name,
+                brief: brief,
+                ok: ok,
+                kind: kind,
+                running: running,
+                call: call,
+                started_at: started_at.map(|value| value.0),
+                at: at.map(|value| value.0),
+            },
+            Self::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::ThreadRun {
+                id,
+                ws,
+            })) => ChangeEvent::ThreadRun {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Devices(
+                steve_types::DevicesEvent::ReleaseHold { hold },
+            )) => ChangeEvent::ReleaseHold {
+                hold: hold.map(|value| serde_json::to_value(value).expect("validated JSON")),
+            },
+            Self::Domain(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Bot {
+                id,
+                ..
+            })) => ChangeEvent::Bot { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project {
+                id,
+                ..
+            })) => ChangeEvent::Project { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Tag {
+                id,
+                ..
+            })) => ChangeEvent::Tag { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Config(
+                steve_types::ConfigEvent::Workspace { id, .. },
+            )) => ChangeEvent::Workspace { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Config(
+                steve_types::ConfigEvent::Settings { id, .. },
+            )) => ChangeEvent::Settings { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Devices(
+                steve_types::DevicesEvent::Device { id },
+            )) => ChangeEvent::Device { id: id.to_string() },
+            Self::Domain(steve_types::DomainEvent::Devices(steve_types::DevicesEvent::Node {
+                id,
+                user,
+            })) => ChangeEvent::Node {
+                id: id.to_string(),
+                user: user.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Devices(
+                steve_types::DevicesEvent::Client { id, user },
+            )) => ChangeEvent::Client {
+                id: id.to_string(),
+                user: user.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+                id,
+                ws,
+            })) => ChangeEvent::Party {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm {
+                id,
+                ws,
+            })) => ChangeEvent::Mm {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Config(
+                steve_types::ConfigEvent::Changeset { id, ws },
+            )) => ChangeEvent::Changeset {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
+                id,
+                ws,
+            })) => ChangeEvent::Account {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Connection { id, ws },
+            )) => ChangeEvent::Connection {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Vault(steve_types::VaultEvent::Vault {
+                id,
+                ws,
+            })) => ChangeEvent::Vault {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Automation(
+                steve_types::AutomationEvent::Signal { id, ws },
+            )) => ChangeEvent::Signal {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Automation(
+                steve_types::AutomationEvent::Flow { id, ws },
+            )) => ChangeEvent::Flow {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Automation(
+                steve_types::AutomationEvent::Run { id, flow_id, ws },
+            )) => ChangeEvent::Run {
+                id: id.to_string(),
+                flow_id: flow_id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Space { id, ws },
+            )) => ChangeEvent::Space {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::ChanMessage { id, space_id, ws },
+            )) => ChangeEvent::ChanMessage {
+                id: id.to_string(),
+                space_id: space_id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Persona { id, ws },
+            )) => ChangeEvent::Persona {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Digest { id, ws },
+            )) => ChangeEvent::Digest {
+                id: id,
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Automation(
+                steve_types::AutomationEvent::Calendar { id, ws },
+            )) => ChangeEvent::Calendar {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Channel { id, ws },
+            )) => ChangeEvent::Channel {
+                id: id.to_string(),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Autonomy(
+                steve_types::AutonomyEvent::Yolo { ws },
+            )) => ChangeEvent::Yolo { ws: ws.to_string() },
+            Self::Domain(steve_types::DomainEvent::Autonomy(
+                steve_types::AutonomyEvent::YoloAction {
+                    id,
+                    decision_id,
+                    ws,
+                },
+            )) => ChangeEvent::YoloAction {
+                id: id.to_string(),
+                decision_id: decision_id.map(|value| value.to_string()),
+                ws: ws.to_string(),
+            },
+            Self::Domain(steve_types::DomainEvent::Stats(steve_types::StatsEvent::Stats {
+                ws,
+                day,
+            })) => ChangeEvent::Stats {
+                ws: ws.to_string(),
+                day: day,
+            },
+            Self::Domain(
+                steve_types::DomainEvent::Knowledge(_) | steve_types::DomainEvent::Integrations(_),
+            ) => panic!("new event families require a typed Publisher"),
+        }
+    }
+}
+
 /// Where the store sends change events. Called synchronously while the write lock is held, so
 /// events arrive in commit order; implementations must be cheap and must not call back into the store.
 pub trait Publisher: Send + Sync {
     fn publish(&self, event: ChangeEvent);
+
+    /// A committed transaction, still under the write lock. Typed-capable publishers override this
+    /// to allocate one revision for the batch. Legacy-only collectors must never silently lose events.
+    fn publish_batch(&self, events: Vec<Published>) {
+        for event in events {
+            self.publish(event.into_legacy());
+        }
+    }
 }
 
 /// No subscribers is normal (no browser open), so send errors are ignored, like EventEmitter.
@@ -229,6 +516,9 @@ impl<P: Publisher + ?Sized> Publisher for Arc<P> {
     fn publish(&self, event: ChangeEvent) {
         (**self).publish(event)
     }
+    fn publish_batch(&self, events: Vec<Published>) {
+        (**self).publish_batch(events)
+    }
 }
 
 /// Drops every event (tools, migrations-only opens).
@@ -237,6 +527,7 @@ pub struct NoPublisher;
 
 impl Publisher for NoPublisher {
     fn publish(&self, _: ChangeEvent) {}
+    fn publish_batch(&self, _: Vec<Published>) {}
 }
 
 /// Adapts a closure, handy for tests and for bridging into another bus type.
@@ -252,6 +543,36 @@ impl<F: Fn(ChangeEvent) + Send + Sync> Publisher for FnPublisher<F> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn old_collectors_accept_migrated_producers_without_changing_their_callback() {
+        let events = std::sync::Mutex::new(Vec::new());
+        let publisher = FnPublisher(|e: ChangeEvent| events.lock().unwrap().push(e));
+        publisher.publish_batch(vec![
+            steve_types::DomainEvent::from(steve_types::WorkEvent::Item {
+                id: "item".into(),
+                ws: "workspace".into(),
+            })
+            .into(),
+            steve_types::LiveEvent::from(steve_types::WorkLiveEvent::SteveThinking {
+                on: true,
+                ws: "workspace".into(),
+                phase: None,
+            })
+            .into(),
+        ]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                ChangeEvent::Item { id: "item".into() },
+                ChangeEvent::SteveThinking {
+                    on: true,
+                    ws: Some("workspace".into()),
+                    phase: None
+                },
+            ]
+        );
+    }
 
     #[test]
     fn json_matches_hub_event() {

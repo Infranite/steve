@@ -8,4 +8,4 @@ rule:
 constraints:
   ENUM:
     regex: '^(.*::)?HubEvent$'
-fix: 'steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'
+fix: 'steve_types::DomainEvent::from(steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), $$$FIELDS })'

@@ -1,14 +1,14 @@
 id: hubevent-message
 snapshots:
   "fn f() { send(HubEvent::Message { id: id }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::Message { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::Message { ws: steve_types::ws_todo!(), id: id })); }"
     labels:
     - source: "HubEvent::Message { id: id }"
       style: primary
       start: 14
       end: 42
   "fn f() { send(s::HubEvent::Message { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::Message { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::Message { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::HubEvent::Message { ws, id: make(\"comma,colon:\") }"
       style: primary

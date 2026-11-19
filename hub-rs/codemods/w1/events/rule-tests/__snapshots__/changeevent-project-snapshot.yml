@@ -1,14 +1,14 @@
 id: changeevent-project
 snapshots:
   "fn f() { send(ChangeEvent::Project { id: id }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), id: id })); }"
     labels:
     - source: "ChangeEvent::Project { id: id }"
       style: primary
       start: 14
       end: 45
   "fn f() { send(s::ChangeEvent::Project { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Project { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Project { ws, id: make(\"comma,colon:\") }"
       style: primary

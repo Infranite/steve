@@ -61,6 +61,7 @@ pub enum WorkLiveEvent {
         on: bool,
         ws: WorkspaceId,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         phase: Option<String>,
     },
     #[serde(rename = "steve.draft")]
@@ -83,10 +84,13 @@ pub enum WorkLiveEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         running: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         call: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         started_at: Option<Millis>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
         at: Option<Millis>,
     },
 }

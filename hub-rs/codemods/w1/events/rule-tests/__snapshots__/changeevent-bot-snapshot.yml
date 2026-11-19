@@ -1,14 +1,14 @@
 id: changeevent-bot
 snapshots:
   "fn f() { send(ChangeEvent::Bot { id: id }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Bot { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Bot { ws: steve_types::ws_todo!(), id: id })); }"
     labels:
     - source: "ChangeEvent::Bot { id: id }"
       style: primary
       start: 14
       end: 41
   "fn f() { send(s::ChangeEvent::Bot { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ConfigEvent::Bot { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ConfigEvent::Bot { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Bot { ws, id: make(\"comma,colon:\") }"
       style: primary

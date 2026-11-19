@@ -1,14 +1,14 @@
 id: changeevent-space
 snapshots:
   "fn f() { send(ChangeEvent::Space { id: id }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Space { id: id })); }"
     labels:
     - source: "ChangeEvent::Space { id: id }"
       style: primary
       start: 14
       end: 43
   "fn f() { send(s::ChangeEvent::Space { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Space { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::Space { ws, id: make(\"comma,colon:\") }"
       style: primary

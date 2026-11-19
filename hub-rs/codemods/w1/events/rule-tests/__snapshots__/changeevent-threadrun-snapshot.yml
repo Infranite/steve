@@ -1,14 +1,14 @@
 id: changeevent-threadrun
 snapshots:
   "fn f() { send(ChangeEvent::ThreadRun { id: id }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::ThreadRun { id: id }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::ThreadRun { id: id })); }"
     labels:
     - source: "ChangeEvent::ThreadRun { id: id }"
       style: primary
       start: 14
       end: 47
   "fn f() { send(s::ChangeEvent::ThreadRun { ws, id: make(\"comma,colon:\") }); }":
-    fixed: "fn f() { send(steve_types::WorkEvent::ThreadRun { ws, id: make(\"comma,colon:\") }.into()); }"
+    fixed: "fn f() { send(steve_types::DomainEvent::from(steve_types::WorkEvent::ThreadRun { ws, id: make(\"comma,colon:\") })); }"
     labels:
     - source: "s::ChangeEvent::ThreadRun { ws, id: make(\"comma,colon:\") }"
       style: primary

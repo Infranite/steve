@@ -143,3 +143,58 @@ impl From<crate::WorkLiveEvent> for LiveEvent {
 pub fn ws_todo() -> WorkspaceId {
     panic!("W1.3b: fill the workspace from the write transaction")
 }
+
+impl DomainEvent {
+    /// Stable SSE tag, used without inspecting serialized JSON.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Work(crate::WorkEvent::Item { .. }) => "item",
+            Self::Work(crate::WorkEvent::Decision { .. }) => "decision",
+            Self::Work(crate::WorkEvent::Session { .. }) => "session",
+            Self::Work(crate::WorkEvent::Message { .. }) => "message",
+            Self::Work(crate::WorkEvent::ThreadRun { .. }) => "thread.run",
+            Self::Devices(crate::DevicesEvent::ReleaseHold { .. }) => "release.hold",
+            Self::Config(crate::ConfigEvent::Bot { .. }) => "bot",
+            Self::Config(crate::ConfigEvent::Project { .. }) => "project",
+            Self::Config(crate::ConfigEvent::Tag { .. }) => "tag",
+            Self::Config(crate::ConfigEvent::Workspace { .. }) => "workspace",
+            Self::Config(crate::ConfigEvent::Settings { .. }) => "settings",
+            Self::Devices(crate::DevicesEvent::Device { .. }) => "device",
+            Self::Devices(crate::DevicesEvent::Node { .. }) => "node",
+            Self::Devices(crate::DevicesEvent::Client { .. }) => "client",
+            Self::People(crate::PeopleEvent::Party { .. }) => "party",
+            Self::Config(crate::ConfigEvent::Mm { .. }) => "mm",
+            Self::Config(crate::ConfigEvent::Changeset { .. }) => "changeset",
+            Self::People(crate::PeopleEvent::Account { .. }) => "account",
+            Self::Channels(crate::ChannelsEvent::Connection { .. }) => "connection",
+            Self::Vault(crate::VaultEvent::Vault { .. }) => "vault",
+            Self::Automation(crate::AutomationEvent::Signal { .. }) => "signal",
+            Self::Automation(crate::AutomationEvent::Flow { .. }) => "flow",
+            Self::Automation(crate::AutomationEvent::Run { .. }) => "run",
+            Self::Channels(crate::ChannelsEvent::Space { .. }) => "space",
+            Self::Channels(crate::ChannelsEvent::ChanMessage { .. }) => "chan_message",
+            Self::Channels(crate::ChannelsEvent::Persona { .. }) => "persona",
+            Self::Channels(crate::ChannelsEvent::Digest { .. }) => "digest",
+            Self::Automation(crate::AutomationEvent::Calendar { .. }) => "calendar",
+            Self::Channels(crate::ChannelsEvent::Channel { .. }) => "channel",
+            Self::Autonomy(crate::AutonomyEvent::Yolo { .. }) => "yolo",
+            Self::Autonomy(crate::AutonomyEvent::YoloAction { .. }) => "yolo_action",
+            Self::Stats(crate::StatsEvent::Stats { .. }) => "stats",
+            Self::Knowledge(crate::KnowledgeEvent::Kb { .. }) => "kb",
+            Self::Integrations(crate::IntegrationsEvent::Gh { .. }) => "gh",
+            Self::Integrations(crate::IntegrationsEvent::Mail { .. }) => "mail",
+        }
+    }
+}
+
+impl LiveEvent {
+    /// Stable SSE tag, used without inspecting serialized JSON.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Work(crate::WorkLiveEvent::Event { .. }) => "event",
+            Self::Work(crate::WorkLiveEvent::SteveThinking { .. }) => "steve.thinking",
+            Self::Work(crate::WorkLiveEvent::SteveDraft { .. }) => "steve.draft",
+            Self::Work(crate::WorkLiveEvent::SteveTool { .. }) => "steve.tool",
+        }
+    }
+}

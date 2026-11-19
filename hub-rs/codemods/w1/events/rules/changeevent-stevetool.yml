@@ -8,4 +8,4 @@ rule:
 constraints:
   ENUM:
     regex: '^(.*::)?ChangeEvent$'
-fix: 'steve_types::WorkLiveEvent::SteveTool { $$$FIELDS }.into()'
+fix: 'steve_types::LiveEvent::from(steve_types::WorkLiveEvent::SteveTool { $$$FIELDS })'
