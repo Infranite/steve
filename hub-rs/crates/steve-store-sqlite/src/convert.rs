@@ -44,7 +44,7 @@ pub fn convert_observed(
     conn: &mut Connection,
     observer: migrate::Observer,
 ) -> Result<Outcome, Error> {
-    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::Validation)?;
+    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::LegacyReplay)?;
     let outcome = convert_on(conn, Some(&progress))?;
     progress.report(
         if matches!(outcome, Outcome::AlreadyCurrent) {
@@ -65,7 +65,7 @@ pub fn convert_and_migrate_observed(
     conn: &mut Connection,
     observer: migrate::Observer,
 ) -> Result<Outcome, Error> {
-    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::Validation)?;
+    let progress = migrate::ProgressTracker::new(conn, observer, migrate::Phase::LegacyReplay)?;
     let outcome = convert_on(conn, Some(&progress))?;
     migrate::migrate_on(conn, Some(&progress))?;
     progress.finish();
@@ -194,13 +194,9 @@ fn migrate_legacy_with(
             p.report(migrate::Phase::LegacyReplay, None, false);
         }
         legacy::migrate_to_head_with(conn, |tx| {
-            if let Some(p) = progress {
-                p.report(migrate::Phase::Validation, None, false);
-            }
+            // Precommit validation belongs to replay; Validation starts only
+            // after this legacy transaction commits, keeping stages monotonic.
             verify_legacy(tx).map_err(MigrationError::Validation)?;
-            if let Some(p) = progress {
-                p.report(migrate::Phase::LegacyReplay, None, false);
-            }
             Ok::<_, MigrationError>(())
         })
         .map_err(|e| match e {
@@ -226,6 +222,9 @@ fn verify_legacy(conn: &Connection) -> Result<(), Error> {
 }
 
 fn install_layout(conn: &Connection) -> Result<(usize, usize, usize), Error> {
+    // convert_on requires autocommit and the caller exclusively owns storage.lock.
+    // The shared borrow also lets its progress tracker outlive this transaction;
+    // SQLite rejects nesting and RAII rolls back any uncommitted installation.
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(db_error)?;
     let has_owner: bool = tx
