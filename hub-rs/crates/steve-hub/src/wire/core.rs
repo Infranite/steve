@@ -1428,8 +1428,6 @@ impl Domain for CoreDomain {
         blocking(move || c.report_release()).await
     }
     async fn shutdown(&self) {
-        self.jobs.stop().await;
-        self.plugins.stop_all().await;
         let node = async {
             match &self.node {
                 Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
@@ -1454,6 +1452,9 @@ impl Domain for CoreDomain {
         if !node_stopped {
             tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
+        // Consumers stay live while the Node and connection runtimes flush their final events.
+        self.jobs.stop().await;
+        self.plugins.stop_all().await;
     }
     fn background_tasks(&self) -> Option<Arc<crate::jobs::Tasks>> {
         Some(self.jobs.clone())
