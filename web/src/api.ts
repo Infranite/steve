@@ -1,5 +1,5 @@
 import type { Code } from "./gen"
-import type { ResearchEvent } from "@/thread/chat-progress"
+import type { DomainEvent, LiveEvent, Envelope, StreamControl } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
@@ -162,7 +162,7 @@ export type State = {
 }
 export type RHold = { item: string; running: number; since: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
-export type HubEvent = { type: "item" | "bot" | "project" | "tag" | "workspace" | "settings" | "device" | "message"; id: string } | { type: "decision" | "session"; id: string; item_id?: string | null } | { type: "event"; session_id: string; seq: number; kind: string; data: unknown } | { type: "steve.thinking"; on: boolean; phase?: "route" | "answer" | "config" | "item" | "supplement" | "research" } | ResearchEvent | { type: "thread.run"; id: string; ws: string } | { type: "steve.draft"; ws: string; mid: string; thought: string; text: string } | { type: "release.hold"; hold: RHold | null } | { type: "node" | "client"; id: string; user: string } | { type: "stream.gap" | "stream.reset" }
+export type HubEvent = Envelope<DomainEvent | LiveEvent> | StreamControl
 
 /** an A2UI action as the page sends it (A2UI v0.9.1 `action` plus where it came from); `data`: the surface's data model then */
 export type A2uiSubmit = { block: string; surfaceId: string; sourceComponentId: string; name: string; label: string; context: Record<string, unknown>; data: unknown; timestamp: string }

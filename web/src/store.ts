@@ -705,7 +705,7 @@ const paint = (sid: string) => { painted.add(sid); painting ??= setTimeout(() =>
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
 export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
-export type ModuleEvent = { type: (typeof MODULE_EVENTS)[number] | "resync"; id: string; ws?: string; flow_id?: string; space_id?: string }
+export type ModuleEvent = Extract<HubEvent, { type: (typeof MODULE_EVENTS)[number] }> | { type: "resync"; id: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
 /** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */
 export const hubSubs = new Set<(e: HubEvent | ModuleEvent) => void>()
@@ -745,7 +745,7 @@ function forgetResearchActivity() {
   if (st.live) { st.live.now = undefined; st.live.active = []; st.live.at = undefined }
 }
 
-function onHub(e: HubEvent | ModuleEvent) {
+function onHub(e: HubEvent) {
   /* the Hub could not continue from our cursor (it restarted, or we were away past its window): refetch everything, once */
   if (e.type === "stream.reset" || e.type === "stream.gap") {
     // The research deltas are not replayed. Keep recorded results, but forget which call was active.
@@ -761,7 +761,7 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
   if (e.type === "workspace") { void resync(); return }
-  if (e.type === "release.hold") { st.hold = e.hold; emit(); return }
+  if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
   if (e.type === "steve.draft") {
     if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
     nextDraft = false
