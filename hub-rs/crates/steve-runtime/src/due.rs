@@ -3,7 +3,7 @@
 //! registry: tokio already queues the timers, and write fairness belongs to the storage executor.
 //! Every source must pass [`contract::check`] (feature `due-contract`), which pins the B3 class of
 //! defects: filtering by due time before the batch limit, a failing row not blocking later rows, and
-//! dead letters taking no further part.
+//! dead letters taking no further part (or continuing sources retrying individual rows).
 use crate::{Clock, policy::Backoff};
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 use tokio::sync::Notify;
@@ -29,8 +29,8 @@ impl std::error::Error for DueError {}
 /// - `next_due` is the earliest due time of rows that can still run (dead letters excluded).
 /// - `run_due(now)` selects rows with `due <= now` **before** applying its batch limit, ordered by due
 ///   time, and handles each row on its own: a row that fails gets its own later due time (the domain's
-///   [`Backoff`]) and, past its limit, becomes a dead letter that neither method sees again. Other rows
-///   of the batch go on.
+///   [`Backoff`]) and, if the domain has a failure limit, becomes a dead letter that neither method
+///   sees again. Continuing sources may retry indefinitely. Other rows of the batch go on.
 pub trait DueSource: Send + Sync + 'static {
     /// The loop's name, also its metric label.
     fn name(&self) -> &'static str;
@@ -53,8 +53,11 @@ pub async fn due_loop<S: DueSource>(
     let fallback = FALLBACK.as_millis() as i64;
     let mut failures = 0u32;
     loop {
+        let next = source.next_due().await;
+        // A storage query may yield for longer than the remaining wait. Anchor both the
+        // deadline comparison and sleep to the time after that query completes.
         let now = clock.now();
-        let step = match source.next_due().await {
+        let step = match next {
             Ok(Some(at)) if at <= now => {
                 lag.record((now - at) as f64 / 1000.0);
                 source.run_due(now).await.map(|()| None)
@@ -96,6 +99,10 @@ pub mod contract {
         fn add(&self, at: i64, poison: bool) -> String;
         /// Ids of rows that ran successfully, in any order.
         fn done(&self) -> Vec<String>;
+        /// Whether this domain retires failing rows. Continuing sources must back off per row.
+        fn dead_letters(&self) -> bool {
+            true
+        }
         /// Ids of rows that became dead letters.
         fn dead(&self) -> Vec<String>;
         /// Expected next deadline of successful recurring rows; one-shot sources have none.
@@ -123,7 +130,7 @@ pub mod contract {
         );
         // 2. a row that always fails does not hold back the rows due after it
         let f = new();
-        let poison = f.add(now - 1, true);
+        f.add(now - 1, true);
         let ok = f.add(now, false);
         f.source()
             .run_due(now)
@@ -134,14 +141,33 @@ pub mod contract {
             "{}: a failing row must not block later rows",
             f.source().name()
         );
-        // 3. a poison row ends as a dead letter that takes no further part
+        // 3. Isolate a poison row: no healthy recurring deadline can hide a hot retry.
+        let f = new();
+        let poison = f.add(now, true);
         let mut at = now;
         for _ in 0..rounds {
-            if f.dead().contains(&poison) {
+            f.source()
+                .run_due(at)
+                .await
+                .expect("run_due with a failing row");
+            assert!(
+                !f.done().contains(&poison),
+                "{}: a failing row is not successful",
+                f.source().name()
+            );
+            if f.dead_letters() && f.dead().contains(&poison) {
                 break;
             }
-            at += DAY;
-            f.source().run_due(at).await.expect("run_due");
+            let next = f.source().next_due().await.expect("next_due");
+            assert!(
+                next.is_some_and(|next| next > at),
+                "{}: a failing row must get its own later due time",
+                f.source().name()
+            );
+            at = next.unwrap();
+        }
+        if !f.dead_letters() {
+            return;
         }
         let name = f.source().name();
         assert!(

@@ -277,3 +277,199 @@ async fn a_wake_before_waiting_is_kept_and_new_work_runs_without_advancing_time(
     before.notify_one();
     assert!(futures::FutureExt::now_or_never(before.notified()).is_some());
 }
+
+/// An endless reconciler has no business dead letter, but still retries only its own failed row.
+struct Continuing(Table);
+impl DueSource for Continuing {
+    fn name(&self) -> &'static str {
+        "continuing"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        self.0.next_due().await
+    }
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        self.0.run_due(now).await?;
+        for r in self.0.rows.lock().unwrap().iter_mut() {
+            r.dead = false;
+        }
+        Ok(())
+    }
+}
+impl Fixture for Continuing {
+    type Source = Self;
+    fn source(&self) -> &Self {
+        self
+    }
+    fn batch(&self) -> usize {
+        LIMIT
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        self.0.add(at, poison)
+    }
+    fn done(&self) -> Vec<String> {
+        self.0.done()
+    }
+    fn dead(&self) -> Vec<String> {
+        vec![]
+    }
+    fn dead_letters(&self) -> bool {
+        false
+    }
+}
+#[tokio::test]
+async fn continuing_rows_must_back_off_without_becoming_dead_letters() {
+    check(|| Continuing(Table::default()), T0, 5).await;
+}
+struct Hot(Continuing);
+impl DueSource for Hot {
+    fn name(&self) -> &'static str {
+        "hot"
+    }
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        self.0.next_due().await
+    }
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        self.0.run_due(now).await?;
+        for r in self
+            .0
+            .0
+            .rows
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|r| r.poison)
+        {
+            r.at = now;
+        }
+        Ok(())
+    }
+}
+impl Fixture for Hot {
+    type Source = Self;
+    fn source(&self) -> &Self {
+        self
+    }
+    fn batch(&self) -> usize {
+        LIMIT
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        self.0.add(at, poison)
+    }
+    fn done(&self) -> Vec<String> {
+        self.0.done()
+    }
+    fn dead(&self) -> Vec<String> {
+        vec![]
+    }
+    fn dead_letters(&self) -> bool {
+        false
+    }
+}
+#[tokio::test]
+#[should_panic(expected = "a failing row must get its own later due time")]
+async fn the_contract_rejects_swallowed_row_errors_that_spin() {
+    check(|| Hot(Continuing(Table::default())), T0, 3).await;
+}
+#[tokio::test]
+async fn r7b_every_overrun_runs_one_immediate_followup_without_burst() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let clock = Arc::new(FakeClock::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let (count, gate) = (calls.clone(), release.clone());
+    let task = steve_runtime::every(
+        "test.overrun",
+        clock.clone(),
+        Duration::from_secs(1),
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let (count, gate) = (count.clone(), gate.clone());
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    gate.notified().await;
+                }
+            }
+        },
+    );
+    until(|| calls.load(Ordering::SeqCst) == 1 && clock.observed(0)).await;
+    clock.advance(3500);
+    release.notify_one();
+    until(|| calls.load(Ordering::SeqCst) >= 2 && clock.observed(3500)).await;
+    settle().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    clock.advance(999);
+    until(|| clock.observed(4499)).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    clock.advance(1);
+    until(|| calls.load(Ordering::SeqCst) == 3).await;
+    task.stop();
+    task.await;
+}
+
+async fn until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !condition() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fake-clock job made progress");
+}
+
+#[tokio::test]
+async fn a_slow_next_due_query_does_not_add_its_latency_to_the_deadline() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Slow {
+        table: Table,
+        first: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+    impl DueSource for Slow {
+        fn name(&self) -> &'static str {
+            "slow-query"
+        }
+        async fn next_due(&self) -> Result<Option<i64>, DueError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.table.next_due().await
+        }
+        async fn run_due(&self, now: i64) -> Result<(), DueError> {
+            self.table.run_due(now).await
+        }
+    }
+    let clock = Arc::new(FakeClock::new(T0));
+    let source = Arc::new(Slow {
+        table: Table::default(),
+        first: AtomicBool::new(true),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    source.table.add(T0 + 1000, false);
+    let task = tokio::spawn(due_loop(
+        source.clone(),
+        clock.clone(),
+        Arc::new(Notify::new()),
+        Backoff {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(1),
+            factor: 1,
+            jitter: Jitter::None,
+            attempts: None,
+            reset_after: None,
+        },
+    ));
+    source.entered.notified().await;
+    clock.advance(900);
+    source.release.notify_one();
+    until(|| clock.observed(T0 + 900)).await;
+    clock.advance(99);
+    until(|| clock.observed(T0 + 999)).await;
+    assert_eq!(source.table.batches(), 0);
+    clock.advance(1);
+    until(|| source.table.batches() == 1).await;
+    task.abort();
+    let _ = task.await;
+}
