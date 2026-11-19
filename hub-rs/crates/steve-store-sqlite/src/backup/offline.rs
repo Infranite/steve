@@ -104,47 +104,10 @@ impl Drop for Cleanup {
         }
     }
 }
-/// Atomically rename without replacing an existing file, including a racing publisher.
-/// Both paths share a directory/filesystem. These native APIs avoid the check-then-rename
-/// race of std::fs::rename (which replaces destinations on Unix).
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn publish(from: &Path, to: &Path) -> io::Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    let from = CString::new(from.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let to = CString::new(to.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    #[cfg(target_os = "macos")]
-    unsafe extern "C" {
-        fn renamex_np(
-            from: *const std::ffi::c_char,
-            to: *const std::ffi::c_char,
-            flags: u32,
-        ) -> i32;
-    }
-    #[cfg(target_os = "linux")]
-    unsafe extern "C" {
-        fn renameat2(
-            from_dir: i32,
-            from: *const std::ffi::c_char,
-            to_dir: i32,
-            to: *const std::ffi::c_char,
-            flags: u32,
-        ) -> i32;
-    }
-    // SAFETY: both C strings are NUL-terminated and remain alive for the call. Flags are
-    // RENAME_EXCL (Darwin) / RENAME_NOREPLACE with AT_FDCWD (Linux), respectively.
-    #[cfg(target_os = "macos")]
-    let result = unsafe { renamex_np(from.as_ptr(), to.as_ptr(), 4) };
-    #[cfg(target_os = "linux")]
-    let result = unsafe { renameat2(-100, from.as_ptr(), -100, to.as_ptr(), 1) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Publish an already verified file without replacing an existing destination, including
+/// a racing publisher. Both names share one directory/filesystem: hard_link creates the
+/// final name atomically, then removing partial completes publication. The caller fsyncs
+/// the directory and withdraws its own final name if durability or budget checks fail.
 fn publish(from: &Path, to: &Path) -> io::Result<()> {
     fs::hard_link(from, to)?;
     if let Err(error) = fs::remove_file(from) {
