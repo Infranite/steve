@@ -15,10 +15,12 @@ steve-calendar/src/sources.rs	ttl-cache	sources::IcsSource::cache	1
 steve-calendar/src/sync.rs	timer-loop	sync::Calendar::run	1
 steve-channels/src/adapters/ext_ws/feed.rs	timer-loop	adapters::ext_ws::feed::ExtWsHook as ConnectionHook::run	1
 steve-channels/src/adapters/ext_ws/provider.rs	timer-loop	adapters::ext_ws::provider::ExtWs::pace	1
+steve-channels/src/adapters/ext_ws/provider.rs	ttl-cache	adapters::ext_ws::provider::Registry::buckets	1
 steve-channels/src/adapters/ext_ws/session.rs	timer-loop	adapters::ext_ws::session::ping_loop	1
 steve-channels/src/adapters/feishu/app_registration/service.rs	timer-loop	adapters::feishu::app_registration::service::Registrations::poll_until_done	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::cancel	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::start_with	1
+steve-channels/src/adapters/feishu/ratelimit.rs	ttl-cache	adapters::feishu::ratelimit::Limiter::buckets	1
 steve-channels/src/adapters/feishu/self_poll.rs	timer-loop	adapters::feishu::self_poll::SelfPoller::run	1
 steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner::serve	1
 steve-core/src/judge.rs	timer-loop	judge::Core::run_judge_watch	1

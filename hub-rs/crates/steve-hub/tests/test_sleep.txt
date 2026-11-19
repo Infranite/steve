@@ -63,7 +63,6 @@ steve-hub/src/nodes/install.rs	3
 steve-hub/src/nodes/removal.rs	1
 steve-hub/src/nodes/upgrade.rs	2
 steve-hub/src/plugins/run.rs	1
-steve-hub/src/system.rs	1
 steve-hub/src/upgrades/tests.rs	4
 steve-hub/src/wire/chan_tests.rs	4
 steve-hub/src/wire/core.rs	2
