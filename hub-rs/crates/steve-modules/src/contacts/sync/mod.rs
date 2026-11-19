@@ -13,7 +13,7 @@
 //! 1. `let conns = TableConnections::new().with("feishu", "飞书", factory)` (C7 provides the factory);
 //! 2. `let sync = DirectorySync::new(modules.clone(), Arc::new(conns))`, then
 //!    `ports.sync = Some(sync.clone())` before building the contacts router;
-//! 3. `sync.spawn()` at startup (part of `jobs::spawn_all`): one worker and a one-second timer;
+//! 3. Register `sync.run()` as the owned `contacts.sync` job: one worker and a one-second timer;
 //! 4. Feishu contact events (`contact.department.*`, `contact.user.*`) → `sync.changed(ws, connection_id)`.
 
 pub mod adapter;
