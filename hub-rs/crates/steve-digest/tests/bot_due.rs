@@ -9,6 +9,7 @@ use steve_modules::testkit::TestEnv;
 use steve_runtime::due::contract::{self, Fixture};
 use steve_runtime::due::{DueSource, due_loop};
 use steve_runtime::policy::{Backoff, Jitter};
+use steve_runtime::testkit::{eventually_notified, eventually_sync};
 use steve_store::{Store, StoreError, uid};
 use tokio::sync::Notify;
 
@@ -123,13 +124,10 @@ fn backoff() -> Backoff {
     }
 }
 async fn observed(p: &Packets, at: i64) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while !p.env.clock.observed(at) {
-            tokio::task::yield_now().await;
-        }
+    eventually_sync("due loop sleeping on the fake clock", || {
+        p.env.clock.observed(at)
     })
-    .await
-    .expect("due loop sleeping on the fake clock");
+    .await;
 }
 
 #[tokio::test]
@@ -149,9 +147,10 @@ async fn packet_age_runs_at_the_deadline_between_minute_ticks() {
     observed(&p, at - 1).await;
     assert!(p.done().is_empty());
     p.env.clock.advance(1);
-    tokio::time::timeout(Duration::from_secs(30), p.processed.notified())
-        .await
-        .unwrap();
+    eventually_notified("packet consumed", &p.processed, || async {
+        p.done().contains(&id)
+    })
+    .await;
     assert_eq!(p.done(), vec![id]);
     task.abort();
     let _ = task.await;
@@ -161,7 +160,7 @@ async fn packet_age_runs_at_the_deadline_between_minute_ticks() {
 async fn a_committed_packet_wakes_an_idle_source_without_advancing_time() {
     let p = Packets::new();
     assert_eq!(p.source.next_due().await.unwrap(), None);
-    let wake = Arc::new(Notify::new());
+    let wake = p.env.store().commit_wake(&["digest_packets", "settings"]);
     let task = tokio::spawn(due_loop(
         p.source.clone(),
         p.env.clock.clone(),
@@ -170,10 +169,10 @@ async fn a_committed_packet_wakes_an_idle_source_without_advancing_time() {
     ));
     observed(&p, NOW).await;
     let id = p.add(NOW, false);
-    wake.notify_one();
-    tokio::time::timeout(Duration::from_secs(30), p.processed.notified())
-        .await
-        .unwrap();
+    eventually_notified("packet consumed", &p.processed, || async {
+        p.done().contains(&id)
+    })
+    .await;
     assert_eq!(p.done(), vec![id]);
     task.abort();
     let _ = task.await;
@@ -221,4 +220,88 @@ async fn packet_count_can_start_before_the_age_deadline() {
     assert_eq!(p.source.next_due().await.unwrap(), Some(NOW));
     p.source.run_due(NOW).await.unwrap();
     assert_eq!(p.done(), vec![id]);
+}
+
+#[tokio::test]
+async fn packet_commits_do_not_self_wake_into_a_busy_loop() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    use steve_runtime::{Clock, FakeClock, due::DueError};
+
+    // Freeze domain wall time while independently advancing the loop's fallback waits.
+    struct FixedWall(Arc<FakeClock>);
+    impl Clock for FixedWall {
+        fn now(&self) -> i64 {
+            NOW
+        }
+        fn sleep(&self, d: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.0.sleep(d)
+        }
+    }
+    struct Counted {
+        source: Arc<BotSource<Consumer>>,
+        runs: AtomicUsize,
+        checks: AtomicUsize,
+    }
+    impl DueSource for Counted {
+        fn name(&self) -> &'static str {
+            self.source.name()
+        }
+        async fn next_due(&self) -> Result<Option<i64>, DueError> {
+            let next = self.source.next_due().await;
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            next
+        }
+        async fn run_due(&self, now: i64) -> Result<(), DueError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            self.source.run_due(now).await
+        }
+    }
+    for poison in [false, true] {
+        let p = Packets::new();
+        let id = p.add(NOW, poison);
+        let source = Arc::new(Counted {
+            source: p.source.clone(),
+            runs: AtomicUsize::new(0),
+            checks: AtomicUsize::new(0),
+        });
+        let elapsed = Arc::new(FakeClock::new(0));
+        let task = steve_runtime::spawn(
+            "test.digest.bot",
+            due_loop(
+                source.clone(),
+                Arc::new(FixedWall(elapsed.clone())),
+                p.env.store().commit_wake(&["digest_packets", "settings"]),
+                backoff(),
+            ),
+        );
+        eventually_sync("packet written and source sleeping", || {
+            source.checks.load(Ordering::SeqCst) >= 2 && elapsed.observed(0)
+        })
+        .await;
+        assert_eq!(p.ids(if poison { "leased" } else { "done" }), vec![id]);
+        for at in [60_000, 120_000, 180_000] {
+            let before = source.checks.load(Ordering::SeqCst);
+            elapsed.advance(60_000);
+            eventually_sync("fallback rechecked and source sleeping again", || {
+                source.checks.load(Ordering::SeqCst) > before && elapsed.observed(at)
+            })
+            .await;
+            assert!(
+                !task.is_finished(),
+                "a failed loop cannot count as bounded work"
+            );
+            assert_eq!(p.env.clock.now(), NOW, "domain wall time stays frozen");
+            assert_eq!(
+                source.runs.load(Ordering::SeqCst),
+                1,
+                "own packet writes may recheck, but must not rerun without a new deadline"
+            );
+        }
+        task.stop();
+        task.await;
+    }
 }

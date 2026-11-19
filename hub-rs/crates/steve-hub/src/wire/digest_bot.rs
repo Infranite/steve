@@ -57,9 +57,6 @@ async fn bind(
             } else {
                 tx.execute("DELETE FROM settings WHERE workspace_id = ? AND key = ?", params![who.ws, bot::SCHEDULE])?;
             }
-            tx.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Settings {
-                id: who.ws.clone().into(), ws: who.ws.clone().into(),
-            }));
             Ok::<_, ApiError>(())
         })?;
         flow.wake();
@@ -144,8 +141,27 @@ impl queue::BotRunner for Runner {
     }
 }
 
-/// Packet-count/age and lease deadlines, woken by committed domain events.
-pub async fn run(m: Modules, flow: Arc<FlowCx>, wake: Arc<tokio::sync::Notify>) {
+/// Tables read by BotSource and runnable/check_refs, including schedule reference checks.
+/// This is only a recheck hint; queue and policy decisions always read the store again.
+fn wake(store: &steve_store::Store) -> Arc<tokio::sync::Notify> {
+    store.commit_wake(&[
+        "digest_packets",
+        "settings",
+        "flows",
+        "flow_triggers",
+        "workspace_members",
+        "bots",
+        "bot_workspaces",
+        "projects",
+        "tags",
+        "flow_runs",
+        "items",
+    ])
+}
+
+/// Packet-count/age and lease deadlines, woken by committed changes to their input tables.
+pub async fn run(m: Modules, flow: Arc<FlowCx>) {
+    let wake = wake(&m.store);
     let source = Arc::new(queue::BotSource::new(&m, Runner(flow)));
     steve_runtime::due::due_loop(
         source,
@@ -163,26 +179,10 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>, wake: Arc<tokio::sync::Notify>) 
     .await;
 }
 
-/// Queue/configuration and ordinary schedule completion can all make a Bot runnable.
-pub fn wakes(event: &steve_types::BusEvent) -> bool {
-    use steve_types::{AutomationEvent, ChannelsEvent, ConfigEvent, DomainEvent, WorkEvent};
-    matches!(
-        event.as_domain(),
-        Some(DomainEvent::Channels(
-            ChannelsEvent::Digest { .. }
-                | ChannelsEvent::Space { .. }
-                | ChannelsEvent::Connection { .. }
-        )) | Some(DomainEvent::Config(
-            ConfigEvent::Settings { .. } | ConfigEvent::Workspace { .. }
-        )) | Some(DomainEvent::Automation(
-            AutomationEvent::Flow { .. } | AutomationEvent::Run { .. }
-        )) | Some(DomainEvent::Work(WorkEvent::Item { .. }))
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
     use steve_flow::testkit::FlowEnv;
     use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 
@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(st, 200, "{schedule}");
         let id = schedule["id"].as_str().unwrap().to_string();
         let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
-        e.env.take_events();
+        let changed = wake(e.env.store());
         let (st, v) = call(
             &api,
             Some(&caller(WS, ME)),
@@ -212,18 +212,15 @@ mod tests {
         )
         .await;
         assert_eq!(st, 200, "{v}");
-        assert!(e.env.take_events().iter().any(|event| matches!(
-            event.as_domain(),
-            Some(steve_types::DomainEvent::Config(
-                steve_types::ConfigEvent::Settings { .. }
-            ))
-        )));
+        assert!(changed.notified().now_or_never().is_some());
         (e, id)
     }
 
     #[tokio::test]
     async fn runnable_excludes_disabled_busy_and_ownerless_bindings_and_spaces_restarts() {
         let (e, id) = bound().await;
+        let changed = wake(e.env.store());
+        let assert_changed = || assert!(changed.notified().now_or_never().is_some());
         let read = || e.env.store().reader(|c| runnable(c, WS)).unwrap();
         assert_eq!(read(), Some((id.clone(), i64::MIN)));
         e.env
@@ -233,6 +230,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        assert_changed();
         assert!(read().is_none());
         e.env.store().with_conn(|c| {
             c.execute("UPDATE flows SET enabled = 1 WHERE id = ?", [&id])?;
@@ -240,6 +238,7 @@ mod tests {
                 VALUES ('digest_busy',?, ?,1,'manual','running',1000)", params![WS,id])?;
             Ok(())
         }).unwrap();
+        assert_changed();
         assert!(read().is_none());
         e.env
             .store()
@@ -251,6 +250,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        assert_changed();
         assert_eq!(
             read(),
             Some((id, 61_000)),
@@ -266,48 +266,8 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        assert_changed();
         assert!(read().is_none());
-    }
-
-    #[test]
-    fn only_relevant_committed_events_wake_the_bot() {
-        use steve_types::{BusEvent, ChannelsEvent, ConfigEvent, DomainEvent};
-        for event in [
-            DomainEvent::from(ChannelsEvent::Digest {
-                id: "p".into(),
-                ws: WS.into(),
-            }),
-            DomainEvent::from(ConfigEvent::Settings {
-                id: WS.into(),
-                ws: WS.into(),
-            }),
-            DomainEvent::from(steve_types::AutomationEvent::Run {
-                id: "r".into(),
-                flow_id: "f".into(),
-                ws: WS.into(),
-            }),
-        ] {
-            assert!(wakes(&BusEvent::from(event)));
-        }
-        assert!(wakes(&BusEvent::from(DomainEvent::from(
-            steve_types::WorkEvent::Item {
-                id: "item".into(),
-                ws: WS.into(),
-            }
-        ))));
-        assert!(!wakes(&BusEvent::from(DomainEvent::from(
-            steve_types::WorkEvent::Message {
-                id: "message".into(),
-                ws: WS.into(),
-            }
-        ))));
-        assert!(!wakes(&BusEvent::from(DomainEvent::from(
-            ChannelsEvent::ChanMessage {
-                id: "m".into(),
-                space_id: "s".into(),
-                ws: WS.into(),
-            }
-        ))));
     }
 
     #[tokio::test]

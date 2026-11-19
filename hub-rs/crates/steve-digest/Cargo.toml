@@ -28,5 +28,6 @@ tokio = { version = "=1.54.1", features = ["rt", "sync", "time"] }
 tracing = "=0.1.44"
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", features = ["due-contract", "testkit"] }
 tokio = { version = "=1.54.1", features = ["rt", "rt-multi-thread", "macros"] }
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query", "tokio", "http1"] }
