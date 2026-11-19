@@ -6,7 +6,10 @@ use steve_channels::{Channels, Outbox};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS};
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
+use steve_modules::testkit::{ME, WS};
 use steve_modules::vault::{Vault, keystore::FileKeyStore};
 use steve_runtime::due::contract::{self, Fixture};
 
