@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_store::base::{self, DecisionKind, Viewer};
-use steve_store::{ChangeEvent, NewDecision, Tx, uid};
+use steve_store::{NewDecision, Tx, uid};
 
 use crate::ChannelResult;
 use crate::channel::SpaceKind;
@@ -1037,10 +1037,12 @@ pub fn touch(tx: &Tx, id: &str, at: i64, external: bool) -> ChannelResult<()> {
 
 /// SSE `{type:"space", id, ws}`.
 pub fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Space {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Space {
+            id: id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 // ---------------------------------------------------------------- settings
@@ -1954,10 +1956,12 @@ pub fn set_account_rules(
         conn,
         &json!({ "fields": ["rules"] }),
     )?;
-    tx.publish(ChangeEvent::Channel {
-        id: conn.into(),
-        ws: ws.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Channel {
+            id: conn.into(),
+            ws: ws.clone().into(),
+        },
+    ));
     channel_settings(tx, ws, conn)?.ok_or_else(|| ApiError::not_found("连接"))
 }
 

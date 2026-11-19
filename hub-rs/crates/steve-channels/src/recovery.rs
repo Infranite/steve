@@ -10,8 +10,8 @@ use std::sync::Arc;
 use steve_modules::accounts::connections::repo::{self, ConnRow};
 use steve_modules::changes::{self, ChangeOp, DraftTarget, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Caller, Registry};
+use steve_store::Tx;
 use steve_store::base::{self, Change, Viewer};
-use steve_store::{ChangeEvent, Tx};
 
 const KIND: &str = "channel_send_permission";
 const OP: &str = "chan.send_permission.enable";
@@ -101,10 +101,12 @@ impl ChangeOp for Permission {
             row.caps.push(spaces::SEND_AS_USER_CAP.into());
             repo::update(tx, &row, steve_store::now())?;
             repo::set_enabled_at(tx, &row.id, steve_store::now())?;
-            tx.publish(ChangeEvent::Connection {
-                id: row.id.clone(),
-                ws: cx.ws.into(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ChannelsEvent::Connection {
+                    id: row.id.clone().into(),
+                    ws: cx.ws.into(),
+                },
+            ));
             base::audit(
                 tx,
                 cx.ws,
@@ -129,10 +131,12 @@ impl ChangeOp for Permission {
             }
             row.caps.retain(|c| c != spaces::SEND_AS_USER_CAP);
             repo::update(tx, &row, steve_store::now())?;
-            tx.publish(ChangeEvent::Connection {
-                id: row.id.clone(),
-                ws: cx.ws.into(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ChannelsEvent::Connection {
+                    id: row.id.clone().into(),
+                    ws: cx.ws.into(),
+                },
+            ));
             base::audit(
                 tx,
                 cx.ws,

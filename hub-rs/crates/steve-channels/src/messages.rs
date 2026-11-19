@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use steve_modules::contacts::{TimelineEntry, TimelineSource};
 use steve_modules::{ApiResult, Modules};
 use steve_store::base::Viewer;
-use steve_store::{ChangeEvent, StoreError, Tx, uid};
+use steve_store::{StoreError, Tx, uid};
 
 use crate::ChannelResult;
 
@@ -288,11 +288,13 @@ pub fn is_ours_out(c: &Connection, space: &str, exts: &[&str]) -> ChannelResult<
 
 /// SSE `{type:"chan_message", id, space_id, ws}`.
 pub fn event(tx: &Tx, ws: &str, space: &str, id: &str) {
-    tx.publish(ChangeEvent::ChanMessage {
-        id: id.into(),
-        space_id: space.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::ChanMessage {
+            id: id.into(),
+            space_id: space.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 // ---------------------------------------------------------------- shape

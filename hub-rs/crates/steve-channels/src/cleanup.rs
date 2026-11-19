@@ -746,10 +746,10 @@ pub async fn run(
                 Level::All => delete_all(tx, &p, now)?,
             }
             for id in yolo_actions {
-                tx.publish(steve_store::ChangeEvent::YoloAction { id, decision_id: None, ws: v.ws.clone() });
+                tx.publish(steve_types::DomainEvent::from(steve_types::AutonomyEvent::YoloAction { id: id.into(), decision_id: None, ws: v.ws.clone().into() }));
             }
             for id in &p.decisions {
-                tx.publish(steve_store::ChangeEvent::Decision { id: id.clone(), item_id: Some(None) });
+                tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision { ws: v.ws.clone().into(), id: id.clone().into(), item_id: Some(None) }));
             }
             let s = p.summary(level, &t.name);
             base::audit(

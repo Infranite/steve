@@ -28,8 +28,8 @@ use serde_json::{Map, Value, json};
 use steve_i18n::t;
 use steve_modules::changes::{Candidate, ChangeOp, DraftTarget, FieldSpec, OpCx, Plan, Prepared};
 use steve_modules::{ApiError, ApiResult, Clock, Registry};
+use steve_store::Tx;
 use steve_store::base::{self, Change, Viewer, show};
-use steve_store::{ChangeEvent, Tx};
 
 use crate::bindings;
 use crate::personas::{self, PersonaPatch, PersonaRow, Reveal};
@@ -1961,10 +1961,12 @@ impl ChannelOp {
             conn,
             &json!({ "fields": keys, "changeset": cx.changeset_id, "undo": undo }),
         )?;
-        tx.publish(ChangeEvent::Channel {
-            id: conn.into(),
-            ws: ws.into(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ChannelsEvent::Channel {
+                id: conn.into(),
+                ws: ws.into(),
+            },
+        ));
         Ok(())
     }
 }

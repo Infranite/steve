@@ -559,10 +559,20 @@ pub fn nudge(tx: &Tx, decision: &str, text: &str) -> ChannelResult<bool> {
         params![line, decision],
     )?;
     if n > 0 {
-        tx.publish(steve_store::ChangeEvent::Decision {
-            id: decision.into(),
-            item_id: Some(None),
-        });
+        // This API has no workspace argument: read the exact row we just changed while the
+        // caller's write transaction is still held. Never guess a workspace from the id.
+        let ws: String = tx.query_row(
+            "SELECT workspace_id FROM decisions WHERE id = ?",
+            [decision],
+            |row| row.get(0),
+        )?;
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: ws.into(),
+                id: decision.into(),
+                item_id: Some(None),
+            },
+        ));
     }
     Ok(n > 0)
 }
