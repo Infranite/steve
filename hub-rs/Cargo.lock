@@ -5851,6 +5851,7 @@ dependencies = [
  "steve-modules",
  "steve-runtime",
  "steve-store",
+ "steve-types",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

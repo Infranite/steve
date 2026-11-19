@@ -1011,15 +1011,26 @@ pub fn reopen_decision(tx: &Tx, id: &str) -> MailResult<()> {
         "UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?",
     )?
     .execute([id])?;
-    let item_id: Option<String> = tx
-        .prepare_cached("SELECT item_id FROM decisions WHERE id = ?")?
-        .query_row([id], |r| r.get(0))
-        .optional()?
-        .flatten();
-    tx.publish(steve_store::ChangeEvent::Decision {
-        id: id.into(),
-        item_id: Some(item_id),
-    });
+    let row: Option<(String, Option<String>)> = tx
+        .prepare_cached("SELECT workspace_id, item_id FROM decisions WHERE id = ?")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((ws, item_id)) = row else {
+        return Ok(());
+    };
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Decision {
+            ws: ws.into(),
+            id: {
+                let value: String = id.into();
+                steve_types::DecisionId::from(value)
+            },
+            item_id: {
+                let value: Option<Option<String>> = Some(item_id);
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     Ok(())
 }
 

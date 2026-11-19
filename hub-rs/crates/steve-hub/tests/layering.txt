@@ -85,6 +85,7 @@ edge	steve-mail	steve-knowledge
 edge	steve-mail	steve-modules
 edge	steve-mail	steve-runtime
 edge	steve-mail	steve-store
+edge	steve-mail	steve-types
 edge	steve-modules	steve-i18n
 edge	steve-modules	steve-runtime
 edge	steve-modules	steve-store
