@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "hs_challenge",
+  "m": "challenge",
+  "gen": 0,
+  "deadline_at": 0,
+  "p": {
+    "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+    "hub_id": "hub-1",
+    "conn_id": "conn-1",
+    "proto": 10,
+    "upgrade_protocol": 1,
+    "hub_time": 1700000000000
+  }
+}

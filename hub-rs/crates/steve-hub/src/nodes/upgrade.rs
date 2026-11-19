@@ -1,6 +1,6 @@
 //! Upgrading paired Nodes to the Hub's own release (the Hub decides, the Node executes).
 //!
-//! A Node can be upgraded when its probe says [`FEATURE_NODE_UPGRADE`] and its build: never
+//! A Node can be upgraded when its `probe_build` reports upgrade support and its build: never
 //! guessed from a version number. Its owner's policy (`nodes.upgrade_policy`, else the Hub's
 //! default, `notify` unless set) says whether the Hub does it on its own (`auto`), only shows it
 //! (`notify`) or neither (`off`); the instance owner may always ask from Devices.
@@ -49,6 +49,9 @@ pub trait Fleet: Send + Sync {
     fn upgrade_only(&self, _node: &str) -> bool {
         false
     }
+    fn protocol_status(&self, _node: &str) -> Option<(&'static str, &'static str)> {
+        None
+    }
     /// Stop (or start again) giving the Node new turns.
     fn hold(&self, node: &str, on: bool);
 }
@@ -64,6 +67,9 @@ impl Fleet for LiveFleet {
         self.registry
             .conn(node)
             .is_some_and(|connection| !connection.is_closed() && connection.is_upgrade())
+    }
+    fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
+        self.fleet.protocol_status(node)
     }
     fn discovery(&self, node: &NodeId) -> Arc<dyn Discovery> {
         self.fleet.remote(node)
@@ -711,15 +717,19 @@ impl Upgrades {
     ) -> Value {
         let seen = self.seen(&node.node_id);
         let (can, why) = self.assess(seen.as_ref());
-        let incompatible = self.fleet.upgrade_only(&node.node_id);
+        let protocol_status = self
+            .fleet
+            .upgrade_only(&node.node_id)
+            .then(|| self.fleet.protocol_status(&node.node_id))
+            .flatten();
         json!({
             "build": seen.as_ref().and_then(|s| s.build.clone()),
             "policy": node.upgrade_policy.clone().unwrap_or_else(|| default.to_string()),
             "own_policy": node.upgrade_policy,
             "can": can,
-            // The existing Devices status badge and upgrade card already understand outdated.
-            "reason": if incompatible { "outdated" } else { why },
-            "protocol_status": if incompatible { Some("版本不一致，需要升级") } else { None },
+            "reason": why,
+            "protocol_status": protocol_status.map(|(_, text)| text),
+            "protocol_older": protocol_status.map(|(older, _)| older),
             "latest": latest,
         })
     }
@@ -975,6 +985,7 @@ mod tests {
         node: Arc<FakeNode>,
         remote: Mutex<Option<Arc<steve_node_wire::RemoteNode>>>,
         holds: Mutex<Vec<bool>>,
+        protocol_older: Mutex<Option<&'static str>>,
     }
 
     impl Fleet for TestFleet {
@@ -985,11 +996,20 @@ mod tests {
             self.node.clone()
         }
         fn upgrade_only(&self, _: &str) -> bool {
+            if self.protocol_older.lock().unwrap().is_some() {
+                return true;
+            }
             self.remote
                 .lock()
                 .unwrap()
                 .as_ref()
                 .is_some_and(|r| r.is_upgrade())
+        }
+        fn protocol_status(&self, _: &str) -> Option<(&'static str, &'static str)> {
+            match *self.protocol_older.lock().unwrap() {
+                Some("hub") => Some(("hub", "版本不一致，需要升级 Hub")),
+                _ => Some(("node", "版本不一致，需要升级 Node")),
+            }
         }
         fn linked(&self, _: &str) -> bool {
             true
@@ -1032,13 +1052,14 @@ mod tests {
         std::fs::write(release.join("bin/steve"), b"maintenance CLI fixture\n").unwrap();
         let node = FakeNode::new("n_a");
         if features {
-            node.set_features(vec![FEATURE_NODE_UPGRADE.into()]);
+            node.set_upgradable(true);
         }
         node.set_build(Some(build("1.0.0", 'a')));
         let fleet = Arc::new(TestFleet {
             node: node.clone(),
             remote: Mutex::new(None),
             holds: Mutex::new(vec![]),
+            protocol_older: Mutex::new(None),
         });
         let timing = Timing {
             poll: Duration::from_millis(20),
@@ -1189,7 +1210,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let view = f.up.view(&row, "notify", None);
-        assert_eq!(view["protocol_status"], "版本不一致，需要升级");
+        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Node");
         assert_eq!(view["reason"], "outdated");
         assert_eq!(view["can"], true);
         let operation = f.up.start("n_a", "u", false).await.unwrap();
@@ -1372,6 +1393,26 @@ mod tests {
         assert_eq!(f.node.staged_upgrades().len(), 1, "one upgrade, not two");
         assert_eq!(f.fleet.holds.lock().unwrap().last(), Some(&false));
         assert_eq!(f.up.switch_now("n_a").await.unwrap_err(), "not_upgrading");
+    }
+
+    #[tokio::test]
+    async fn devices_keep_the_upgrade_assessment_when_the_hub_is_older() {
+        let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
+        f.node.set_build(Some(build("3.0.0", 'c')));
+        *f.fleet.protocol_older.lock().unwrap() = Some("hub");
+        f.up.look("n_a").await.unwrap();
+        let row = f
+            .store
+            .reader(|db| store_nodes::get(db, "n_a"))
+            .unwrap()
+            .unwrap();
+        let view = f.up.view(&row, "notify", None);
+        assert_eq!(view["reason"], "manual");
+        assert_eq!(view["can"], false);
+        assert_eq!(view["protocol_older"], "hub");
+        assert_eq!(view["protocol_status"], "版本不一致，需要升级 Hub");
+        assert_eq!(f.up.start("n_a", "u", true).await.unwrap_err(), "manual");
+        assert!(f.node.staged_upgrades().is_empty());
     }
 
     #[tokio::test]

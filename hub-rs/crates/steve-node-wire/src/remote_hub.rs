@@ -37,7 +37,7 @@ impl HubLink {
 
     fn conn(&self) -> ApiResult<Arc<Conn>> {
         match self.current() {
-            Some(c) if !c.is_closed() => Ok(c),
+            Some(c) if !c.is_closed() && !c.is_upgrade() => Ok(c),
             _ => Err(ApiError::new(ErrorCode::Offline, "hub not connected")),
         }
     }

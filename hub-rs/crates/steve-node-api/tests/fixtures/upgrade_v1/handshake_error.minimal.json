@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "hs_error",
+  "m": "error",
+  "gen": 0,
+  "deadline_at": 0,
+  "p": {
+    "code": "denied",
+    "retry": "never",
+    "operation": null,
+    "detail": "not admitted"
+  }
+}

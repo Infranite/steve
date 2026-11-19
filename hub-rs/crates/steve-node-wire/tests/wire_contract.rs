@@ -349,7 +349,7 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
         w.remote.upgrade_stage(ask.clone()).await.unwrap_err().code,
         ErrorCode::Unsupported
     );
-    fake.set_features(vec![FEATURE_NODE_UPGRADE.into()]);
+    fake.set_upgradable(true);
     assert_eq!(
         w.remote.upgrade_stage(ask.clone()).await.unwrap().phase,
         "staged"
@@ -371,7 +371,7 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
         "succeeded"
     );
     assert_eq!(
-        w.remote.probe(false).await.unwrap().build.unwrap().version,
+        w.remote.probe_build().await.unwrap().build.unwrap().version,
         "2.0.0"
     );
 }

@@ -53,6 +53,12 @@ impl Handler for ServeHub {
             REPLY_CAPTURE => en(&self.files()?.capture_reply(de(p)?).await?),
             BLOB_FETCH => {
                 let a: FetchArgs = de(p)?;
+                if matches!(a.access, FileAccess::Operation { .. }) {
+                    return Err(ApiError::new(
+                        ErrorCode::Denied,
+                        "upgrade archives require upgrade v1",
+                    ));
+                }
                 en(&self.files()?.fetch(a.access, a.id, a.offset, a.max).await?)
             }
             BLOB_BEGIN => en(&self.files()?.begin_upload(de(p)?).await?),

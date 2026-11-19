@@ -40,22 +40,7 @@ pub use serve_hub::ServeHub;
 /// Ordinary frames use the single application protocol number; upgrade/bootstrap frames use v1.
 pub use steve_node_api::PROTOCOL as WIRE;
 
-/// Close codes (application range).
-pub mod close {
-    /// A malformed envelope or an oversize control frame.
-    pub const MALFORMED: u16 = 4400;
-    /// Refused: unknown, pending, revoked Node or a bad signature (one text for all).
-    pub const DENIED: u16 = 4403;
-    /// Silent past the heartbeat budget.
-    pub const DEAD: u16 = 4408;
-    /// A newer connection of the same Node took over.
-    pub const FENCED: u16 = 4409;
-    /// No supported bootstrap upgrade protocol.
-    pub const UNSUPPORTED: u16 = 4426;
-    /// The Hub could not decide (store error, timeout); dial again.
-    pub const INTERNAL: u16 = 1011;
-    pub const GOODBYE: u16 = 1000;
-}
+pub use steve_node_api::upgrade_v1::close;
 
 /// A wait drawn at random between half of `d` and all of it ("equal jitter"): Nodes that lost
 /// their link at the same moment (the Hub restarted) dial again spread out, not all at once.

@@ -144,6 +144,7 @@ struct State {
     /// files and scans always need one.
     roots: Vec<RootInfo>,
     features: Vec<String>,
+    upgradable: bool,
     /// The build a probe reports ([`FakeNode::set_build`]).
     build: Option<BuildIdentity>,
     /// Upgrades this Node was asked for, by operation ([`FakeNode::set_upgrade_outcome`]).
@@ -278,7 +279,12 @@ impl FakeNode {
         self.st().features = features;
     }
 
-    /// The build a probe reports.
+    /// Whether the minimal upgrade probe says this Node can switch its release.
+    pub fn set_upgradable(&self, upgradable: bool) {
+        self.st().upgradable = upgradable;
+    }
+
+    /// The build the minimal upgrade probe reports.
     pub fn set_build(&self, build: Option<BuildIdentity>) {
         self.st().build = build;
     }
@@ -399,6 +405,7 @@ impl FakeNode {
             // the machine's own: roots, files and harness history outlive the journal
             roots: old.roots,
             features: old.features,
+            upgradable: old.upgradable,
             build: old.build,
             upgrades: old.upgrades,
             upgrade_outcome: old.upgrade_outcome,
@@ -2218,7 +2225,7 @@ impl Discovery for FakeNode {
         let state = self.st();
         Ok(crate::upgrade_v1::ProbeBuildResponse {
             build: state.build.clone().map(Into::into),
-            upgradable: state.features.iter().any(|f| f == FEATURE_NODE_UPGRADE),
+            upgradable: state.upgradable,
             running: state.active.len() as u64,
         })
     }
@@ -2304,12 +2311,11 @@ impl Discovery for FakeNode {
             roots: st.roots.clone(),
             capacity,
             features: st.features.clone(),
-            build: st.build.clone(),
         })
     }
     async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         let mut st = self.st();
-        if !st.features.iter().any(|f| f == FEATURE_NODE_UPGRADE) {
+        if !st.upgradable {
             return unsupported("node upgrade");
         }
         if let Some(s) = st.upgrades.get(&u.operation) {
@@ -2343,6 +2349,7 @@ impl Discovery for FakeNode {
             .iter()
             .find(|u| u.operation == s.operation)
             .map(|u| u.build.clone());
+        let current = st.build.clone();
         let Some(state) = st.upgrades.get_mut(&s.operation) else {
             return Err(ApiError::new(ErrorCode::Invalid, "no such upgrade"));
         };
@@ -2354,6 +2361,13 @@ impl Discovery for FakeNode {
             state.updated = now;
             return Ok(state.clone());
         }
+        crate::upgrade_bridge::refuse_downgrade(
+            &current
+                .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "no installed build"))?
+                .version,
+            &state.version,
+        )
+        .map_err(ApiError::from)?;
         if busy && !s.force {
             return Err(ApiError::new(ErrorCode::Busy, "the node still runs work"));
         }

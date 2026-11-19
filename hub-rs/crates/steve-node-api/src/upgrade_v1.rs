@@ -16,9 +16,50 @@
 //! canonical JSON (sorted object keys, compact JSON scalars/arrays). Bootstrap carries no
 //! ordinary capabilities or stream heads: those are queried only after an equal-version link.
 
+//! Authentication encoding is part of v1: Ed25519 (RFC 8032, pure Ed25519, no prehash),
+//! a raw 32-byte compressed public key and raw 64-byte R || S signature. Writers emit lowercase
+//! hexadecimal (64/128 ASCII digits, no prefix); readers accept either hex case, but no whitespace
+//! or alternate lengths. Verification is strict: reject noncanonical S and small-order keys/R,
+//! invalid point encodings, and any changed signed byte. The crypto implementation may live in
+//! the transport; its RFC 8032 and malleability vectors must pass before shipping.
+//!
+//! Welcome pins identify SHA256 of the complete leaf certificate DER, encoded as `sha256:` plus
+//! 64 lowercase hex digits. CLI input may also accept the bare digest and uppercase hex.
+//! An empty hub_key AND empty sig means unsigned welcome; a Node with a pinned Hub identity must
+//! reject it. Every other welcome must have both a well-formed key and a valid signature.
+//!
+//! Bootstrap refusal sends error then close: invalid=4400, denied=4403, unsupported=4426,
+//! internal (including admission timeouts)=1011. A bare 4403/4426 close means denied/unsupported;
+//! every other bare close is offline/retry. A noted report closes with 1000. Established links
+//! use 4408 for heartbeat loss, 4409 for generation fencing and 1000 for normal disconnection.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+/// Close codes shared by bootstrap and upgrade-v1 links.
+pub mod close {
+    pub const MALFORMED: u16 = 4400;
+    pub const DENIED: u16 = 4403;
+    pub const DEAD: u16 = 4408;
+    pub const FENCED: u16 = 4409;
+    pub const UNSUPPORTED: u16 = 4426;
+    pub const INTERNAL: u16 = 1011;
+    pub const GOODBYE: u16 = 1000;
+}
+
+/// Raw fixed-width hex; no prefixes, whitespace or short forms.
+pub fn decode_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    hex::decode(text).ok()?.try_into().ok()
+}
+
+pub fn certificate_pin(der: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(der)))
+}
+
+pub fn parse_pin(pin: &str) -> Option<[u8; 32]> {
+    decode_hex(pin.strip_prefix("sha256:").unwrap_or(pin))
+}
 
 pub const UPGRADE_PROTOCOL: u32 = 1;
 pub const REPORT_MAX: usize = 1024;

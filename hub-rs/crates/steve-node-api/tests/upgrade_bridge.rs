@@ -32,3 +32,17 @@ fn release_order_is_numeric_and_an_unrecognized_version_cannot_switch() {
         }
     }
 }
+
+#[test]
+fn wire_incompatible_defers_local_work_and_downgrade_keeps_its_code() {
+    use steve_node_api::{ApiError, ErrorCode, RetryClass};
+    let wire = v1::Error::incompatible();
+    assert_eq!(wire.retry, v1::Retry::Never);
+    let local = ApiError::from(wire);
+    assert_eq!(
+        (local.code, local.retry),
+        (ErrorCode::Offline, RetryClass::SameOperation)
+    );
+    let wire = v1::Error::new(v1::Code::Downgrade, "older journal reader");
+    assert_eq!(v1::Error::from(ApiError::from(wire.clone())), wire);
+}

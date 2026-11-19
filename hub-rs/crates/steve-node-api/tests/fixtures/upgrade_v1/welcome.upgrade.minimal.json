@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "hs_welcome",
+  "m": "welcome",
+  "gen": 0,
+  "deadline_at": 0,
+  "p": {
+    "gen": 7,
+    "proto": 10,
+    "upgrade_protocol": 1,
+    "mode": "upgrade",
+    "paused": false,
+    "heartbeat_ms": 10000,
+    "hub_key": "2222222222222222222222222222222222222222222222222222222222222222",
+    "pins": [
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "sig": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444"
+  }
+}

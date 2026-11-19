@@ -49,11 +49,8 @@ pub fn welcome_key(c: &Challenge, h: &Hello, w: &Welcome) -> Result<Option<[u8; 
         return Ok(None);
     }
     let bad = || refused("invalid", "a welcome whose signature does not hold");
-    let key: [u8; 32] = hex::decode(&w.hub_key)
-        .ok()
-        .and_then(|k| k.try_into().ok())
-        .ok_or_else(bad)?;
-    let sig = hex::decode(&w.sig).map_err(|_| bad())?;
+    let key = upgrade::decode_hex::<32>(&w.hub_key).ok_or_else(bad)?;
+    let sig = upgrade::decode_hex::<64>(&w.sig).ok_or_else(bad)?;
     if !identity::verify(&key, &welcome_message(c, h, w), &sig) {
         return Err(bad());
     }
@@ -187,7 +184,7 @@ async fn receive_hello(
         .await
         .map_err(internal)?
         .ok_or_else(denied)?;
-    let sig = hex::decode(&hello.sig).map_err(|_| denied())?;
+    let sig = upgrade::decode_hex::<64>(&hello.sig).ok_or_else(denied)?;
     if !identity::verify(&key, &hello_message(challenge, &hello), &sig) {
         return Err(denied());
     }
@@ -316,8 +313,8 @@ async fn take_report(
             return refused(INTERNAL, "the hub could not decide; dial again");
         }
     };
-    let ok = hex::decode(&report.sig)
-        .is_ok_and(|sig| identity::verify(&key, &report_message(challenge, &report), &sig));
+    let ok = upgrade::decode_hex::<64>(&report.sig)
+        .is_some_and(|sig| identity::verify(&key, &report_message(challenge, &report), &sig));
     if !ok {
         return denied();
     }
@@ -328,7 +325,9 @@ async fn take_report(
         serde_json::to_value(upgrade::Noted {}).unwrap(),
     )
     .await;
-    let _ = sink.send(Frame::Close(1000, REPORTED.into())).await;
+    let _ = sink
+        .send(Frame::Close(upgrade::close::GOODBYE, REPORTED.into()))
+        .await;
     let _ = sink.close().await;
     refused(REPORTED, report.error)
 }

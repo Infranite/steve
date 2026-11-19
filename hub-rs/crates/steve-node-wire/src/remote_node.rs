@@ -121,13 +121,25 @@ impl RemoteNode {
         self.conn(true).ok().map(|c| c.generation())
     }
 
+    fn live_conn(&self) -> ApiResult<Arc<Conn>> {
+        self.slot
+            .lock()
+            .unwrap()
+            .link
+            .as_ref()
+            .filter(|l| !l.conn.is_closed())
+            .map(|l| l.conn.clone())
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "node offline"))
+    }
+
     fn conn(&self, new_work: bool) -> ApiResult<Arc<Conn>> {
         let slot = self.slot.lock().unwrap();
         match slot.link.as_ref() {
             Some(l) if l.conn.is_closed() => Err(ApiError::new(ErrorCode::Offline, "node offline")),
-            Some(l) if new_work && l.conn.is_upgrade() => {
-                Err(upgrade_v1::Error::incompatible().into())
-            }
+            Some(l) if l.conn.is_upgrade() => Err(ApiError::new(
+                ErrorCode::Offline,
+                "ordinary protocol unavailable while upgrading",
+            )),
             Some(_) if new_work && slot.reconciling => Err(ApiError::new(
                 ErrorCode::Offline,
                 "node restarted, reconciling first",
@@ -165,7 +177,7 @@ impl RemoteNode {
         operation: Option<&OperationId>,
     ) -> ApiResult<R> {
         let value = self
-            .conn(false)?
+            .live_conn()?
             .call_upgrade(method, to_value(&args)?, operation)
             .await
             .map_err(ApiError::from)?;

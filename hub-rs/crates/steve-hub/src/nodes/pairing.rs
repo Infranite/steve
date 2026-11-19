@@ -426,14 +426,11 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
                 .is_some_and(|c| !c.is_closed() && c.is_upgrade());
             v["protocol"] = json!(svc.fleet.protocol(&n.node_id));
             v["protocol_mode"] = json!(if upgrade_only { "upgrade" } else { "normal" });
-            v["protocol_status"] = if upgrade_only {
-                json!("版本不一致，需要升级")
-            } else {
-                Value::Null
-            };
-            if upgrade_only {
-                v["link_error"] = json!({ "at": now(), "error": "版本不一致，需要升级" });
-            }
+            let protocol_status = upgrade_only
+                .then(|| svc.fleet.protocol_status(&n.node_id))
+                .flatten();
+            v["protocol_status"] = json!(protocol_status.map(|(_, text)| text));
+            v["protocol_older"] = json!(protocol_status.map(|(older, _)| older));
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));

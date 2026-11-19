@@ -355,13 +355,7 @@ fn check_request(me: &BuildIdentity, u: &NodeUpgrade) -> ApiResult<()> {
             "this node already runs that release",
         ));
     }
-    let semver = |v: &str| {
-        let p: Vec<_> = v.split('.').collect();
-        p.len() == 3
-            && p.iter()
-                .all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
-    };
-    if !semver(&u.build.version)
+    if steve_node_api::upgrade_bridge::release_version(&u.build.version).is_err()
         || u.build.commit.len() != 40
         || !u.build.commit.bytes().all(|b| b.is_ascii_hexdigit())
         || u.sha256.len() != 64
@@ -1103,7 +1097,7 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(error.code, ErrorCode::Invalid);
+            assert_eq!(error.code, ErrorCode::Downgrade);
             assert!(error.safe_detail.contains("refusing downgrade"));
             let after = load(root, "nup_older").unwrap().unwrap();
             assert_eq!(after.state.phase, "staged");

@@ -45,10 +45,7 @@ pub fn parse_pins(s: &str) -> Result<Trust, String> {
 }
 
 pub fn parse_pin(s: &str) -> Result<[u8; 32], String> {
-    let h = s.strip_prefix("sha256:").unwrap_or(s);
-    hex::decode(h)
-        .ok()
-        .and_then(|v| v.try_into().ok())
+    steve_node_api::upgrade_v1::parse_pin(s)
         .ok_or_else(|| "a pin is sha256:<64 hex digits>".to_string())
 }
 

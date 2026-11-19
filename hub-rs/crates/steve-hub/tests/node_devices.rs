@@ -39,39 +39,48 @@ async fn row(h: &Hub, node: &str) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgrade() {
     use steve_node_api::{Discovery, PROTOCOL};
-    let h = Hub::start().await;
-    let (id, node) = h.paired("u1").await;
-    let linked = dial_url_as(
-        &h.ws_url(),
-        &h.svc.hub_id,
-        &id,
-        &node,
-        FakeNode::new(node.as_str()),
-        1,
-        PROTOCOL + 1,
-    )
-    .await
-    .unwrap();
-    until("upgrade link installed", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-            && h.svc.fleet.protocol(node.as_str()) == Some(PROTOCOL + 1)
-    })
-    .await;
-    assert!(linked.conn.is_upgrade());
-    let device = row(&h, node.as_str()).await;
-    assert_eq!(device["linked"], true);
-    assert_eq!(device["protocol"], PROTOCOL + 1);
-    assert_eq!(device["protocol_mode"], "upgrade");
-    assert_eq!(device["protocol_status"], "版本不一致，需要升级");
-    assert_eq!(device["link_error"]["error"], "版本不一致，需要升级");
-    assert!(
-        device["host"].is_null(),
-        "ordinary host discovery is skipped"
-    );
-    let remote = h.svc.fleet.remote(&node);
-    assert!(remote.probe(false).await.is_err());
-    remote.probe_build().await.unwrap();
-    assert!(!linked.conn.is_closed());
+    for (protocol, older, status) in [
+        (PROTOCOL - 1, "node", "版本不一致，需要升级 Node"),
+        (PROTOCOL + 1, "hub", "版本不一致，需要升级 Hub"),
+    ] {
+        let h = Hub::start().await;
+        let (id, node) = h.paired("u1").await;
+        let linked = dial_url_as(
+            &h.ws_url(),
+            &h.svc.hub_id,
+            &id,
+            &node,
+            FakeNode::new(node.as_str()),
+            1,
+            protocol,
+        )
+        .await
+        .unwrap();
+        until("upgrade link installed", 5, || {
+            h.svc.registry.current(node.as_str()).is_some()
+                && h.svc.fleet.protocol(node.as_str()) == Some(protocol)
+        })
+        .await;
+        assert!(linked.conn.is_upgrade());
+        let device = row(&h, node.as_str()).await;
+        assert_eq!(device["linked"], true);
+        assert_eq!(device["protocol"], protocol);
+        assert_eq!(device["protocol_mode"], "upgrade");
+        assert_eq!(device["protocol_status"], status);
+        assert_eq!(device["protocol_older"], older);
+        assert!(device["link_error"].is_null());
+        let again = row(&h, node.as_str()).await;
+        assert_eq!(again["protocol_status"], device["protocol_status"]);
+        assert_eq!(again["link_error"], device["link_error"]);
+        assert!(
+            device["host"].is_null(),
+            "ordinary host discovery is skipped"
+        );
+        let remote = h.svc.fleet.remote(&node);
+        assert!(remote.probe(false).await.is_err());
+        remote.probe_build().await.unwrap();
+        assert!(!linked.conn.is_closed());
+    }
 }
 
 /// A Hub whose store's change events are kept, to read back which reached the stream.

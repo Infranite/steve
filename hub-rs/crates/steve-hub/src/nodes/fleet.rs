@@ -196,6 +196,15 @@ impl NodeFleet {
         });
     }
 
+    /// Which peer needs an upgrade, based on the authenticated application protocol numbers.
+    pub fn protocol_status(&self, node: &str) -> Option<(&'static str, &'static str)> {
+        match self.protocol(node)?.cmp(&steve_node_api::PROTOCOL) {
+            std::cmp::Ordering::Less => Some(("node", "版本不一致，需要升级 Node")),
+            std::cmp::Ordering::Greater => Some(("hub", "版本不一致，需要升级 Hub")),
+            std::cmp::Ordering::Equal => None,
+        }
+    }
+
     pub fn protocol(&self, node: &str) -> Option<u32> {
         self.nodes
             .lock()

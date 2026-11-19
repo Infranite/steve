@@ -26,6 +26,8 @@ pub enum ErrorCode {
     /// Out of capacity, disk or budget.
     Exhausted,
     Invalid,
+    /// Switching to an older release would make the Node journal unreadable.
+    Downgrade,
     /// It may or may not have happened; ask, do not redo.
     OutcomeUnknown,
     /// Events were lost beyond the retention window.
@@ -123,7 +125,7 @@ impl From<ApiError> for steve_types::Error {
             ErrorCode::Expired | ErrorCode::Stale => Code::Stale,
             ErrorCode::Conflict => Code::Conflict,
             ErrorCode::Exhausted => Code::Exhausted,
-            ErrorCode::Invalid => Code::Invalid,
+            ErrorCode::Invalid | ErrorCode::Downgrade => Code::Invalid,
             ErrorCode::OutcomeUnknown => Code::OutcomeUnknown,
             ErrorCode::Gap => Code::Gap,
             ErrorCode::Internal => Code::Internal,
@@ -176,6 +178,7 @@ mod error_contract_tests {
             (ErrorCode::Conflict, Code::Conflict),
             (ErrorCode::Exhausted, Code::Exhausted),
             (ErrorCode::Invalid, Code::Invalid),
+            (ErrorCode::Downgrade, Code::Invalid),
             (ErrorCode::OutcomeUnknown, Code::OutcomeUnknown),
             (ErrorCode::Gap, Code::Gap),
             (ErrorCode::Internal, Code::Internal),

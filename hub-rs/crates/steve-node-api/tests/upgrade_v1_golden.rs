@@ -3,7 +3,7 @@
 #[allow(dead_code)]
 mod v1;
 
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -126,8 +126,17 @@ fn cases() -> BTreeMap<String, Value> {
         };
         cases.insert(
             format!("{name}.json"),
-            value(frame(v1::Kind::Ctl, method, payload)),
+            value(frame(v1::Kind::Ctl, method, payload.clone())),
         );
+        if matches!(
+            method,
+            v1::CHALLENGE | v1::HELLO | v1::WELCOME | v1::REPORT | v1::NOTED | v1::ERROR
+        ) {
+            cases.insert(
+                format!("{name}.minimal.json"),
+                value(v1::Frame::ctl(format!("hs_{method}"), method, 0, payload)),
+            );
+        }
     }
     for (name, bytes) in [
         ("hello", v1::hello_message(&challenge, &hello)),
@@ -322,6 +331,64 @@ fn phase_name(phase: v1::Phase) -> &'static str {
     }
 }
 
+fn typed<T: Serialize + DeserializeOwned>(value: Value) -> Value {
+    serde_json::to_value(serde_json::from_value::<T>(value).unwrap()).unwrap()
+}
+
+/// Decode fixture bytes through the actual schema, including the payload behind Frame::p.
+fn roundtrip(name: &str, encoded: Value) -> Value {
+    if name.ends_with(".signing.json") {
+        return typed::<String>(encoded);
+    }
+    if name.starts_with("error.") {
+        return typed::<v1::Error>(encoded);
+    }
+    if name.starts_with("phase.") {
+        return typed::<v1::Phase>(encoded);
+    }
+    if name.starts_with("retry.") {
+        return typed::<v1::Retry>(encoded);
+    }
+    let mut frame: v1::Frame = serde_json::from_value(encoded).unwrap();
+    frame.p = match frame.t {
+        v1::Kind::Ctl => match frame.m.as_str() {
+            v1::CHALLENGE => typed::<v1::Challenge>(frame.p),
+            v1::HELLO => typed::<v1::Hello>(frame.p),
+            v1::WELCOME => typed::<v1::Welcome>(frame.p),
+            v1::REPORT => typed::<v1::Report>(frame.p),
+            v1::NOTED => typed::<v1::Noted>(frame.p),
+            v1::ERROR => typed::<v1::Error>(frame.p),
+            v1::HEARTBEAT => typed::<v1::Heartbeat>(frame.p),
+            v1::FENCED => typed::<v1::Fenced>(frame.p),
+            v1::GOODBYE => typed::<v1::Goodbye>(frame.p),
+            _ => panic!("uncovered control fixture: {name}"),
+        },
+        v1::Kind::Req => match frame.m.as_str() {
+            v1::PROBE_BUILD => typed::<v1::ProbeBuildRequest>(frame.p),
+            v1::UPGRADE_STAGE => typed::<v1::StageRequest>(frame.p),
+            v1::BLOB_FETCH => typed::<v1::FetchRequest>(frame.p),
+            v1::UPGRADE_SWITCH => typed::<v1::SwitchRequest>(frame.p),
+            v1::UPGRADE_STATUS => typed::<v1::StatusRequest>(frame.p),
+            _ => panic!("uncovered request fixture: {name}"),
+        },
+        v1::Kind::Res => {
+            let outcome: v1::Outcome = serde_json::from_value(frame.p).unwrap();
+            value(match outcome {
+                v1::Outcome::Err(error) => v1::Outcome::Err(error),
+                v1::Outcome::Ok(payload) => v1::Outcome::Ok(if name.starts_with("probe_build.") {
+                    typed::<v1::ProbeBuildResponse>(payload)
+                } else if name.starts_with("blob.fetch.") {
+                    typed::<v1::FetchResponse>(payload)
+                } else {
+                    typed::<v1::UpgradeState>(payload)
+                }),
+            })
+        }
+        v1::Kind::Unknown => frame.p,
+    };
+    value(frame)
+}
+
 #[test]
 fn every_upgrade_v1_shape_matches_its_frozen_bytes() {
     let directory =
@@ -344,6 +411,13 @@ fn every_upgrade_v1_shape_matches_its_frozen_bytes() {
             actual,
             std::fs::read(directory.join(&name)).unwrap(),
             "{name}: frozen v1 bytes changed"
+        );
+        let decoded = roundtrip(&name, serde_json::from_slice(&actual).unwrap());
+        let mut reencoded = serde_json::to_vec_pretty(&decoded).unwrap();
+        reencoded.push(b'\n');
+        assert_eq!(
+            actual, reencoded,
+            "{name}: typed decode/reencode changed frozen bytes"
         );
     }
 }

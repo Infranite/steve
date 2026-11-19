@@ -133,8 +133,8 @@ pub trait Discovery: Send + Sync {
         ))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
-    /// Stage the Hub's release on this Node ([`NodeUpgrade`]). Only a Node that advertises
-    /// [`FEATURE_NODE_UPGRADE`] does.
+    /// Stage the Hub's release on this Node ([`NodeUpgrade`]) when
+    /// [`Discovery::probe_build`] reports it as upgradable.
     async fn upgrade_stage(&self, _u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         Err(ApiError::new(
             ErrorCode::Unsupported,

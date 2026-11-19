@@ -532,3 +532,102 @@ async fn a_node_that_cannot_link_says_why_and_nothing_links() {
     }
     assert_eq!(adm.reports.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn permanent_authentication_uses_rfc8032_strict_ed25519_and_fixed_width_hex() {
+    use steve_node_api::upgrade_v1 as v1;
+    use steve_node_wire::identity::verify;
+    // RFC 8032 section 7.1, test 1 (empty message).
+    let seed =
+        v1::decode_hex::<32>("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+            .unwrap();
+    let public =
+        v1::decode_hex::<32>("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+            .unwrap();
+    let sig = v1::decode_hex::<64>(concat!(
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155",
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    ))
+    .unwrap();
+    let identity = Identity::from_seed(seed);
+    assert_eq!(identity.public(), public);
+    assert_eq!(identity.sign(b""), sig);
+    assert!(verify(&public, b"", &sig));
+    assert!(!verify(&public, b"changed", &sig));
+    assert!(!verify(&public, b"", &sig[..63]));
+    let mut noncanonical = sig;
+    noncanonical[32..].fill(255);
+    assert!(!verify(&public, b"", &noncanonical));
+    let mut small_order = [0; 64];
+    small_order[0] = 1; // identity point R with S=0
+    let mut identity_key = [0; 32];
+    identity_key[0] = 1;
+    assert!(!verify(&identity_key, b"", &small_order));
+    assert!(!verify(&public, b"", &small_order));
+    assert!(!verify(&[255; 32], b"", &sig));
+    assert_eq!(
+        v1::decode_hex::<32>(&hex::encode_upper(public)),
+        Some(public)
+    );
+    for text in [
+        format!(" {}", hex::encode(public)),
+        format!("0x{}", hex::encode(public)),
+        "aa".into(),
+    ] {
+        assert!(v1::decode_hex::<32>(&text).is_none());
+    }
+    assert_eq!(
+        v1::certificate_pin(b"abc"),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        steve_node_wire::tls::parse_pin(&v1::certificate_pin(b"abc")).unwrap(),
+        steve_node_wire::identity::sha256(b"abc")
+    );
+    assert_eq!(
+        (
+            close::MALFORMED,
+            close::DENIED,
+            close::DEAD,
+            close::FENCED,
+            close::UNSUPPORTED,
+            close::INTERNAL,
+            close::GOODBYE
+        ),
+        (4400, 4403, 4408, 4409, 4426, 1011, 1000)
+    );
+}
+
+#[tokio::test]
+async fn every_bare_bootstrap_close_has_the_frozen_refusal_meaning() {
+    for (code, expected) in [
+        (4403, "denied"),
+        (4426, "unsupported"),
+        (4400, "offline"),
+        (1011, "offline"),
+        (1000, "offline"),
+        (4999, "offline"),
+    ] {
+        let (mut hub, mut node) = pair();
+        hub.sink
+            .send(Frame::Close(code, "test".into()))
+            .await
+            .unwrap();
+        let identity = Identity::from_seed([7; 32]);
+        let node_id = nid("n1");
+        let error = handshake::dial(
+            &mut node.sink,
+            &mut node.stream,
+            NodeIntro {
+                node: &node_id,
+                identity: &identity,
+                incarnation: 1,
+                hub_id: None,
+                hub_key: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, expected, "close {code}");
+    }
+}

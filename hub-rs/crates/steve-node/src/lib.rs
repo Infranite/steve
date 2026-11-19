@@ -1597,7 +1597,7 @@ impl LocalNode {
     }
 
     /// Lets the Hub upgrade this Node through `upgrader` (the host that installed it as a
-    /// service): probes then say [`FEATURE_NODE_UPGRADE`] and the build. Set once.
+    /// service): `probe_build` then reports its build and upgrade support. Set once.
     pub fn set_upgrader(&self, upgrader: Arc<dyn Upgrader>) {
         let _ = self.0.upgrader.set(upgrader);
     }
@@ -4501,15 +4501,11 @@ impl Discovery for LocalNode {
                     FEATURE_ARTIFACT_READ.into(),
                     FEATURE_HARNESS_UPDATES.into(),
                 ];
-                if self.0.upgrader.get().is_some() {
-                    f.push(FEATURE_NODE_UPGRADE.into());
-                }
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());
                 }
                 f
             },
-            build: self.0.upgrader.get().map(|u| u.build()),
         })
     }
     async fn probe_build(&self) -> ApiResult<upgrade_v1::ProbeBuildResponse> {

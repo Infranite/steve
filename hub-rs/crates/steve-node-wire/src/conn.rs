@@ -136,9 +136,57 @@ impl LaneQ {
     }
 }
 
+/// The payload/error contract selected once, before dispatch or queueing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Schema {
+    Ordinary,
+    V1,
+}
+
+impl Schema {
+    fn version(self) -> u32 {
+        match self {
+            Self::Ordinary => steve_node_api::PROTOCOL,
+            Self::V1 => upgrade::UPGRADE_PROTOCOL,
+        }
+    }
+
+    fn outcome(self, outcome: Outcome) -> Value {
+        match self {
+            Self::Ordinary => serde_json::to_value(outcome).unwrap(),
+            Self::V1 => serde_json::to_value(match outcome {
+                Outcome::Ok(value) => upgrade::Outcome::Ok(value),
+                Outcome::Err(error) => upgrade::Outcome::Err(error.into()),
+            })
+            .unwrap(),
+        }
+    }
+}
+
+enum Route {
+    Ordinary,
+    V1,
+    Incompatible,
+    Unsupported,
+}
+
+/// A mismatched peer's ordinary requests never touch a mutable payload decoder.
+fn route(mode: upgrade::Mode, env: &Envelope) -> Route {
+    match (env.v, env.t) {
+        (upgrade::UPGRADE_PROTOCOL, Kind::Req) if !upgrade::is_method(&env.m) => {
+            Route::Incompatible
+        }
+        (upgrade::UPGRADE_PROTOCOL, Kind::Unknown) => Route::Incompatible,
+        (upgrade::UPGRADE_PROTOCOL, _) => Route::V1,
+        (_, Kind::Req | Kind::Unknown) if mode == upgrade::Mode::Upgrade => Route::Incompatible,
+        (steve_node_api::PROTOCOL, _) if mode == upgrade::Mode::Normal => Route::Ordinary,
+        _ => Route::Unsupported,
+    }
+}
+
 struct Pending {
     tx: oneshot::Sender<Value>,
-    upgrade: bool,
+    schema: Schema,
 }
 
 struct CloseReq {
@@ -264,7 +312,10 @@ impl Conn {
     /// Calls `method` with the table's lane and deadline.
     pub async fn call(&self, method: &str, p: Value, op: Option<&OperationId>) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(upgrade::Error::incompatible().into());
+            return Err(ApiError::new(
+                ErrorCode::Offline,
+                "ordinary protocol unavailable while upgrading",
+            ));
         }
         let spec = methods::spec(method)
             .ok_or_else(|| ApiError::new(ErrorCode::Internal, format!("no method {method}")))?;
@@ -281,9 +332,14 @@ impl Conn {
         op: Option<&OperationId>,
     ) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(upgrade::Error::incompatible().into());
+            return Err(ApiError::new(
+                ErrorCode::Offline,
+                "ordinary protocol unavailable while upgrading",
+            ));
         }
-        let raw = self.call_raw(method, p, lane, deadline, op, false).await?;
+        let raw = self
+            .call_raw(method, p, lane, deadline, op, Schema::Ordinary)
+            .await?;
         let outcome: Outcome = serde_json::from_value(raw)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("bad result: {e}")))?;
         match outcome {
@@ -311,7 +367,7 @@ impl Conn {
             (Lane::Control, Duration::from_secs(60))
         };
         let raw = self
-            .call_raw(method, p, lane, budget, op, true)
+            .call_raw(method, p, lane, budget, op, Schema::V1)
             .await
             .map_err(upgrade::Error::from)?;
         let outcome: upgrade::Outcome = serde_json::from_value(raw).map_err(|_| {
@@ -334,7 +390,7 @@ impl Conn {
         lane: Lane,
         deadline: Duration,
         op: Option<&OperationId>,
-        upgrade: bool,
+        schema: Schema,
     ) -> ApiResult<Value> {
         let offline = |why: &str| ApiError::new(ErrorCode::Offline, format!("{method}: {why}"));
         if self.is_closed() {
@@ -342,11 +398,7 @@ impl Conn {
         }
         let id = self.s.id();
         let env = Envelope {
-            v: if upgrade {
-                upgrade::UPGRADE_PROTOCOL
-            } else {
-                crate::WIRE
-            },
+            v: schema.version(),
             t: Kind::Req,
             id: id.clone(),
             re: None,
@@ -363,7 +415,7 @@ impl Conn {
             .pending
             .lock()
             .unwrap()
-            .insert(id.clone(), Pending { tx, upgrade });
+            .insert(id.clone(), Pending { tx, schema });
         let lane_q = self.s.lane(lane);
         let until = Instant::now() + deadline;
         let lost = |why: &str| {
@@ -405,7 +457,7 @@ impl Shared {
         env.v = if self.mode == upgrade::Mode::Upgrade {
             upgrade::UPGRADE_PROTOCOL
         } else {
-            crate::WIRE
+            steve_node_api::PROTOCOL
         };
         env
     }
@@ -423,17 +475,10 @@ impl Shared {
 
     /// Answers from the reader itself (stale, unknown kind): never waits, so a full lane drops
     /// the answer and its sender meets its deadline.
-    fn respond_now(&self, re: String, outcome: Outcome, generation: u64, frozen: bool) {
-        let text = if frozen {
-            let outcome = match outcome {
-                Outcome::Ok(value) => upgrade::Outcome::Ok(value),
-                Outcome::Err(error) => upgrade::Outcome::Err(error.into()),
-            };
-            self.response_upgrade(re, "", outcome, generation)
-        } else {
-            self.response(re, "", outcome, generation)
-        };
-        if let Some(text) = text {
+    fn respond_now(&self, re: String, outcome: Outcome, generation: u64, schema: Schema) {
+        if let Some(text) =
+            self.response_payload(re, "", schema.outcome(outcome), generation, schema)
+        {
             let _ = self.ctl.try_send(text, None);
         }
     }
@@ -460,7 +505,7 @@ impl Shared {
         generation: u64,
     ) -> Option<String> {
         let p = serde_json::to_value(&outcome).unwrap_or(Value::Null);
-        self.response_payload(re, method, p, generation, false)
+        self.response_payload(re, method, p, generation, Schema::Ordinary)
     }
 
     fn response_upgrade(
@@ -471,7 +516,7 @@ impl Shared {
         generation: u64,
     ) -> Option<String> {
         let p = serde_json::to_value(outcome).ok()?;
-        self.response_payload(re, method, p, generation, true)
+        self.response_payload(re, method, p, generation, Schema::V1)
     }
 
     fn response_payload(
@@ -480,14 +525,10 @@ impl Shared {
         method: &str,
         p: Value,
         generation: u64,
-        frozen: bool,
+        schema: Schema,
     ) -> Option<String> {
         let env = Envelope {
-            v: if frozen {
-                upgrade::UPGRADE_PROTOCOL
-            } else {
-                crate::WIRE
-            },
+            v: schema.version(),
             t: Kind::Res,
             id: self.id(),
             re: Some(re),
@@ -507,11 +548,7 @@ impl Shared {
                         .replacen("request ", &format!("{method} request "), 1);
                 }
                 let mut env = env;
-                env.p = if frozen {
-                    serde_json::to_value(upgrade::Outcome::Err(e)).ok()?
-                } else {
-                    serde_json::to_value(Outcome::Err(e.into())).ok()?
-                };
+                env.p = schema.outcome(Outcome::Err(e.into()));
                 env.encode().ok()?
             }
         };
@@ -659,18 +696,18 @@ async fn reader(
             shut(&s, None, crate::close::MALFORMED, "malformed envelope");
             return;
         };
-        let frozen = env.v == upgrade::UPGRADE_PROTOCOL;
-        if s.mode == upgrade::Mode::Upgrade
-            && env.t == Kind::Req
-            && (!frozen || !upgrade::is_method(&env.m))
-        {
-            s.incompatible(env.id, &env.m, env.generation);
-            continue;
-        }
-        if !frozen && env.v != crate::WIRE {
-            shut(&s, None, crate::close::UNSUPPORTED, "envelope version");
-            return;
-        }
+        let schema = match route(s.mode, &env) {
+            Route::Ordinary => Schema::Ordinary,
+            Route::V1 => Schema::V1,
+            Route::Incompatible => {
+                s.incompatible(env.id, &env.m, env.generation);
+                continue;
+            }
+            Route::Unsupported => {
+                shut(&s, None, crate::close::UNSUPPORTED, "envelope version");
+                return;
+            }
+        };
         match env.t {
             Kind::Res => {
                 // a late answer of another generation never reaches a caller
@@ -679,25 +716,18 @@ async fn reader(
                 }
                 let Some(re) = env.re else { continue };
                 if let Some(p) = s.pending.lock().unwrap().remove(&re)
-                    && p.upgrade == frozen
+                    && p.schema == schema
                 {
                     let _ = p.tx.send(env.p);
                 }
             }
             Kind::Req => {
-                // Decide the schema before touching the ordinary payload or any business port.
-                if (s.mode == upgrade::Mode::Upgrade && !frozen)
-                    || (frozen && !upgrade::is_method(&env.m))
-                {
-                    s.incompatible(env.id, &env.m, env.generation);
-                    continue;
-                }
                 if env.generation != s.generation {
                     s.respond_now(
                         env.id,
                         Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
                         env.generation,
-                        frozen,
+                        schema,
                     );
                     continue;
                 }
@@ -716,7 +746,7 @@ async fn reader(
                             "too many requests in flight on this link",
                         )),
                         s.generation,
-                        frozen,
+                        schema,
                     );
                     continue;
                 };
@@ -731,7 +761,7 @@ async fn reader(
                 let (h, s2) = (handler.clone(), s.clone());
                 // the work outlives the link: a port never ties what it started to its caller
                 tokio::spawn(async move {
-                    if frozen {
+                    if schema == Schema::V1 {
                         let outcome = match h.handle_upgrade(&env.m, env.p).await {
                             Ok(value) => upgrade::Outcome::Ok(value),
                             Err(error) => upgrade::Outcome::Err(error),
@@ -775,14 +805,11 @@ async fn reader(
                 m if s.mode == upgrade::Mode::Normal => handler.control(m, &env.p),
                 _ => {}
             },
-            Kind::Unknown if frozen || s.mode == upgrade::Mode::Upgrade => {
-                s.incompatible(env.id, &env.m, env.generation);
-            }
             Kind::Unknown => s.respond_now(
                 env.id,
                 Outcome::Err(ApiError::new(ErrorCode::Unsupported, "unknown frame kind")),
                 s.generation,
-                frozen,
+                schema,
             ),
         }
     }

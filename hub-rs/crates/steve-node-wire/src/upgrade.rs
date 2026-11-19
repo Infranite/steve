@@ -34,21 +34,6 @@ pub async fn serve_node<N: Node + ?Sized>(
         v1::UPGRADE_SWITCH => {
             let request: v1::SwitchRequest = decode(value)?;
             let request: steve_node_api::UpgradeSwitch = request.try_into()?;
-            if !request.abandon {
-                let current = node
-                    .probe_build()
-                    .await
-                    .map_err(v1::Error::from)?
-                    .build
-                    .ok_or_else(|| {
-                        v1::Error::new(v1::Code::Unsupported, "no installed release identity")
-                    })?;
-                let staged = node
-                    .upgrade_status(request.operation.clone())
-                    .await
-                    .map_err(v1::Error::from)?;
-                upgrade_bridge::refuse_downgrade(&current.version, &staged.version)?;
-            }
             let state = node
                 .upgrade_switch(request)
                 .await

@@ -41,7 +41,7 @@ mod tests {
     #[test]
     fn round_trip_and_caps() {
         let e = Envelope {
-            v: crate::WIRE,
+            v: steve_node_api::PROTOCOL,
             t: Kind::Req,
             id: "r_1".into(),
             re: None,

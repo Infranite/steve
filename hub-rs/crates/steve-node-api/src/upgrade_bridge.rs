@@ -16,6 +16,7 @@ impl From<ApiError> for v1::Error {
             ErrorCode::Conflict => v1::Code::Conflict,
             ErrorCode::Exhausted => v1::Code::Exhausted,
             ErrorCode::Invalid => v1::Code::Invalid,
+            ErrorCode::Downgrade => v1::Code::Downgrade,
             ErrorCode::OutcomeUnknown => v1::Code::OutcomeUnknown,
             ErrorCode::Gap => v1::Code::Gap,
             ErrorCode::Internal => v1::Code::Internal,
@@ -36,8 +37,10 @@ impl From<ApiError> for v1::Error {
 impl From<v1::Error> for ApiError {
     fn from(error: v1::Error) -> Self {
         let code = match error.code {
-            v1::Code::Incompatible | v1::Code::Unsupported => ErrorCode::Unsupported,
-            v1::Code::Downgrade | v1::Code::Invalid => ErrorCode::Invalid,
+            v1::Code::Incompatible => ErrorCode::Offline,
+            v1::Code::Unsupported => ErrorCode::Unsupported,
+            v1::Code::Invalid => ErrorCode::Invalid,
+            v1::Code::Downgrade => ErrorCode::Downgrade,
             v1::Code::Offline => ErrorCode::Offline,
             v1::Code::Busy => ErrorCode::Busy,
             v1::Code::Denied => ErrorCode::Denied,
@@ -51,10 +54,15 @@ impl From<v1::Error> for ApiError {
         };
         Self {
             code,
-            retry: match error.retry {
-                v1::Retry::Never => RetryClass::Never,
-                v1::Retry::Later => RetryClass::SameOperation,
-                v1::Retry::Reconcile => RetryClass::AfterReconcile,
+            // `incompatible/never` is a wire refusal, not a permanent rejection of queued work.
+            retry: if error.code == v1::Code::Incompatible {
+                RetryClass::SameOperation
+            } else {
+                match error.retry {
+                    v1::Retry::Never => RetryClass::Never,
+                    v1::Retry::Later => RetryClass::SameOperation,
+                    v1::Retry::Reconcile => RetryClass::AfterReconcile,
+                }
             },
             operation: error.operation.and_then(|op| OperationId::new(op).ok()),
             state: (code == ErrorCode::OutcomeUnknown).then_some(StateTag::Unknown),
@@ -198,27 +206,29 @@ pub fn invalid(detail: impl Into<String>) -> v1::Error {
     v1::Error::new(v1::Code::Invalid, detail)
 }
 
+/// Parse the release installer's three decimal components once for validation and comparison.
+pub fn release_version(v: &str) -> v1::Result<[u64; 3]> {
+    let parts: Vec<_> = v.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(invalid(
+            "upgrade versions must be three decimal release components",
+        ));
+    }
+    Ok([
+        parts[0].parse().map_err(|_| invalid("version overflow"))?,
+        parts[1].parse().map_err(|_| invalid("version overflow"))?,
+        parts[2].parse().map_err(|_| invalid("version overflow"))?,
+    ])
+}
+
 /// Release versions are exactly three decimal components, as required by the release installer.
 /// Compare numerically (1.10.0 > 1.9.0), never lexically. Unknown versions fail closed.
 pub fn refuse_downgrade(current: &str, target: &str) -> v1::Result<()> {
-    fn version(v: &str) -> v1::Result<[u64; 3]> {
-        let parts: Vec<_> = v.split('.').collect();
-        if parts.len() != 3
-            || parts
-                .iter()
-                .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
-        {
-            return Err(invalid(
-                "upgrade versions must be three decimal release components",
-            ));
-        }
-        Ok([
-            parts[0].parse().map_err(|_| invalid("version overflow"))?,
-            parts[1].parse().map_err(|_| invalid("version overflow"))?,
-            parts[2].parse().map_err(|_| invalid("version overflow"))?,
-        ])
-    }
-    if version(target)? < version(current)? {
+    if release_version(target)? < release_version(current)? {
         return Err(v1::Error::new(
             v1::Code::Downgrade,
             format!(

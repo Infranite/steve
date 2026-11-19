@@ -643,3 +643,101 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
     assert_eq!(h.fleet.link_failure(node.as_str()), None);
     n.task.abort();
 }
+
+/// An already reconciled coordinator keeps sending control and queued commands while new work
+/// is held. A protocol mismatch must leave those operations pending, then send the same IDs once
+/// a compatible Node returns, rather than permanently rejecting the user's work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_same_operation() {
+    use std::sync::Arc;
+    use steve_node_wire::RemoteSink;
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    let first = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    fake.connect(Arc::new(RemoteSink(first.link.clone())));
+    h.session("s_pending");
+    let rt = h.bind(&node, "s_pending");
+    until("session reconciled and ready", 15, || {
+        phase(&h, "s_pending") == "ready"
+    })
+    .await;
+    first
+        .conn
+        .close(None, steve_node_wire::close::GOODBYE, "replacing release");
+    until("first link detached", 5, || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    rt.prompt("s_pending", "queued across upgrade", "user", &[])
+        .unwrap();
+    let start_sql = "SELECT operation_id FROM node_commands WHERE method='start_turn'";
+    until("ordinary call deferred offline", 5, || h.q::<i64>(
+        "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'"
+    ) == 1).await;
+    let operation: String = h.q(start_sql);
+    let generation: i64 =
+        h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
+    let incompatible = dial_url_as(
+        &h.ws_url(),
+        &h.svc.hub_id,
+        &identity,
+        &node,
+        fake.clone(),
+        1,
+        PROTOCOL + 1,
+    )
+    .await
+    .unwrap();
+    until("upgrade link attached", 5, || {
+        h.fleet.remote(&node).is_upgrade()
+    })
+    .await;
+    until("send loop retried on upgrade link", 5, || {
+        h.q::<i64>(&format!(
+            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
+        )) == 1
+    }).await;
+    let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
+    let error: String = h.q("SELECT json_extract(receipt,'$.last_error.code') FROM node_commands WHERE method='start_turn'");
+    assert_eq!(state, "pending", "{}", h.dump());
+    assert_eq!(error, "offline");
+    assert_eq!(
+        h.q::<i64>("SELECT maybe_sent FROM node_commands WHERE method='start_turn'"),
+        0
+    );
+    assert!(!fake.log().iter().any(|(method, _)| *method == "start_turn"));
+    assert_eq!(h.q::<String>(start_sql), operation);
+    incompatible
+        .conn
+        .close(None, steve_node_wire::close::GOODBYE, "upgraded");
+    until("upgrade link detached", 5, || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let restored = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
+    fake.connect(Arc::new(RemoteSink(restored.link.clone())));
+    until("same queued operation delivered", 10, || {
+        fake.log()
+            .iter()
+            .any(|(method, op)| *method == "start_turn" && op.as_str() == operation)
+    })
+    .await;
+    until("receipt accepted", 5, || {
+        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'") != "pending"
+    })
+    .await;
+    assert_eq!(
+        fake.log()
+            .iter()
+            .filter(|(method, _)| *method == "start_turn")
+            .count(),
+        1
+    );
+    assert_eq!(h.q::<String>(start_sql), operation);
+    assert_ne!(
+        h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'"),
+        "rejected"
+    );
+    rt.stop("test complete");
+}
