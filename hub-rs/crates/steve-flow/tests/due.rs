@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use serde_json::json;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use steve_flow::alarms::{AlarmClock, AlarmLine, AlarmSource, Want};
 use steve_flow::exec::{RunExecutor, RunStatus};
@@ -56,12 +57,22 @@ impl AlarmSource for AlarmLines {
     }
 }
 fn environment() -> (TestEnv, Arc<FlowCx>) {
+    environment_for(Arc::new(Claimed))
+}
+fn environment_for(exec: Arc<dyn RunExecutor>) -> (TestEnv, Arc<FlowCx>) {
     let core = Arc::new(FakeCore::default());
-    let setup = FlowSetup::new(core.clone()).alarm_source(Arc::new(AlarmLines));
+    let fault_store = Arc::new(std::sync::OnceLock::new());
+    let setup = FlowSetup::new(core.clone())
+        .alarm_source(Arc::new(AlarmLines))
+        .alarm_source(Arc::new(Faults {
+            store: fault_store.clone(),
+        }));
     let env = TestEnv::new(|r| setup.register(r));
     env.clock.set(NOW);
     *core.store.lock().unwrap() = Some(env.store().clone());
-    let cx = setup.build(env.modules.clone(), Arc::new(Claimed));
+    env.store().with_conn(|c| {c.execute_batch("CREATE TABLE claim_faults(kind TEXT PRIMARY KEY); INSERT INTO claim_faults VALUES('plan'),('line');")?;Ok(())}).unwrap();
+    fault_store.set(env.store().clone()).ok().unwrap();
+    let cx = setup.build(env.modules.clone(), exec);
     (env, cx)
 }
 
@@ -80,7 +91,10 @@ struct Runs {
 }
 impl Runs {
     fn new(kind: Kind) -> Self {
-        let (env, cx) = environment();
+        Self::with_executor(kind, Arc::new(Claimed))
+    }
+    fn with_executor(kind: Kind, exec: Arc<dyn RunExecutor>) -> Self {
+        let (env, cx) = environment_for(exec);
         let source = match kind {
             Kind::Trigger => RunSource::triggers(cx.clone()),
             Kind::Wait => RunSource::waits(cx.clone()),
@@ -482,9 +496,11 @@ async fn one_planning_source_error_does_not_rollback_healthy_fired_alarms() {
     let id = f.add(NOW, false);
     f.env.store().with_conn(|c|Ok(c.execute(
         "INSERT INTO time_alarm_dirty(workspace_id,subject) VALUES(?,'contract:source_error')",[WS])?)).unwrap();
-    assert!(
-        f.source.run_due(NOW).await.is_err(),
-        "the source error reaches due_loop for backoff"
+    f.source.run_due(NOW).await.unwrap();
+    assert_eq!(
+        f.source.next_due().await.unwrap(),
+        None,
+        "failed requests are terminal, not source backoff"
     );
     assert!(
         f.done().contains(&id),
@@ -504,5 +520,281 @@ async fn one_planning_source_error_does_not_rollback_healthy_fired_alarms() {
         f.source.next_due().await.unwrap(),
         None,
         "a repaired source recovers without replaying the fired alarm"
+    );
+}
+
+struct Faults {
+    store: Arc<std::sync::OnceLock<steve_store::Store>>,
+}
+impl Faults {
+    fn fail(&self, c: &Connection, kind: &str) -> FlowResult<()> {
+        c.execute("INSERT INTO claim_leaks(kind) VALUES(?)", [kind])?;
+        self.store
+            .get()
+            .unwrap()
+            .publish(steve_types::DomainEvent::from(
+                steve_types::AutomationEvent::Signal {
+                    id: "row-leak".into(),
+                    ws: WS.into(),
+                },
+            ));
+        Err(ApiError::Internal(format!("persistent {kind} failure")))
+    }
+}
+impl AlarmSource for Faults {
+    fn family(&self) -> &'static str {
+        "todo"
+    }
+    fn plan(&self, c: &Connection, ws: &str, id: &str, now: i64) -> FlowResult<Vec<Want>> {
+        if id == "plan" {
+            if c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='plan')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )? {
+                self.fail(c, "plan")?;
+            }
+            return TodoSource.plan(c, ws, id, now);
+        }
+        Ok(vec![])
+    }
+    fn line(&self, c: &Connection, _: &str, id: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+        if id == "line"
+            && c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claim_faults WHERE kind='line')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            self.fail(c, "line")?;
+        }
+        Ok(Some(AlarmLine {
+            subject: format!("todo:{id}"),
+            text: id.into(),
+            detail: None,
+            link: None,
+            planned_for: None,
+        }))
+    }
+}
+fn no_leaks(env: &TestEnv) {
+    assert_eq!(
+        env.store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT count(*) FROM claim_leaks",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        0
+    );
+    assert!(!env.take_events().iter().any(|e|matches!(e.as_domain(),Some(steve_types::DomainEvent::Automation(steve_types::AutomationEvent::Signal{id,..})) if id.to_string()=="row-leak")),"rolled-back row events must not escape the Store savepoint");
+}
+#[tokio::test]
+async fn internal_claim_failures_end_only_the_bad_row_without_delaying_other_deadlines() {
+    for kind in [Kind::Trigger, Kind::Wait, Kind::Retry] {
+        let f = Runs::new(kind);
+        let bad = f.add(NOW, false);
+        let good = f.add(NOW + 37, false);
+        let trigger = match kind {
+            Kind::Trigger => format!(
+                "CREATE TRIGGER fail_claim BEFORE UPDATE OF next_at ON flow_triggers WHEN OLD.id='{bad}' BEGIN SELECT RAISE(ABORT,'persistent claim failure'); END;"
+            ),
+            _ => format!(
+                "CREATE TRIGGER fail_claim BEFORE UPDATE OF status ON flow_runs WHEN OLD.id='{bad}' AND NEW.status='running' BEGIN SELECT RAISE(ABORT,'persistent claim failure'); END;"
+            ),
+        };
+        f.env
+            .store()
+            .with_conn(|c| {
+                c.execute_batch(&trigger)?;
+                c.execute("UPDATE flow_triggers SET missed='skip'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        f.source.run_due(NOW).await.unwrap();
+        assert!(f.state(&bad, false));
+        assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + 37));
+        f.source.run_due(NOW + 36).await.unwrap();
+        assert!(!f.state(&good, true));
+        f.env.clock.set(NOW + 37);
+        f.source.run_due(NOW + 37).await.unwrap();
+        assert!(
+            f.state(&good, true),
+            "a failed peer cannot turn a healthy deadline into a missed run"
+        );
+        if matches!(kind, Kind::Trigger) {
+            assert_eq!(
+                f.env
+                    .store()
+                    .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                        "SELECT started FROM flow_runs WHERE flow_id=?",
+                        [&good],
+                        |r| r.get::<_, i64>(0)
+                    )?))
+                    .unwrap(),
+                NOW + 37
+            );
+        }
+        assert_eq!(
+            f.env
+                .store()
+                .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT count(*) FROM audit WHERE action='flow.claim_failed' AND target=?",
+                    [&bad],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .unwrap(),
+            1,
+            "terminal failure is durable and not attempted again"
+        );
+        let expected = if matches!(kind, Kind::Trigger) {
+            Some((NOW.div_euclid(DAY) + 1) * DAY)
+        } else {
+            None
+        };
+        assert_eq!(f.source.next_due().await.unwrap(), expected);
+    }
+}
+
+#[tokio::test]
+async fn a_poison_alarm_line_rolls_back_only_its_row_and_not_the_ready_batch() {
+    let f = Alarms::new();
+    let bad = f.add(NOW - 1, false);
+    f.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("CREATE TABLE claim_leaks(kind TEXT)")?;
+            c.execute(
+                "UPDATE time_alarms SET subject='todo:line' WHERE id=?",
+                [&bad],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for _ in 0..BATCH {
+        f.add(NOW, false);
+    }
+    f.env.take_events();
+    f.source.run_due(NOW).await.unwrap();
+    assert_eq!(
+        f.done().len(),
+        BATCH - 1,
+        "a failed row must not undo the healthy rows of its batch"
+    );
+    no_leaks(&f.env);
+    f.source.run_due(NOW).await.unwrap();
+    assert_eq!(
+        f.done().len(),
+        BATCH,
+        "the retrying first row must be filtered before LIMIT"
+    );
+    no_leaks(&f.env);
+    assert!(f.dead().contains(&bad));
+    assert_eq!(f.done().len(), BATCH);
+    assert_eq!(f.source.next_due().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn broken_dirty_planning_does_not_mask_alarm_deadlines_and_a_subject_edit_can_retry() {
+    let f = Alarms::new();
+    let good = f.add(NOW + 37, false);
+    f.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("CREATE TABLE claim_leaks(kind TEXT)")?;
+            c.execute("INSERT INTO todos(id,workspace_id,owner,text,state,source,writer,created,updated,remind_at) VALUES('plan',?1,?2,'retry planning','open','you',?2,?3,?3,?3)",params![WS,ME,NOW])?;
+            Ok(())
+        })
+        .unwrap();
+    f.env.take_events();
+    f.source.run_due(NOW).await.unwrap();
+    no_leaks(&f.env);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + 37));
+    f.env.clock.set(NOW + 37);
+    f.source.run_due(NOW + 37).await.unwrap();
+    assert!(f.done().contains(&good));
+    no_leaks(&f.env);
+    assert_eq!(f.source.next_due().await.unwrap(), None);
+    assert_eq!(f.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row("SELECT count(*) FROM audit WHERE action='flow.claim_failed' AND target='todo:plan'",[],|r|r.get::<_,i64>(0))?)).unwrap(),1);
+    // The actual migrated subject trigger requests planning again after the fault is repaired.
+    f.env
+        .store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM claim_faults WHERE kind='plan'", [])?;
+            c.execute("UPDATE todos SET remind_at=? WHERE id='plan'", [NOW + DAY])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(f.source.next_due().await.unwrap(), Some(f.env.clock.now()));
+    f.source.run_due(f.env.clock.now()).await.unwrap();
+    assert_eq!(
+        f.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT state FROM time_alarms WHERE subject='todo:plan'",
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
+            .unwrap(),
+        "planned"
+    );
+    f.env.clock.set(NOW + DAY);
+    f.source.run_due(NOW + DAY).await.unwrap();
+    assert_eq!(
+        f.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT state FROM time_alarms WHERE subject='todo:plan'",
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
+            .unwrap(),
+        "fired"
+    );
+}
+
+struct Finished(Arc<std::sync::atomic::AtomicBool>);
+#[async_trait]
+impl RunExecutor for Finished {
+    async fn drive(&self, cx: &FlowCx, id: &str) -> FlowResult<RunStatus> {
+        let result = steve_flow::GraphEngine.drive(cx, id).await;
+        self.0.store(true, Ordering::SeqCst);
+        result
+    }
+}
+
+#[tokio::test]
+async fn failed_wait_completion_settles_its_signal_once_through_the_engine() {
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let f = Runs::with_executor(Kind::Wait, Arc::new(Finished(finished.clone())));
+    let bad = f.add(NOW, true);
+    f.env.store().with_conn(|c|{
+        c.execute("INSERT INTO ext_events(id,workspace_id,source,type,dedupe_key,occurred,received,summary) VALUES('settle-event',?,'manual','manual','settle-event',?2,?2,'test')",params![WS,NOW])?;
+        c.execute("UPDATE flow_runs SET event_id='settle-event' WHERE id=?",[&bad])?;
+        c.execute_batch("CREATE TABLE settle_counts(n INTEGER); CREATE TRIGGER count_settle AFTER UPDATE ON ext_events WHEN NEW.id='settle-event' BEGIN INSERT INTO settle_counts(n) VALUES(1); END;")?;Ok(())
+    }).unwrap();
+    f.source.run_due(NOW).await.unwrap();
+    until(|| finished.load(Ordering::SeqCst)).await;
+    assert!(
+        f.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT outcome='failed' FROM ext_events WHERE id='settle-event'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )?))
+            .unwrap()
+    );
+    assert_eq!(
+        f.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT count(*) FROM settle_counts",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        1
     );
 }

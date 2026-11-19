@@ -67,6 +67,7 @@ macro_rules! t_in {
 
 pub mod adapter;
 pub mod alarms;
+mod claim;
 pub mod api;
 pub mod bots;
 pub mod budget;

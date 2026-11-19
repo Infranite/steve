@@ -330,48 +330,49 @@ pub fn replan(
     reconcile(tx, ws, subject, &wants, now).map(Some)
 }
 
-/// Plans every subject marked in `time_alarm_dirty` again, each in its own transaction (one that fails
-/// is logged and stays marked; the others go on). Returns how many were planned.
+/// Plans dirty subjects independently. A broken request cancels only its subject's alarms and
+/// records a durable diagnostic; a later subject edit requests planning again.
 pub fn replan_dirty(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<usize> {
-    let batch: Vec<(String, String)> = store.reader(|c| {
-        let mut st = c.prepare_cached(
-            "SELECT workspace_id, subject FROM time_alarm_dirty ORDER BY rowid LIMIT ?",
-        )?;
-        Ok::<_, crate::FlowError>(
-            st.query_map([BATCH as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?,
-        )
+    let rows = store.reader(|c| -> FlowResult<Vec<i64>> {
+        let mut st =
+            c.prepare_cached("SELECT rowid FROM time_alarm_dirty ORDER BY rowid LIMIT ?")?;
+        Ok(st
+            .query_map([BATCH as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     })?;
     let mut done = 0;
-    let mut failure = None;
-    for (ws, subject) in batch {
-        let result = store.transaction(|tx| -> FlowResult<()> {
-            replan(tx, sources, &ws, &subject, now)?;
-            tx.execute(
-                "DELETE FROM time_alarm_dirty WHERE workspace_id=? AND subject=?",
-                params![ws, subject],
-            )?;
-            Ok(())
-        });
-        match result {
-            Ok(()) => done += 1,
-            Err(e) if e.status() < 500 => {
-                tracing::error!(%ws, %subject, error=%e, "invalid alarm plan; cancelled");
-                store.transaction(|tx| -> FlowResult<()> {
-                    tx.execute("UPDATE time_alarms SET state='cancelled', hold_until=NULL, updated=?3 WHERE workspace_id=?1 AND subject=?2 AND state='planned'", params![ws, subject, now])?;
-                    tx.execute("DELETE FROM time_alarm_dirty WHERE workspace_id=? AND subject=?", params![ws, subject])?;
-                    Ok(())
-                })?;
-            }
-            Err(e) => {
-                failure.get_or_insert(e);
-            }
+    for rowid in rows {
+        let key = crate::claim::Key::new("time_alarm_dirty", "subject", rowid);
+        let planned = crate::claim::row(
+            store,
+            &key,
+            now,
+            |tx| {
+                let (ws, subject): (String, String) = tx.query_row(
+                    "SELECT workspace_id,subject FROM time_alarm_dirty WHERE rowid=?",
+                    [rowid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                replan(tx, sources, &ws, &subject, now)?;
+                tx.execute("DELETE FROM time_alarm_dirty WHERE rowid=?", [rowid])?;
+                Ok(Some(()))
+            },
+            |tx, _| {
+                let (ws, subject): (String, String) = tx.query_row(
+                    "SELECT workspace_id,subject FROM time_alarm_dirty WHERE rowid=?",
+                    [rowid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                tx.execute("UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?3 WHERE workspace_id=?1 AND subject=?2 AND state='planned'",params![ws,subject,now])?;
+                tx.execute("DELETE FROM time_alarm_dirty WHERE rowid=?", [rowid])?;
+                Ok(None)
+            },
+        )?;
+        if planned.is_some() {
+            done += 1;
         }
     }
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(done),
-    }
+    Ok(done)
 }
 
 /// What a [`claim_due`] round did.
@@ -448,152 +449,120 @@ fn mark(tx: &Tx, ws: &str, subject: &str) -> FlowResult<()> {
     Ok(())
 }
 
-/// One round: claims every due alarm (see the module docs). One transaction: nothing fires twice.
+const INVALID_TIME: &str = "typeof(fire_at)<>'integer' OR (hold_until IS NOT NULL AND typeof(hold_until)<>'integer') OR (stale_at IS NOT NULL AND typeof(stale_at)<>'integer')";
+
+enum RowOutcome {
+    Cancelled,
+    Stale,
+    Held,
+    Fire {
+        due: Due,
+        topic: &'static Topic,
+        line: AlarmLine,
+        late: bool,
+    },
+}
+
+fn claim_one(
+    tx: &Tx,
+    sources: &AlarmSources,
+    rowid: i64,
+    now: i64,
+) -> FlowResult<Option<RowOutcome>> {
+    let d=tx.query_row("SELECT id,workspace_id,owner_user,kind,subject,planned_for,fire_at,stale_at,hold_until FROM time_alarms WHERE rowid=? AND state='planned'",[rowid],|r|Ok(Due {id:r.get(0)?,ws:r.get(1)?,owner:r.get(2)?,kind:r.get(3)?,subject:r.get(4)?,planned_for:r.get(5)?,fire_at:r.get(6)?,stale_at:r.get(7)?,hold_until:r.get(8)?})).optional()?;
+    let Some(d) = d else { return Ok(None) };
+    let cancel = |tx: &Tx| -> FlowResult<Option<RowOutcome>> {
+        tx.execute(
+            "UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?2 WHERE rowid=?1",
+            params![rowid, now],
+        )?;
+        Ok(Some(RowOutcome::Cancelled))
+    };
+    let Some(topic) = topic_of_kind(&d.kind) else {
+        return cancel(tx);
+    };
+    let ends = quiet_ends(tx, &d.ws, &d.owner, now)?;
+    let out = match plan_alarm(d.fire_at, d.stale_at, now, ends, topic.quiet) {
+        AlarmAction::Stale => {
+            tx.execute(
+                "UPDATE time_alarms SET state='stale',hold_until=NULL,updated=?2 WHERE rowid=?1",
+                params![rowid, now],
+            )?;
+            mark(tx, &d.ws, &d.subject)?;
+            RowOutcome::Stale
+        }
+        AlarmAction::Hold { until } => {
+            if d.hold_until != Some(until) {
+                tx.execute(
+                    "UPDATE time_alarms SET hold_until=?2,updated=?3 WHERE rowid=?1",
+                    params![rowid, until, now],
+                )?;
+            }
+            RowOutcome::Held
+        }
+        AlarmAction::Fire { late_ms } => {
+            let line = match d.subject.split_once(':') {
+                Some((family, id)) => match sources.get(family) {
+                    Some(source) => source.line(tx, &d.ws, id, &d.kind)?,
+                    None => None,
+                },
+                None => None,
+            };
+            let Some(mut line) = line else {
+                return cancel(tx);
+            };
+            line.planned_for = Some(d.planned_for);
+            mark(tx, &d.ws, &d.subject)?;
+            RowOutcome::Fire {
+                due: d,
+                topic,
+                line,
+                late: late_ms > MISSED_GRACE_MS,
+            }
+        }
+    };
+    Ok(Some(out))
+}
+
+/// Every row attempt has a Store savepoint. Counters and message groups are merged only after
+/// that attempt succeeds; the outer transaction keeps successful claims and their events atomic.
 pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<Claimed> {
     store.transaction(|tx| {
-        let due: Vec<Due> = {
-            let mut st = tx.prepare_cached(
-                "SELECT id, workspace_id, owner_user, kind, subject, planned_for, fire_at, stale_at, hold_until FROM time_alarms
-                  WHERE state = 'planned' AND fire_at <= ?1 AND (hold_until IS NULL OR hold_until <= ?1 OR stale_at <= ?1) ORDER BY fire_at, id LIMIT ?2",
-            )?;
-            st.query_map(params![now, BATCH as i64], |r| {
-                Ok(Due {
-                    id: r.get(0)?,
-                    ws: r.get(1)?,
-                    owner: r.get(2)?,
-                    kind: r.get(3)?,
-                    subject: r.get(4)?,
-                    planned_for: r.get(5)?,
-                    fire_at: r.get(6)?,
-                    stale_at: r.get(7)?,
-                    hold_until: r.get(8)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows:Vec<i64>={
+            let sql=format!("SELECT rowid FROM time_alarms WHERE state='planned' AND (({INVALID_TIME}) OR (fire_at<=?1 AND (hold_until IS NULL OR hold_until<=?1 OR stale_at<=?1))) ORDER BY fire_at,id LIMIT ?2");
+            let mut st=tx.prepare_cached(&sql)?;
+            st.query_map(params![now,BATCH as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
-        let mut out = Claimed::default();
-        let mut groups: Vec<Group> = Vec::new();
-        let mut quiet: Vec<((String, String), Option<i64>)> = Vec::new();
-        for d in due {
-            let cancel = |tx: &Tx| -> FlowResult<()> {
-                tx.execute(
-                    "UPDATE time_alarms SET state = 'cancelled', hold_until = NULL, updated = ? WHERE id = ?",
-                    params![now, d.id],
-                )?;
-                Ok(())
-            };
-            let Some(topic) = topic_of_kind(&d.kind) else {
-                tracing::warn!(alarm = %d.id, kind = %d.kind, "no notification topic for this alarm kind; cancelled");
-                cancel(tx)?;
-                out.cancelled += 1;
-                continue;
-            };
-            let key = (d.ws.clone(), d.owner.clone());
-            let ends = match quiet.iter().find(|(k, _)| *k == key) {
-                Some((_, e)) => *e,
-                None => {
-                    let e = quiet_ends(tx, &d.ws, &d.owner, now)?;
-                    quiet.push((key, e));
-                    e
-                }
-            };
-            match plan_alarm(d.fire_at, d.stale_at, now, ends, topic.quiet) {
-                AlarmAction::Stale => {
-                    tx.execute(
-                        "UPDATE time_alarms SET state = 'stale', hold_until = NULL, updated = ? WHERE id = ?",
-                        params![now, d.id],
-                    )?;
-                    mark(tx, &d.ws, &d.subject)?;
-                    out.stale += 1;
-                }
-                AlarmAction::Hold { until } => {
-                    if d.hold_until != Some(until) {
-                        tx.execute(
-                            "UPDATE time_alarms SET hold_until = ?, updated = ? WHERE id = ?",
-                            params![until, now, d.id],
-                        )?;
-                    }
-                    out.held += 1;
-                }
-                AlarmAction::Fire { late_ms } => {
-                    let line = match d.subject.split_once(':') {
-                        Some((family, id)) => match sources.get(family) {
-                            Some(s) => match s.line(tx, &d.ws, id, &d.kind) {
-                                Ok(line) => line,
-                                Err(e) if e.status() < 500 => {
-                                    tracing::error!(alarm=%d.id, error=%e, "invalid alarm; cancelled");
-                                    None
-                                }
-                                Err(e) => return Err(e),
-                            },
-                            None => None,
-                        },
-                        None => None,
-                    };
-                    let Some(mut line) = line else {
-                        cancel(tx)?;
-                        out.cancelled += 1;
-                        continue;
-                    };
-                    line.planned_for = Some(d.planned_for);
-                    mark(tx, &d.ws, &d.subject)?;
-                    let late = late_ms > MISSED_GRACE_MS;
-                    let at = groups.iter_mut().find(|g| {
-                        topic.merges && g.ws == d.ws && g.owner == d.owner && g.topic.name == topic.name
-                    });
-                    match at {
-                        Some(g) => {
-                            g.ids.push(d.id.clone());
-                            if !g.lines.iter().any(|l| same_line(&l.text) == same_line(&line.text)) {
-                                g.lines.push(line);
-                            }
-                            g.late |= late;
-                        }
-                        None => groups.push(Group {
-                            ws: d.ws.clone(),
-                            owner: d.owner.clone(),
-                            topic,
-                            ids: vec![d.id.clone()],
-                            lines: vec![line],
-                            late,
-                        }),
-                    }
+        let mut out=Claimed::default();
+        let mut groups:Vec<Group>=Vec::new();
+        for rowid in rows {
+            let key=crate::claim::Key::new("time_alarms","id",rowid);
+            let outcome=crate::claim::row(store,&key,now,|tx|claim_one(tx,sources,rowid,now),|tx,_| {
+                let changed=tx.execute("UPDATE time_alarms SET state='cancelled',hold_until=NULL,updated=?2 WHERE rowid=?1 AND state='planned'",params![rowid,now])?;
+                Ok((changed==1).then_some(RowOutcome::Cancelled))
+            })?;
+            match outcome {
+                None=>{},
+                Some(RowOutcome::Cancelled)=>out.cancelled+=1,
+                Some(RowOutcome::Stale)=>out.stale+=1,
+                Some(RowOutcome::Held)=>out.held+=1,
+                Some(RowOutcome::Fire{due:d,topic,line,late})=>{
+                    if let Some(g)=groups.iter_mut().find(|g|topic.merges&&g.ws==d.ws&&g.owner==d.owner&&g.topic.name==topic.name) {
+                        g.ids.push(d.id);
+                        if !g.lines.iter().any(|l|same_line(&l.text)==same_line(&line.text)) {g.lines.push(line);}
+                        g.late|=late;
+                    } else {groups.push(Group{ws:d.ws,owner:d.owner,topic,ids:vec![d.id],lines:vec![line],late});}
                 }
             }
         }
-        for Group {
-            ws,
-            owner,
-            topic,
-            ids,
-            lines,
-            late,
-        } in groups
-        {
-            let kind = topic.alarm.unwrap_or_default();
-            let payload = AlarmFired {
-                owner,
-                kind: kind.into(),
-                alarms: ids.clone(),
-                lines,
-                late,
-                at: Some(now),
-            };
-            let ev = steve_store::outbox::emit(
-                tx,
-                &ws,
-                topic.name,
-                ALARM_FIRED_V,
-                &serde_json::to_value(&payload)?,
-            )?;
+        for Group{ws,owner,topic,ids,lines,late} in groups {
+            let payload=AlarmFired{owner,kind:topic.alarm.unwrap_or_default().into(),alarms:ids.clone(),lines,late,at:Some(now)};
+            let ev=steve_store::outbox::emit(tx,&ws,topic.name,ALARM_FIRED_V,&serde_json::to_value(&payload)?)?;
             for id in &ids {
-                tx.execute(
-                    "UPDATE time_alarms SET state = 'fired', fired_at = ?, run_ref = ?, hold_until = NULL, updated = ? WHERE id = ? AND state = 'planned'",
-                    params![now, ev.id, now, id],
-                )?;
+                let changed=tx.execute("UPDATE time_alarms SET state='fired',fired_at=?2,run_ref=?3,hold_until=NULL,updated=?2 WHERE id=?1 AND state='planned'",params![id,now,ev.id])?;
+                if changed!=1 {return Err(steve_modules::ApiError::conflict("alarm changed during claim"));}
             }
-            out.fired += ids.len();
-            out.events.push(ev.id);
+            out.fired+=ids.len();out.events.push(ev.id);
         }
         Ok(out)
     })
@@ -614,8 +583,15 @@ fn recheck_holds(store: &Store, all: bool, now: i64) -> FlowResult<()> {
 }
 
 /// Next stored alarm deadline, including the expiry of a quiet-hour hold.
-pub fn next_alarm_at(c: &Connection) -> FlowResult<Option<i64>> {
-    Ok(c.query_row("SELECT min(max(fire_at,min(coalesce(hold_until,fire_at),coalesce(stale_at,9223372036854775807)))) FROM time_alarms WHERE state='planned'", [], |r| r.get(0))?)
+pub fn next_alarm_at(c: &Connection, now: i64) -> FlowResult<Option<i64>> {
+    let base = format!(
+        "CASE WHEN {INVALID_TIME} THEN ?1 ELSE max(fire_at,min(coalesce(hold_until,fire_at),coalesce(stale_at,9223372036854775807))) END"
+    );
+    Ok(c.query_row(
+        &format!("SELECT min({base}) FROM time_alarms WHERE state='planned'"),
+        [now],
+        |r| r.get(0),
+    )?)
 }
 
 /// The alarms of `subject` in `ws`, for the subject's own page and for tests.
@@ -669,10 +645,8 @@ impl AlarmClock {
             .store()
             .admitted(self.cx.blocking(move |s| {
                 recheck_holds(s, recheck, now)?;
-                let planned = replan_dirty(s, &cx.alarms, now);
+                replan_dirty(s, &cx.alarms, now)?;
                 let claimed = claim_due(s, &cx.alarms, now)?;
-                // A failed subject plan does not stop healthy already planned alarms from firing.
-                planned?;
                 // Repeating sources plan their next occurrence before next_due is queried again.
                 replan_dirty(s, &cx.alarms, now)?;
                 Ok(claimed)
@@ -727,18 +701,19 @@ impl steve_runtime::due::DueSource for AlarmClock {
                     return Ok(Some(cx.now()));
                 }
                 s.reader(|c| {
-                    let dirty: bool =
-                        c.query_row("SELECT EXISTS(SELECT 1 FROM time_alarm_dirty)", [], |r| {
-                            r.get(0)
-                        })?;
-                    if dirty {
-                        return Ok(Some(cx.now()));
-                    }
                     if policy_changed(c, cx.now())? {
                         return Ok(Some(cx.now()));
                     }
-                    // A held alarm is due at its hold or its stale deadline, whichever comes first.
-                    next_alarm_at(c)
+                    let dirty: Option<i64> = c.query_row(
+                        "SELECT CASE WHEN EXISTS(SELECT 1 FROM time_alarm_dirty) THEN ?1 END",
+                        [cx.now()],
+                        |r| r.get(0),
+                    )?;
+                    let alarm = next_alarm_at(c, cx.now())?;
+                    Ok(match (dirty, alarm) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    })
                 })
             })
             .await

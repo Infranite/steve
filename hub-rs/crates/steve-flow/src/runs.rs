@@ -356,16 +356,11 @@ pub fn page_of(
 }
 
 /// Runs of `waiting` status whose retry is due.
-pub fn due_retries(c: &Connection, now: i64) -> FlowResult<Vec<(String, i64)>> {
-    let mut st = c.prepare_cached(
-        "SELECT id, retry_at FROM flow_runs WHERE status = 'waiting' AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at, id LIMIT ?",
-    )?;
-    let rows = st
-        .query_map([now, crate::scheduler::BATCH as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+pub(crate) fn due_retries(c: &Connection, now: i64) -> FlowResult<Vec<i64>> {
+    let mut st=c.prepare_cached("SELECT rowid FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL AND (typeof(retry_at)<>'integer' OR retry_at<=?1) ORDER BY retry_at,id LIMIT ?2")?;
+    Ok(st
+        .query_map(params![now, crate::scheduler::BATCH as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Claims a retry or ends unusable stored state. A true result needs completion bookkeeping.
@@ -385,26 +380,19 @@ pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64, now: i64) -> FlowResult<boo
 
 /// An unusable persisted wait/retry is terminal, using the run's existing failed state.
 pub(crate) fn fail_due(tx: &Tx, id: &str, now: i64, reason: &str) -> FlowResult<bool> {
-    let meta: Option<(String,String,Option<String>,bool)> = tx.query_row(
-        "SELECT workspace_id,flow_id,event_id,dry_run FROM flow_runs WHERE id=? AND status='waiting'", [id],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-    ).optional()?;
-    let Some((ws, flow, event, dry)) = meta else {
+    let meta: Option<(String, String)> = tx
+        .query_row(
+            "SELECT workspace_id,flow_id FROM flow_runs WHERE id=? AND status='waiting'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((ws, flow)) = meta else {
         return Ok(false);
     };
     tx.execute("UPDATE flow_runs SET status='failed', retry_at=NULL, error=?2, outcome_label=?2, ended=?3 WHERE id=?1 AND status='waiting'", params![id, reason, now])?;
     tx.execute("DELETE FROM flow_waits WHERE run_id=?", [id])?;
     publish(tx, &ws, &flow, id);
-    if !dry && let Some(event) = event {
-        if let Some(ws) = crate::signals::settle(tx, &event)? {
-            tx.publish(steve_types::DomainEvent::from(
-                steve_types::AutomationEvent::Signal {
-                    id: event.into(),
-                    ws: ws.into(),
-                },
-            ));
-        }
-    }
     // Dispatching an already failed run performs the engine's normal parent/event completion.
     Ok(true)
 }

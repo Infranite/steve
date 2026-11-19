@@ -211,24 +211,16 @@ struct Due {
     missed: MissedPolicy,
 }
 
-fn due(c: &Connection, now: i64) -> FlowResult<Vec<Due>> {
-    let mut st = c.prepare_cached(
-        "SELECT t.id, t.flow_id, t.node_id, t.cron, t.tz, t.next_at, t.missed FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0 AND t.next_at IS NOT NULL AND t.next_at <= ? ORDER BY t.next_at, t.id LIMIT ?",
-    )?;
-    let rows = st
-        .query_map([now, BATCH as i64], |r| {
-            Ok(Due {
-                id: r.get(0)?,
-                flow_id: r.get(1)?,
-                node_id: r.get(2)?,
-                cron: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                tz: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                next_at: r.get(5)?,
-                missed: MissedPolicy::from_db(r.get::<_, Option<String>>(6)?.as_deref()),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+fn due(c: &Connection, now: i64) -> FlowResult<Vec<i64>> {
+    let mut st = c.prepare_cached("SELECT t.rowid FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?1) ORDER BY t.next_at,t.id LIMIT ?2")?;
+    Ok(st
+        .query_map(params![now, BATCH as i64], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+fn load_due(tx: &Tx, rowid: i64, now: i64) -> FlowResult<Option<Due>> {
+    Ok(tx.query_row("SELECT t.id,t.flow_id,t.node_id,t.cron,t.tz,t.next_at,t.missed FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.rowid=?1 AND t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL AND (typeof(t.next_at)<>'integer' OR t.next_at<=?2)", params![rowid,now], |r| Ok(Due {
+        id:r.get(0)?, flow_id:r.get(1)?, node_id:r.get(2)?, cron:r.get::<_,Option<String>>(3)?.unwrap_or_default(), tz:r.get::<_,Option<String>>(4)?.unwrap_or_default(), next_at:r.get(5)?, missed:MissedPolicy::from_db(r.get::<_,Option<String>>(6)?.as_deref()),
+    })).optional()?)
 }
 
 /// Claims one trigger. `None` = someone else claimed it first (or it is broken and was disabled).
@@ -310,15 +302,29 @@ pub(crate) struct Claims {
 }
 impl Claims {
     pub fn failed(&mut self, error: crate::FlowError) {
-        tracing::error!(%error, "due row claim failed");
+        tracing::error!(%error, "due source storage failed");
         self.error.get_or_insert(error);
     }
 }
 
-fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+pub(crate) fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     let mut out = Claims::default();
-    for d in cx.store().reader(|c| due(c, now))? {
-        match cx.store().transaction(|tx| claim(tx, &d, now)) {
+    for rowid in cx.store().reader(|c| due(c, now))? {
+        let key = crate::claim::Key::new("flow_triggers", "id", rowid);
+        let result = crate::claim::row(
+            cx.store(),
+            &key,
+            now,
+            |tx| match load_due(tx, rowid, now)? {
+                Some(d) => claim(tx, &d, now),
+                None => Ok(None),
+            },
+            |tx, _| {
+                tx.execute("UPDATE flow_triggers SET enabled=0 WHERE rowid=?", [rowid])?;
+                Ok(None)
+            },
+        );
+        match result {
             Ok(Some((id, true))) => out.ids.push(id),
             Ok(_) => {}
             Err(e) => out.failed(e),
@@ -327,15 +333,33 @@ fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     Ok(out)
 }
 
-fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
     let mut out = Claims::default();
-    for (id, retry_at) in cx.store().reader(|c| runs::due_retries(c, now))? {
-        match cx
-            .store()
-            .transaction(|tx| runs::claim_retry(tx, &id, retry_at, now))
-        {
-            Ok(true) => out.ids.push(id),
-            Ok(false) => {}
+    for rowid in cx.store().reader(|c| runs::due_retries(c, now))? {
+        let key = crate::claim::Key::new("flow_runs", "id", rowid);
+        let result = crate::claim::row(
+            cx.store(),
+            &key,
+            now,
+            |tx| {
+                let row:Option<(String,i64)>=tx.query_row("SELECT id,retry_at FROM flow_runs WHERE rowid=?1 AND status='waiting' AND retry_at IS NOT NULL AND (typeof(retry_at)<>'integer' OR retry_at<=?2)",params![rowid,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                let Some((id, at)) = row else { return Ok(None) };
+                Ok(runs::claim_retry(tx, &id, at, now)?.then_some(id))
+            },
+            |tx, error| {
+                let id: String =
+                    tx.query_row("SELECT id FROM flow_runs WHERE rowid=?", [rowid], |r| {
+                        r.get(0)
+                    })?;
+                Ok(
+                    runs::fail_due(tx, &id, now, &format!("Retry claim failed: {error}"))?
+                        .then_some(id),
+                )
+            },
+        );
+        match result {
+            Ok(Some(id)) => out.ids.push(id),
+            Ok(None) => {}
             Err(e) => out.failed(e),
         }
     }
@@ -573,16 +597,19 @@ impl steve_runtime::due::DueSource for RunSource {
             if matches!(kind, Kind::Triggers) && cx.has_followups().await {
                 return Ok(Some(cx.now()));
             }
+            let when = cx.now();
             let sql = match kind {
                 Kind::Triggers => {
-                    "SELECT min(t.next_at) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0"
+                    "SELECT min(CASE WHEN typeof(t.next_at)='integer' THEN t.next_at ELSE ?1 END) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0 AND t.next_at IS NOT NULL"
                 }
                 Kind::Waits => {
-                    "SELECT min(w.until) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.mode IN ('delay','until','event')"
+                    "SELECT min(CASE WHEN typeof(w.until)='integer' THEN w.until ELSE ?1 END) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.until IS NOT NULL AND w.mode IN ('delay','until','event')"
                 }
-                Kind::Retries => "SELECT min(retry_at) FROM flow_runs WHERE status='waiting'",
+                Kind::Retries => {
+                    "SELECT min(CASE WHEN typeof(retry_at)='integer' THEN retry_at ELSE ?1 END) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL"
+                }
             };
-            cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)))
+            cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [when], |r| r.get(0))?)))
                 .await
                 .map_err(|e| steve_runtime::due::DueError(e.to_string()))
         }

@@ -134,9 +134,9 @@ tokio::task_local! {
 pub fn drive<'a>(cx: &'a FlowCx, run_id: &'a str) -> BoxFut<'a, FlowResult<RunStatus>> {
     Box::pin(async move {
         let work = async {
-            let st = drive_inner(cx, run_id).await?;
+            let result = drive_inner(cx, run_id).await;
             after(cx, run_id).await;
-            Ok(st)
+            result
         };
         if IN_FLOW.try_with(|v| *v).unwrap_or(false) {
             return work.await;
@@ -1006,51 +1006,60 @@ pub fn cancel(tx: &Tx, run: &RunRow, now: i64) -> FlowResult<bool> {
     Ok(true)
 }
 
-/// Waits due by the clock (`delay`, `until`, event timeouts): resumes them and returns the runs to
-/// drive. Called by every scheduler round. A wait that cannot be resumed is logged and skipped, so
-/// the ones resumed before it are still driven.
+/// Claims persisted waits row by row. Failed attempts are isolated in existing terminal states; terminal
+/// results are dispatched through the same driver completion path as successful resumes.
 pub(crate) fn claim_waits_at(cx: &FlowCx, now: i64) -> FlowResult<crate::scheduler::Claims> {
-    let due = cx.store().reader(|c| -> FlowResult<Vec<(String, String, String, Value)>> {
-        let mut st = c.prepare_cached(
-            "SELECT w.run_id, w.node_id, w.mode, w.match FROM flow_waits w JOIN flow_runs r ON r.id = w.run_id
-              WHERE w.until IS NOT NULL AND w.until <= ? AND w.mode IN ('delay', 'until', 'event') AND r.status = 'waiting'
-              ORDER BY w.until, w.run_id, w.node_id LIMIT ?",
-        )?;
-        let rows = st
-            .query_map([now, crate::scheduler::BATCH as i64], |r| {
-                let m: Option<String> = r.get(3)?;
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    m.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or(Value::Null),
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    });
-    let due = due?;
+    let rows=cx.store().reader(|c|->FlowResult<Vec<i64>> {
+        let mut st=c.prepare_cached("SELECT w.rowid FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE w.until IS NOT NULL AND (typeof(w.until)<>'integer' OR w.until<=?1) AND w.mode IN ('delay','until','event') AND r.status='waiting' ORDER BY w.until,w.run_id,w.node_id LIMIT ?2")?;
+        Ok(st.query_map(params![now,crate::scheduler::BATCH as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    })?;
     let mut out = crate::scheduler::Claims::default();
-    for (run_id, node, mode, matcher) in due {
-        let ok = cx.store().transaction(|tx| -> FlowResult<bool> {
-            let valid = tx.query_row("SELECT r.cursor = ?2 AND CASE WHEN json_valid(r.context) THEN json_type(r.context)='object' ELSE 0 END FROM flow_runs r JOIN flow_waits w ON w.run_id=r.id WHERE r.id=?1 AND r.status='waiting' AND w.node_id=?2 AND w.until<=?3", params![run_id, node, now], |r| r.get::<_, Option<bool>>(0)).optional()?;
-            let Some(valid) = valid else { return Ok(false); };
-            if !valid.unwrap_or(false) {
-                return runs::fail_due(tx, &run_id, now, "Invalid stored wait state");
-            }
-            let Some(run) = runs::get(tx, &run_id)? else {
-                return Ok(false);
-            };
-            let res = if mode == "event" {
-                json!({ "output": { "timeout": true }, "branch": wait::timeout_branch(&matcher, &Value::Null) })
-            } else {
-                json!({ "output": { "waited": mode, "at": now } })
-            };
-            resume_in(tx, run, &node, res)
-        });
-        match ok {
-            Ok(true) => out.ids.push(run_id),
-            Ok(false) => {}
+    for rowid in rows {
+        let key = crate::claim::Key::new("flow_waits", "run_id", rowid);
+        let result = crate::claim::row(
+            cx.store(),
+            &key,
+            now,
+            |tx| {
+                let row:Option<(String,String,String,Option<String>,i64)>=tx.query_row("SELECT w.run_id,w.node_id,w.mode,w.match,w.until FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE w.rowid=?1 AND r.status='waiting' AND w.until IS NOT NULL AND (typeof(w.until)<>'integer' OR w.until<=?2)",params![rowid,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+                let Some((run_id, node, mode, matcher, _until)) = row else {
+                    return Ok(None);
+                };
+                let valid=tx.query_row("SELECT cursor=?2 AND CASE WHEN json_valid(context) THEN json_type(context)='object' ELSE 0 END FROM flow_runs WHERE id=?1",params![run_id,node],|r|r.get::<_,Option<bool>>(0))?;
+                if !valid.unwrap_or(false) {
+                    return Ok(
+                        runs::fail_due(tx, &run_id, now, "Invalid stored wait state")?
+                            .then_some(run_id),
+                    );
+                }
+                let Some(run) = runs::get(tx, &run_id)? else {
+                    return Ok(None);
+                };
+                let matcher = matcher
+                    .and_then(|m| serde_json::from_str(&m).ok())
+                    .unwrap_or(Value::Null);
+                let res = if mode == "event" {
+                    json!({"output":{"timeout":true},"branch":wait::timeout_branch(&matcher,&Value::Null)})
+                } else {
+                    json!({"output":{"waited":mode,"at":now}})
+                };
+                Ok(resume_in(tx, run, &node, res)?.then_some(run_id))
+            },
+            |tx, error| {
+                let run: String = tx.query_row(
+                    "SELECT run_id FROM flow_waits WHERE rowid=?",
+                    [rowid],
+                    |r| r.get(0),
+                )?;
+                Ok(
+                    runs::fail_due(tx, &run, now, &format!("Wait claim failed: {error}"))?
+                        .then_some(run),
+                )
+            },
+        );
+        match result {
+            Ok(Some(id)) => out.ids.push(id),
+            Ok(None) => {}
             Err(e) => out.failed(e),
         }
     }

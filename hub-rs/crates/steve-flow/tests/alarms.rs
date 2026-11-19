@@ -225,9 +225,11 @@ fn an_alarm_fires_exactly_once_and_never_again() {
     // not yet
     assert_eq!(e.claim(at - 2 * MIN), alarms::Claimed::default());
     assert_eq!(
-        e.store.reader(alarms::next_alarm_at).unwrap(),
+        e.store
+            .reader(|c| alarms::next_alarm_at(c, at - 2 * MIN))
+            .unwrap(),
         Some(at),
-        "the clock sleeps until it"
+        "the source reports this stored deadline"
     );
     let c = e.claim(at);
     assert_eq!((c.fired, c.events.len()), (1, 1));
@@ -249,7 +251,12 @@ fn an_alarm_fires_exactly_once_and_never_again() {
     e.changed("a", at + MIN);
     assert_eq!(e.claim(at + 2 * MIN).fired, 0);
     assert_eq!(e.events(TODO_DUE).len(), 1);
-    assert_eq!(e.store.reader(alarms::next_alarm_at).unwrap(), None);
+    assert_eq!(
+        e.store
+            .reader(|c| alarms::next_alarm_at(c, at + 2 * MIN))
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -337,7 +344,10 @@ fn quiet_hours_postpone_a_reminder_and_merge_what_waited() {
         .unwrap();
     assert_eq!(rows[0]["hold_until"], end);
     // the next round: the other one, then the held one at the end of the quiet hours
-    assert_eq!(e.store.reader(alarms::next_alarm_at).unwrap(), Some(dawn));
+    assert_eq!(
+        e.store.reader(|c| alarms::next_alarm_at(c, night)).unwrap(),
+        Some(dawn)
+    );
     assert_eq!(
         e.claim(dawn).held,
         1,

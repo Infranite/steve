@@ -722,9 +722,13 @@ async fn preflight_refuses_at_creation_and_at_fire_time() {
     assert!(
         e.env
             .store()
-            .reader(|c| runs::due_retries(c, i64::MAX))
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT count(*) FROM flow_runs WHERE status='waiting' AND retry_at IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
             .unwrap()
-            .is_empty(),
+            == 0,
         "nothing is tried again by itself"
     );
 }
