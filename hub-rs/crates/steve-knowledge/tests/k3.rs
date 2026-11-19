@@ -650,7 +650,7 @@ async fn steve_remember_saves_a_candidate() {
 async fn chat_days_are_documents_and_extracted_once() {
     let e = setup();
     let m = &e.env.modules;
-    let (start, _) = chat::day_bounds("2026-10-31").unwrap();
+    let (start, _) = chat::day_bounds("2026-10-31", steve_runtime::tz::Zone::system()).unwrap();
     e.env
         .store()
         .with_conn(|c| {

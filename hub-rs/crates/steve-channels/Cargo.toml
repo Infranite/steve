@@ -27,6 +27,7 @@ name = "personal_trigger_fixture"
 required-features = ["fake"]
 
 [dependencies]
+steve-runtime = { path = "../steve-runtime" }
 steve-types = { path = "../steve-types" }
 aes = "=0.9.3"
 base64 = "=0.23.1"

@@ -310,7 +310,7 @@ pub fn layers(case: &Case, s: &Setting, history: usize, voice: Voice) -> Layers 
     let now = at.unwrap_or(0) + observed_latency(case).unwrap_or(0) * 1000;
     let clock = Clock {
         now,
-        tz: s.tz.unwrap_or(chrono_tz::UTC),
+        tz: s.tz.unwrap_or_else(steve_modules::zone::default_tz),
     };
     let label = |m: &context::Msg| context::label(&m.name, m.side, Mode::Own, &s.owner);
     let mut t = context_msg(target);

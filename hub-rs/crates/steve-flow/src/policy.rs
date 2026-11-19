@@ -230,7 +230,10 @@ impl Staleness {
                     u32::from(minute.min(1439) % 60),
                     0,
                 )?;
-                steve_modules::zone::instant(tz, at)
+                steve_runtime::tz::Zone::parse(tz.name())
+                    .ok()?
+                    .instant(at)
+                    .ok()
             }
         }
     }

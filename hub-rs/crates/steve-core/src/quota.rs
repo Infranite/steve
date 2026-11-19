@@ -8,7 +8,7 @@
 
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
 
 use crate::error::Result;
@@ -90,14 +90,11 @@ pub(crate) fn reset_at(error: &str, now: i64) -> Option<i64> {
 }
 
 /// `at` as you read it: the time, with the date when it is not today.
-pub(crate) fn when(at: i64, now: i64) -> String {
-    let (Some(t), Some(n)) = (
-        Local.timestamp_millis_opt(at).single(),
-        Local.timestamp_millis_opt(now).single(),
-    ) else {
+pub(crate) fn when(at: i64, now: i64, zone: steve_runtime::tz::Zone) -> String {
+    let (Some(t), Some(n)) = (zone.local(at).ok(), zone.local(now).ok()) else {
         return String::new();
     };
-    if t.date_naive() == n.date_naive() {
+    if t.date() == n.date() {
         t.format("%H:%M").to_string()
     } else {
         t.format("%m-%d %H:%M").to_string()
@@ -112,6 +109,26 @@ pub(crate) struct QuotaWait {
 }
 
 impl Tx<'_> {
+    fn quota_zone(&self, item_id: &str) -> steve_runtime::tz::Zone {
+        self.db()
+            .item(item_id)
+            .ok()
+            .flatten()
+            .and_then(|i| {
+                self.db()
+                    .store()
+                    .reader(|c| {
+                        Ok::<_, crate::error::CoreError>(steve_modules::zone::workspace_tz(
+                            c,
+                            &i.workspace_id,
+                        )?)
+                    })
+                    .ok()
+            })
+            .and_then(|z| steve_runtime::tz::Zone::parse(z.name()).ok())
+            .unwrap_or_else(steve_runtime::tz::Zone::system)
+    }
+
     /// The turn of `sid` failed on a quota that is back at `until`: the item waits for it, no
     /// continue spent, no card.
     pub(crate) fn quota_wait(
@@ -130,7 +147,7 @@ impl Tx<'_> {
         );
         let line = format!(
             "模型配额用完，{} 后 Steve 让它继续：{}",
-            when(until, crate::util::now()),
+            when(until, crate::util::now(), self.quota_zone(item_id)),
             js_head(error, 160)
         );
         self.db()
@@ -146,7 +163,12 @@ impl Tx<'_> {
         let now = crate::util::now();
         /* written into the item's `now`: zh-CN, shown in the reader's language by crate::now_line */
         (w.until > now).then(|| {
-            steve_i18n::stored(|| steve_i18n::t!("core.now.quota_wait", when = when(w.until, now)))
+            steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.now.quota_wait",
+                    when = when(w.until, now, self.quota_zone(item_id))
+                )
+            })
         })
     }
 
@@ -201,6 +223,22 @@ impl Tx<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                when(ms, ms, z),
+                z.local(ms).unwrap().format("%H:%M").to_string()
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

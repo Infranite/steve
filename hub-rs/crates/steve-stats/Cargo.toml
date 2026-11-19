@@ -5,6 +5,7 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+steve-runtime = { path = "../steve-runtime" }
 steve-acp = { path = "../steve-acp" }
 steve-store = { path = "../steve-store" }
 steve-i18n = { path = "../steve-i18n" }

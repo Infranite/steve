@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
-use chrono::{Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Weekday};
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Weekday};
 use chrono_tz::Tz;
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, ConnCx, ConnectionProvider, FieldDef, Health, Integration, ProviderError,
@@ -290,7 +290,8 @@ impl CalendarSource for IcsSource {
             tz: cal
                 .tz
                 .clone()
-                .or_else(|| config(cx, "tz").filter(|z| ics::zone(z).is_some())),
+                .or_else(|| config(cx, "tz").filter(|z| ics::zone(z).is_some()))
+                .or_else(|| Some(steve_modules::zone::default_tz().name().into())),
             ..Default::default()
         }])
     }
@@ -303,7 +304,7 @@ impl CalendarSource for IcsSource {
         let Some(cal) = self.read(cx).await? else {
             return Ok(Vec::new());
         };
-        Ok(cal.occurrences(w, zone_of(cx, Tz::UTC)))
+        Ok(cal.occurrences(w, zone_of(cx, steve_modules::zone::default_tz())))
     }
     async fn get(
         &self,
@@ -362,10 +363,10 @@ impl DemoSource {
     fn days(cx: &ConnCx, w: Window) -> Vec<NaiveDate> {
         let tz = Self::tz(cx);
         let now = cx.connections().modules().clock.now();
-        let today = tz
-            .timestamp_millis_opt(now)
-            .earliest()
-            .map(|d| d.date_naive())
+        let today = steve_runtime::tz::Zone::parse(tz.name())
+            .ok()
+            .and_then(|z| z.local(now).ok())
+            .map(|d| d.date())
             .unwrap_or_default();
         (-7..=21)
             .map(|k| today + Duration::days(k))
@@ -383,10 +384,10 @@ impl DemoSource {
     fn work(cx: &ConnCx, w: Window) -> Vec<RemoteEvent> {
         let tz = Self::tz(cx);
         let now = cx.connections().modules().clock.now();
-        let today = tz
-            .timestamp_millis_opt(now)
-            .earliest()
-            .map(|d| d.date_naive())
+        let today = steve_runtime::tz::Zone::parse(tz.name())
+            .ok()
+            .and_then(|z| z.local(now).ok())
+            .map(|d| d.date())
             .unwrap_or_default();
         let me = || Attendee {
             who: Person {
@@ -680,5 +681,30 @@ impl CalendarSource for DemoSource {
                 })
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                DemoSource::at(
+                    name.parse().unwrap(),
+                    wall.date(),
+                    chrono::Timelike::hour(&wall),
+                    chrono::Timelike::minute(&wall)
+                ),
+                ms
+            );
+        }
     }
 }

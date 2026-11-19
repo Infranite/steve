@@ -19,7 +19,7 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "home", "label": "打开时进入", "values": ["对话", "待处理", "事项"], "def": "对话", "live": true },
         { "key": "awayH", "label": "离开期间汇报", "values": ["2", "4", "8", "0"], "def": "4", "live": true, "labels": { "2": "2 小时", "4": "4 小时", "8": "8 小时", "0": "不汇报" } },
         // the workspace time zone of schedules (steve-flow), as steve-hub's settings.rs serves it
-        { "key": "tz", "label": "时区", "values": ["Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "Asia/Taipei", "live": true },
+        { "key": "tz", "label": "时区", "values": ["system", "Asia/Taipei", "Asia/Shanghai", "Asia/Tokyo", "UTC", "Europe/London", "America/Los_Angeles", "America/New_York"], "def": "system", "live": true, "labels": {"system": "跟随系统"} },
       ],
       "items": [
         { "key": "accDefault", "label": "默认验收方式", "values": ["manual", "auto"], "def": "auto", "live": true, "labels": { "manual": "需要你验收", "auto": "自动验收" } },
@@ -2494,7 +2494,7 @@ mod tests {
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
         assert_eq!(d.len(), 15);
-        assert_eq!(d["tz"], "Asia/Taipei");
+        assert_eq!(d["tz"], "system");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(
             setting_allowed("handoff", "70")

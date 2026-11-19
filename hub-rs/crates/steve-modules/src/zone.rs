@@ -1,12 +1,12 @@
 //! Whose clock a local date or time is read on: one rule for every module.
 //!
 //! A person's time zone is the one in their notification policy (`notification_policies.timezone`);
-//! someone without a policy gets the workspace's `tz` setting, else [`DEFAULT_TZ`]. Todos and their
+//! someone without a policy gets the workspace's `tz` setting, else the system zone. Todos and their
 //! reminders, new schedules, the digest's day and `/汇报` all read it here, so a person never sees one
 //! module on one clock and the next on another ([`Zone::from`] says which one it was, for the UI).
 //!
-//! Local times become instants by one rule ([`instant`]): a time in a daylight-saving gap moves to the
-//! first minute that exists after it, a repeated time is its first pass. Quiet hours ([`Quiet`]) are
+//! Local times become instants by one rule ([`Zone::instant`]): a time in a daylight-saving gap moves to the
+//! same minute after the gap (RFC 5545), a repeated time is its first pass. Quiet hours ([`Quiet`]) are
 //! minutes of the local day, `[start, end)`, crossing midnight when `start > end`.
 
 use chrono::{Duration, NaiveDateTime, TimeZone, Timelike};
@@ -15,10 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 /// The workspace default (`SETTINGS.tz.def`).
-pub const DEFAULT_TZ: &str = "Asia/Taipei";
-
-/// The longest gap a daylight-saving change opens in a local clock, in minutes.
-pub const DST_GAP_MAX_MIN: i64 = 180;
+pub const DEFAULT_TZ: &str = "system";
 
 /// Where a [`Zone`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -91,15 +88,18 @@ impl Zone {
 
     /// The local wall-clock time of Unix ms.
     pub fn local(&self, ms: i64) -> Option<NaiveDateTime> {
-        self.tz
-            .timestamp_millis_opt(ms)
-            .single()
-            .map(|d| d.naive_local())
+        steve_runtime::tz::Zone::parse(self.name())
+            .ok()?
+            .local(ms)
+            .ok()
     }
 
-    /// Unix ms of a local time ([`instant`]).
+    /// Unix ms of a local time ([`Zone::instant`]).
     pub fn instant(&self, at: NaiveDateTime) -> Option<i64> {
-        instant(self.tz, at)
+        steve_runtime::tz::Zone::parse(self.name())
+            .ok()?
+            .instant(at)
+            .ok()
     }
 
     /// RFC 3339 with this zone's offset.
@@ -126,37 +126,43 @@ impl Zone {
 
     /// Unix ms of the local midnight that starts the day of `ms`.
     pub fn day_start(&self, ms: i64) -> Option<i64> {
-        self.instant(self.local(ms)?.date().and_hms_opt(0, 0, 0)?)
+        steve_runtime::tz::Zone::parse(self.name())
+            .ok()?
+            .day(ms)
+            .ok()
+            .map(|d| d.0)
     }
 }
 
-/// The workspace's `tz` setting (a JSON string), else [`DEFAULT_TZ`].
+/// The workspace's `tz` setting (a JSON string), else the system zone.
 pub fn workspace_tz(c: &Connection, ws: &str) -> rusqlite::Result<Tz> {
+    workspace_tz_with(c, ws, steve_runtime::tz::Zone::system)
+}
+
+fn workspace_tz_with(
+    c: &Connection,
+    ws: &str,
+    system: impl FnOnce() -> steve_runtime::tz::Zone,
+) -> rusqlite::Result<Tz> {
     let v: Option<String> = c
         .query_row(
             "SELECT value FROM settings WHERE workspace_id = ? AND key = 'tz'",
             [ws],
-            |r| r.get(0),
+            |r| r.get::<_, Option<String>>(0),
         )
-        .optional()?;
+        .optional()?
+        .flatten();
     Ok(v.and_then(|v| serde_json::from_str::<String>(&v).ok())
         .and_then(|t| t.trim().parse::<Tz>().ok())
-        .unwrap_or_else(default_tz))
+        .unwrap_or_else(|| system().name().parse().expect("runtime IANA zone")))
 }
 
 /// [`DEFAULT_TZ`], parsed.
 pub fn default_tz() -> Tz {
-    DEFAULT_TZ.parse().unwrap_or(chrono_tz::UTC)
-}
-
-/// Unix ms of local time `at` in `tz`: the first pass of a repeated time; a time in a daylight-saving
-/// gap moved to the first minute after it.
-pub fn instant(tz: Tz, at: NaiveDateTime) -> Option<i64> {
-    (0..=DST_GAP_MAX_MIN).find_map(|m| {
-        tz.from_local_datetime(&(at + Duration::minutes(m)))
-            .earliest()
-            .map(|d| d.timestamp_millis())
-    })
+    steve_runtime::tz::Zone::system()
+        .name()
+        .parse()
+        .expect("runtime IANA zone")
 }
 
 /// Quiet hours: minutes since local midnight, `[start, end)`; `start > end` crosses midnight.
@@ -189,7 +195,7 @@ impl Quiet {
     }
 
     /// When the quiet hours `now` is in end (`None` when `now` is not in them): the next local
-    /// `end` minute after `now`, by [`instant`].
+    /// `end` minute after `now`, by [`Zone::instant`].
     pub fn ends(&self, tz: Tz, now: i64) -> Option<i64> {
         if !self.contains(tz, now) {
             return None;
@@ -203,12 +209,49 @@ impl Quiet {
         } else {
             today + Duration::days(1)
         };
-        instant(tz, at).filter(|&t| t > now)
+        Zone::new(tz).instant(at).filter(|&t| t > now)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_empty_and_system_settings_use_injected_system() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE settings(workspace_id TEXT, key TEXT, value TEXT)")
+            .unwrap();
+        for value in [None, Some("\"\""), Some("\"system\"")] {
+            c.execute("DELETE FROM settings", []).unwrap();
+            if let Some(v) = value {
+                c.execute("INSERT INTO settings VALUES ('w','tz',?)", [v])
+                    .unwrap();
+            }
+            assert_eq!(
+                workspace_tz_with(&c, "w", || steve_runtime::tz::Zone::parse("Europe/London")
+                    .unwrap())
+                .unwrap()
+                .name(),
+                "Europe/London"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            let zone = Zone::new(name.parse().unwrap());
+            assert_eq!(zone.instant(wall), Some(ms));
+            assert_eq!(zone.local(ms), z.local(ms).ok());
+            assert_eq!(zone.day_start(ms), Some(z.day(ms).unwrap().0));
+        }
+    }
+
     use super::*;
     use chrono::{NaiveDate, Utc};
 
@@ -225,14 +268,14 @@ mod tests {
             .unwrap()
             .and_hms_opt(2, 30, 0)
             .unwrap();
-        // 02:30 does not exist that night: 03:00 EDT = 07:00 UTC
-        assert_eq!(instant(ny, gap), Some(utc(2026, 3, 8, 7, 0)));
+        // 02:30 does not exist that night: 03:30 EDT = 07:30 UTC
+        assert_eq!(Zone::new(ny).instant(gap), Some(utc(2026, 3, 8, 7, 30)));
         let fold = NaiveDate::from_ymd_opt(2026, 11, 1)
             .unwrap()
             .and_hms_opt(1, 30, 0)
             .unwrap();
         // 01:30 happens twice: the first is EDT, 05:30 UTC
-        assert_eq!(instant(ny, fold), Some(utc(2026, 11, 1, 5, 30)));
+        assert_eq!(Zone::new(ny).instant(fold), Some(utc(2026, 11, 1, 5, 30)));
     }
 
     #[test]
@@ -273,7 +316,7 @@ mod tests {
         let other = Zone::of(&c, "w", "other").unwrap();
         assert_eq!(
             (other.name(), other.from),
-            (DEFAULT_TZ, ZoneFrom::Workspace)
+            (default_tz().name(), ZoneFrom::Workspace)
         );
         c.execute(
             "INSERT INTO settings VALUES ('w', 'tz', '\"America/New_York\"')",

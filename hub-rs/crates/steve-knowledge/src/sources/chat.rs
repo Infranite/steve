@@ -5,9 +5,10 @@
 
 use std::time::Duration;
 
-use chrono::{Local, NaiveDate, TimeZone, Timelike};
+use chrono::{NaiveDate, Timelike};
 use rusqlite::{Connection, params};
 use steve_modules::{ApiError, ApiResult, Modules};
+use steve_runtime::tz::Zone;
 use steve_store::base::Level;
 use steve_store::base::mems::Mem;
 use steve_store::uid;
@@ -30,40 +31,30 @@ pub const TODAY_EVERY: i64 = 3600 * 1000;
 /// Local time after which yesterday is finalized, and after which it is extracted.
 pub const FINALIZE_AT: (u32, u32) = (3, 30);
 pub const EXTRACT_AT: (u32, u32) = (3, 40);
-const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// The local day (`YYYY-MM-DD`) of a Unix-ms time.
-pub fn day_of(ms: i64) -> String {
-    Local
-        .timestamp_millis_opt(ms)
-        .earliest()
-        .map(|d| d.format("%Y-%m-%d").to_string())
+pub fn day_of(ms: i64, zone: Zone) -> String {
+    zone.local(ms)
+        .map(|t| t.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }
 
-/// `[start, end)` in Unix ms of a local day.
-pub fn day_bounds(day: &str) -> Option<(i64, i64)> {
+/// `[start, end)` in Unix ms of a local day on the workspace clock.
+pub fn day_bounds(day: &str, zone: Zone) -> Option<(i64, i64)> {
     let d = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-    let at = |d: NaiveDate| {
-        Local
-            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
-            .earliest()
-            .map(|t| t.timestamp_millis())
-    };
-    Some((at(d)?, at(d.succ_opt()?)?))
+    zone.day(zone.instant(d.and_hms_opt(0, 0, 0)?).ok()?).ok()
 }
 
-fn hhmm(ms: i64) -> String {
-    Local
-        .timestamp_millis_opt(ms)
-        .earliest()
-        .map(|d| d.format("%H:%M").to_string())
+fn hhmm(ms: i64, zone: Zone) -> String {
+    zone.local(ms)
+        .map(|t| t.format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
 /// The day's conversation as text, `我（10:31）：…` / `Steve（10:32）：…`; `None` if nothing was said.
 pub fn day_text(c: &Connection, ws: &str, day: &str) -> ApiResult<Option<String>> {
-    let Some((start, end)) = day_bounds(day) else {
+    let zone = Zone::parse(steve_modules::zone::workspace_tz(c, ws)?.name()).expect("IANA zone");
+    let Some((start, end)) = day_bounds(day, zone) else {
         return Ok(None);
     };
     let msgs: Vec<(String, String, i64)> = c
@@ -79,7 +70,7 @@ pub fn day_text(c: &Connection, ws: &str, day: &str) -> ApiResult<Option<String>
         .filter(|(_, t, _)| !t.trim().is_empty())
         .map(|(a, t, at)| {
             let who = if a == "me" { "我" } else { "Steve" };
-            format!("{who}（{}）：{}", hhmm(at), t.trim())
+            format!("{who}（{}）：{}", hhmm(at, zone), t.trim())
         })
         .collect();
     Ok((!lines.is_empty()).then(|| lines.join("\n\n")))
@@ -210,15 +201,32 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
             })
         })
         .await?;
-    let local = Local.timestamp_millis_opt(now).earliest();
-    let hm = local.map(|t| (t.hour(), t.minute())).unwrap_or((0, 0));
-    let yesterday = day_of(now - DAY_MS);
     for ws in wss {
+        let w = ws.clone();
+        let zone = m
+            .blocking(move |m| {
+                m.store.reader(|c| {
+                    Ok::<_, ApiError>(
+                        Zone::parse(steve_modules::zone::workspace_tz(c, &w)?.name())
+                            .expect("IANA zone"),
+                    )
+                })
+            })
+            .await?;
+        let Some(local) = zone.local(now).ok() else {
+            continue;
+        };
+        let hm = (local.hour(), local.minute());
+        let yesterday = local
+            .date()
+            .pred_opt()
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
         // a day's document is rebuilt and chunked in one write: off the runtime
         let (k, w, y) = (kb.clone(), ws.clone(), yesterday.clone());
         m.blocking(move |m| {
             if today {
-                sync_day(m, &k, &w, &day_of(now))?;
+                sync_day(m, &k, &w, &day_of(now, zone))?;
             }
             if hm >= FINALIZE_AT {
                 let mark = format!("sync:chat:{y}");
@@ -285,16 +293,34 @@ impl DocLoader for ChatLoader {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(day_bounds(&day_of(ms, z), z), z.day(ms).ok());
+            assert_eq!(
+                hhmm(ms, z),
+                z.local(ms).unwrap().format("%H:%M").to_string()
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
     fn days_round_trip() {
-        let (s, e) = day_bounds("2026-10-31").unwrap();
+        let zone = Zone::parse("Europe/London").unwrap();
+        let (s, e) = day_bounds("2026-10-31", zone).unwrap();
         assert!(e > s);
-        assert_eq!(day_of(s), "2026-10-31");
-        assert_eq!(day_of(e - 1), "2026-10-31");
-        assert_eq!(day_of(e), "2026-11-01");
+        assert_eq!(day_of(s, zone), "2026-10-31");
+        assert_eq!(day_of(e - 1, zone), "2026-10-31");
+        assert_eq!(day_of(e, zone), "2026-11-01");
         assert_eq!(short_label("2026-10-31"), "10-31 的对话");
-        assert!(day_bounds("昨天").is_none());
+        assert!(day_bounds("昨天", Zone::system()).is_none());
     }
 }

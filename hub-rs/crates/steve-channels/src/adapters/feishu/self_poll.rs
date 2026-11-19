@@ -176,7 +176,7 @@ fn in_quiet_hours(c: &rusqlite::Connection, ws: &str, now: i64) -> ChannelResult
 
 /// The Hub's default time zone (`DEFAULT_TZ` of the schedules).
 fn chrono_tz_default() -> chrono_tz::Tz {
-    steve_flow::cron::parse_tz(steve_flow::cron::DEFAULT_TZ).unwrap_or(chrono_tz::UTC)
+    steve_modules::zone::default_tz()
 }
 
 // ---------------------------------------------------------------------------------------------

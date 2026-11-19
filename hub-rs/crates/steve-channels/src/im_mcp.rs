@@ -69,7 +69,7 @@ pub(crate) fn tz_of(c: &rusqlite::Connection, ws: &str) -> chrono_tz::Tz {
     steve_flow::schedules::workspace_tz(c, ws)
         .ok()
         .and_then(|t| steve_flow::cron::parse_tz(&t).ok())
-        .unwrap_or(chrono_tz::UTC)
+        .unwrap_or_else(steve_modules::zone::default_tz)
 }
 
 /// A time argument: unix ms (or seconds), RFC 3339, or `YYYY-MM-DD[ HH:MM[:SS]]` in the
@@ -105,9 +105,10 @@ pub fn parse_time(v: &Value, tz: chrono_tz::Tz) -> Option<i64> {
                     .ok()
                     .and_then(|d| d.and_hms_opt(0, 0, 0))
             })?;
-            tz.from_local_datetime(&naive)
-                .earliest()
-                .map(|d| d.timestamp_millis())
+            steve_runtime::tz::Zone::parse(tz.name())
+                .ok()?
+                .instant(naive)
+                .ok()
         }
         _ => None,
     }
@@ -265,6 +266,29 @@ pub fn render(p: &Page, tz: chrono_tz::Tz) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(
+                parse_time(&serde_json::json!(text), name.parse().unwrap()),
+                Some(ms)
+            );
+            let mut f = crate::rules::Facts::default();
+            f.set_time(ms, name);
+            let local = z.local(ms).unwrap();
+            assert_eq!(
+                f.minute,
+                chrono::Timelike::hour(&local) * 60 + chrono::Timelike::minute(&local)
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -302,7 +302,7 @@ async fn tz_setting() {
         .and_then(|g| g.iter().find(|s| s["key"] == "tz"))
         .cloned()
         .expect("tz in general");
-    assert_eq!(tz["def"], "Asia/Taipei");
+    assert_eq!(tz["def"], "system");
     assert_eq!(
         c.call("PATCH", "/api/settings", Some(json!({ "tz": "UTC" })), None)
             .await

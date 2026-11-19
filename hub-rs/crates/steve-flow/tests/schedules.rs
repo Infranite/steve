@@ -77,7 +77,7 @@ async fn create_computes_next_run_and_describe() {
     assert_eq!(s["cron"], "30 8 * * *");
     assert_eq!(s["describe"], "每天 08:30");
     assert_eq!(s["when"], "每天 08:30");
-    assert_eq!(s["tz"], "Asia/Taipei");
+    assert_eq!(s["tz"], steve_modules::zone::default_tz().name());
     assert_eq!(s["budget_usd"], 1.0);
     assert_eq!(s["missed"], "catch_up_once");
     assert_eq!(s["overlap"], "skip");

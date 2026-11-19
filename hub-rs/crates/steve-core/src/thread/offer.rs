@@ -9,7 +9,6 @@ use crate::gateway::Offer;
 use crate::orchestrator::CreateItem;
 use crate::repo::{BotExt, FileRef, Item, Message};
 use crate::util::{js_head, js_len, now};
-use chrono::{Local, TimeZone};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -63,10 +62,8 @@ pub(crate) struct ThreadItem<'a> {
     pub by: Option<String>,
 }
 
-fn hm(t: i64) -> String {
-    Local
-        .timestamp_millis_opt(t)
-        .single()
+fn hm(t: i64, zone: steve_runtime::tz::Zone) -> String {
+    zone.local(t)
         .map(|d| d.format("%H:%M").to_string())
         .unwrap_or_default()
 }
@@ -156,9 +153,17 @@ impl Core {
         {
             start -= 1;
         }
+        let zone = self.store().store().reader(|c| {
+            Ok::<_, crate::error::CoreError>(steve_modules::zone::workspace_tz(c, ws)?)
+        })?;
+        let zone = steve_runtime::tz::Zone::parse(zone.name()).expect("IANA zone");
         let line = |m: &Message| {
             let who = if m.author == "me" { "用户" } else { "Steve" };
-            let mut s = format!("  {who} {}：{}", hm(m.created), js_head(&m.text, 4000));
+            let mut s = format!(
+                "  {who} {}：{}",
+                hm(m.created, zone),
+                js_head(&m.text, 4000)
+            );
             let read: Vec<String> = m.meta["steps"]["tools"]
                 .as_array()
                 .map(|ts| {
@@ -424,5 +429,22 @@ impl Core {
             .find(|m| m.author == "steve" && m.item_id.is_none())
             .filter(|m| m.meta["offer"]["state"] == "open" && now() - m.created < 24 * 3600 * 1000)
             .cloned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn runtime_dst_table() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+        ] {
+            let z = steve_runtime::tz::Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let ms = z.instant(wall).unwrap();
+            assert_eq!(hm(ms, z), z.local(ms).unwrap().format("%H:%M").to_string());
+        }
     }
 }
