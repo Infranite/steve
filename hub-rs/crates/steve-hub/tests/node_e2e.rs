@@ -381,6 +381,13 @@ impl Client {
     /// These cases cover retry orchestration, not transcript settlement. Pi's native accounting
     /// has no transcript tail window; the very same scripted ACP adapter supplies the failures.
     async fn retry_item(&self, h: &Home, goal: &str) -> String {
+        // Finish discovery before admission. Previously these tests passed only if item creation
+        // beat the probe: the generic fake lacked the HTTP MCP capability Pi requires, so a
+        // completed probe refused the Bot and left a fail card without ever creating a session.
+        let (st, probe) = self
+            .call("GET", "/api/system/models?harness=pi&fresh=1", None)
+            .await;
+        assert_eq!(st, 200, "retry adapter discovery: {probe}; {}", hub_log(h));
         let (st, bot) = self
             .call(
                 "POST",
@@ -405,15 +412,19 @@ impl Client {
             .await;
         assert_eq!(st, 200, "{i}");
         let item = i["id"].as_str().expect("item").to_string();
-        let mut sid = None;
-        assert!(
-            wait(30, || {
-                sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
-                sid.is_some()
+        // Creation starts the session synchronously, or returns the item with a failure card.
+        // Waiting cannot turn a refused start into a session; report the actual blocker now.
+        h.one("SELECT id FROM sessions WHERE item_id=?", &item)
+            .unwrap_or_else(|| {
+                panic!(
+                    "item creation returned without a session: item={i}; failure={:?}; log:\n{}",
+                    h.one(
+                        "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
+                        &item,
+                    ),
+                    hub_log(h),
+                )
             })
-            .await
-        );
-        sid.expect("session")
     }
 }
 
@@ -509,10 +520,7 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
         true,
         &[(
             "STEVE_ADAPTER_PI",
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../steve-acp/tests/fake-acp.js"
-            ),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/retry-acp.mjs"),
         )],
     );
     serving(&h).await;
@@ -619,10 +627,7 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         true,
         &[(
             "STEVE_ADAPTER_PI",
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../steve-acp/tests/fake-acp.js"
-            ),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/retry-acp.mjs"),
         )],
     );
     serving(&h).await;
