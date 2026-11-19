@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use steve_store::base;
-use steve_store::{ChangeEvent, Decision, Tx};
+use steve_store::{Decision, Tx};
 
 use super::repo;
 use crate::decisions::{DecisionCx, DecisionHandler};
@@ -32,10 +32,18 @@ impl DecisionHandler for ConnectionDecision {
                         &r.id,
                         &json!({"status": "paused", "decision": d.id}),
                     )?;
-                    tx.publish(ChangeEvent::Connection {
-                        id: r.id.clone(),
-                        ws: cx.ws.into(),
-                    });
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::ChannelsEvent::Connection {
+                            id: {
+                                let value: String = r.id.clone();
+                                steve_types::ConnectionId::from(value)
+                            },
+                            ws: {
+                                let value: String = cx.ws.into();
+                                steve_types::WorkspaceId::from(value)
+                            },
+                        },
+                    ));
                 }
                 Ok(json!({"choice": "pause"}))
             }

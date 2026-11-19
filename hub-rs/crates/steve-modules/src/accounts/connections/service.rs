@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, header};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use steve_store::base::{self, DecisionKind, Viewer};
-use steve_store::{ChangeEvent, NewDecision, Tx, uid};
+use steve_store::{NewDecision, Tx, uid};
 use zeroize::Zeroizing;
 
 use super::cx::{
@@ -936,10 +936,18 @@ impl Connections {
                     &r.id,
                     &json!({"adapter": r.adapter, PAIR_KEY: r.config.get(PAIR_KEY)}),
                 )?;
-                tx.publish(ChangeEvent::Connection {
-                    id: r.id.clone(),
-                    ws: viewer.ws.clone(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ChannelsEvent::Connection {
+                        id: {
+                            let value: String = r.id.clone();
+                            steve_types::ConnectionId::from(value)
+                        },
+                        ws: {
+                            let value: String = viewer.ws.clone();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
             }
             Ok::<_, VaultError>(r)
         })?;
@@ -1575,14 +1583,30 @@ impl Connections {
                 },
             )?;
         }
-        tx.publish(ChangeEvent::Connection {
-            id: done.connection_id.clone(),
-            ws: ws.into(),
-        });
-        tx.publish(ChangeEvent::Account {
-            id: account.id.clone(),
-            ws: ws.into(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ChannelsEvent::Connection {
+                id: {
+                    let value: String = done.connection_id.clone();
+                    steve_types::ConnectionId::from(value)
+                },
+                ws: {
+                    let value: String = ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        ));
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::PeopleEvent::Account {
+                id: {
+                    let value: String = account.id.clone();
+                    steve_types::AccountId::from(value)
+                },
+                ws: {
+                    let value: String = ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        ));
         Ok((done, old))
     }
 
@@ -2097,14 +2121,30 @@ impl Connections {
                     &r.id,
                     &json!({"status": r.status, "caps": r.caps}),
                 )?;
-                tx.publish(ChangeEvent::Connection {
-                    id: r.id.clone(),
-                    ws: viewer.ws.clone(),
-                });
-                tx.publish(ChangeEvent::Account {
-                    id: r.account_id.clone(),
-                    ws: viewer.ws.clone(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ChannelsEvent::Connection {
+                        id: {
+                            let value: String = r.id.clone();
+                            steve_types::ConnectionId::from(value)
+                        },
+                        ws: {
+                            let value: String = viewer.ws.clone();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::PeopleEvent::Account {
+                        id: {
+                            let value: String = r.account_id.clone();
+                            steve_types::AccountId::from(value)
+                        },
+                        ws: {
+                            let value: String = viewer.ws.clone();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
             }
             Ok::<_, VaultError>(r)
         })?;
@@ -2142,14 +2182,30 @@ impl Connections {
                     &rr.id,
                     &json!({"adapter": rr.adapter, "account": rr.account_id}),
                 )?;
-                tx.publish(ChangeEvent::Connection {
-                    id: rr.id.clone(),
-                    ws: rr.workspace_id.clone(),
-                });
-                tx.publish(ChangeEvent::Account {
-                    id: rr.account_id.clone(),
-                    ws: rr.workspace_id.clone(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ChannelsEvent::Connection {
+                        id: {
+                            let value: String = rr.id.clone();
+                            steve_types::ConnectionId::from(value)
+                        },
+                        ws: {
+                            let value: String = rr.workspace_id.clone();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::PeopleEvent::Account {
+                        id: {
+                            let value: String = rr.account_id.clone();
+                            steve_types::AccountId::from(value)
+                        },
+                        ws: {
+                            let value: String = rr.workspace_id.clone();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
                 Ok::<_, VaultError>(())
             })
         })
@@ -2164,10 +2220,18 @@ impl Connections {
         self.0.m.store.transaction(|tx| {
             if repo::get(tx, id)?.is_some_and(|r| r.workspace_id == ws) {
                 repo::set_last_sync(tx, id, now)?;
-                tx.publish(ChangeEvent::Connection {
-                    id: id.into(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ChannelsEvent::Connection {
+                        id: {
+                            let value: String = id.into();
+                            steve_types::ConnectionId::from(value)
+                        },
+                        ws: {
+                            let value: String = ws.into();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
             }
             Ok::<_, VaultError>(())
         })
@@ -2418,7 +2482,18 @@ impl Connections {
                     }
                     // learned, not edited: no revision bump (see repo::set_config)
                     repo::set_config(tx, &id, &r.config, now)?;
-                    tx.publish(ChangeEvent::Connection { id, ws });
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::ChannelsEvent::Connection {
+                            id: {
+                                let value: String = id;
+                                steve_types::ConnectionId::from(value)
+                            },
+                            ws: {
+                                let value: String = ws;
+                                steve_types::WorkspaceId::from(value)
+                            },
+                        },
+                    ));
                     Ok(())
                 })
             })
@@ -2450,10 +2525,8 @@ impl Connections {
                 r.health.error_at = now;
                 repo::set_health(tx, &r.id, &r.status, &r.health, now)?;
                 self.open_reauth(tx, &r)?;
-                tx.publish(ChangeEvent::Connection {
-                    id: r.id.clone(),
-                    ws: r.workspace_id.clone(),
-                });
+                tx.publish(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = r.id.clone(); steve_types::ConnectionId::from(value) },
+                ws: { let value: String = r.workspace_id.clone(); steve_types::WorkspaceId::from(value) }, }));
                 n += 1;
             }
             Ok::<_, VaultError>(n)
@@ -2501,10 +2574,8 @@ impl Connections {
                 if r.status != before.0 {
                     tracing::info!(connection = %id, status = %r.status, "connection status changed");
                 }
-                tx.publish(ChangeEvent::Connection {
-                    id: id.into(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection { id: { let value: String = id.into(); steve_types::ConnectionId::from(value) },
+                ws: { let value: String = ws.into(); steve_types::WorkspaceId::from(value) }, }));
             }
             Ok(())
         })

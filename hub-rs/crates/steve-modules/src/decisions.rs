@@ -166,10 +166,11 @@ pub fn undo(
             "UPDATE decisions SET status = 'open', result = ?, resolved = NULL, undo = NULL WHERE id = ?",
             rusqlite::params![result, id],
         )?;
-        tx.publish(steve_store::ChangeEvent::Decision {
+        tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision {
+            ws: d.workspace_id.clone().into(),
             id: id.into(),
-            item_id: Some(d.item_id.clone()),
-        });
+            item_id: Some(d.item_id.clone().map(Into::into)),
+        }));
         base::audit(tx, &d.workspace_id, actor, "decision.undo", id, &json!({}))?;
         Ok(d)
     }))

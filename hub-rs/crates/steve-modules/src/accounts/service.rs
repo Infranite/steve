@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use steve_store::Tx;
 use steve_store::base::{self, Viewer};
-use steve_store::{ChangeEvent, Tx};
 
 use super::repo::{
     self, ACCOUNT, Account, AccountPatch, AccountQuery, ConnectionBrief, ItemRef, MatchRule,
@@ -43,18 +43,34 @@ pub fn default_label(source: &str) -> &'static str {
 }
 
 pub(crate) fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Account {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::PeopleEvent::Account {
+            id: {
+                let value: String = id.into();
+                steve_types::AccountId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 /// The party's page shows its accounts and counts them.
 pub(crate) fn party_event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Party {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = id.into();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
 }
 
 // ---------------------------------------------------------------- handles

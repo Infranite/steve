@@ -5,7 +5,7 @@
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OptionalExtension, params};
 use steve_store::base::{Viewer, bind};
-use steve_store::{Cached, ChangeEvent, Result, Tx, now};
+use steve_store::{Cached, Result, Tx, now};
 
 use super::repo::Party;
 
@@ -152,11 +152,22 @@ pub fn bots(c: &Connection, ws: &str) -> Result<Vec<(String, String)>> {
 /// `timeline.add(item, actor, kind, text)` inside a transaction (the store's own repository takes the
 /// write lock and cannot be called here). Publishes `{type:"item"}` like it.
 pub fn timeline_add(tx: &Tx, item: &str, actor: &str, kind: &str, text: &str) -> Result<()> {
+    let ws: String = tx.query_row("SELECT workspace_id FROM items WHERE id = ?", [item], |r| {
+        r.get(0)
+    })?;
     tx.run(
         "INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES (?, ?, ?, ?, ?)",
         params![item, now(), actor, kind, text],
     )?;
-    tx.publish(ChangeEvent::Item { id: item.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: ws.into(),
+            id: {
+                let value: String = item.into();
+                steve_types::ItemId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 

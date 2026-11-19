@@ -5,7 +5,7 @@
 use std::fmt;
 
 use serde_json::json;
-use steve_store::{ChangeEvent, base, now, uid};
+use steve_store::{base, now, uid};
 
 use super::repo::{self, UseRow};
 use crate::ApiError;
@@ -167,10 +167,18 @@ impl Vault {
                 && at - finished <= FAILURE_MERGE_MS
             {
                 repo::touch_use(tx, &id, at)?;
-                tx.publish(ChangeEvent::Vault {
-                    id: item_id.into(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::VaultEvent::Vault {
+                        id: {
+                            let value: String = item_id.into();
+                            steve_types::VaultItemId::from(value)
+                        },
+                        ws: {
+                            let value: String = ws.into();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
                 return Ok(());
             }
             let su = uid("su");
@@ -197,10 +205,18 @@ impl Vault {
                 item_id,
                 &json!({"mode": "internal", "use": su, "ok": ok, "fields": labels}),
             )?;
-            tx.publish(ChangeEvent::Vault {
-                id: item_id.into(),
-                ws: ws.into(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::VaultEvent::Vault {
+                    id: {
+                        let value: String = item_id.into();
+                        steve_types::VaultItemId::from(value)
+                    },
+                    ws: {
+                        let value: String = ws.into();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                },
+            ));
             Ok(())
         })
     }

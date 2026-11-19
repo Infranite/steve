@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use steve_store::{ChangeEvent, Tx, base, now, uid};
+use steve_store::{Tx, base, now, uid};
 
 use super::items::GrantOut;
 use super::items::repo::{self as irepo, ItemRow};
@@ -100,10 +100,18 @@ pub(crate) fn add_grant(
         &item.id,
         &json!({"grant": id, "bot": bot, "scope": scope, "hours": hours, "decision": decision_id}),
     )?;
-    tx.publish(ChangeEvent::Vault {
-        id: item.id.clone(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::VaultEvent::Vault {
+            id: {
+                let value: String = item.id.clone();
+                steve_types::VaultItemId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
     Ok(id)
 }
 
@@ -176,10 +184,18 @@ impl Vault {
                     &g.resource_id,
                     &json!({"grant": grant_id, "bot": g.subject_id}),
                 )?;
-                tx.publish(ChangeEvent::Vault {
-                    id: g.resource_id.clone(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::VaultEvent::Vault {
+                        id: {
+                            let value: String = g.resource_id.clone();
+                            steve_types::VaultItemId::from(value)
+                        },
+                        ws: {
+                            let value: String = ws.into();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                    },
+                ));
             }
             Ok(())
         })

@@ -36,7 +36,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_store::caps as repo;
-use steve_store::{ChangeEvent, Tx, base, now};
+use steve_store::{Tx, base, now};
 
 use crate::vault::{Vault, VaultError, VaultResult};
 use crate::{ApiError, Body, Caller};
@@ -170,10 +170,28 @@ pub(crate) fn users(c: &Connection, kind: &str, id: &str) -> Result<Value, ApiEr
     ))
 }
 
+/// Capabilities belong to the Bot's home even when another workspace it serves edits them.
+pub(crate) fn bot_workspace(tx: &Tx, bot: &str) -> Result<String, ApiError> {
+    Ok(
+        tx.query_row("SELECT workspace_id FROM bots WHERE id = ?", [bot], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
 /// Each Bot using an entry hears that it changed.
 pub(crate) fn publish_users(tx: &Tx, kind: &str, id: &str) -> Result<(), ApiError> {
     for a in repo::of_entry(tx, kind, id)? {
-        tx.publish(ChangeEvent::Bot { id: a.bot_id });
+        let ws = bot_workspace(tx, &a.bot_id)?;
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Bot {
+                ws: ws.into(),
+                id: {
+                    let value: String = a.bot_id;
+                    steve_types::BotId::from(value)
+                },
+            },
+        ));
     }
     Ok(())
 }
@@ -276,7 +294,15 @@ pub(crate) fn assign_in(
         entry,
         &json!({"bot": bot, "kind": kind, "name": name, "enabled": enabled}),
     )?;
-    tx.publish(ChangeEvent::Bot { id: bot.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Bot {
+            ws: bot_workspace(tx, bot)?.into(),
+            id: {
+                let value: String = bot.into();
+                steve_types::BotId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 
@@ -367,8 +393,77 @@ impl Capabilities {
                 entry,
                 &json!({"bot": bot, "kind": kind, "name": name}),
             )?;
-            tx.publish(ChangeEvent::Bot { id: bot.into() });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: bot_workspace(tx, bot)?.into(),
+                    id: {
+                        let value: String = bot.into();
+                        steve_types::BotId::from(value)
+                    },
+                },
+            ));
             Ok::<_, VaultError>(())
         })
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use steve_store::{Published, Publisher, Store};
+    use steve_types::{DomainEvent, Scope, Scoped};
+
+    struct Events(Arc<Mutex<Vec<DomainEvent>>>);
+    impl Publisher for Events {
+        fn publish(&self, _: steve_store::ChangeEvent) {}
+        fn publish_batch(&self, events: Vec<Published>) {
+            for event in events {
+                if let Published::Domain(event) = event {
+                    self.0.lock().unwrap().push(event);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capability_notices_follow_each_bots_home_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = Store::open(dir.path().join("store.db"), Events(events.clone())).unwrap();
+        store.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO workspaces (id,name,created) VALUES ('home-a','A',1),('home-b','B',1);
+                 INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('bot-a','home-a','A','codex',1),('bot-b','home-b','B','codex',1);
+                 INSERT INTO bot_capabilities (bot_id,kind,entry_id,enabled,created) VALUES ('bot-a','skill','shared',1,1),('bot-b','skill','shared',1,1);",
+            )?;
+            Ok(())
+        }).unwrap();
+        events.lock().unwrap().clear();
+        store
+            .transaction(|tx| publish_users(tx, "skill", "shared"))
+            .unwrap();
+        let mut actual: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                let DomainEvent::Config(steve_types::ConfigEvent::Bot { id, .. }) = event else {
+                    panic!("unexpected event: {event:?}")
+                };
+                let Scope::Ws(ws) = event.scope() else {
+                    panic!("Bot must be workspace-scoped")
+                };
+                (id.to_string(), ws.to_string())
+            })
+            .collect();
+        actual.sort();
+        assert_eq!(
+            actual,
+            [
+                ("bot-a".into(), "home-a".into()),
+                ("bot-b".into(), "home-b".into())
+            ]
+        );
     }
 }
