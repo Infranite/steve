@@ -633,7 +633,6 @@ export default {
       github_rerun: "重跑 GitHub 检查",
       grant_add: "授予权限",
       grant_revoke: "收回权限",
-      item_kind_fill: "补上事项分类",
       item_party_add: "关联联系人到事项",
       item_party_remove: "取消事项关联的联系人",
       job_open: "添加职务",

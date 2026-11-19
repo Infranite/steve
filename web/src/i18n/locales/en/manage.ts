@@ -637,7 +637,6 @@ export default {
       github_rerun: "GitHub checks re-run",
       grant_add: "Access granted",
       grant_revoke: "Access revoked",
-      item_kind_fill: "Item category filled in",
       item_party_add: "Contact linked to an item",
       item_party_remove: "Contact unlinked from an item",
       job_open: "Job added",
