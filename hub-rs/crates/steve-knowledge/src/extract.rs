@@ -533,9 +533,36 @@ pub async fn run(
     item: Option<&str>,
     task: Task<'_>,
 ) -> ApiResult<Vec<Mem>> {
+    let prepared = prepare(m, kb, origin, text, item, task).await?;
+    if prepared.candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let origin = origin.clone();
+    m.blocking(move |m| m.store.transaction(|tx| commit_in(tx, &origin, &prepared)))
+        .await
+}
+
+/// Model output checked against the source text, ready for one domain transaction.
+pub(crate) struct Prepared {
+    pub(crate) text: String,
+    pub(crate) candidates: Vec<NewCandidate>,
+}
+
+/// Retrieval, model work and filtering, outside the writer. All sources share `SLOTS`.
+pub(crate) async fn prepare(
+    m: &Modules,
+    kb: &Knowledge,
+    origin: &Origin,
+    text: &str,
+    item: Option<&str>,
+    task: Task<'_>,
+) -> ApiResult<Prepared> {
     let text = clip(text, MAX_INPUT);
     if text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(Prepared {
+            text,
+            candidates: Vec::new(),
+        });
     }
     let now = m.clock.now();
     // retrieval (which may ask a remote store) and the name list: off the runtime
@@ -618,42 +645,46 @@ pub async fn run(
         ))
     })?;
     tracing::info!(origin = %origin.id, offered, kept = chosen.len(), "kb.extract: candidates");
-    if chosen.is_empty() {
-        return Ok(Vec::new());
-    }
-    let origin = origin.clone();
-    m.blocking(move |m| {
-        let made = m.store.transaction(|tx| {
-            chosen
-                .iter()
-                .map(|c| {
-                    let mut c = c.clone();
-                    // only the owner's own conversation tells their words apart (`我（…）：`)
-                    c.owner_said = origin.kind == OriginKind::Chat
-                        && c.kind != "event"
-                        && candidates::owner_said(&text, OWNER_LINE, &c.evidence);
-                    candidates::propose(tx, &origin, &c)
-                })
-                .collect::<ApiResult<Vec<_>>>()
-        })?;
-        kept_notice(m, &origin.ws, &made);
-        Ok(made)
+    Ok(Prepared {
+        text,
+        candidates: chosen,
     })
-    .await
+}
+
+/// Writes candidates, decisions and their notice in the caller's transaction. A source can
+/// atomically include its completion receipt, including when no candidates were selected.
+pub(crate) fn commit_in(
+    tx: &steve_store::Tx<'_>,
+    origin: &Origin,
+    prepared: &Prepared,
+) -> ApiResult<Vec<Mem>> {
+    let made = prepared
+        .candidates
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.owner_said = origin.kind == OriginKind::Chat
+                && c.kind != "event"
+                && candidates::owner_said(&prepared.text, OWNER_LINE, &c.evidence);
+            candidates::propose(tx, origin, &c)
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    kept_notice(tx, &origin.ws, &made)?;
+    Ok(made)
 }
 
 /// How a line of the owner starts in a day of chat (`sources::chat::day_text`).
 const OWNER_LINE: &str = "我（";
 
 /// Memories kept at once because the owner said so: one notice says which, and where to take them back.
-fn kept_notice(m: &Modules, ws: &str, made: &[Mem]) {
+fn kept_notice(tx: &steve_store::Tx<'_>, ws: &str, made: &[Mem]) -> ApiResult<()> {
     let kept: Vec<String> = made
         .iter()
         .filter(|x| x.status == "confirmed")
         .map(|x| format!("「{}」", x.text.chars().take(80).collect::<String>()))
         .collect();
     if kept.is_empty() {
-        return;
+        return Ok(());
     }
     let text = format!(
         "按你在对话里说的，记住了 {} 条：{}。不对的话到 知识 › 长期记忆 里改或删掉。",
@@ -661,13 +692,8 @@ fn kept_notice(m: &Modules, ws: &str, made: &[Mem]) {
         kept.join("；")
     );
     let meta = serde_json::json!({"notice": {"kind": "memory", "level": "info"}});
-    if let Err(e) = m
-        .store
-        .messages()
-        .add(ws, "steve", &text, None, &meta, "notify")
-    {
-        tracing::warn!("kb.extract: kept notice: {e}");
-    }
+    steve_store::base::message_add(tx, ws, "steve", &text, None, &meta, "notify")?;
+    Ok(())
 }
 
 /// The entry point for other modules: mail threads (`OriginKind::Mail`, default
