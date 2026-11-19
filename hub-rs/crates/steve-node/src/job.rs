@@ -123,8 +123,8 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             .into_iter()
             .map(|b| (Subject::Execution(exec.clone()), b))
             .collect();
-        if inner.j.events(evs, None).is_err() {
-            broken.store(true, Ordering::SeqCst);
+        if let Err(error) = inner.j.events(evs, None) {
+            event_failed(&inner, &broken, &error);
         }
         inner.wake.notify_one();
     };
@@ -371,12 +371,11 @@ async fn acp_think(
                     job: spec.job.clone(),
                     attempt: spec.run.attempt.clone(),
                 };
-                if inner
+                if let Err(error) = inner
                     .j
                     .events(vec![(Subject::Execution(exec), diagnostic)], None)
-                    .is_err()
                 {
-                    broken.store(true, Ordering::SeqCst);
+                    event_failed(inner, broken, &error);
                 }
                 inner.wake.notify_one();
             }
@@ -390,15 +389,11 @@ async fn acp_think(
                     job: spec.job.clone(),
                     attempt: spec.run.attempt.clone(),
                 };
-                if inner
-                    .j
-                    .events(
-                        vec![(Subject::Execution(exec), EventBody::Usage { report })],
-                        None,
-                    )
-                    .is_err()
-                {
-                    broken.store(true, Ordering::SeqCst);
+                if let Err(error) = inner.j.events(
+                    vec![(Subject::Execution(exec), EventBody::Usage { report })],
+                    None,
+                ) {
+                    event_failed(inner, broken, &error);
                 } else if let Some(id) = final_id {
                     pending_usage.lock().unwrap().retain(|r| r.report_id != id);
                 }
@@ -560,6 +555,15 @@ async fn prepare(
         }
     }
     Ok((images, text.join("\n\n")))
+}
+
+/// A local budget refusal stops this job; a journal IO failure faults the Node.
+fn event_failed(inner: &Inner, broken: &AtomicBool, error: &ApiError) {
+    match error.code {
+        ErrorCode::Exhausted => broken.store(true, Ordering::SeqCst),
+        ErrorCode::Internal => inner.fault(),
+        _ => {}
+    }
 }
 
 /// The Node stops the attempt: a cancel, its deadline, the Hub gone past the lease, its output
@@ -893,5 +897,73 @@ mod attachment_tests {
         fact.paths = vec!["input.txt".into()];
         fact.origin = ToolOrigin::External;
         assert!(!attached_tool(&fact, temp.path(), &[file], true));
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use crate::{LocalNode, NodeConfig, PolicyCeiling, Storage};
+
+    #[tokio::test]
+    async fn local_event_errors_distinguish_journal_budget_from_io_failure() {
+        for code in [ErrorCode::Exhausted, ErrorCode::Internal, ErrorCode::Busy] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let node = LocalNode::open(NodeConfig {
+                node: NodeId::new("test").unwrap(),
+                home: root.join("node"),
+                acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
+                    adapters: Default::default(),
+                    node: "node".into(),
+                    claude_executable: "claude".into(),
+                    steve_home: root.join("steve"),
+                    codex_home: root.join("codex"),
+                    user_home: root.into(),
+                    version: "test".into(),
+                },
+                roots: vec![],
+                capacity: Capacity {
+                    sessions: 0,
+                    jobs: 1,
+                    execs: 0,
+                },
+                storage: Storage::default(),
+                ceiling: PolicyCeiling::unlimited(),
+            })
+            .unwrap();
+            let broken = AtomicBool::new(false);
+            event_failed(
+                &node.0,
+                &broken,
+                &ApiError::new(code, "event write fixture"),
+            );
+            assert_eq!(broken.load(Ordering::SeqCst), code == ErrorCode::Exhausted);
+            assert_eq!(node.0.faulted(), code == ErrorCode::Internal);
+            let limits = Limits {
+                deadline: Timestamp(now() + 60_000),
+                offline_until: Timestamp(now() + 60_000),
+                ..steve_node_api::testkit::build::limits()
+            };
+            let stop = why_stop(
+                &node.0,
+                &OperationId::new("job").unwrap(),
+                &limits,
+                &AtomicU64::new(0),
+                &broken,
+                node.0.j.budget_epoch(),
+            );
+            match (code, stop) {
+                (ErrorCode::Exhausted, Some(Stop::End(Outcome::Cancelled, Some(error), _))) => {
+                    assert_eq!(error, NodeStop::JournalBudget.error())
+                }
+                (ErrorCode::Internal, Some(Stop::End(Outcome::Failed, Some(error), _))) => {
+                    assert_eq!(error, NodeStop::JournalFails.error())
+                }
+                (ErrorCode::Busy, None) => {}
+                _ => panic!("wrong journal stop classification for {code:?}"),
+            }
+        }
     }
 }

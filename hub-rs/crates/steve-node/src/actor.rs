@@ -1449,8 +1449,9 @@ impl Actor {
     ) {
         tracing::error!("node journal ({}): {error}", self.session);
         let exhausted = error.code == ErrorCode::Exhausted;
-        // Failed closing facts remain caller-owned and must join the terminal retry even if
-        // preceding buffered data was refused. Ordinary stream entries are writer-owned.
+        // A streaming-only update transfers to the window; an update with a causal boundary
+        // commits as one caller-owned transaction. Retain its closing facts for terminal retry;
+        // rejected data ends this attempt and is never submitted again.
         let retry = if streamed || exhausted {
             events
                 .into_iter()

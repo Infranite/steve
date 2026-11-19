@@ -2,8 +2,6 @@
 //! the Hub asks. Each figure comes from the platform's own account of it; one it cannot give is
 //! left out.
 
-use std::path::Path;
-
 use steve_node_api::{NodeVitals, RootVitals, Timestamp};
 
 use crate::workspace::Root;
@@ -26,13 +24,13 @@ pub(crate) fn measure(roots: &[Root], sessions: u32) -> NodeVitals {
         roots: roots
             .iter()
             .filter_map(|r| {
-                let (free, total, inodes_free) = space(&r.path)?;
+                let space = crate::space::measure(&r.path)?;
                 Some(RootVitals {
                     root: r.id.clone(),
                     display: r.display.clone(),
-                    free,
-                    total,
-                    inodes_free,
+                    free: space.free,
+                    total: space.total,
+                    inodes_free: space.inodes_free,
                 })
             })
             .collect(),
@@ -45,30 +43,6 @@ fn load() -> Option<[f64; 3]> {
     // SAFETY: getloadavg writes at most 3 values into the array it is given
     let n = unsafe { libc::getloadavg(l.as_mut_ptr(), 3) };
     (n == 3).then_some(l)
-}
-
-/// Free and total bytes, and free inodes, of the file system `dir` is on.
-fn space(dir: &Path) -> Option<(u64, u64, Option<u64>)> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `st` is written by statvfs before it is read.
-    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let st = unsafe { st.assume_init() };
-    #[allow(clippy::unnecessary_cast)] // the field types differ between platforms
-    let (frsize, blocks, avail, favail) = (
-        st.f_frsize as u64,
-        st.f_blocks as u64,
-        st.f_bavail as u64,
-        st.f_favail as u64,
-    );
-    Some((
-        avail.saturating_mul(frsize),
-        blocks.saturating_mul(frsize),
-        Some(favail),
-    ))
 }
 
 /// (total, available) bytes of memory.

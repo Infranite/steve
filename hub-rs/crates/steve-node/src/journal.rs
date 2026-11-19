@@ -690,24 +690,28 @@ impl Writer {
         }
         let incarnation = self.incarnation;
         let mut data_failed = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.transaction(TransactionBehavior::Immediate, |t| {
-                for event in &pending.events {
-                    if let Err(e) = t.emit(event, incarnation) {
-                        data_failed = true;
-                        return Err(e);
-                    }
+        let mut caller_panic = None;
+        let result = self.transaction(TransactionBehavior::Immediate, |t| {
+            for event in &pending.events {
+                if let Err(e) = t.emit(event, incarnation) {
+                    data_failed = true;
+                    return Err(e);
                 }
-                f(t)
-            })
-        }));
-        let result = match result {
-            Ok(result) => result,
-            Err(panic) => {
-                self.pending = pending;
-                std::panic::resume_unwind(panic);
             }
-        };
+            // Only caller code can return its window to the writer on unwind. An internal
+            // emit panic must drop that window rather than repeatedly poisoning every flush.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(t))) {
+                Ok(result) => result,
+                Err(panic) => {
+                    caller_panic = Some(panic);
+                    Err(internal("transaction callback panicked"))
+                }
+            }
+        });
+        if let Some(panic) = caller_panic {
+            self.pending = pending;
+            std::panic::resume_unwind(panic);
+        }
         if let Err(e) = &result {
             // An admission can be exhausted for its own request-size/policy limit. Only an
             // actual event-budget refusal (or IO failure) changes running actors' journal alarm.
