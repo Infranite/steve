@@ -1433,11 +1433,7 @@ async fn repeated_unconfigured_origin_requests_use_the_assembled_space() {
             .await
             .expect("CORS response");
         assert!(!response.status().is_server_error());
-        assert!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .is_none()
-        );
+        assert_eq!(response.status().as_u16(), 401);
+        assert_eq!(response.headers().get("x-steve-origin").unwrap(), "refused");
     }
 }
