@@ -3,7 +3,7 @@
 //!
 //! TypeScript generation is test-only. Add every new public data type to the explicit list in
 //! `gen.rs`. Default `cargo test -p steve-types` compares all bindings and the complete directory.
-//! To rewrite, run from `hub-rs`: `STEVE_TS_BLESS=1 cargo test -p steve-types gen`.
+//! To rewrite, run from `hub-rs`: `STEVE_GUARD_BLESS=1 cargo test -p steve-types gen`.
 //! Generated files live in `web/src/gen`, are committed, and must never be edited or merged by hand.
 //! The generator prepends the Steve provenance header to ts-rs's own generated header, and uses
 //! TypeScript `number` for JSON integer fields (not ts-rs's default `bigint`).

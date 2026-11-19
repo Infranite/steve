@@ -1,6 +1,6 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under web<TAB>JSON-escaped literal<TAB>count.
-# Rewrite: STEVE_ZH_BLESS=1 node --test web/test/guard-zh-compare.test.mjs
+# Rewrite: STEVE_GUARD_BLESS=1 node --test web/test/guard-zh-compare.test.mjs
 src/auto/decision.tsx	"不"	1
 src/bot-page.tsx	"能力"	1
 src/bot-page.tsx	"自己写"	1
