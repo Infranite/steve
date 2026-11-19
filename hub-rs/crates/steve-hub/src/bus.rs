@@ -581,7 +581,13 @@ impl Sender {
 /// Latest statistics notice per workspace in each five-second window.
 #[derive(Default)]
 struct StatsThrottle {
-    streams: HashMap<String, (std::time::Instant, steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>)>,
+    streams: HashMap<
+        String,
+        (
+            std::time::Instant,
+            steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>,
+        ),
+    >,
     pending: HashSet<String>,
 }
 impl StatsThrottle {

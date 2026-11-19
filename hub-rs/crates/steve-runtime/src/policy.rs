@@ -113,7 +113,8 @@ impl Backoff {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum RateLimit {
-    /// One token per `per`, initially `burst` tokens (not burst tokens per period).
+    /// One unit per `per`, initially `burst` units. Limiter::with_units can express
+    /// multiple units per period without rounding a fractional nanosecond per unit.
     Gcra {
         per: Duration,
         burst: u32,
@@ -174,6 +175,13 @@ type Bucket = governor::RateLimiter<
 >;
 enum State {
     Bucket(Bucket),
+    // GCRA theoretical arrival time relative to `at`, scaled by units per period.
+    // governor's integer-nanosecond quota cannot express fractional unit periods.
+    // Keep this debt in u128 so byte-sized rates neither round nor accumulate drift.
+    Fractional {
+        at: Duration,
+        debt: u128,
+    },
     Window {
         start: Duration,
         hits: VecDeque<Duration>,
@@ -186,6 +194,7 @@ struct Entry {
 pub struct Limiter<K> {
     rate: RateLimit,
     sliding: bool,
+    units: NonZeroU32,
     clock: PolicyClock,
     keys: Mutex<HashMap<K, Entry>>,
 }
@@ -209,22 +218,40 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         Self {
             rate,
             sliding: false,
+            units: NonZeroU32::MIN,
             clock: PolicyClock::new(clock),
             keys: Mutex::new(HashMap::new()),
         }
+    }
+    /// Configure a fresh GCRA limiter for `units` per `RateLimit::Gcra::per`.
+    /// Burst and check_n weights remain resource units (e.g. bytes), not batches.
+    /// Integer scaled GCRA debt preserves rates such as 1 MiB/s exactly.
+    pub fn with_units(mut self, units: NonZeroU32) -> Self {
+        assert!(matches!(self.rate, RateLimit::Gcra { .. }));
+        assert!(
+            self.keys.get_mut().unwrap().is_empty(),
+            "configure units before admission"
+        );
+        self.units = units;
+        self
     }
     pub fn sliding(rate: RateLimit) -> Self {
         Self::new(rate).into_sliding()
     }
     pub fn into_sliding(mut self) -> Self {
         assert!(matches!(self.rate, RateLimit::Window { .. }));
+        assert!(
+            self.keys.get_mut().unwrap().is_empty(),
+            "configure windows before admission"
+        );
         self.sliding = true;
         self
     }
     /// Prunes fully recovered keys even if no further requests arrive for those keys.
     pub fn prune(&self) {
+        let mut keys = self.keys.lock().unwrap();
         let now = self.clock.now();
-        self.keys.lock().unwrap().retain(|_, e| e.expires > now);
+        keys.retain(|_, e| e.expires > now);
     }
     pub fn len(&self) -> usize {
         self.prune();
@@ -249,8 +276,8 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         if n.get() > capacity {
             return Err(CheckError::InsufficientCapacity { capacity });
         }
-        let now = self.clock.now();
         let mut keys = self.keys.lock().unwrap();
+        let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
         match (&mut e.state, self.rate) {
@@ -263,6 +290,22 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
                     e.expires = now + per * burst;
                 }
                 result
+            }
+            (State::Fractional { at, debt }, RateLimit::Gcra { per, burst }) => {
+                let units = u128::from(self.units.get());
+                *debt = debt.saturating_sub(now.saturating_sub(*at).as_nanos() * units);
+                *at = now;
+                let next = *debt + per.as_nanos() * u128::from(n.get());
+                let capacity = per.as_nanos() * u128::from(burst);
+                if next > capacity {
+                    return Err(CheckError::Wait(Wait(scaled_duration(
+                        next - capacity,
+                        units,
+                    ))));
+                }
+                *debt = next;
+                e.expires = now + scaled_duration(next, units);
+                Ok(())
             }
             (State::Window { start, hits }, RateLimit::Window { len, max }) => {
                 self.refresh(start, hits, now, len);
@@ -287,6 +330,9 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         Entry {
             expires: now,
             state: match self.rate {
+                RateLimit::Gcra { .. } if self.units.get() > 1 => {
+                    State::Fractional { at: now, debt: 0 }
+                }
                 RateLimit::Gcra { per, burst } => State::Bucket(Bucket::direct_with_clock(
                     governor::Quota::with_period(per)
                         .expect("GCRA period out of range")
@@ -340,8 +386,8 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         let RateLimit::Window { len, max } = self.rate else {
             panic!("peek requires a Window");
         };
-        let now = self.clock.now();
         let mut keys = self.keys.lock().unwrap();
+        let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let Some(e) = keys.get_mut(key) else {
             return Ok(());
@@ -364,8 +410,8 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         let RateLimit::Window { len, max } = self.rate else {
             panic!("hit requires a Window");
         };
-        let now = self.clock.now();
         let mut keys = self.keys.lock().unwrap();
+        let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
         let State::Window { start, hits } = &mut e.state else {
@@ -381,6 +427,15 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
             *start + len
         };
     }
+}
+// Round only the reported wait/expiry up to a whole nanosecond. Admission uses
+// the unrounded debt above, including fractional credit across rejected batches.
+fn scaled_duration(debt: u128, units: u128) -> Duration {
+    let nanos = debt.div_ceil(units);
+    Duration::new(
+        (nanos / 1_000_000_000) as u64,
+        (nanos % 1_000_000_000) as u32,
+    )
 }
 /// One stream's leading event and latest trailing event; callers wait on deadline then call due.
 pub struct Throttle<T> {

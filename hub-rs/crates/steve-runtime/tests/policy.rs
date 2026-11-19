@@ -398,3 +398,113 @@ fn byte_rate_quantization_is_explicit_at_one_mib_per_second() {
         }
     }
 }
+
+#[test]
+fn exact_byte_rate_preserves_fractional_credit_and_long_running_keys() {
+    use std::num::NonZeroU32;
+    use steve_runtime::{FakeClock, policy::CheckError};
+    const MIB: u32 = 1024 * 1024;
+    let clock = Arc::new(FakeClock::new(0));
+    let l = Limiter::with_clock(
+        RateLimit::Gcra {
+            per: sec(1),
+            burst: 64 * MIB,
+        },
+        clock.clone(),
+    )
+    .with_units(NonZeroU32::new(MIB).unwrap());
+    let check = |n| l.check_n(&"node", NonZeroU32::new(n).unwrap());
+    assert_eq!(
+        check(64 * MIB + 1),
+        Err(CheckError::InsufficientCapacity { capacity: 64 * MIB })
+    );
+    assert_eq!(check(64 * MIB), Ok(()));
+    // Fractional byte credit survives both successful and rejected batches.
+    for (ms, n, allowed) in [
+        (0, 1, false),
+        (1, 1048, true),
+        (1, 1, false),
+        (2, 1049, true),
+        (2, 1, false),
+    ] {
+        clock.set(ms);
+        assert_eq!(check(n).is_ok(), allowed, "{ms} {n}");
+    }
+    clock.set(90 * 86_400_000);
+    assert!(
+        l.is_empty(),
+        "scaled time does not overflow after months of uptime"
+    );
+    assert_eq!(check(64 * MIB), Ok(()));
+    clock.advance(1000);
+    assert_eq!(check(MIB), Ok(()));
+    assert_eq!(
+        check(1),
+        Err(CheckError::Wait(Wait(Duration::from_nanos(954))))
+    );
+    assert_eq!(
+        l.check_n(&"other", NonZeroU32::new(64 * MIB).unwrap()),
+        Ok(())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_byte_rate_rounds_only_waits_not_admission() {
+    use std::num::NonZeroU32;
+    use steve_runtime::policy::CheckError;
+    const MIB: u32 = 1024 * 1024;
+    let l = Limiter::new(RateLimit::Gcra {
+        per: sec(1),
+        burst: 64 * MIB,
+    })
+    .with_units(NonZeroU32::new(MIB).unwrap());
+    let check = |n| l.check_n(&"node", NonZeroU32::new(n).unwrap());
+    assert_eq!(check(64 * MIB), Ok(()));
+    assert_eq!(
+        check(1),
+        Err(CheckError::Wait(Wait(Duration::from_nanos(954))))
+    );
+    tokio::time::advance(Duration::from_nanos(953)).await;
+    assert_eq!(
+        check(1),
+        Err(CheckError::Wait(Wait(Duration::from_nanos(1))))
+    );
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    assert_eq!(check(1), Ok(()));
+    assert_eq!(
+        check(1),
+        Err(CheckError::Wait(Wait(Duration::from_nanos(954))))
+    );
+}
+
+#[test]
+fn scaled_gcra_matches_governor_for_integral_unit_periods() {
+    use std::num::NonZeroU32;
+    use steve_runtime::FakeClock;
+    let clock = Arc::new(FakeClock::new(0));
+    let governor = Limiter::with_clock(
+        RateLimit::Gcra {
+            per: Duration::from_millis(500),
+            burst: 5,
+        },
+        clock.clone(),
+    );
+    let scaled = Limiter::with_clock(
+        RateLimit::Gcra {
+            per: sec(1),
+            burst: 5,
+        },
+        clock.clone(),
+    )
+    .with_units(NonZeroU32::new(2).unwrap());
+    for attempt in 0..2000 {
+        clock.advance([0, 17, 333, 2500][attempt % 4]);
+        let weight = NonZeroU32::new((attempt as u32 * 37) % 7 + 1).unwrap();
+        let key = attempt % 3;
+        assert_eq!(
+            scaled.check_n(&key, weight),
+            governor.check_n(&key, weight),
+            "attempt {attempt}"
+        );
+    }
+}
