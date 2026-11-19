@@ -6,6 +6,7 @@ publish.workspace = true
 description = "Calendars as data sources: the calendar.v1 profile, built-in ICS and demo sources, the read cache and its sync, read API and tools"
 
 [dependencies]
+steve-types = { path = "../steve-types" }
 steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
 steve-flow = { path = "../steve-flow" }

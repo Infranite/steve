@@ -20,7 +20,6 @@ use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
-use steve_store::ChangeEvent;
 
 use crate::profile::Features;
 use crate::query::{self, Range};
@@ -278,7 +277,7 @@ impl Calendar {
                     if detail == "busy" && cur.detail != "busy" {
                         repo::strip_details(tx, &cur.id, now)?;
                     }
-                    tx.publish(ChangeEvent::Calendar { id: cur.id.clone(), ws: who2.ws.clone() });
+                    tx.publish(steve_types::DomainEvent::from(steve_types::AutomationEvent::Calendar { id: cur.id.clone().into(), ws: who2.ws.clone().into() }));
                     let resync = (detail == "full" && cur.detail != "full") || (enabled && !cur.enabled);
                     Ok((repo::calendar(tx, &cur.id)?.expect("just updated"), resync))
                 })

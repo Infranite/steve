@@ -251,10 +251,12 @@ impl Calendar {
         let Some(remote) = remote else {
             self.modules().store.transaction(|tx| {
                 repo::delete_event(tx, &row.id, now)?;
-                tx.publish(steve_store::ChangeEvent::Calendar {
-                    id: cal.id.clone(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::AutomationEvent::Calendar {
+                        id: cal.id.clone().into(),
+                        ws: ws.into(),
+                    },
+                ));
                 Ok::<_, ApiError>(())
             })?;
             return cached(Some("来源里已经没有这个日程了".into()));
@@ -273,10 +275,12 @@ impl Calendar {
             {
                 fresh.meeting_id = row.meeting_id.clone();
                 repo::write_event(tx, &fresh, &atts, now)?;
-                tx.publish(steve_store::ChangeEvent::Calendar {
-                    id: cal.id.clone(),
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::AutomationEvent::Calendar {
+                        id: cal.id.clone().into(),
+                        ws: ws.into(),
+                    },
+                ));
             }
             Ok::<_, ApiError>(())
         })?;

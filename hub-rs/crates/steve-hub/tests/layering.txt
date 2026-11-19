@@ -7,6 +7,7 @@ edge	steve-calendar	steve-flow
 edge	steve-calendar	steve-i18n
 edge	steve-calendar	steve-modules
 edge	steve-calendar	steve-store
+edge	steve-calendar	steve-types
 edge	steve-channels	steve-flow
 edge	steve-channels	steve-i18n
 edge	steve-channels	steve-knowledge
