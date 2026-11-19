@@ -27,6 +27,11 @@ impl WallClock for Time {
         Millis(self.0.load(Ordering::SeqCst))
     }
 }
+impl steve_store_sqlite::snapshot::Clock for Time {
+    fn now(&self) -> Millis {
+        WallClock::now(self)
+    }
+}
 pub type Events = Arc<Mutex<Vec<(Rev, Vec<String>)>>>;
 pub fn row(id: &str, n: i64) -> Row {
     Row(vec![
@@ -136,6 +141,7 @@ pub fn prepare_layout(dir: &std::path::Path, split: bool) {
     std::fs::create_dir_all(dir).unwrap();
     for file in layout.files.keys() {
         let c = Connection::open(dir.join(file)).unwrap();
+        c.pragma_update(None, "journal_mode", "WAL").unwrap();
         c.execute_batch(steve_store_sqlite::schema::CONTRACT)
             .unwrap();
         c.execute_batch("CREATE TABLE outbox_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,workspace_id TEXT NOT NULL,topic TEXT NOT NULL,version INTEGER NOT NULL,payload TEXT NOT NULL,created INTEGER NOT NULL);").unwrap();
@@ -166,9 +172,29 @@ pub fn open_store(
     steve_store_sqlite::store::SqliteStore::new(
         engines,
         registry,
-        time,
+        time.clone(),
         Arc::new(|_, _: Vec<String>| {}),
         || false,
     )
     .unwrap()
+    .with_snapshot_clock(time)
+    .unwrap()
+}
+
+pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    struct Notify(std::thread::Thread);
+    impl std::task::Wake for Notify {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(Arc::new(Notify(std::thread::current())));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => return value,
+            std::task::Poll::Pending => std::thread::park(),
+        }
+    }
 }
