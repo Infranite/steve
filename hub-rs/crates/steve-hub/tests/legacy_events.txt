@@ -1,5 +1,4 @@
 # Remaining production legacy publications. Shrink per crate; remove with the last legacy path.
 steve-hub/src/bus.rs	publish_value(	2
-steve-knowledge/src/steward.rs	ChangeEvent::	1
 steve-mail/src/repo.rs	ChangeEvent::	1
 steve-store/src/bus.rs	ChangeEvent::	36
