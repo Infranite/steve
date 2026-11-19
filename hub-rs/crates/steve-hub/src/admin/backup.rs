@@ -119,7 +119,10 @@ pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf
         let _ = fs::remove_file(&partial);
         return Err(e);
     }
-    fs::rename(&partial, &dest)?;
+    if let Err(error) = fs::rename(&partial, &dest) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
     Ok(Some(dest))
 }
 

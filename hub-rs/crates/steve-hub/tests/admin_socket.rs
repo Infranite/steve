@@ -490,13 +490,29 @@ async fn backup_command_uses_the_live_socket_and_management_inventory() {
     .await
     .unwrap();
     assert_eq!(usage["diagnostic"]["count"], 1);
+    let path = access::admin_socket_path(&hub.cfg.home).unwrap();
+    let empty = tokio::task::spawn_blocking(move || {
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .write_all(b"POST /admin/v1/backup HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        let mut reply = String::new();
+        socket.read_to_string(&mut reply).unwrap();
+        serde_json::from_str::<access::CliOutput>(reply.split_once("\r\n\r\n").unwrap().1).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(empty.code, 0, "{}", empty.stderr);
     let bad = hub.cli(&["backup", "--reason", "daily"]).await;
     assert_eq!(bad.code, 2);
     assert_eq!(
         steve_store_sqlite::backup::list(&hub.cfg.home.join("backups"))
             .unwrap()
             .len(),
-        1
+        2
     );
     hub.stop().await;
 }

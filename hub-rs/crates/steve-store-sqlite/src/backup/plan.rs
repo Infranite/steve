@@ -157,12 +157,27 @@ fn schema(path: &Path) -> rusqlite::Result<Option<i64>> {
         [],
         |r| r.get(0),
     )?;
-    if exists {
-        c.query_row("SELECT v FROM schema_version LIMIT 1", [], |r| r.get(0))
-            .optional()
-    } else {
-        Ok(None)
+    if !exists {
+        return Ok(None);
     }
+    let has_v: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_version') WHERE name='v')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_v {
+        return Ok(None);
+    }
+    let value: Option<rusqlite::types::Value> = c
+        .query_row("SELECT v FROM schema_version LIMIT 1", [], |r| r.get(0))
+        .optional()?;
+    // Application metadata is optional: an unfamiliar/older header does not prevent a
+    // physically verified diagnostic copy. Actual SQLite I/O errors still propagate.
+    Ok(match value {
+        Some(rusqlite::types::Value::Integer(v)) => Some(v),
+        Some(rusqlite::types::Value::Text(v)) => v.parse().ok(),
+        _ => None,
+    })
 }
 pub fn backup(
     db_path: &Path,
@@ -280,11 +295,10 @@ pub fn backup(
         let _ = File::open(&plan.dest_root).and_then(|f| f.sync_all());
         return Err(error.into());
     }
-    if matches!(plan.keep, Keep::Default) {
-        if let Err(error) = prune_impl(&plan.dest_root, &plan.reason, now_ms(), Some(&manifest.id))
-        {
-            tracing::warn!("backup retention failed: {error}");
-        }
+    if matches!(plan.keep, Keep::Default)
+        && let Err(error) = prune_impl(&plan.dest_root, &plan.reason, now_ms(), Some(&manifest.id))
+    {
+        tracing::warn!("backup retention failed: {error}");
     }
     Ok(manifest)
 }
