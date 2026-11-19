@@ -85,7 +85,7 @@
 //! // (connected, re-authorized, resumed → start, plus sync_bot_chats for a bot; paused, reauth,
 //! // disconnected → stop). No hook in Connections is needed: it publishes `connection` events.
 //! use steve_channels::adapters::feishu::{BotHook, SelfPollHook};
-//! let events = bus.tap(&["connection"]);                              // tapped before listing
+//! let events = bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. }))));                              // tapped before listing
 //! let rt = steve_channels::lifecycle::ConnectionRuntime::builder(channels.clone())
 //!     .hook("feishu_app", Some(bot_decl), Arc::new(BotHook::new(channels.clone())))
 //!     .hook("feishu_user", Some(user_decl), Arc::new(SelfPollHook::new(channels.clone(), feishu_user.clone())))

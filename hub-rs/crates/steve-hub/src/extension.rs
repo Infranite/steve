@@ -495,10 +495,32 @@ impl Declare<'_> {
 #[derive(Clone)]
 pub struct BusTap(Bus);
 
+/// Plugin boundary view over the original bounded typed tap. Encoding is lazy, so it adds
+/// no queue, reorder point or overflow policy of its own.
+pub struct PluginEvents {
+    inner: tokio::sync::mpsc::Receiver<steve_types::Notification>,
+}
+impl PluginEvents {
+    pub async fn recv(&mut self) -> Option<Value> {
+        self.inner
+            .recv()
+            .await
+            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+    }
+    pub fn try_recv(&mut self) -> Result<Value, tokio::sync::mpsc::error::TryRecvError> {
+        self.inner
+            .try_recv()
+            .map(|event| serde_json::to_value(&*event).expect("plugin event frame"))
+    }
+}
 impl BusTap {
-    /// The events whose `type` is one of `types`.
-    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::Receiver<Value> {
-        self.0.tap(types)
+    /// The plugin's declared wire tags, encoded only when the plugin reads each frame.
+    pub fn tap(&self, types: &[&str]) -> PluginEvents {
+        let types: Vec<String> = types.iter().map(|ty| (*ty).to_owned()).collect();
+        let inner = self
+            .0
+            .tap(move |event| types.iter().any(|ty| ty == event.wire_type()));
+        PluginEvents { inner }
     }
 }
 
@@ -781,6 +803,35 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn plugin_boundary_encodes_one_bounded_tap_in_domain_live_order() {
+        let bus = Bus::new();
+        let mut events = BusTap(bus.clone()).tap(&["project", "steve.thinking"]);
+        assert_eq!(events.inner.max_capacity(), Bus::TAP_CAPACITY);
+        bus.publish_batch(vec![
+            steve_types::ConfigEvent::Project {
+                id: "p".into(),
+                ws: "a".into(),
+            }
+            .into(),
+            steve_types::WorkLiveEvent::SteveThinking {
+                on: true,
+                ws: "a".into(),
+                phase: None,
+            }
+            .into(),
+        ]);
+        for tag in ["project", "steve.thinking"] {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event["type"], tag);
+            assert_eq!(event["ws"], "a");
+            assert_eq!(event["rev"], 1);
+        }
+    }
 
     #[test]
     fn overlapping_routes_are_an_error_not_a_panic() {

@@ -685,7 +685,11 @@ impl Plugins {
 
     /// The job the Hub runs: reconciles now, whenever a connection changes (`events`, the bus's
     /// `connection` events) and every 20 seconds.
-    pub async fn supervise(self, modules: Modules, mut events: tokio::sync::mpsc::Receiver<Value>) {
+    pub async fn supervise(
+        self,
+        modules: Modules,
+        mut events: tokio::sync::mpsc::Receiver<steve_types::Notification>,
+    ) {
         let mut open = true;
         loop {
             self.reconcile(&modules).await;

@@ -391,23 +391,20 @@ impl DirectorySync {
         }
     }
 
-    /// Follows `{type:"connection", id, ws}` events (steve-hub's `Bus::tap(&["connection"])`) with
+    /// Follows `{type:"connection", id, ws}` events (the Hub's typed connection tap) with
     /// [`DirectorySync::connection_changed`] until the sender goes away.
     pub fn spawn_watch(
         self: &Arc<Self>,
-        mut rx: mpsc::Receiver<serde_json::Value>,
+        mut rx: mpsc::Receiver<steve_types::Notification>,
     ) -> tokio::task::JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
-                if ev.get("type").and_then(serde_json::Value::as_str) != Some("connection") {
-                    continue;
-                }
-                if let (Some(id), Some(ws)) = (
-                    ev.get("id").and_then(serde_json::Value::as_str),
-                    ev.get("ws").and_then(serde_json::Value::as_str),
-                ) {
-                    me.connection_changed(ws, id);
+                if let Some(steve_types::DomainEvent::Channels(
+                    steve_types::ChannelsEvent::Connection { id, ws },
+                )) = ev.event.as_domain()
+                {
+                    me.connection_changed(ws.as_str(), id.as_str());
                 }
             }
         })

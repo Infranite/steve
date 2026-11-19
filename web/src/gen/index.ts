@@ -5,6 +5,7 @@ export type { AlarmLine } from "./AlarmLine";
 export type { AutomationEvent } from "./AutomationEvent";
 export type { AutonomyEvent } from "./AutonomyEvent";
 export type { BotId } from "./BotId";
+export type { BusEvent } from "./BusEvent";
 export type { CalendarId } from "./CalendarId";
 export type { ChanMessageId } from "./ChanMessageId";
 export type { ChangesetId } from "./ChangesetId";

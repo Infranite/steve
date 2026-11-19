@@ -6,14 +6,14 @@ use steve_store::*;
 use steve_types::{Scope, Scoped};
 
 #[derive(Clone, Default)]
-struct Sink(Arc<Mutex<Vec<Vec<Published>>>>);
+struct Sink(Arc<Mutex<Vec<Vec<BusEvent>>>>);
 
 impl Publisher for Sink {
-    fn publish(&self, _: ChangeEvent) {
+    fn publish(&self, _: BusEvent) {
         panic!("store producer used legacy publication");
     }
 
-    fn publish_batch(&self, events: Vec<Published>) {
+    fn publish_batch(&self, events: Vec<BusEvent>) {
         if !events.is_empty() {
             self.0.lock().unwrap().push(events);
         }
@@ -21,7 +21,7 @@ impl Publisher for Sink {
 }
 
 impl Sink {
-    fn take(&self) -> Vec<Vec<Published>> {
+    fn take(&self) -> Vec<Vec<BusEvent>> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 
@@ -32,11 +32,10 @@ impl Sink {
             .into_iter()
             .map(|event| {
                 let (scope, wire) = match event {
-                    Published::Domain(event) => {
+                    BusEvent::Domain(event) => {
                         (event.scope(), serde_json::to_value(event).unwrap())
                     }
-                    Published::Live(event) => (event.scope(), serde_json::to_value(event).unwrap()),
-                    Published::Legacy(event) => panic!("legacy producer: {event:?}"),
+                    BusEvent::Live(event) => (event.scope(), serde_json::to_value(event).unwrap()),
                 };
                 assert_eq!(scope, Scope::Ws(ws.into()));
                 assert_eq!(wire["ws"], ws);

@@ -113,7 +113,7 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         streams.push((response.into_body(), sees_ws, sees_user));
     }
-    bus.publish(vec![
+    bus.publish_batch(vec![
         PeopleEvent::Party {
             id: "party-a".into(),
             ws: "workspace-a".into(),
@@ -142,7 +142,7 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         }
         .into(),
     );
-    bus.publish(vec![
+    bus.publish_batch(vec![
         DevicesEvent::Device {
             id: "barrier".into(),
         }

@@ -4,7 +4,7 @@ use steve_hub::{
     bus::{Bus, Scope, Viewer},
     wire::store::BusPublisher,
 };
-use steve_store::{ChangeEvent, Store, StoreError};
+use steve_store::{Store, StoreError};
 use steve_types::*;
 mod bus_cases;
 
@@ -49,9 +49,7 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
                 Ok::<_, StoreError>(())
             })?;
             tx.publish(thinking());
-            tx.publish(ChangeEvent::Item {
-                id: "legacy".into(),
-            });
+            tx.publish(item("third"));
             Ok::<_, StoreError>(())
         })
         .unwrap();
@@ -60,7 +58,7 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
         assert_eq!(v, json!({"type":"item", "id":id, "ws":"a", "rev":1}));
     }
     assert_eq!(next(&mut rx).await.1["rev"], 1);
-    assert!(next(&mut rx).await.1.get("rev").is_none());
+    assert_eq!(next(&mut rx).await.1["rev"], 1);
     let rolled_back: Result<(), StoreError> = store.transaction(|tx| {
         tx.publish(item("rolled-back"));
         Err(StoreError::NotFound("test".into()))
@@ -85,7 +83,7 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
 }
 
 #[tokio::test]
-async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_tap_json() {
+async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() {
     let tags = [
         "item",
         "decision",
@@ -128,9 +126,8 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_tap_json() {
         "mail",
     ];
     let bus = Bus::new();
-    bus.set_session_workspace(|_| panic!("typed events must never resolve scope through storage"));
     let mut rx = bus.subscribe();
-    let mut tap = bus.tap(&tags);
+    let mut tap = bus.tap(|_| true);
     for tag in tags {
         let event = bus_cases::typed(tag, "a");
         bus.publish(event);
@@ -139,7 +136,7 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_tap_json() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(tap_value, value, "{tag}");
+        assert_eq!(serde_json::to_value(&*tap_value).unwrap(), value, "{tag}");
         assert!(value["rev"].is_number());
         assert_eq!(value["type"], tag);
         let personal = matches!(tag, "node" | "client");
@@ -171,7 +168,7 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_tap_json() {
         assert_eq!(
             frame.scope,
             if hub {
-                Scope::All
+                Scope::Hub
             } else if personal {
                 Scope::User("user".into())
             } else {
@@ -202,18 +199,14 @@ async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
 #[tokio::test]
 async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
     let bus = Bus::new();
-    bus.set_session_workspace(|_| Some("a".into()));
     let mut rx = bus.subscribe();
-    let mut tap = bus.tap(&["event"]);
-    let data = json!({"rawOutput": "x".repeat(5000), "content": {"type":"image", "data":"base64"}, "_meta":{"claudeCode":{"toolName":"Read"}}});
-    bus.publish(steve_hub::bus::HubEvent::Event {
-        session_id: "s".into(),
-        seq: 1,
-        kind: "tool".into(),
-        data: data.clone(),
+    let mut tap = bus.tap(|e| {
+        matches!(
+            e.as_live(),
+            Some(LiveEvent::Work(WorkLiveEvent::Event { .. }))
+        )
     });
-    let (_, old) = next(&mut rx).await;
-    assert_eq!(tap.recv().await.unwrap()["data"], data);
+    let data = json!({"rawOutput": "x".repeat(5000), "content": {"type":"image", "data":"base64"}, "_meta":{"claudeCode":{"toolName":"Read"}}});
     bus.live(
         WorkLiveEvent::Event {
             session_id: "s".into(),
@@ -225,8 +218,10 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
         .into(),
     );
     let (_, typed) = next(&mut rx).await;
-    assert_eq!(tap.recv().await.unwrap()["data"], data);
-    assert_eq!(typed["data"], old["data"]);
+    assert_eq!(
+        serde_json::to_value(&*tap.recv().await.unwrap()).unwrap()["data"],
+        data
+    );
     assert_eq!(typed["data"]["tool"], "Read");
     assert_eq!(typed["data"]["content"], json!({"type":"image"}));
 }

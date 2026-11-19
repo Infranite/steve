@@ -138,12 +138,6 @@ impl From<crate::WorkLiveEvent> for LiveEvent {
     }
 }
 
-/// Migration placeholder: every invocation warns, then panics if accidentally executed.
-#[deprecated(note = "W1.3b: fill the workspace from the write transaction")]
-pub fn ws_todo() -> WorkspaceId {
-    panic!("W1.3b: fill the workspace from the write transaction")
-}
-
 impl DomainEvent {
     /// Stable SSE tag, used without inspecting serialized JSON.
     pub fn wire_type(&self) -> &'static str {
@@ -169,5 +163,151 @@ impl LiveEvent {
         match self {
             Self::Work(event) => event.wire_type(),
         }
+    }
+}
+
+/// One typed publication. Domain and live events share ordering through the bus and its taps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum BusEvent {
+    Domain(DomainEvent),
+    Live(LiveEvent),
+}
+impl From<DomainEvent> for BusEvent {
+    fn from(event: DomainEvent) -> Self {
+        Self::Domain(event)
+    }
+}
+impl From<LiveEvent> for BusEvent {
+    fn from(event: LiveEvent) -> Self {
+        Self::Live(event)
+    }
+}
+impl Scoped for BusEvent {
+    fn scope(&self) -> Scope {
+        match self {
+            Self::Domain(e) => e.scope(),
+            Self::Live(e) => e.scope(),
+        }
+    }
+}
+impl BusEvent {
+    pub fn as_domain(&self) -> Option<&DomainEvent> {
+        match self {
+            Self::Domain(e) => Some(e),
+            Self::Live(_) => None,
+        }
+    }
+    pub fn as_live(&self) -> Option<&LiveEvent> {
+        match self {
+            Self::Live(e) => Some(e),
+            Self::Domain(_) => None,
+        }
+    }
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Domain(e) => e.wire_type(),
+            Self::Live(e) => e.wire_type(),
+        }
+    }
+    /// The same logical key as the wire notice: transcript entries must never coalesce.
+    pub fn coalesce_key(&self) -> Option<(&'static str, Option<WorkspaceId>, String)> {
+        if matches!(
+            self,
+            Self::Live(crate::LiveEvent::Work(crate::WorkLiveEvent::Event { .. }))
+        ) {
+            return None;
+        }
+        let ws = match self.scope() {
+            Scope::Ws(ws) => Some(ws),
+            _ => None,
+        };
+        let id = match self {
+            Self::Domain(e) => e.entity_id().unwrap_or_default(),
+            Self::Live(_) => "",
+        };
+        Some((self.wire_type(), ws, id.to_owned()))
+    }
+}
+
+impl DomainEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Work(event) => event.entity_id(),
+            Self::Devices(event) => event.entity_id(),
+            Self::Config(event) => event.entity_id(),
+            Self::People(event) => event.entity_id(),
+            Self::Channels(event) => event.entity_id(),
+            Self::Vault(event) => event.entity_id(),
+            Self::Automation(event) => event.entity_id(),
+            Self::Autonomy(event) => event.entity_id(),
+            Self::Stats(event) => event.entity_id(),
+            Self::Knowledge(event) => event.entity_id(),
+            Self::Integrations(event) => event.entity_id(),
+        }
+    }
+}
+
+/// Shared immutable notification delivered to internal subscribers before boundary encoding.
+pub type Notification = std::sync::Arc<Envelope<BusEvent>>;
+impl From<crate::WorkEvent> for BusEvent {
+    fn from(event: crate::WorkEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::ConfigEvent> for BusEvent {
+    fn from(event: crate::ConfigEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::DevicesEvent> for BusEvent {
+    fn from(event: crate::DevicesEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::ChannelsEvent> for BusEvent {
+    fn from(event: crate::ChannelsEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::PeopleEvent> for BusEvent {
+    fn from(event: crate::PeopleEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::VaultEvent> for BusEvent {
+    fn from(event: crate::VaultEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::AutomationEvent> for BusEvent {
+    fn from(event: crate::AutomationEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::AutonomyEvent> for BusEvent {
+    fn from(event: crate::AutonomyEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::StatsEvent> for BusEvent {
+    fn from(event: crate::StatsEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::KnowledgeEvent> for BusEvent {
+    fn from(event: crate::KnowledgeEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::IntegrationsEvent> for BusEvent {
+    fn from(event: crate::IntegrationsEvent) -> Self {
+        Self::Domain(event.into())
+    }
+}
+impl From<crate::WorkLiveEvent> for BusEvent {
+    fn from(event: crate::WorkLiveEvent) -> Self {
+        Self::Live(event.into())
     }
 }

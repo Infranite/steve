@@ -11,7 +11,7 @@ use node_harness::*;
 use serde_json::{Value, json};
 use steve_hub::nodes::{self, link::Door, vitals};
 use steve_node_api::testkit::FakeNode;
-use steve_store::{ChangeEvent, FnPublisher, Store};
+use steve_store::{BusEvent, FnPublisher, Store};
 
 async fn nodes_of(h: &Hub, user: &str) -> Value {
     reqwest::Client::new()
@@ -36,7 +36,7 @@ async fn row(h: &Hub, node: &str) -> Value {
 }
 
 /// A Hub whose store's change events are kept, to read back which reached the stream.
-async fn watched() -> (Hub, Arc<Mutex<Vec<ChangeEvent>>>) {
+async fn watched() -> (Hub, Arc<Mutex<Vec<BusEvent>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let dir = tempfile::tempdir().unwrap();
     let keep = seen.clone();
@@ -49,11 +49,11 @@ async fn watched() -> (Hub, Arc<Mutex<Vec<ChangeEvent>>>) {
     (Hub::on(dir, store, None).await, seen)
 }
 
-fn node_events(seen: &Mutex<Vec<ChangeEvent>>, node: &str) -> usize {
+fn node_events(seen: &Mutex<Vec<BusEvent>>, node: &str) -> usize {
     seen.lock()
         .unwrap()
         .iter()
-        .filter(|e| matches!(e, ChangeEvent::Node { id, user } if id == node && user == "u1"))
+        .filter(|e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Devices(steve_types::DevicesEvent::Node { id, user })) if id.as_str() == node && user.as_str() == "u1"))
         .count()
 }
 
@@ -226,7 +226,9 @@ async fn every_change_of_a_node_tells_its_owner() {
     );
     // only ever for its owner
     assert!(seen.lock().unwrap().iter().all(|e| match e {
-        ChangeEvent::Node { user, .. } => user == "u1",
+        steve_types::BusEvent::Domain(steve_types::DomainEvent::Devices(
+            steve_types::DevicesEvent::Node { user, .. },
+        )) => user.as_str() == "u1",
         _ => true,
     }));
 }

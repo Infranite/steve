@@ -14,7 +14,7 @@ install! { install(reg, cx) [core, db, host, node_jobs, yolo_forced] => [core, d
     let mut jobs = std::mem::take(&mut reg.built.as_mut().expect("modules installed").jobs);
     jobs.extend(node_jobs);
     jobs.push(Box::pin(
-        engine.clone().run_events(bus.tap(&["decision", "yolo"])),
+        engine.clone().run_events(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision { .. }) | steve_types::DomainEvent::Autonomy(steve_types::AutonomyEvent::Yolo { .. }))))),
     ));
     jobs.push(Box::pin(engine.clone().run_ticks()));
 }}

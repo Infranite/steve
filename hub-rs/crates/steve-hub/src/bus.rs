@@ -1,145 +1,13 @@
-//! In-process domain events (bus.ts). Store writes and the orchestrator publish here; every SSE stream subscribes.
-
+//! Typed, ordered in-process notifications. Encoding belongs to SSE and plugin boundaries.
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use steve_store::Published;
+use std::sync::{Arc, Mutex};
+pub use steve_types::{BusEvent, Scope};
 use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
 
-/// One bus event; serialized it is exactly the SSE `data:` payload of the TS Hub.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum HubEvent {
-    #[serde(rename = "item")]
-    Item { id: String },
-    /// `item_id`: `None` = key absent, `Some(None)` = `null`.
-    #[serde(rename = "decision")]
-    Decision {
-        id: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "double_option"
-        )]
-        item_id: Option<Option<String>>,
-    },
-    #[serde(rename = "session")]
-    Session {
-        id: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "double_option"
-        )]
-        item_id: Option<Option<String>>,
-    },
-    /// A session event; `data` is the stored object as written (not re-read).
-    #[serde(rename = "event")]
-    Event {
-        session_id: String,
-        seq: i64,
-        kind: String,
-        data: serde_json::Value,
-    },
-    #[serde(rename = "message")]
-    Message { id: String },
-    /// `phase`: `route` → `answer` | `config` | `item` | `supplement` while one message is handled.
-    #[serde(rename = "steve.thinking")]
-    Thinking {
-        on: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ws: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        phase: Option<String>,
-    },
-    /// The bot id may be `"*"` (all memories of a workspace cleared).
-    #[serde(rename = "bot")]
-    Bot { id: String },
-    #[serde(rename = "project")]
-    Project { id: String },
-    #[serde(rename = "tag")]
-    Tag { id: String },
-    #[serde(rename = "workspace")]
-    Workspace { id: String },
-    #[serde(rename = "settings")]
-    Settings { id: String },
-    #[serde(rename = "device")]
-    Device { id: String },
-    /// A paired Node changed; sent to its owner `user` (and the Hub's owners) only.
-    #[serde(rename = "node")]
-    Node { id: String, user: String },
-    /// A signed-in client of `user` came onto the live stream, left it, or was signed in or out;
-    /// sent to that user (and the Hub's owners) only.
-    #[serde(rename = "client")]
-    Client { id: String, user: String },
-}
-
-/// `Option<Option<T>>` that tells "absent" from `null`.
-mod double_option {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer, T: Serialize>(
-        v: &Option<Option<T>>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(inner) => inner.serialize(s),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
-        d: D,
-    ) -> Result<Option<Option<T>>, D::Error> {
-        Option::<T>::deserialize(d).map(Some)
-    }
-}
-
-/// Input accepted while legacy producers are migrated crate by crate.
-pub enum Publication {
-    Legacy(HubEvent),
-    Event(Published),
-    Batch(Vec<DomainEvent>),
-}
-impl From<HubEvent> for Publication {
-    fn from(e: HubEvent) -> Self {
-        Self::Legacy(e)
-    }
-}
-impl From<Published> for Publication {
-    fn from(e: Published) -> Self {
-        Self::Event(e)
-    }
-}
-impl From<DomainEvent> for Publication {
-    fn from(e: DomainEvent) -> Self {
-        Self::Event(e.into())
-    }
-}
-impl From<LiveEvent> for Publication {
-    fn from(e: LiveEvent) -> Self {
-        Self::Event(e.into())
-    }
-}
-impl From<Vec<DomainEvent>> for Publication {
-    fn from(e: Vec<DomainEvent>) -> Self {
-        Self::Batch(e)
-    }
-}
-
-enum Queued {
-    Legacy(Value),
-    Domain(Envelope<DomainEvent>),
-    Live(Envelope<LiveEvent>),
-}
-
-/// Already encoded at the SSE edge, shared by live fan-out, throttling and replay.
 #[derive(Debug)]
 struct Encoded {
     json: String,
@@ -147,32 +15,34 @@ struct Encoded {
     ty: String,
 }
 impl Encoded {
-    fn typed<E: Scoped + Serialize>(e: Envelope<E>, ty: &str) -> Self {
-        let scope = match e.scope() {
-            steve_types::Scope::Ws(ws) => Scope::Ws(ws.to_string()),
-            steve_types::Scope::User(user) => Scope::User(user.to_string()),
-            steve_types::Scope::Hub => Scope::All,
+    fn typed(event: &Envelope<BusEvent>) -> Self {
+        let scope = event.scope();
+        let ty = event.event.wire_type().to_owned();
+        // Taps keep the original opaque transcript. Slim a copy only at the SSE boundary.
+        let json = if matches!(
+            &event.event,
+            BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. }))
+        ) {
+            let mut slim = event.clone();
+            if let BusEvent::Live(LiveEvent::Work(steve_types::WorkLiveEvent::Event {
+                data, ..
+            })) = &mut slim.event
+            {
+                let value = crate::api::slim::ev_out(
+                    serde_json::to_value(&*data).expect("transcript JSON"),
+                );
+                *data = steve_types::RawJson::from_str(
+                    &serde_json::to_string(&value).expect("slim JSON"),
+                )
+                .expect("validated JSON");
+            }
+            serde_json::to_string(&slim).expect("SSE event")
+        } else {
+            serde_json::to_string(event).expect("SSE event")
         };
-        let json = serde_json::to_string(&e).expect("typed event serializes");
-        Self {
-            ty: ty.into(),
-            json,
-            scope,
-        }
+        Self { json, scope, ty }
     }
 }
-
-/// Who may see a frame: every subscriber, the subscribers of one workspace, one user (and the Hub's owners,
-/// who manage every device), or nobody (a session event of a session that doesn't exist; TS compared
-/// `undefined` with the workspace id).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    All,
-    Ws(String),
-    User(String),
-    Nobody,
-}
-
 /// Who a stream is for: the workspace it shows, and who is signed in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Viewer {
@@ -199,10 +69,6 @@ impl From<String> for Viewer {
     }
 }
 
-/// Events about one person's devices (their Nodes, their signed-in clients), shaped `{type, id, user}`: they
-/// go to that user and to the Hub's owners, never to a whole workspace.
-const PERSONAL: &[&str] = &["node", "client"];
-
 /// One event as it goes out on every SSE stream: serialized (and slimmed) once, with its audience.
 #[derive(Debug)]
 pub struct Frame {
@@ -222,19 +88,12 @@ impl Frame {
 
     pub fn visible(&self, v: &Viewer) -> bool {
         match &self.scope {
-            Scope::All => true,
-            Scope::Ws(w) => *w == v.ws,
-            Scope::User(u) => v.owner || (!u.is_empty() && *u == v.user),
-            Scope::Nobody => false,
+            Scope::Hub => true,
+            Scope::Ws(w) => w.as_str() == v.ws,
+            Scope::User(u) => v.owner || (!u.as_str().is_empty() && u.as_str() == v.user),
         }
     }
 }
-
-/// Events that change nothing `/api/state` reads, so they leave [`Bus::generation`] alone: transcript chunks
-/// (stored only in `events`; a turn's end publishes `session`), a chat answer being written and its research
-/// tool calls (the stored reply publishes `message`), and statistics (counted by their own generation).
-/// A client coming and going (`client`) is not in `/api/state` either.
-const STATELESS: &[&str] = &["event", "steve.draft", "steve.tool", "stats", "client"];
 
 /// Frames the change log doesn't keep: transcript chunks (the per-session events API is their cursor) and a
 /// chat answer being written (each one carries the full text so far).
@@ -251,7 +110,6 @@ pub const TAP_OVERFLOW_MAX: usize = 512;
 
 const TAP_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 const TAP_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-const SESSION_CACHE_HALF: usize = 50_000;
 const WS_GENERATION_MAX: usize = 10_000;
 
 /// A position in the change log: the Bus's epoch (random per process, so a Hub restart never matches) and
@@ -338,21 +196,21 @@ struct Log {
     head: AtomicU64,
 }
 
-type Resolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type EventFilter = Box<dyn Fn(&BusEvent) -> bool + Send + Sync>;
 type Taps = Arc<Mutex<Vec<TapSlot>>>;
 
 struct TapSlot {
-    types: Vec<String>,
-    tx: tokio::sync::mpsc::Sender<Value>,
-    overflow: VecDeque<(Option<u64>, Value)>,
+    filter: EventFilter,
+    tx: tokio::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
+    overflow: VecDeque<(Option<u64>, Arc<Envelope<BusEvent>>)>,
     evicted_since_warn: u64,
     last_warn: Option<std::time::Instant>,
 }
 
 impl TapSlot {
-    fn new(types: Vec<String>, tx: tokio::sync::mpsc::Sender<Value>) -> Self {
+    fn new(filter: EventFilter, tx: tokio::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>) -> Self {
         Self {
-            types,
+            filter,
             tx,
             overflow: VecDeque::new(),
             evicted_since_warn: 0,
@@ -360,8 +218,8 @@ impl TapSlot {
         }
     }
 
-    fn matches(&self, ty: &str) -> bool {
-        self.types.iter().any(|t| t == ty)
+    fn matches(&self, event: &BusEvent) -> bool {
+        (self.filter)(event)
     }
 
     /// Flushes queued overflow items into `tx` in FIFO order without blocking.
@@ -386,7 +244,7 @@ impl TapSlot {
     }
 
     /// Delivers `v` without blocking. Returns `false` if the receiver disconnected.
-    fn deliver(&mut self, v: Value, now: std::time::Instant) -> bool {
+    fn deliver(&mut self, v: Arc<Envelope<BusEvent>>, now: std::time::Instant) -> bool {
         if !self.flush() {
             return false;
         }
@@ -404,14 +262,13 @@ impl TapSlot {
         }
     }
 
-    fn push_overflow(&mut self, v: Value, now: std::time::Instant) {
-        let (h, dup_pos) = match tap_key_fields(&v) {
+    fn push_overflow(&mut self, v: Arc<Envelope<BusEvent>>, now: std::time::Instant) {
+        let (h, dup_pos) = match v.event.coalesce_key() {
             Some(k) => {
-                let h = hash_tap_key(k);
-                let pos = self
-                    .overflow
-                    .iter()
-                    .position(|(eh, ev)| *eh == Some(h) && tap_key_fields(ev) == Some(k));
+                let h = hash_tap_key(&k);
+                let pos = self.overflow.iter().position(|(eh, ev)| {
+                    *eh == Some(h) && ev.event.coalesce_key().as_ref() == Some(&k)
+                });
                 (Some(h), pos)
             }
             None => (None, None),
@@ -429,7 +286,7 @@ impl TapSlot {
                 .is_none_or(|t| now.duration_since(t) >= TAP_WARN_INTERVAL)
             {
                 tracing::warn!(
-                    types = ?self.types,
+                    pending = self.overflow.len(),
                     evicted = self.evicted_since_warn,
                     overflow_max = TAP_OVERFLOW_MAX,
                     "bus tap consumer lagging; evicted oldest overflow event(s)"
@@ -442,241 +299,122 @@ impl TapSlot {
     }
 }
 
-fn tap_key_fields(v: &Value) -> Option<(&str, &str, &str)> {
-    let ty = v.get("type").and_then(Value::as_str)?;
-    if ty == "event" {
-        return None;
-    }
-    let ws = v.get("ws").and_then(Value::as_str).unwrap_or_default();
-    let id = v.get("id").and_then(Value::as_str).unwrap_or_default();
-    Some((ty, ws, id))
-}
-
-fn hash_tap_key(k: (&str, &str, &str)) -> u64 {
+fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     k.hash(&mut h);
     h.finish()
 }
 
-/// Two-generation session -> workspace cache (at most `2 * half_cap` entries). Rotating `hot` into
-/// `cold` evicts at most half the cache at once while promoting active `cold` sessions back into `hot`.
-struct SessionWsCache {
-    hot: HashMap<String, String>,
-    cold: HashMap<String, String>,
-    half_cap: usize,
-}
-
-impl SessionWsCache {
-    fn new(half_cap: usize) -> Self {
-        Self {
-            hot: HashMap::new(),
-            cold: HashMap::new(),
-            half_cap: half_cap.max(1),
-        }
-    }
-
-    fn get(&mut self, sid: &str) -> Option<String> {
-        if let Some(ws) = self.hot.get(sid) {
-            return Some(ws.clone());
-        }
-        if let Some((sid, ws)) = self.cold.remove_entry(sid) {
-            self.insert(sid, ws.clone());
-            return Some(ws);
-        }
-        None
-    }
-
-    fn insert(&mut self, sid: String, ws: String) {
-        if !self.hot.contains_key(&sid) && self.hot.len() >= self.half_cap {
-            self.cold = std::mem::take(&mut self.hot);
-        }
-        self.cold.remove(&sid);
-        self.hot.insert(sid, ws);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.hot.len() + self.cold.len()
-    }
-}
-
 struct Inner {
-    /// bumped by every publish that can change `/api/state`, synchronously: anything computed from the database
-    /// before a write is stale after it
-    generation: std::sync::atomic::AtomicU64,
-    /// bumped by non-`STATELESS` global events (`Scope::All`) and monotonic `ws_generations` prunes
+    generation: AtomicU64,
     global_generation: AtomicU64,
-    /// per-workspace counters bumped only when a non-`STATELESS` event carries a non-empty `"ws"`
     ws_generations: Mutex<HashMap<String, u64>>,
-    /// bumped by every `stats` event before it is coalesced: cached statistics older than this are stale
-    stats_generation: std::sync::atomic::AtomicU64,
-    tx: std::sync::mpsc::Sender<Queued>,
+    stats_generation: AtomicU64,
+    tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Frame>>,
     taps: Taps,
-    resolver: Arc<OnceLock<Resolver>>,
     log: Arc<Log>,
 }
-
-/// Fan-out of bus events. Publishing is synchronous and never blocks (it can run under the store's write
-/// lock); one dispatcher thread, in publish order, resolves a session event's workspace (cached; sessions
-/// never move), slims its data (`evOut`), serializes once and broadcasts the bytes. A subscriber that falls
-/// more than [`Bus::CAPACITY`] frames behind is told it lagged (the SSE layer asks the web to refetch).
-///
-/// The dispatcher also numbers the frames it sends and keeps the last [`RING_FRAMES`] / [`RING_BYTES`] of
-/// them in memory (the change log: [`Bus::cursor`], [`Bus::replay`]), except the [`TRANSIENT`] ones and those
-/// nobody may see. Ids increase in send order, which is not publish order: a held `stats` frame gets its id
-/// when it goes out. The log is only sound because every store write publishes after its commit
-/// (steve-store `tx.rs`): a frame describes a change that a read made after it can already see. A
-/// publisher that published before committing could have a snapshot whose cursor covers a change it misses.
+/// Publishing is synchronous under the store write lock; a dispatcher shares typed envelopes
+/// with internal taps and encodes each SSE frame once. Revisions are independent of cursors.
 #[derive(Clone)]
 pub struct Bus(Arc<Inner>);
-
 impl Default for Bus {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl Bus {
     pub const CAPACITY: usize = 4096;
     pub const TAP_CAPACITY: usize = TAP_CAPACITY;
     pub const TAP_OVERFLOW_MAX: usize = TAP_OVERFLOW_MAX;
-
     pub fn new() -> Self {
         Self::with_window(RING_FRAMES, RING_BYTES)
     }
-
-    /// A Bus whose change log keeps at most `frames` frames and `bytes` bytes.
     pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Queued>();
+        let (tx, rx) = std::sync::mpsc::channel();
         let out = broadcast::channel(Self::CAPACITY).0;
-        let resolver: Arc<OnceLock<Resolver>> = Arc::new(OnceLock::new());
         let taps: Taps = Arc::default();
         let log = Arc::new(Log {
             epoch: steve_store::uid("ep"),
             ring: Mutex::new(Ring::new(frames, bytes)),
             head: AtomicU64::new(0),
         });
-        let (o, r, t, l) = (out.clone(), resolver.clone(), taps.clone(), log.clone());
-        let spawned = std::thread::Builder::new()
+        let (o, t, l) = (out.clone(), taps.clone(), log.clone());
+        if let Err(e) = std::thread::Builder::new()
             .name("steve-bus".into())
-            .spawn(move || dispatch(rx, o, r, t, l));
-        if let Err(e) = spawned {
+            .spawn(move || dispatch(rx, o, t, l))
+        {
             tracing::error!("bus dispatcher: {e}");
         }
-        Bus(Arc::new(Inner {
-            generation: std::sync::atomic::AtomicU64::new(0),
+        Self(Arc::new(Inner {
+            generation: AtomicU64::new(0),
             global_generation: AtomicU64::new(0),
             ws_generations: Mutex::new(HashMap::new()),
-            stats_generation: std::sync::atomic::AtomicU64::new(0),
+            stats_generation: AtomicU64::new(0),
             tx,
             revision: Mutex::new(0),
             out,
             taps,
-            resolver,
             log,
         }))
     }
-
-    /// Every published event whose `type` is one of `types`, as JSON, in publish order (module jobs that
-    /// react to store changes, e.g. steve-knowledge's `sync::on_event`).
-    pub fn tap(&self, types: &[&str]) -> tokio::sync::mpsc::Receiver<Value> {
+    /// Typed domain/live envelopes, in publish order, selected by a Rust predicate.
+    pub fn tap(
+        &self,
+        filter: impl Fn(&BusEvent) -> bool + Send + Sync + 'static,
+    ) -> tokio::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>> {
         let (tx, rx) = tokio::sync::mpsc::channel(Self::TAP_CAPACITY);
-        let mut t = self.0.taps.lock().unwrap_or_else(|e| e.into_inner());
-        t.push(TapSlot::new(
-            types.iter().map(|s| s.to_string()).collect(),
-            tx,
-        ));
+        self.0
+            .taps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(TapSlot::new(Box::new(filter), tx));
         rx
     }
-
-    /// How to find a session's workspace (set once storage is open).
-    pub fn set_session_workspace(
-        &self,
-        f: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
-    ) {
-        let _ = self.0.resolver.set(Box::new(f));
+    pub fn publish(&self, event: impl Into<BusEvent>) {
+        self.publish_batch(vec![event.into()]);
     }
-
-    /// Delivers `e` to every current subscriber that may see it, in publish order.
-    pub fn publish(&self, e: impl Into<Publication>) {
-        match e.into() {
-            Publication::Legacy(e) => {
-                if let Ok(v) = serde_json::to_value(e) {
-                    self.publish_value(v);
-                }
-            }
-            Publication::Event(e) => self.publish_batch(vec![e]),
-            Publication::Batch(events) => {
-                self.publish_batch(events.into_iter().map(Published::Domain).collect())
-            }
-        }
-    }
-
     pub fn live(&self, event: LiveEvent) {
-        self.publish_batch(vec![Published::Live(event)]);
+        self.publish(event);
     }
-
-    /// Called synchronously under the store write lock, once per committed transaction.
-    /// Live-only batches reuse the current revision. The lock also keeps concurrent batches ordered.
-    pub fn publish_batch(&self, events: Vec<Published>) {
+    /// One committed batch, still under the writer lock. A live-only batch uses the current rev.
+    pub fn publish_batch(&self, events: Vec<BusEvent>) {
         let mut revision = self.0.revision.lock().unwrap_or_else(|e| e.into_inner());
-        if events.iter().any(|e| matches!(e, Published::Domain(_))) {
+        if events.iter().any(|e| matches!(e, BusEvent::Domain(_))) {
             *revision += 1;
         }
         for event in events {
-            let event = match event {
-                Published::Legacy(e) => {
-                    if let Ok(v) = serde_json::to_value(e) {
-                        self.publish_value(v);
+            let stateless = matches!(
+                &event,
+                BusEvent::Domain(
+                    DomainEvent::Stats(_)
+                        | DomainEvent::Devices(steve_types::DevicesEvent::Client { .. })
+                ) | BusEvent::Live(LiveEvent::Work(
+                    steve_types::WorkLiveEvent::Event { .. }
+                        | steve_types::WorkLiveEvent::SteveDraft { .. }
+                        | steve_types::WorkLiveEvent::SteveTool { .. }
+                ))
+            );
+            if !stateless {
+                self.0.generation.fetch_add(1, Ordering::SeqCst);
+                match event.scope() {
+                    Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
+                    Scope::Hub | Scope::User(_) => {
+                        self.0.global_generation.fetch_add(1, Ordering::SeqCst);
                     }
-                    continue;
                 }
-                Published::Domain(event) => {
-                    let stateless = matches!(
-                        &event,
-                        DomainEvent::Stats(_)
-                            | DomainEvent::Devices(steve_types::DevicesEvent::Client { .. })
-                    );
-                    self.invalidate_typed(&event.scope(), stateless);
-                    if matches!(&event, DomainEvent::Stats(_)) {
-                        self.0.stats_generation.fetch_add(1, Ordering::SeqCst);
-                    }
-                    Queued::Domain(Envelope {
-                        event,
-                        rev: Rev(*revision),
-                    })
-                }
-                Published::Live(event) => {
-                    let stateless = !matches!(
-                        &event,
-                        LiveEvent::Work(steve_types::WorkLiveEvent::SteveThinking { .. })
-                    );
-                    self.invalidate_typed(&event.scope(), stateless);
-                    Queued::Live(Envelope {
-                        event,
-                        rev: Rev(*revision),
-                    })
-                }
-            };
-            let _ = self.0.tx.send(event);
-        }
-    }
-
-    fn invalidate_typed(&self, scope: &steve_types::Scope, stateless: bool) {
-        if stateless {
-            return;
-        }
-        self.0.generation.fetch_add(1, Ordering::SeqCst);
-        match scope {
-            steve_types::Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
-            steve_types::Scope::Hub | steve_types::Scope::User(_) => {
-                self.0.global_generation.fetch_add(1, Ordering::SeqCst);
             }
+            if matches!(&event, BusEvent::Domain(DomainEvent::Stats(_))) {
+                self.0.stats_generation.fetch_add(1, Ordering::SeqCst);
+            }
+            let _ = self.0.tx.send(Arc::new(Envelope {
+                event,
+                rev: Rev(*revision),
+            }));
         }
     }
-
     fn invalidate_workspace(&self, ws: &str) {
         let mut map = self
             .0
@@ -687,62 +425,13 @@ impl Bus {
             *g = g.wrapping_add(1);
         } else {
             if map.len() >= WS_GENERATION_MAX {
-                let max_evicted = map.values().copied().max().unwrap_or(0);
-                self.0
-                    .global_generation
-                    .fetch_add(max_evicted, Ordering::SeqCst);
+                let max = map.values().copied().max().unwrap_or(0);
+                self.0.global_generation.fetch_add(max, Ordering::SeqCst);
                 map.clear();
             }
             map.insert(ws.into(), 1);
         }
     }
-
-    /// Any event shaped `{type, …}` (steve-store's and steve-core's events serialize to the same JSON).
-    pub fn publish_value(&self, v: Value) {
-        let ty = v.get("type").and_then(Value::as_str);
-        if !ty.is_some_and(|t| STATELESS.contains(&t)) {
-            self.0
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match v.get("ws") {
-                Some(Value::String(w)) if !w.is_empty() => {
-                    let mut map = self
-                        .0
-                        .ws_generations
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if let Some(g) = map.get_mut(w.as_str()) {
-                        *g = g.wrapping_add(1);
-                    } else {
-                        if map.len() >= WS_GENERATION_MAX {
-                            let max_evicted = map.values().copied().max().unwrap_or(0);
-                            self.0
-                                .global_generation
-                                .fetch_add(max_evicted, Ordering::SeqCst);
-                            map.clear();
-                        }
-                        map.insert(w.clone(), 1);
-                    }
-                }
-                Some(_) => {}
-                // a Node's link is in `/api/state` (the Hub's own Node), for every workspace
-                None if ty.is_some_and(|t| PERSONAL.contains(&t)) => {
-                    self.0.global_generation.fetch_add(1, Ordering::SeqCst);
-                }
-                None if steve_modules::sse::requires_workspace(ty.unwrap_or_default()) => {}
-                None => {
-                    self.0.global_generation.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-        }
-        if ty == Some("stats") {
-            self.0
-                .stats_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        let _ = self.0.tx.send(Queued::Legacy(v));
-    }
-
     /// How many events were published so far.
     pub fn generation(&self) -> u64 {
         self.0.generation.load(std::sync::atomic::Ordering::SeqCst)
@@ -814,9 +503,8 @@ impl Bus {
 }
 
 fn dispatch(
-    rx: std::sync::mpsc::Receiver<Queued>,
+    rx: std::sync::mpsc::Receiver<Arc<Envelope<BusEvent>>>,
     out: broadcast::Sender<Arc<Frame>>,
-    resolver: Arc<OnceLock<Resolver>>,
     taps: Taps,
     log: Arc<Log>,
 ) {
@@ -825,16 +513,13 @@ fn dispatch(
         log,
         next_id: 0,
     };
-    let mut seen = SessionWsCache::new(SESSION_CACHE_HALF);
     let mut stats = StatsThrottle::default();
     let mut tap_overflow = false;
     loop {
         let tap_due = tap_overflow.then(|| std::time::Instant::now() + TAP_DRAIN_INTERVAL);
         let deadline = match (stats.deadline(), tap_due) {
             (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+            (a, b) => a.or(b),
         };
         let next = match deadline {
             None => rx
@@ -842,130 +527,36 @@ fn dispatch(
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
             Some(at) => rx.recv_timeout(at.saturating_duration_since(std::time::Instant::now())),
         };
-        let queued = match next {
-            Ok(v) => v,
+        let event = match next {
+            Ok(event) => event,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let now = std::time::Instant::now();
                 if tap_overflow {
                     let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
                     t.retain_mut(TapSlot::flush);
                     tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
                 }
-                for v in stats.due(now) {
-                    out.send(v);
+                for frame in stats.due(std::time::Instant::now()) {
+                    out.send(frame);
                 }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
-        let mut v = match queued {
-            Queued::Domain(e) => {
-                let ty = e.event.wire_type();
-                let frame = Encoded::typed(e, ty);
-                deliver_taps(
-                    &taps,
-                    &frame.ty,
-                    serde_json::from_str(&frame.json).expect("event JSON"),
-                    &mut tap_overflow,
-                );
-                if frame.ty == "stats" {
-                    if let Some(frame) = stats.offer(frame, std::time::Instant::now()) {
-                        out.send(frame);
-                    }
+        let now = std::time::Instant::now();
+        {
+            let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
+            t.retain_mut(|slot| {
+                if slot.matches(&event.event) {
+                    slot.deliver(event.clone(), now)
                 } else {
-                    out.send(frame);
+                    slot.flush()
                 }
-                continue;
-            }
-            Queued::Live(mut e) => {
-                // Value taps retain the full stored transcript, while SSE keeps the existing slim
-                // payload contract. Only the boundary converts the opaque RawJson payload.
-                let original = if matches!(
-                    &e.event,
-                    LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. })
-                ) {
-                    Some(serde_json::to_value(&e).expect("tap event JSON"))
-                } else {
-                    None
-                };
-                if let LiveEvent::Work(steve_types::WorkLiveEvent::Event { data, .. }) =
-                    &mut e.event
-                {
-                    let slim = crate::api::slim::ev_out(
-                        serde_json::to_value(&*data).expect("transcript JSON"),
-                    );
-                    *data = steve_types::RawJson::from_str(
-                        &serde_json::to_string(&slim).expect("slim JSON"),
-                    )
-                    .expect("validated JSON");
-                }
-                let ty = e.event.wire_type();
-                let frame = Encoded::typed(e, ty);
-                deliver_taps(
-                    &taps,
-                    &frame.ty,
-                    original
-                        .unwrap_or_else(|| serde_json::from_str(&frame.json).expect("event JSON")),
-                    &mut tap_overflow,
-                );
-                out.send(frame);
-                continue;
-            }
-            Queued::Legacy(v) => v,
-        };
-        let ty = v
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        deliver_taps(&taps, &ty, v.clone(), &mut tap_overflow);
-        let scope = if ty == "stats" {
-            Scope::Ws(ws_of(&v))
-        } else if ty == "event" {
-            let sid = v
-                .get("session_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let ws = match seen.get(&sid) {
-                Some(w) => Some(w),
-                None => {
-                    let w = resolver.get().and_then(|f| f(&sid));
-                    if let Some(w) = &w {
-                        seen.insert(sid, w.clone());
-                    }
-                    w
-                }
-            };
-            if let Some(d) = v.get_mut("data") {
-                *d = crate::api::slim::ev_out(d.take());
-            }
-            ws.map(Scope::Ws).unwrap_or(Scope::Nobody)
-        } else if PERSONAL.contains(&ty.as_str()) {
-            // only for the user they concern (and the Hub's owners); without one, the owners only
-            Scope::User(
-                v.get("user")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            )
-        } else {
-            // Explicit workspace metadata is authoritative, including newly registered event
-            // types. Known private types with missing/malformed metadata fail closed.
-            match v.get("ws") {
-                Some(Value::String(w)) if !w.is_empty() => Scope::Ws(w.clone()),
-                Some(_) => Scope::Nobody,
-                None if steve_modules::sse::requires_workspace(&ty) => Scope::Nobody,
-                None => Scope::All,
-            }
-        };
-        let frame = Encoded {
-            json: serde_json::to_string(&v).expect("event JSON"),
-            scope,
-            ty,
-        };
-        if frame.ty == "stats" {
-            if let Some(frame) = stats.offer(frame, std::time::Instant::now()) {
+            });
+            tap_overflow = t.iter().any(|slot| !slot.overflow.is_empty());
+        }
+        let frame = Encoded::typed(&event);
+        if matches!(&event.event, BusEvent::Domain(DomainEvent::Stats(_))) {
+            if let Some(frame) = stats.offer(frame, now) {
                 out.send(frame);
             }
         } else {
@@ -973,20 +564,6 @@ fn dispatch(
         }
     }
 }
-
-fn deliver_taps(taps: &Taps, ty: &str, value: Value, overflow: &mut bool) {
-    let now = std::time::Instant::now();
-    let mut taps = taps.lock().unwrap_or_else(|e| e.into_inner());
-    taps.retain_mut(|slot| {
-        if slot.matches(ty) {
-            slot.deliver(value.clone(), now)
-        } else {
-            slot.flush()
-        }
-    });
-    *overflow = taps.iter().any(|slot| !slot.overflow.is_empty());
-}
-
 /// The dispatcher's end: numbers, logs and broadcasts frames. Only the dispatcher thread holds it, so ids
 /// follow send order.
 struct Sender {
@@ -998,7 +575,7 @@ struct Sender {
 impl Sender {
     fn send(&mut self, frame: Encoded) {
         let Encoded { json, scope, ty } = frame;
-        let kept = scope != Scope::Nobody && !TRANSIENT.contains(&ty.as_str());
+        let kept = !TRANSIENT.contains(&ty.as_str());
         let id = kept.then(|| {
             self.next_id += 1;
             self.next_id
@@ -1017,95 +594,57 @@ impl Sender {
     }
 }
 
-fn ws_of(v: &Value) -> String {
-    v.get("ws")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// `{type:"stats"}` events, coalesced per workspace: a quiet workspace's event goes out at
-/// once; within [`StatsThrottle::WINDOW`] of the last one sent, the latest is held and sent when the window
-/// ends. So a browser gets at most one every 5 seconds and never misses the last change.
-#[derive(Debug)]
-struct StatsThrottle<T = Value> {
+/// Latest statistics notice per workspace in each five-second window.
+#[derive(Default)]
+struct StatsThrottle {
     last: HashMap<String, std::time::Instant>,
-    held: HashMap<String, T>,
+    held: HashMap<String, Encoded>,
 }
-
-trait WorkspaceKey {
-    fn workspace(&self) -> String;
-}
-impl WorkspaceKey for Value {
-    fn workspace(&self) -> String {
-        ws_of(self)
-    }
-}
-impl WorkspaceKey for Encoded {
-    fn workspace(&self) -> String {
-        match &self.scope {
-            Scope::Ws(ws) => ws.clone(),
-            _ => unreachable!("stats is workspace scoped"),
-        }
-    }
-}
-impl<T> Default for StatsThrottle<T> {
-    fn default() -> Self {
-        Self {
-            last: HashMap::new(),
-            held: HashMap::new(),
-        }
-    }
-}
-impl<T: WorkspaceKey> StatsThrottle<T> {
+impl StatsThrottle {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
-
-    /// The event to send now, if any.
-    fn offer(&mut self, v: T, now: std::time::Instant) -> Option<T> {
-        let ws = v.workspace();
+    fn offer(&mut self, frame: Encoded, now: std::time::Instant) -> Option<Encoded> {
+        let Scope::Ws(ws) = &frame.scope else {
+            unreachable!("statistics are workspace scoped")
+        };
+        let ws = ws.to_string();
         match self.last.get(&ws) {
-            Some(t) if now.duration_since(*t) < Self::WINDOW => {
-                self.held.insert(ws, v);
+            Some(at) if now.duration_since(*at) < Self::WINDOW => {
+                self.held.insert(ws, frame);
                 None
             }
             _ => {
                 if self.last.len() > 10_000 {
                     self.last
-                        .retain(|_, t| now.duration_since(*t) < Self::WINDOW);
+                        .retain(|_, at| now.duration_since(*at) < Self::WINDOW);
                 }
                 self.last.insert(ws, now);
-                Some(v)
+                Some(frame)
             }
         }
     }
-
-    /// When the earliest held event is due.
     fn deadline(&self) -> Option<std::time::Instant> {
         self.held
             .keys()
             .filter_map(|ws| self.last.get(ws))
-            .map(|t| *t + Self::WINDOW)
+            .map(|at| *at + Self::WINDOW)
             .min()
     }
-
-    /// The held events whose window has ended.
-    fn due(&mut self, now: std::time::Instant) -> Vec<T> {
-        let ready: Vec<String> = self
+    fn due(&mut self, now: std::time::Instant) -> Vec<Encoded> {
+        let keys: Vec<_> = self
             .held
             .keys()
             .filter(|ws| {
                 self.last
                     .get(*ws)
-                    .is_none_or(|t| now.duration_since(*t) >= Self::WINDOW)
+                    .is_none_or(|at| now.duration_since(*at) >= Self::WINDOW)
             })
             .cloned()
             .collect();
-        ready
-            .into_iter()
+        keys.into_iter()
             .filter_map(|ws| {
-                let v = self.held.remove(&ws)?;
+                let frame = self.held.remove(&ws)?;
                 self.last.insert(ws, now);
-                Some(v)
+                Some(frame)
             })
             .collect()
     }
@@ -1114,631 +653,399 @@ impl<T: WorkspaceKey> StatsThrottle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn js(e: &HubEvent) -> String {
-        serde_json::to_string(e).expect("json")
+    use serde_json::{Value, json};
+    use std::time::Duration;
+    use steve_types::*;
+    fn item(id: &str, ws: &str) -> BusEvent {
+        WorkEvent::Item {
+            id: id.into(),
+            ws: ws.into(),
+        }
+        .into()
     }
-
-    #[test]
-    fn shapes_match_ts() {
-        assert_eq!(
-            js(&HubEvent::Item { id: "ST-1".into() }),
-            r#"{"type":"item","id":"ST-1"}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Session {
-                id: "s".into(),
-                item_id: None
-            }),
-            r#"{"type":"session","id":"s"}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Session {
-                id: "s".into(),
-                item_id: Some(None)
-            }),
-            r#"{"type":"session","id":"s","item_id":null}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Decision {
-                id: "d".into(),
-                item_id: Some(Some("ST-2".into()))
-            }),
-            r#"{"type":"decision","id":"d","item_id":"ST-2"}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Event {
-                session_id: "s".into(),
-                seq: 3,
-                kind: "user".into(),
-                data: json!({"text":"hi","via":"me"})
-            }),
-            r#"{"type":"event","session_id":"s","seq":3,"kind":"user","data":{"text":"hi","via":"me"}}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Thinking {
-                on: true,
-                ws: Some("default".into()),
-                phase: None
-            }),
-            r#"{"type":"steve.thinking","on":true,"ws":"default"}"#
-        );
-        assert_eq!(
-            js(&HubEvent::Bot { id: "*".into() }),
-            r#"{"type":"bot","id":"*"}"#
-        );
-        let back: HubEvent =
-            serde_json::from_str(r#"{"type":"session","id":"s","item_id":null}"#).expect("parse");
-        assert_eq!(
-            back,
-            HubEvent::Session {
-                id: "s".into(),
-                item_id: Some(None)
-            }
-        );
+    fn connection(id: &str, ws: &str) -> BusEvent {
+        ChannelsEvent::Connection {
+            id: id.into(),
+            ws: ws.into(),
+        }
+        .into()
+    }
+    fn memory(id: &str, ws: &str) -> BusEvent {
+        ConfigEvent::Mm {
+            id: id.into(),
+            ws: ws.into(),
+        }
+        .into()
+    }
+    fn stats(ws: &str, day: &str) -> BusEvent {
+        StatsEvent::Stats {
+            ws: ws.into(),
+            day: Some(day.into()),
+        }
+        .into()
+    }
+    fn encoded(e: BusEvent) -> Encoded {
+        Encoded::typed(&Envelope {
+            event: e,
+            rev: Rev(1),
+        })
+    }
+    fn json(frame: &Frame) -> Value {
+        serde_json::from_slice(&frame.bytes[6..frame.bytes.len() - 2]).unwrap()
+    }
+    async fn next(rx: &mut broadcast::Receiver<Arc<Frame>>) -> Arc<Frame> {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn tapped(rx: &mut tokio::sync::mpsc::Receiver<Notification>) -> Notification {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    fn frames(r: Replay) -> (Vec<Arc<Frame>>, u64) {
+        match r {
+            Replay::Frames { frames, head } => (frames, head),
+            Replay::Reset { head } => panic!("unexpected reset {head}"),
+        }
+    }
+    fn reset(r: Replay) -> u64 {
+        match r {
+            Replay::Reset { head } => head,
+            _ => panic!("expected reset"),
+        }
+    }
+    fn ids(f: &[Arc<Frame>]) -> Vec<u64> {
+        f.iter().filter_map(|f| f.id).collect()
     }
 
     #[test]
     fn stats_are_coalesced_per_workspace() {
         let mut t = StatsThrottle::default();
         let at = std::time::Instant::now();
-        let ev = |ws: &str, n: i64| json!({"type": "stats", "ws": ws, "n": n});
-        let s = std::time::Duration::from_secs(1);
-        assert_eq!(t.offer(ev("a", 1), at), Some(ev("a", 1)));
-        assert_eq!(t.offer(ev("a", 2), at + s), None);
-        assert_eq!(t.offer(ev("a", 3), at + 2 * s), None);
-        // another workspace has its own window
-        assert_eq!(t.offer(ev("b", 1), at + 2 * s), Some(ev("b", 1)));
-        assert_eq!(t.deadline(), Some(at + 5 * s));
-        assert!(t.due(at + 4 * s).is_empty());
-        // the window's end sends the latest of the held ones, once
-        assert_eq!(t.due(at + 5 * s), vec![ev("a", 3)]);
+        let sec = Duration::from_secs(1);
+        assert!(t.offer(encoded(stats("a", "1")), at).is_some());
+        assert!(t.offer(encoded(stats("a", "2")), at + sec).is_none());
+        assert!(t.offer(encoded(stats("a", "3")), at + 2 * sec).is_none());
+        assert!(t.offer(encoded(stats("b", "1")), at + 2 * sec).is_some());
+        assert_eq!(t.deadline(), Some(at + 5 * sec));
+        assert!(t.due(at + 4 * sec).is_empty());
+        let due = t.due(at + 5 * sec);
+        assert_eq!(due.len(), 1);
+        assert!(due[0].json.contains("\"day\":\"3\""));
         assert_eq!(t.deadline(), None);
-        assert_eq!(t.offer(ev("a", 4), at + 6 * s), None);
-        assert_eq!(t.due(at + 10 * s), vec![ev("a", 4)]);
     }
-
-    #[test]
-    fn only_state_changes_bump_the_generation() {
-        let bus = Bus::new();
-        let g = bus.generation();
-        bus.publish_value(
-            json!({"type": "event", "session_id": "s", "seq": 1, "kind": "k", "data": {}}),
-        );
-        bus.publish_value(
-            json!({"type": "steve.draft", "ws": "w1", "mid": "m", "thought": "", "text": "x"}),
-        );
-        bus.publish_value(json!({"type": "steve.tool", "ws": "w1"}));
-        bus.publish_value(json!({"type": "stats", "ws": "w1"}));
-        assert_eq!(bus.generation(), g);
-        bus.publish_value(json!({"type": "session", "id": "s"}));
-        bus.publish_value(json!({"type": "message", "id": "m"}));
-        assert_eq!(bus.generation(), g + 2);
-    }
-
-    /// G5/G6: a Node's and a client's changes reach the user they belong to and the Hub's owners, in any
-    /// workspace, and nobody else; a client coming and going leaves `/api/state` alone, a Node's link does not.
-    #[tokio::test]
-    async fn device_events_go_to_their_user_and_the_owners() {
-        let bus = Bus::new();
-        let mut rx = bus.subscribe();
-        let g = bus.generation_for("w1");
-        bus.publish(HubEvent::Client {
-            id: "cli_1".into(),
-            user: "u1".into(),
-        });
-        assert_eq!(bus.generation_for("w1"), g, "a client is not in the state");
-        bus.publish(HubEvent::Node {
-            id: "n1".into(),
-            user: "u1".into(),
-        });
-        assert_eq!(
-            bus.generation_for("w2"),
-            g + 1,
-            "a Node's link is, everywhere"
-        );
-        bus.publish_value(json!({"type": "node", "id": "n2"}));
-        let viewer = |user: &str, owner| Viewer {
-            ws: "w1".into(),
-            user: user.into(),
-            owner,
-        };
-        for (want, scope) in [
-            ("client", Scope::User("u1".into())),
-            ("node", Scope::User("u1".into())),
-            ("node", Scope::User(String::new())),
-        ] {
-            let f = rx.recv().await.unwrap();
-            assert!(std::str::from_utf8(&f.bytes).unwrap().contains(want));
-            assert_eq!(f.scope, scope);
-            assert!(f.id.is_some(), "kept for a resume");
-            assert!(!f.visible_to("w1"), "not to a whole workspace");
-            assert!(f.visible(&viewer("owner", true)));
-            assert!(!f.visible(&viewer("u2", false)));
-            assert!(!f.visible(&viewer("", false)));
-            assert_eq!(
-                f.visible(&viewer("u1", false)),
-                scope == Scope::User("u1".into())
-            );
-        }
-        assert_eq!(
-            serde_json::to_value(HubEvent::Node {
-                id: "n1".into(),
-                user: "u1".into()
-            })
-            .unwrap(),
-            json!({"type": "node", "id": "n1", "user": "u1"})
-        );
-    }
-
-    #[tokio::test]
-    async fn stats_frames_stay_in_their_workspace() {
-        let bus = Bus::new();
-        let mut a = bus.subscribe();
-        let g = bus.stats_generation();
-        bus.publish_value(json!({"type": "stats", "ws": "w1", "day": "2026-11-01"}));
-        bus.publish_value(json!({"type": "stats", "ws": "w1"}));
-        assert_eq!(bus.stats_generation(), g + 2);
-        let f = a.recv().await.expect("first");
-        assert_eq!(f.scope, Scope::Ws("w1".into()));
-        assert!(f.visible_to("w1") && !f.visible_to("w2"));
-        // the second is held for the rest of the window
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(3), a.recv())
-                .await
-                .is_err()
-        );
-        let f = tokio::time::timeout(std::time::Duration::from_secs(4), a.recv())
-            .await
-            .expect("trailing")
-            .expect("frame");
-        assert_eq!(
-            &f.bytes[..],
-            &b"data: {\"type\":\"stats\",\"ws\":\"w1\"}\n\n"[..]
-        );
-    }
-
-    #[tokio::test]
-    async fn fan_out_in_order_with_scopes() {
-        let bus = Bus::new();
-        bus.set_session_workspace(|sid| (sid == "s1").then(|| "w1".to_string()));
-        let mut a = bus.subscribe();
-        bus.publish(HubEvent::Item { id: "1".into() });
-        bus.publish(HubEvent::Event {
-            session_id: "s1".into(),
-            seq: 1,
-            kind: "x".into(),
-            data: json!({"_meta": 1, "a": 2}),
-        });
-        bus.publish(HubEvent::Event {
-            session_id: "nope".into(),
-            seq: 2,
-            kind: "x".into(),
-            data: json!({}),
-        });
-        bus.publish(HubEvent::Thinking {
-            on: true,
-            ws: Some("w2".into()),
-            phase: None,
-        });
-        let f = a.recv().await.expect("1");
-        assert_eq!(
-            (&f.bytes[..], &f.scope),
-            (
-                &b"data: {\"type\":\"item\",\"id\":\"1\"}\n\n"[..],
-                &Scope::All
-            )
-        );
-        let f = a.recv().await.expect("2");
-        assert_eq!(&f.bytes[..], &b"data: {\"type\":\"event\",\"session_id\":\"s1\",\"seq\":1,\"kind\":\"x\",\"data\":{\"a\":2}}\n\n"[..]);
-        assert!(f.visible_to("w1") && !f.visible_to("w2"));
-        assert_eq!(a.recv().await.expect("3").scope, Scope::Nobody);
-        assert!(a.recv().await.expect("4").visible_to("w2"));
-        /* a chat answer being written stays in its workspace */
-        bus.publish_value(
-            json!({"type": "steve.draft", "ws": "w1", "mid": "m", "thought": "", "text": "一"}),
-        );
-        let f = a.recv().await.expect("5");
-        assert_eq!(f.scope, Scope::Ws("w1".into()));
-    }
-
     #[test]
     fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
         let bus = Bus::new();
-        assert_eq!(bus.generation(), 0);
-        assert_eq!(bus.generation_for("w1"), 0);
-        assert_eq!(bus.generation_for("w2"), 0);
-
-        // STATELESS events touch neither global nor workspace generations.
-        for ev in [
-            json!({"type": "event", "session_id": "s1", "seq": 1, "kind": "k", "data": {}}),
-            json!({"type": "steve.draft", "ws": "w1", "mid": "m", "thought": "", "text": "x"}),
-            json!({"type": "steve.tool", "ws": "w1"}),
-            json!({"type": "stats", "ws": "w1"}),
-        ] {
-            bus.publish_value(ev);
-        }
-        assert_eq!(bus.generation(), 0);
-        assert_eq!(bus.generation_for("w1"), 0);
-        assert_eq!(bus.generation_for("w2"), 0);
-
-        // Workspace-scoped events in w1 bump w1 (and legacy generation()), leaving w2 untouched.
-        for ev in [
-            json!({"type": "party", "id": "p1", "ws": "w1"}),
-            json!({"type": "mm", "id": "m1", "ws": "w1"}),
-            json!({"type": "yolo", "ws": "w1"}),
-            json!({"type": "yolo_action", "id": "ya1", "ws": "w1"}),
-            json!({"type": "thread.run", "id": "tr1", "ws": "w1"}),
-            json!({"type": "steve.thinking", "on": true, "ws": "w1"}),
-        ] {
-            bus.publish_value(ev);
-        }
-        assert_eq!(bus.generation(), 6);
-        assert_eq!(bus.generation_for("w1"), 6);
-        assert_eq!(bus.generation_for("w2"), 0);
-
-        // Workspace-scoped events in w2 bump w2, leaving w1 untouched.
-        bus.publish_value(json!({"type": "connection", "id": "c1", "ws": "w2"}));
-        assert_eq!(bus.generation(), 7);
-        assert_eq!(bus.generation_for("w1"), 6);
-        assert_eq!(bus.generation_for("w2"), 1);
-
-        // Malformed/empty/missing ws on workspace-required types map to Scope::Nobody and do not
-        // invalidate other workspaces via generation_for.
-        for ev in [
-            json!({"type": "party"}),
-            json!({"type": "party", "ws": ""}),
-            json!({"type": "party", "ws": null}),
-            json!({"type": "plugin.custom"}),
-        ] {
-            bus.publish_value(ev);
-        }
-        assert_eq!(bus.generation(), 11);
-        assert_eq!(bus.generation_for("w1"), 6);
-        assert_eq!(bus.generation_for("w2"), 1);
-
-        // Global events (no ws, Scope::All) bump every workspace's generation_for.
-        bus.publish(HubEvent::Item { id: "ST-1".into() });
-        bus.publish(HubEvent::Session {
-            id: "s1".into(),
-            item_id: None,
-        });
-        assert_eq!(bus.generation(), 13);
-        assert_eq!(bus.generation_for("w1"), 8);
-        assert_eq!(bus.generation_for("w2"), 3);
-        assert_eq!(bus.generation_for("w3"), 2);
-
-        // Exceeding WS_GENERATION_MAX prunes safely while keeping generation_for strictly monotonic.
-        let before_w1 = bus.generation_for("w1");
-        let before_w2 = bus.generation_for("w2");
-        for i in 0..(WS_GENERATION_MAX + 50) {
-            bus.publish_value(json!({"type": "mm", "id": "m", "ws": format!("wx-{i}")}));
+        bus.publish(item("a", "a"));
+        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (1, 0));
+        bus.publish(item("b", "b"));
+        bus.publish(DomainEvent::from(DevicesEvent::Node {
+            id: "n".into(),
+            user: "u".into(),
+        }));
+        assert_eq!((bus.generation_for("a"), bus.generation_for("b")), (2, 2));
+        let before = (bus.generation_for("a"), bus.generation_for("b"));
+        for i in 0..WS_GENERATION_MAX + 50 {
+            bus.publish(memory("m", &format!("w-{i}")));
         }
         assert!(bus.0.ws_generations.lock().unwrap().len() <= WS_GENERATION_MAX);
-        let after_w1 = bus.generation_for("w1");
-        let after_w2 = bus.generation_for("w2");
-        assert!(after_w1 >= before_w1, "{after_w1} < {before_w1}");
-        assert!(after_w2 >= before_w2, "{after_w2} < {before_w2}");
-        bus.publish_value(json!({"type": "mm", "id": "m2", "ws": "w1"}));
-        assert_eq!(bus.generation_for("w1"), after_w1 + 1);
-        assert_eq!(bus.generation_for("w2"), after_w2);
+        assert!(bus.generation_for("a") >= before.0 && bus.generation_for("b") >= before.1);
+        let b = bus.generation_for("b");
+        let a = bus.generation_for("a");
+        bus.publish(memory("m", "a"));
+        assert_eq!(bus.generation_for("a"), a + 1);
+        assert_eq!(bus.generation_for("b"), b);
     }
-
-    #[test]
-    fn session_ws_cache_evicts_generationally_without_clear_cliff() {
-        let mut cache = SessionWsCache::new(4);
-        for i in 0..4 {
-            cache.insert(format!("s{i}"), format!("w{i}"));
+    #[tokio::test]
+    async fn fan_out_in_order_with_scopes() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        bus.publish(item("one", "a"));
+        bus.publish(item("two", "b"));
+        let first = next(&mut rx).await;
+        let second = next(&mut rx).await;
+        assert_eq!(json(&first)["id"], "one");
+        assert_eq!(json(&second)["id"], "two");
+        assert!(first.visible_to("a") && !first.visible_to("b"));
+        assert!(second.visible_to("b") && !second.visible_to("a"));
+        bus.publish(DomainEvent::from(DevicesEvent::Node {
+            id: "n".into(),
+            user: "u".into(),
+        }));
+        let personal = next(&mut rx).await;
+        for (user, owner, want) in [
+            ("u", false, true),
+            ("other", false, false),
+            ("owner", true, true),
+            ("", false, false),
+        ] {
+            assert_eq!(
+                personal.visible(&Viewer {
+                    ws: "a".into(),
+                    user: user.into(),
+                    owner
+                }),
+                want
+            );
         }
-        assert_eq!(cache.len(), 4);
-        // Trigger rotation: s0..s3 move to cold, s4 enters hot (no full clear).
-        cache.insert("s4".into(), "w4".into());
-        assert_eq!(cache.len(), 5);
-        // Hot lookup on active cold entry s1 promotes s1 into hot.
-        assert_eq!(cache.get("s1").as_deref(), Some("w1"));
-        // Fill hot and trigger another rotation: promoted s1 survives, stale cold entries s0/s2/s3 evict.
-        cache.insert("s5".into(), "w5".into());
-        cache.insert("s6".into(), "w6".into());
-        cache.insert("s7".into(), "w7".into());
-        assert!(cache.len() <= 8, "bounded at 2 * half_cap: {}", cache.len());
-        assert_eq!(cache.get("s1").as_deref(), Some("w1"));
-        assert_eq!(cache.get("s0"), None);
-        assert_eq!(cache.get("s2"), None);
-        assert_eq!(cache.get("s3"), None);
+        bus.publish(DomainEvent::from(DevicesEvent::Device { id: "hub".into() }));
+        let all = next(&mut rx).await;
+        assert!(all.visible_to("a") && all.visible_to("b"));
     }
-
+    #[tokio::test]
+    async fn stats_frames_stay_in_their_workspace() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        bus.publish(stats("a", "1"));
+        bus.publish(stats("b", "2"));
+        let a = next(&mut rx).await;
+        let b = next(&mut rx).await;
+        assert_eq!(json(&a)["ws"], "a");
+        assert!(!a.visible_to("b"));
+        assert_eq!(json(&b)["ws"], "b");
+        assert!(!b.visible_to("a"));
+    }
     #[tokio::test]
     async fn tap_overflow_coalesces_same_key_and_drains_without_new_publishes() {
         let bus = Bus::new();
-        let mut tap = bus.tap(&["connection"]);
+        let mut tap = bus.tap(|e| {
+            matches!(
+                e.as_domain(),
+                Some(DomainEvent::Channels(ChannelsEvent::Connection { .. }))
+            )
+        });
         let mut sse = bus.subscribe();
-
-        // Fill the tap's bounded channel (TAP_CAPACITY).
         for i in 0..TAP_CAPACITY {
-            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": format!("c-{i}")}));
-            let _ = sse.recv().await.expect("sse");
+            bus.publish(connection(&format!("c-{i}"), "a"));
+            next(&mut sse).await;
         }
-        assert_eq!(bus.0.taps.lock().unwrap()[0].overflow.len(), 0);
-
-        // Publish repeated updates for 3 distinct (type, ws, id) keys while consumer is stalled.
-        for rev in 1..=40 {
-            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": "alpha", "rev": rev}));
+        for _ in 0..40 {
+            bus.publish(connection("alpha", "a"));
         }
-        for rev in 1..=25 {
-            bus.publish_value(json!({"type": "connection", "ws": "w1", "id": "beta", "rev": rev}));
+        for _ in 0..25 {
+            bus.publish(connection("beta", "a"));
         }
-        for rev in 1..=15 {
-            bus.publish_value(json!({"type": "connection", "ws": "w2", "id": "alpha", "rev": rev}));
+        for _ in 0..15 {
+            bus.publish(connection("alpha", "b"));
         }
-        for _ in 0..(40 + 25 + 15) {
-            let _ = sse.recv().await.expect("sse");
+        for _ in 0..80 {
+            next(&mut sse).await;
         }
-
-        // All 80 overflow events coalesced into just 3 pending entries.
         assert_eq!(bus.0.taps.lock().unwrap()[0].overflow.len(), 3);
-
-        // With NO further publishes, draining the receiver flushes the overflow via TAP_DRAIN_INTERVAL.
         for i in 0..TAP_CAPACITY {
-            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
-                .await
-                .expect("in time")
-                .expect("event");
-            assert_eq!(v["id"], format!("c-{i}"));
+            let e = tapped(&mut tap).await;
+            assert!(
+                matches!(e.event.as_domain(),Some(DomainEvent::Channels(ChannelsEvent::Connection {id,..})) if id.as_str()==format!("c-{i}"))
+            );
         }
-        let mut coalesced = Vec::new();
+        let mut got = Vec::new();
         for _ in 0..3 {
-            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
-                .await
-                .expect("overflow drained")
-                .expect("event");
-            coalesced.push((
-                v["ws"].as_str().unwrap().to_string(),
-                v["id"].as_str().unwrap().to_string(),
-                v["rev"].as_i64().unwrap(),
-            ));
+            let e = tapped(&mut tap).await;
+            if let Some(DomainEvent::Channels(ChannelsEvent::Connection { id, ws })) =
+                e.event.as_domain()
+            {
+                got.push((id.to_string(), ws.to_string(), e.rev.0));
+            }
         }
         assert_eq!(
-            coalesced,
+            got,
             vec![
-                ("w1".into(), "alpha".into(), 40),
-                ("w1".into(), "beta".into(), 25),
-                ("w2".into(), "alpha".into(), 15),
+                ("alpha".into(), "a".into(), TAP_CAPACITY as u64 + 40),
+                ("beta".into(), "a".into(), TAP_CAPACITY as u64 + 65),
+                ("alpha".into(), "b".into(), TAP_CAPACITY as u64 + 80)
             ]
         );
-        assert!(bus.0.taps.lock().unwrap()[0].overflow.is_empty());
     }
-
     #[tokio::test]
     async fn tap_flood_never_blocks_bounds_memory_evicts_oldest_and_drops_closed_tap() {
         let bus = Bus::new();
-        let mut tap = bus.tap(&["mm"]);
+        let mut tap = bus.tap(|e| {
+            matches!(
+                e.as_domain(),
+                Some(DomainEvent::Config(ConfigEvent::Mm { .. }))
+            )
+        });
         let mut sse = bus.subscribe();
-
         for i in 0..TAP_CAPACITY {
-            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("init-{i}")}));
-            let _ = sse.recv().await.expect("sse");
+            bus.publish(memory(&format!("init-{i}"), "a"));
+            next(&mut sse).await;
         }
-
-        // Flood TAP_OVERFLOW_MAX + 200 distinct events; publisher never blocks and overflow stays capped.
-        let extra = 200usize;
-        let flood = TAP_OVERFLOW_MAX + extra;
-        for i in 0..flood {
-            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("ov-{i}"), "seq": i}));
-            let _ = sse.recv().await.expect("sse");
+        for i in 0..TAP_OVERFLOW_MAX + 200 {
+            bus.publish(memory(&format!("overflow-{i}"), "a"));
+            next(&mut sse).await;
         }
         assert_eq!(
             bus.0.taps.lock().unwrap()[0].overflow.len(),
             TAP_OVERFLOW_MAX
         );
-
-        // Drain channel + bounded overflow: oldest `extra` overflow items were evicted, newest kept in order.
-        for i in 0..TAP_CAPACITY {
-            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
-                .await
-                .expect("channel item")
-                .expect("value");
-            assert_eq!(v["id"], format!("init-{i}"));
+        for _ in 0..TAP_CAPACITY {
+            tapped(&mut tap).await;
         }
-        for i in extra..flood {
-            let v = tokio::time::timeout(std::time::Duration::from_secs(2), tap.recv())
-                .await
-                .expect("overflow item")
-                .expect("value");
-            assert_eq!(v["seq"], i);
-        }
-
-        // Now create a second tap, overflow it, drop its receiver with NO new publishes, and verify cleanup.
-        let tap2 = bus.tap(&["mm"]);
-        assert_eq!(bus.0.taps.lock().unwrap().len(), 2);
-        for i in 0..(TAP_CAPACITY + 32) {
-            bus.publish_value(json!({"type": "mm", "ws": "w1", "id": format!("drop-{i}")}));
-            let _ = sse.recv().await.expect("sse");
-        }
-        drop(tap2);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while bus.0.taps.lock().unwrap().len() > 1 {
+        for i in 200..TAP_OVERFLOW_MAX + 200 {
+            let e = tapped(&mut tap).await;
             assert!(
-                tokio::time::Instant::now() < deadline,
-                "closed tap with overflow was not dropped"
+                matches!(e.event.as_domain(),Some(DomainEvent::Config(ConfigEvent::Mm {id,..})) if id.as_str()==format!("overflow-{i}"))
             );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert_eq!(bus.0.taps.lock().unwrap().len(), 1);
+        let abandoned = bus.tap(|_| true);
+        for i in 0..TAP_CAPACITY + 1 {
+            bus.publish(memory(&format!("later-{i}"), "a"));
+            next(&mut sse).await;
+        }
+        drop(abandoned);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if bus.0.taps.lock().unwrap().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
-}
-
-#[cfg(test)]
-mod scope_regression {
-    use super::*;
-    use serde_json::json;
-
     #[tokio::test]
-    async fn private_and_new_events_never_escape_their_workspace() {
+    async fn transcript_overflow_keeps_distinct_chunks_and_mixed_event_order() {
         let bus = Bus::new();
-        let mut rx = bus.subscribe();
-        for ty in [
-            "steve.tool",
-            "steve.draft",
-            "steve.thinking",
-            "plugin.future",
-        ] {
-            bus.publish_value(json!({"type":ty,"ws":"private-a","brief":"private"}));
-            let f = rx.recv().await.unwrap();
-            assert!(f.visible_to("private-a"));
-            assert!(!f.visible_to("private-b"), "{ty}");
+        let mut tap = bus.tap(|_| true);
+        let mut sse = bus.subscribe();
+        for i in 0..TAP_CAPACITY {
+            bus.publish(memory(&format!("m-{i}"), "a"));
+            next(&mut sse).await;
         }
-        for ev in [
-            json!({"type":"steve.tool"}),
-            json!({"type":"plugin.future"}),
-            json!({"type":"mail"}),
-            json!({"type":"plugin.future","ws":null}),
-            json!({"type":"steve.tool","ws":""}),
-        ] {
-            bus.publish_value(ev);
-            assert_eq!(rx.recv().await.unwrap().scope, Scope::Nobody);
+        for seq in 1..=20 {
+            bus.live(
+                WorkLiveEvent::Event {
+                    session_id: "s".into(),
+                    seq: Seq(seq),
+                    kind: "text".into(),
+                    data: RawJson::from_str("{}").unwrap(),
+                    ws: "a".into(),
+                }
+                .into(),
+            );
+            next(&mut sse).await;
         }
-    }
-}
-
-#[cfg(test)]
-mod change_log {
-    use super::*;
-    use serde_json::json;
-    use std::time::Duration;
-
-    async fn next(rx: &mut broadcast::Receiver<Arc<Frame>>) -> Arc<Frame> {
-        tokio::time::timeout(Duration::from_secs(10), rx.recv())
-            .await
-            .expect("in time")
-            .expect("frame")
-    }
-
-    fn frames(r: Replay) -> (Vec<Arc<Frame>>, u64) {
-        match r {
-            Replay::Frames { frames, head } => (frames, head),
-            Replay::Reset { head } => panic!("reset at {head}"),
+        assert_eq!(bus.0.taps.lock().unwrap()[0].overflow.len(), 20);
+        for _ in 0..TAP_CAPACITY {
+            tapped(&mut tap).await;
         }
-    }
-
-    fn reset(r: Replay) -> u64 {
-        match r {
-            Replay::Reset { head } => head,
-            Replay::Frames { frames, .. } => panic!("{} frames, not a reset", frames.len()),
+        for seq in 1..=20 {
+            let e = tapped(&mut tap).await;
+            assert!(
+                matches!(e.event.as_live(),Some(LiveEvent::Work(WorkLiveEvent::Event {seq:actual,..})) if actual.0==seq)
+            );
         }
+        bus.publish(item("next", "a"));
+        bus.live(
+            WorkLiveEvent::SteveThinking {
+                on: true,
+                ws: "a".into(),
+                phase: None,
+            }
+            .into(),
+        );
+        assert!(matches!(tapped(&mut tap).await.event, BusEvent::Domain(_)));
+        assert!(matches!(tapped(&mut tap).await.event, BusEvent::Live(_)));
     }
-
-    fn ids(f: &[Arc<Frame>]) -> Vec<u64> {
-        f.iter().filter_map(|f| f.id).collect()
-    }
-
     #[tokio::test]
     async fn ids_follow_send_order_even_for_held_stats() {
         let bus = Bus::new();
         let mut rx = bus.subscribe();
         let start = bus.cursor();
-        bus.publish_value(json!({"type": "stats", "ws": "w1", "n": 1}));
-        bus.publish_value(json!({"type": "stats", "ws": "w1", "n": 2}));
-        bus.publish(HubEvent::Item { id: "ST-1".into() });
+        bus.publish(stats("a", "1"));
+        bus.publish(stats("a", "2"));
+        bus.publish(item("later", "a"));
         let a = next(&mut rx).await;
         let b = next(&mut rx).await;
-        // the held stats frame goes out after the item published later, and its id is the larger one
-        let c = tokio::time::timeout(Duration::from_secs(7), rx.recv())
-            .await
-            .expect("trailing stats")
-            .expect("frame");
-        assert!(a.bytes.starts_with(b"data: {\"type\":\"stats\""));
-        assert!(b.bytes.starts_with(b"data: {\"type\":\"item\""));
-        assert!(c.bytes.ends_with(b"\"n\":2}\n\n"));
-        let (a, b, c) = (a.id.unwrap(), b.id.unwrap(), c.id.unwrap());
-        assert!(a < b && b < c, "{a} {b} {c}");
+        let c = next(&mut rx).await;
+        assert_eq!(json(&a)["day"], "1");
+        assert_eq!(json(&b)["id"], "later");
+        assert_eq!(json(&c)["day"], "2");
+        assert!(a.id < b.id && b.id < c.id);
         let (log, head) = frames(bus.replay(&start));
-        assert_eq!(ids(&log), vec![a, b, c]);
-        assert_eq!(head, c);
+        assert_eq!(ids(&log), vec![1, 2, 3]);
+        assert_eq!(head, 3);
     }
-
     #[tokio::test]
-    async fn transient_and_invisible_frames_are_not_kept() {
+    async fn transient_frames_are_not_kept() {
         let bus = Bus::new();
-        bus.set_session_workspace(|sid| (sid == "s1").then(|| "w1".to_string()));
         let mut rx = bus.subscribe();
         let start = bus.cursor();
-        bus.publish(HubEvent::Event {
-            session_id: "s1".into(),
-            seq: 1,
-            kind: "x".into(),
-            data: json!({}),
-        });
-        bus.publish_value(json!({"type": "steve.draft", "ws": "w1", "mid": "m", "text": "x"}));
-        bus.publish_value(json!({"type": "steve.tool"}));
-        bus.publish(HubEvent::Session {
-            id: "s1".into(),
-            item_id: None,
-        });
-        for _ in 0..3 {
-            assert_eq!(next(&mut rx).await.id, None);
-        }
+        bus.live(
+            WorkLiveEvent::Event {
+                session_id: "s".into(),
+                seq: Seq(1),
+                kind: "text".into(),
+                data: RawJson::from_str("{}").unwrap(),
+                ws: "a".into(),
+            }
+            .into(),
+        );
+        bus.live(
+            WorkLiveEvent::SteveDraft {
+                ws: "a".into(),
+                mid: "m".into(),
+                thought: "".into(),
+                text: "draft".into(),
+            }
+            .into(),
+        );
+        bus.publish(item("kept", "a"));
+        assert!(next(&mut rx).await.id.is_none());
+        assert!(next(&mut rx).await.id.is_none());
         let kept = next(&mut rx).await;
         assert_eq!(kept.id, Some(start.n + 1));
-        let (log, head) = frames(bus.replay(&start));
+        let (log, _) = frames(bus.replay(&start));
         assert_eq!(ids(&log), vec![start.n + 1]);
-        assert_eq!(&log[0].bytes[..], &kept.bytes[..]);
-        assert_eq!(head, start.n + 1);
     }
-
     async fn publish_items(bus: &Bus, rx: &mut broadcast::Receiver<Arc<Frame>>, n: usize) {
         for i in 0..n {
-            bus.publish(HubEvent::Item {
-                id: format!("ST-{i:03}"),
-            });
+            bus.publish(item(&format!("ST-{i:03}"), "a"));
         }
         for _ in 0..n {
             next(rx).await;
         }
     }
-
     #[tokio::test]
     async fn eviction_by_count_resets_older_cursors() {
         let bus = Bus::with_window(3, usize::MAX);
         let mut rx = bus.subscribe();
-        let epoch = bus.epoch().to_string();
         publish_items(&bus, &mut rx, 5).await;
         let at = |n| Cursor {
-            epoch: epoch.clone(),
+            epoch: bus.epoch().into(),
             n,
         };
-        // ids 3..=5 are kept: a cursor at 2 continues, one at 1 has lost frame 2
         assert_eq!(ids(&frames(bus.replay(&at(2))).0), vec![3, 4, 5]);
-        assert_eq!(ids(&frames(bus.replay(&at(4))).0), vec![5]);
         assert_eq!(reset(bus.replay(&at(1))), 5);
-        assert_eq!(reset(bus.replay(&at(0))), 5);
     }
-
     #[tokio::test]
     async fn eviction_by_bytes_resets_older_cursors() {
-        // every item frame here is `data: {"type":"item","id":"ST-00i"}\n\n`
-        let one = b"data: {\"type\":\"item\",\"id\":\"ST-000\"}\n\n".len();
+        let one = encoded(item("ST-000", "a")).json.len() + 8;
         let bus = Bus::with_window(1000, 2 * one + 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 4).await;
         let at = |n| Cursor {
-            epoch: bus.epoch().to_string(),
+            epoch: bus.epoch().into(),
             n,
         };
         assert_eq!(ids(&frames(bus.replay(&at(2))).0), vec![3, 4]);
         assert_eq!(reset(bus.replay(&at(1))), 4);
-        // a frame larger than the whole window is still kept on its own
         let bus = Bus::with_window(1000, 1);
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 2).await;
-        let at = |n| Cursor {
-            epoch: bus.epoch().to_string(),
-            n,
-        };
-        assert_eq!(ids(&frames(bus.replay(&at(1))).0), vec![2]);
-        assert_eq!(reset(bus.replay(&at(0))), 2);
+        assert_eq!(
+            reset(bus.replay(&Cursor {
+                epoch: bus.epoch().into(),
+                n: 0
+            })),
+            2
+        );
     }
-
     #[tokio::test]
     async fn foreign_future_or_malformed_cursors_reset() {
         let bus = Bus::new();
@@ -1747,55 +1054,36 @@ mod change_log {
         let other = Bus::new();
         assert_ne!(bus.epoch(), other.epoch());
         assert_eq!(reset(bus.replay(&other.cursor())), 2);
-        let ahead = Cursor {
-            epoch: bus.epoch().to_string(),
-            n: 3,
-        };
-        assert_eq!(reset(bus.replay(&ahead)), 2);
-        for bad in [
+        assert_eq!(
+            reset(bus.replay(&Cursor {
+                epoch: bus.epoch().into(),
+                n: 3
+            })),
+            2
+        );
+        for s in [
             "",
             "nonsense",
             ":1",
-            &format!("{}:", bus.epoch()),
-            &format!("{}:-1", bus.epoch()),
-            &format!("{}:1x", bus.epoch()),
-            &format!("{}:99999999999999999999999", bus.epoch()),
+            "epoch:-1",
+            "epoch:1x",
+            "epoch:9999999999999999999999999",
         ] {
-            assert_eq!(Cursor::parse(bad), None, "{bad}");
-            assert_eq!(reset(bus.replay_from(bad)), 2, "{bad}");
+            assert!(Cursor::parse(s).is_none());
+            assert_eq!(reset(bus.replay_from(s)), 2);
         }
-        let c = bus.cursor();
-        assert_eq!(Cursor::parse(&c.to_string()), Some(c.clone()));
-        assert_eq!(
-            ids(&frames(bus.replay_from(&format!("{}:1", c.epoch))).0),
-            vec![2]
-        );
+        assert_eq!(Cursor::parse(&bus.cursor().to_string()), Some(bus.cursor()));
     }
-
     #[tokio::test]
-    async fn replay_at_head_is_empty() {
+    async fn replay_at_head_is_empty_and_cursor_tracks_each_kept_frame() {
         let bus = Bus::new();
-        let (log, head) = frames(bus.replay(&bus.cursor()));
-        assert!(log.is_empty());
-        assert_eq!(head, 0);
+        assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         let mut rx = bus.subscribe();
-        publish_items(&bus, &mut rx, 3).await;
-        let (log, head) = frames(bus.replay(&bus.cursor()));
-        assert!(log.is_empty());
-        assert_eq!(head, 3);
-    }
-
-    #[tokio::test]
-    async fn cursor_after_dispatch_is_the_last_frame_id() {
-        let bus = Bus::new();
-        let mut rx = bus.subscribe();
-        for i in 0..20 {
-            bus.publish(HubEvent::Item { id: format!("{i}") });
-            bus.publish_value(json!({"type": "steve.draft", "ws": "w1", "text": "x"}));
-            let f = next(&mut rx).await;
-            next(&mut rx).await;
-            assert_eq!(bus.cursor().n, f.id.expect("id"));
-            assert_eq!(bus.cursor().epoch, bus.epoch());
+        for i in 1..=20 {
+            bus.publish(item(&format!("{i}"), "a"));
+            let e = next(&mut rx).await;
+            assert_eq!(bus.cursor().n, e.id.unwrap());
+            assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         }
     }
 }

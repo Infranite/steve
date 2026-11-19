@@ -3,7 +3,7 @@
 
 use crate::error::{Result, msg};
 use crate::gateway::{ModelGateway, Tier};
-use crate::repo::{Db as Store, HubEvent};
+use crate::repo::{BusEvent, Db as Store};
 use crate::runtime::{
     AgentRuntime, Answered, Configured, Flushed, Prompted, Released, Running, Stop, TurnEnd,
 };
@@ -489,7 +489,7 @@ pub struct Kit {
     pub core: Core,
     pub rt: Arc<FakeRuntime>,
     pub gw: Arc<FakeGateway>,
-    pub events: Arc<Mutex<Vec<HubEvent>>>,
+    pub events: Arc<Mutex<Vec<BusEvent>>>,
 }
 
 impl Kit {

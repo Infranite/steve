@@ -13,13 +13,5 @@ install! { install(reg, cx) [] => [db] {
             tracing::warn!(%error, "legacy delivery output recovery failed; will retry on next start");
         }
     }
-    let lookup = db.clone();
-    bus.set_session_workspace(move |sid| {
-        lookup
-            .sessions()
-            .get(sid)
-            .ok()
-            .flatten()
-            .map(|s| s.workspace_id)
-    });
+
 }}

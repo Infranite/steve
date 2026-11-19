@@ -334,7 +334,7 @@ impl ConnectionRuntime {
     /// Starts every wanted run, then follows `events` (the Hub bus's `connection` events, tapped
     /// before this call) until they end or the runtime is shut down. Returns at once; the work is
     /// a task of its own.
-    pub fn start(&self, mut events: mpsc::Receiver<Value>) -> JoinHandle<()> {
+    pub fn start(&self, mut events: mpsc::Receiver<steve_types::Notification>) -> JoinHandle<()> {
         let me = self.clone();
         tokio::spawn(async move {
             me.start_all();
@@ -349,16 +349,12 @@ impl ConnectionRuntime {
                         None => return,
                     },
                 };
-                if ev.get("type").and_then(Value::as_str) != Some("connection") {
-                    continue;
+                if let Some(steve_types::DomainEvent::Channels(
+                    steve_types::ChannelsEvent::Connection { id, ws },
+                )) = ev.event.as_domain()
+                {
+                    me.on_event(ws.as_str(), id.as_str());
                 }
-                let (Some(id), Some(ws)) = (
-                    ev.get("id").and_then(Value::as_str),
-                    ev.get("ws").and_then(Value::as_str),
-                ) else {
-                    continue;
-                };
-                me.on_event(ws, id);
             }
         })
     }

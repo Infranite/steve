@@ -696,11 +696,13 @@ impl Mail {
         Ok(Ok(Part { bytes, mime }))
     }
 
-    /// The bus side of the module (integrator: call for every `ChangeEvent`): a connection that
+    /// The bus side of the module (integrator: call for every `BusEvent`): a connection that
     /// appears, recovers or goes away starts or stops its runner now (the first sync of a new mailbox
     /// runs at once instead of at the next minute's reconcile).
-    pub fn on_event(&self, e: &steve_store::ChangeEvent) {
-        if let steve_store::ChangeEvent::Connection { .. } = e
+    pub fn on_event(&self, e: &steve_store::BusEvent) {
+        if let steve_types::BusEvent::Domain(steve_types::DomainEvent::Channels(
+            steve_types::ChannelsEvent::Connection { .. },
+        )) = e
             && tokio::runtime::Handle::try_current().is_ok()
             && let Err(err) = self.reconcile()
         {

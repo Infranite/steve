@@ -52,3 +52,17 @@ impl ConfigEvent {
         }
     }
 }
+
+impl ConfigEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Bot { id, .. } => Some(id.as_str()),
+            Self::Project { id, .. } => Some(id.as_str()),
+            Self::Tag { id, .. } => Some(id.as_str()),
+            Self::Workspace { id, .. } => Some(id.as_str()),
+            Self::Settings { id, .. } => Some(id.as_str()),
+            Self::Mm { id, .. } => Some(id.as_str()),
+            Self::Changeset { id, .. } => Some(id.as_str()),
+        }
+    }
+}

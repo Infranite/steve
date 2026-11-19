@@ -4,7 +4,6 @@ use crate::wire::modules::*;
 use crate::wire::modules::{Env, knowledge};
 use crate::wire::ports as hp;
 use axum::Router;
-use serde_json::Value;
 use std::sync::Arc;
 use steve_modules::{Modules, Registry};
 
@@ -141,7 +140,7 @@ pub(crate) struct ModuleRegistry<'a> {
     pending_lifecycle: Option<
         Option<(
             steve_channels::lifecycle::ConnectionRuntime,
-            tokio::sync::mpsc::Receiver<Value>,
+            tokio::sync::mpsc::Receiver<steve_types::Notification>,
         )>,
     >,
     routes: Option<Router>,

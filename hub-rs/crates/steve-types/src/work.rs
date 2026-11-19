@@ -130,3 +130,15 @@ impl WorkLiveEvent {
         }
     }
 }
+
+impl WorkEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Item { id, .. } => Some(id.as_str()),
+            Self::Decision { id, .. } => Some(id.as_str()),
+            Self::Session { id, .. } => Some(id.as_str()),
+            Self::Message { id, .. } => Some(id.as_str()),
+            Self::ThreadRun { id, .. } => Some(id.as_str()),
+        }
+    }
+}

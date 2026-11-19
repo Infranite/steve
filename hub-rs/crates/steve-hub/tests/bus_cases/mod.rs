@@ -1,7 +1,7 @@
 //! One explicitly constructed event for each public wire tag. No event deserialization.
-use steve_store::Published;
+use steve_store::BusEvent;
 use steve_types::*;
-pub fn typed(ty: &str, ws: &str) -> Published {
+pub fn typed(ty: &str, ws: &str) -> BusEvent {
     match ty {
         "item" => DomainEvent::from(WorkEvent::Item {
             id: "entity".into(),

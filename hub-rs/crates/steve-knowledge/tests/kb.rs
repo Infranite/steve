@@ -12,9 +12,9 @@ use steve_knowledge::retrieve::{Purpose, Query, anchor_mems, retrieve};
 use steve_knowledge::sync;
 use steve_knowledge::{KbEvent, Knowledge};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_store::StoreError;
 use steve_store::base::mems::{self, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
-use steve_store::{ChangeEvent, StoreError};
 
 struct Env {
     env: TestEnv,
@@ -324,10 +324,18 @@ async fn never_memories_are_not_returned() {
         .unwrap();
     sync::on_event(
         &e.env.modules,
-        &ChangeEvent::Mm {
-            id: id.clone(),
-            ws: WS.into(),
-        },
+        &steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Mm {
+                id: {
+                    let value: String = id.clone();
+                    steve_types::MemoryId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        )),
     )
     .unwrap();
     assert!(e.search(ME, "周五下午").await.is_empty());
@@ -353,10 +361,18 @@ async fn deleted_memories_leave_the_index() {
     // The event path …
     sync::on_event(
         &e.env.modules,
-        &ChangeEvent::Mm {
-            id: id.clone(),
-            ws: WS.into(),
-        },
+        &steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Mm {
+                id: {
+                    let value: String = id.clone();
+                    steve_types::MemoryId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        )),
     )
     .unwrap();
     assert!(e.search(ME, "简短").await.is_empty());
@@ -552,9 +568,15 @@ async fn old_bot_memories_become_searchable() {
     // What the 5-minute sweep (or the `bot` bus event) does, triggered directly.
     sync::on_event(
         &e.env.modules,
-        &ChangeEvent::Bot {
-            id: "bot_k1".into(),
-        },
+        &steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Bot {
+                ws: steve_types::WorkspaceId::from(steve_store::WS),
+                id: {
+                    let value: String = "bot_k1".into();
+                    steve_types::BotId::from(value)
+                },
+            },
+        )),
     )
     .unwrap();
     let hits = e.search(OTHER, "冒烟测试").await;
@@ -583,7 +605,19 @@ async fn old_bot_memories_become_searchable() {
             Ok(())
         })
         .unwrap();
-    sync::on_event(&e.env.modules, &ChangeEvent::Bot { id: "*".into() }).unwrap();
+    sync::on_event(
+        &e.env.modules,
+        &steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::ConfigEvent::Bot {
+                ws: steve_types::WorkspaceId::from(steve_store::WS),
+                id: {
+                    let value: String = "*".into();
+                    steve_types::BotId::from(value)
+                },
+            },
+        )),
+    )
+    .unwrap();
     assert!(e.search(ME, "回归测试").await.is_empty());
 }
 

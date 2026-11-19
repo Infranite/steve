@@ -14,5 +14,5 @@ install! { routes(reg, _cx) [conns, mut module_routes, plugins] => [conns, modul
 
 install! { jobs(reg, cx) [mut jobs, modules, plugins] => [jobs, modules] {
     let Env { bus, .. } = cx.clone();
-    jobs.push(Box::pin(plugins.supervise(modules.clone(), bus.tap(&["connection"]))));
+    jobs.push(Box::pin(plugins.supervise(modules.clone(), bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))))));
 }}

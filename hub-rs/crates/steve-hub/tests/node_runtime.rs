@@ -11,7 +11,7 @@ use steve_hub::wire::node_runtime::{
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
-use steve_store::{ChangeEvent, FileRef, FnPublisher, Store, StoreError};
+use steve_store::{BusEvent, FileRef, FnPublisher, Store, StoreError};
 
 #[path = "node_runtime/clock.rs"]
 mod clock;
@@ -92,7 +92,7 @@ struct H {
     clock: Option<Arc<ManualClock>>,
     ends: Arc<Ends>,
     seen: Arc<Tee>,
-    published: Arc<Mutex<Vec<ChangeEvent>>>,
+    published: Arc<Mutex<Vec<BusEvent>>>,
 }
 
 /// Forwards to the Hub and keeps what went through, to send it again.
@@ -683,7 +683,7 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     assert!(
         published
             .iter()
-            .any(|e| matches!(e, ChangeEvent::Event { kind, .. } if kind == "user")),
+            .any(|e| matches!(e, steve_types::BusEvent::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::Event { kind, .. })) if kind == "user")),
         "the browser hears the turn's messages"
     );
 }

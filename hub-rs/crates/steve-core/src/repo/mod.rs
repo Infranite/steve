@@ -6,13 +6,11 @@ use rusqlite::OptionalExtension;
 use serde_json::{Map, Value};
 
 pub use steve_store::{
-    Bot, ChangeEvent, Decision, Event, FileRef, FileRow, Goal, Item, Memory, Message, NewDecision,
+    Bot, BusEvent, Decision, Event, FileRef, FileRow, Goal, Item, Memory, Message, NewDecision,
     NewItem, NewSession, Parent, PlanStep, Project, Queued, Release, Session, Tag, WS, Workspace,
 };
 /// A timeline entry with its attachments (`timeline.list`).
 pub type TimelineRow = steve_store::TimelineEntry;
-/// The SSE payload union (bus.ts `HubEvent`).
-pub type HubEvent = ChangeEvent;
 
 /// `patch!{status: "run", now: "继续处理"}`: a JSON object of column → value, decoded into the store's patch types.
 #[macro_export]
@@ -76,12 +74,12 @@ impl Db {
         &self.s
     }
 
-    pub fn publish(&self, e: HubEvent) {
+    pub fn publish(&self, e: BusEvent) {
         self.s.publish(e)
     }
 
     /// Runs `f` inside one re-entrant SQLite transaction on the underlying store; all repository
-    /// writes and their `ChangeEvent`s commit or roll back together.
+    /// writes and their `BusEvent`s commit or roll back together.
     pub fn atomic<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.s.atomic(f)
     }

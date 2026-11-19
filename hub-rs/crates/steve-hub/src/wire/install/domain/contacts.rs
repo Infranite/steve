@@ -18,7 +18,7 @@ install! { install(reg, cx) [conns, modules] => [conns, directory, modules] {
         steve_modules::contacts::sync::DirectorySync::new(modules.clone(), Arc::new(directory));
     drop(directory.spawn());
     // connected, re-verified, a permission granted: sync the address book again soon
-    drop(directory.spawn_watch(bus.tap(&["connection"])));
+    drop(directory.spawn_watch(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. }))))));
 }}
 
 install! { finish(reg, _cx) [directory, mut ports] => [ports] {

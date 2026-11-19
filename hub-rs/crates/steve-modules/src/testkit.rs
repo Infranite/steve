@@ -11,7 +11,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, header};
 use serde_json::Value;
-use steve_store::{ChangeEvent, FnPublisher, Store};
+use steve_store::{BusEvent, FnPublisher, Store};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -108,14 +108,14 @@ pub struct TestEnv {
     pub gateway: Arc<FakeGateway>,
     /// The modules' clock, starting at the real time.
     pub clock: Arc<FakeClock>,
-    pub events: Arc<Mutex<Vec<ChangeEvent>>>,
+    pub events: Arc<Mutex<Vec<BusEvent>>>,
 }
 
 impl TestEnv {
     /// Migrated store in a temp dir; `register` fills the registry like the integrator would.
     pub fn new(register: impl FnOnce(&mut Registry)) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
-        let events: Arc<Mutex<Vec<ChangeEvent>>> = Arc::default();
+        let events: Arc<Mutex<Vec<BusEvent>>> = Arc::default();
         let sink = events.clone();
         let store = Store::open(
             dir.path().join("steve.sqlite3"),
@@ -153,7 +153,7 @@ impl TestEnv {
     }
 
     /// Returns and clears the events published so far.
-    pub fn take_events(&self) -> Vec<ChangeEvent> {
+    pub fn take_events(&self) -> Vec<BusEvent> {
         std::mem::take(&mut *self.events.lock().unwrap_or_else(|p| p.into_inner()))
     }
 }
@@ -225,4 +225,12 @@ pub async fn call_raw(
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+/// A typed notification fixture for internal subscriber tests.
+pub fn notification(event: impl Into<steve_types::BusEvent>) -> steve_types::Notification {
+    std::sync::Arc::new(steve_types::Envelope {
+        event: event.into(),
+        rev: steve_types::Rev(1),
+    })
 }

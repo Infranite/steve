@@ -17,7 +17,7 @@ use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig}
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 use steve_store::base::Viewer;
 use tempfile::TempDir;
 
@@ -482,18 +482,42 @@ async fn deleting_a_persona_moves_accounts_to_default_and_spaces_to_following() 
         json!({"ok": true, "moved": {"accounts": 1, "spaces": 1}})
     );
     let ev = h.env.take_events();
-    assert!(ev.contains(&ChangeEvent::Persona {
-        id: oncall.clone(),
-        ws: WS.into()
-    }));
-    assert!(ev.contains(&ChangeEvent::Channel {
-        id: h.con.clone(),
-        ws: WS.into()
-    }));
-    assert!(ev.contains(&ChangeEvent::Space {
-        id: d1.clone(),
-        ws: WS.into()
-    }));
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Persona {
+            id: {
+                let value: String = oncall.clone();
+                steve_types::PersonaId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Channel {
+            id: {
+                let value: String = h.con.clone();
+                steve_types::ConnectionId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Space {
+            id: {
+                let value: String = d1.clone();
+                steve_types::SpaceId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
 
     // the account speaks as Steve; the DM follows it; the group keeps its own persona
     assert_eq!(

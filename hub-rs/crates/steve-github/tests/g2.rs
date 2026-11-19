@@ -787,7 +787,7 @@ async fn reviews_comments_issues_and_merges() {
         h.env
             .take_events()
             .iter()
-            .any(|e| matches!(e, steve_store::ChangeEvent::Item { id } if id == "ST-12")),
+            .any(|e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Item { id, .. })) if id.as_str() == "ST-12")),
         "the linked item's detail refreshes"
     );
 

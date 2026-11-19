@@ -2,16 +2,16 @@
 use std::sync::{Arc, Mutex};
 use steve_channels::decide;
 use steve_modules::ApiError;
-use steve_store::{ChangeEvent, NewDecision, Published, Publisher, Store};
+use steve_store::{BusEvent, NewDecision, Publisher, Store};
 use steve_types::{DomainEvent, Scope, Scoped, WorkEvent};
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<Published>>>);
+struct Capture(Arc<Mutex<Vec<BusEvent>>>);
 impl Publisher for Capture {
-    fn publish(&self, event: ChangeEvent) {
-        self.0.lock().unwrap().push(event.into());
+    fn publish(&self, event: BusEvent) {
+        self.0.lock().unwrap().push(event);
     }
-    fn publish_batch(&self, events: Vec<Published>) {
+    fn publish_batch(&self, events: Vec<BusEvent>) {
         self.0.lock().unwrap().extend(events);
     }
 }
@@ -54,7 +54,7 @@ fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     let events = capture.0.lock().unwrap().clone();
     assert_eq!(events.len(), 2);
     for (event, (id, ws)) in events.iter().zip(&decisions) {
-        let Published::Domain(event) = event else {
+        let BusEvent::Domain(event) = event else {
             panic!("nudge must publish a typed domain event")
         };
         assert_eq!(event.scope(), Scope::Ws((*ws).into()));

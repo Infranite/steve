@@ -67,6 +67,7 @@ fn bindings_match() {
         HttpErrorBody,
         Envelope<DomainEvent>,
         Scope,
+        BusEvent,
         DomainEvent,
         LiveEvent,
         StreamControl,

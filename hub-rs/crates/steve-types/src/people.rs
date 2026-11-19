@@ -32,3 +32,12 @@ impl PeopleEvent {
         }
     }
 }
+
+impl PeopleEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Party { id, .. } => Some(id.as_str()),
+            Self::Account { id, .. } => Some(id.as_str()),
+        }
+    }
+}

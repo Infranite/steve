@@ -28,3 +28,11 @@ impl VaultEvent {
         }
     }
 }
+
+impl VaultEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Vault { id, .. } => Some(id.as_str()),
+        }
+    }
+}

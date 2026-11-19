@@ -4,16 +4,16 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
-use steve_store::{ChangeEvent, FnPublisher, Store};
+use steve_store::{BusEvent, FnPublisher, Store};
 use tempfile::TempDir;
 
 /// Records every published event.
 #[derive(Clone, Default)]
-pub struct Events(pub Arc<Mutex<Vec<ChangeEvent>>>);
+pub struct Events(pub Arc<Mutex<Vec<BusEvent>>>);
 
 impl Events {
     /// Returns and clears what was published so far.
-    pub fn take(&self) -> Vec<ChangeEvent> {
+    pub fn take(&self) -> Vec<BusEvent> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }

@@ -13,7 +13,7 @@ use steve_flow::ingest::{self, LABEL_NO_FLOW, LABEL_RECORD};
 use steve_flow::testkit::{FakeEventAdapter, FlowEnv};
 use steve_flow::{AdapterError, EventAdapter, EventSink, retention, signals};
 use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 
 const DAY: i64 = 24 * 3_600_000;
 
@@ -793,18 +793,33 @@ async fn signal_events_are_coalesced() {
             .to_string();
     }
     tokio::time::sleep(signals::COALESCE + Duration::from_millis(200)).await;
-    let sig: Vec<ChangeEvent> = e
+    let sig: Vec<BusEvent> = e
         .env
         .take_events()
         .into_iter()
-        .filter(|x| matches!(x, ChangeEvent::Signal { .. }))
+        .filter(|x| {
+            matches!(
+                x,
+                steve_types::BusEvent::Domain(steve_types::DomainEvent::Automation(
+                    steve_types::AutomationEvent::Signal { .. }
+                ))
+            )
+        })
         .collect();
     assert_eq!(
         sig,
-        vec![ChangeEvent::Signal {
-            id: last,
-            ws: WS.into()
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Automation(steve_types::AutomationEvent::Signal {
+                id: {
+                    let value: String = last;
+                    steve_types::SignalId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
 }
 

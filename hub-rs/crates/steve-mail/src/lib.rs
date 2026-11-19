@@ -16,7 +16,7 @@
 //! 2. `let mail = Mail::builder(modules, conns, cfg).adapter(imap).events(<steve-flow impl of
 //!    MailEvents>).notify(<publisher of {type:"mail", id, ws}>).build();` and `mail.spawn_jobs()`;
 //! 3. contacts `Ports.timelines.push(Arc::new(MailTimeline))`;
-//! 4. `HubEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail`.
+//! 4. `BusEvent` gets `{type:"mail", id, ws}`; SETTINGS gets `keepMail`.
 //!
 //! Slice E4 — triage: [`nodes`] (`mail.draft_reply`, `mail.archive`, `mail.mark_read`, the mail
 //! links of items, the `thread_key → item` lookup, `archive_on_done` via [`nodes::MailHooks`]),

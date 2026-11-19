@@ -24,7 +24,7 @@
 //!    `POST /api/config/:id/apply|undo` try [`changes::apply`] / [`changes::undo`] first and fall back to
 //!    the in-memory drafts on `None`; `pickTarget` appends [`changes::candidates`];
 //! 4. `POST /api/decisions/:id`: try [`decisions::dispatch`] first; on `None` run the old logic;
-//! 5. `/api/stream`: drop events for which [`sse::delivers`] is false;
+//! 5. `/api/stream`: filter typed envelopes using `Scoped::scope()`;
 //! 6. `undoDecision`: call [`Registry::before_undo`] in its transaction first;
 //! 7. the B1 call points: `registry.hooks()` in createItem / accept / finish / drop,
 //!    `registry.contexts()` in `startSession` and `answer`, [`panels::panels`] / [`panels::action`]
@@ -47,7 +47,6 @@ pub mod net;
 pub mod outbound;
 pub mod panels;
 pub mod shown;
-pub mod sse;
 pub mod testkit;
 pub mod vault;
 pub mod zone;

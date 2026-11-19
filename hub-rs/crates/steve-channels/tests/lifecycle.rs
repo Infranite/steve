@@ -199,8 +199,8 @@ struct H {
     ch: Channels,
     probe: Arc<Probe>,
     rt: ConnectionRuntime,
-    tx: mpsc::Sender<Value>,
-    rx: Option<mpsc::Receiver<Value>>,
+    tx: mpsc::Sender<steve_types::Notification>,
+    rx: Option<mpsc::Receiver<steve_types::Notification>>,
 }
 
 fn setup(timing: Timing) -> H {
@@ -310,9 +310,12 @@ impl H {
     }
 
     fn event(&self, id: &str) {
-        let _ = self
-            .tx
-            .try_send(json!({"type": "connection", "id": id, "ws": WS}));
+        let _ = self.tx.try_send(steve_modules::testkit::notification(
+            steve_types::ChannelsEvent::Connection {
+                id: id.into(),
+                ws: WS.into(),
+            },
+        ));
     }
 
     fn start(&mut self) {

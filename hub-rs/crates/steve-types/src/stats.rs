@@ -32,3 +32,11 @@ impl StatsEvent {
         }
     }
 }
+
+impl StatsEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Stats { .. } => None,
+        }
+    }
+}

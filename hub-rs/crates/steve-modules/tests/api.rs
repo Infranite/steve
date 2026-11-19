@@ -12,7 +12,7 @@ use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller
 use steve_modules::{ApiError, ApiResult, Body, Caller, Check, Modules, Registry, own};
 use steve_store::base::mems::{self, MemPatch, NewMem};
 use steve_store::base::{self, Level, ObjRef, Visibility};
-use steve_store::{ChangeEvent, Decision, Tx};
+use steve_store::{Decision, Tx};
 
 #[derive(Deserialize)]
 struct NewNote {
@@ -215,10 +215,18 @@ async fn validation_errors_name_the_fields() {
     assert!(b["id"].as_str().unwrap().starts_with("mm_"));
     assert_eq!(
         t.take_events(),
-        [ChangeEvent::Mm {
-            id: b["id"].as_str().unwrap().into(),
-            ws: WS.into()
-        }]
+        [steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm {
+                id: {
+                    let value: String = b["id"].as_str().unwrap().into();
+                    steve_types::MemoryId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
 }
 
@@ -360,10 +368,19 @@ async fn confirm_decisions_dispatch_to_the_module() {
         ("confirm", vec!["yes".to_string(), "no".into()], None)
     );
     let ev = t.take_events();
-    assert!(ev.contains(&ChangeEvent::Decision {
-        id: d.id.clone(),
-        item_id: Some(None)
-    }));
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+            id: {
+                let value: String = d.id.clone();
+                steve_types::DecisionId::from(value)
+            },
+            item_id: {
+                let value: Option<Option<String>> = Some(None);
+                value.map(|value| value.map(Into::into))
+            },
+            ws: steve_types::WorkspaceId::from(steve_store::WS)
+        })
+    )));
 
     assert_eq!(
         decisions::dispatch(&t.modules, &me, &d.id, "maybe", "")

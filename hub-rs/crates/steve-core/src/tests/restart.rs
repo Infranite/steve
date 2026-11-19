@@ -90,7 +90,12 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                crate::repo::HubEvent::ReleaseHold { hold } => Some(hold.clone()),
+                steve_types::BusEvent::Domain(steve_types::DomainEvent::Devices(
+                    steve_types::DevicesEvent::ReleaseHold { hold },
+                )) => Some(
+                    hold.as_ref()
+                        .map(|value| serde_json::to_value(value).unwrap()),
+                ),
                 _ => None,
             })
             .collect::<Vec<_>>()

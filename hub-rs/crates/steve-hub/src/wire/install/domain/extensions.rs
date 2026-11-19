@@ -35,7 +35,7 @@ install! { mount(reg, cx) [channels, declared, jobs, module_routes, started] => 
         for h in hooks {
             rt = rt.hook(&h.adapter, h.decl, h.hook);
         }
-        (rt.build(), bus.tap(&["connection"]))
+        (rt.build(), bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))))
     });
 }}
 

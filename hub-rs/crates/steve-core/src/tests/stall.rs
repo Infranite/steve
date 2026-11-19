@@ -1,7 +1,7 @@
 //! Items left in `run` with nothing going on get one “它停下了” card (crate::stall).
 
 use crate::AgentRuntime;
-use crate::repo::HubEvent;
+use crate::repo::BusEvent;
 use crate::stall::{STALL, STALL_AFTER_MS};
 use crate::testkit::Kit;
 use crate::util::now;
@@ -109,11 +109,12 @@ fn a_turn_starting_expires_the_card_and_continue_sends_a_turn() {
     assert!(stall_cards(&k, &i).iter().all(|d| d.status != "open"));
     assert_eq!(k.status(&i).0, "run");
     assert!(
-        k.events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, HubEvent::Decision { .. })),
+        k.events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Decision { .. }
+            ))
+        )),
         "the web hears about it"
     );
 }

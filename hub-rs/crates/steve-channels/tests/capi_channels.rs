@@ -849,7 +849,7 @@ async fn members_of_your_own_spaces_are_yours_alone() {
 // The runtime.
 
 /// The connection runtime with the built-in Feishu hooks, and the sender its events come on.
-fn runtime(h: &H) -> (ConnectionRuntime, mpsc::Sender<Value>) {
+fn runtime(h: &H) -> (ConnectionRuntime, mpsc::Sender<steve_types::Notification>) {
     let rt = ConnectionRuntime::builder(h.ch.clone())
         .hook(
             "feishu_app",
@@ -872,9 +872,9 @@ fn runtime(h: &H) -> (ConnectionRuntime, mpsc::Sender<Value>) {
 }
 
 /// The change events published since the last call, as the Hub's bus hands them to the runtime.
-fn publish(h: &H, tx: &mpsc::Sender<Value>) {
+fn publish(h: &H, tx: &mpsc::Sender<steve_types::Notification>) {
     for e in h.env.take_events() {
-        let _ = tx.try_send(serde_json::to_value(e).expect("json"));
+        let _ = tx.try_send(steve_modules::testkit::notification(e));
     }
 }
 
@@ -926,7 +926,12 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
 
     // repeated events change nothing
     publish(&h, &tx);
-    let _ = tx.try_send(json!({"type": "connection", "id": con, "ws": WS}));
+    let _ = tx.try_send(steve_modules::testkit::notification(
+        steve_types::ChannelsEvent::Connection {
+            id: con.clone().into(),
+            ws: WS.into(),
+        },
+    ));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_connects_total(), 1);
 

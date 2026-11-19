@@ -1,7 +1,7 @@
 //! SQLite storage for the Steve Hub: the Rust port of hub/src/db.ts and hub/src/repo.ts.
 //!
 //! [`Store::open`] runs the db.ts migrations verbatim; the repositories (`store.items()`, `store.bots()`, …)
-//! mirror the repo.ts objects one to one and publish a [`ChangeEvent`] after every write.
+//! mirror the repo.ts objects one to one and publish a [`BusEvent`] after every write.
 //!
 //! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of read-only
 //! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
@@ -38,8 +38,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-pub use bus::{ChangeEvent, FnPublisher, NoPublisher, Published, Publisher};
+pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use repo::*;
+pub use steve_types::BusEvent;
 pub use tx::Tx;
 pub use types::*;
 
@@ -142,7 +143,7 @@ pub(crate) struct W<'a> {
 }
 
 impl W<'_> {
-    pub fn publish(&self, e: impl Into<Published>) {
+    pub fn publish(&self, e: impl Into<BusEvent>) {
         self.store.emit_event(e.into())
     }
 
@@ -242,7 +243,7 @@ impl Store {
     }
 
     /// Publishes an event that is not tied to a store write (`steve.thinking`, imports finishing).
-    pub fn publish(&self, e: impl Into<Published>) {
+    pub fn publish(&self, e: impl Into<BusEvent>) {
         self.emit_event(e.into())
     }
 

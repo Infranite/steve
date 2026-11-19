@@ -4,8 +4,8 @@ mod common;
 
 use common::*;
 use serde_json::json;
+use steve_store::WS;
 use steve_store::yolo::{self, ScopeChange};
-use steve_store::{ChangeEvent, WS};
 
 #[test]
 fn scope_put_bumps_revision_writes_revisions_and_publishes() {
@@ -33,7 +33,17 @@ fn scope_put_bumps_revision_writes_revisions_and_publishes() {
         (after.mode.as_str(), after.revision, after.set_by.as_str()),
         ("on", 1, "u1")
     );
-    assert_eq!(t.events.take(), vec![ChangeEvent::Yolo { ws: WS.into() }]);
+    assert_eq!(
+        t.events.take(),
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Autonomy(steve_types::AutonomyEvent::Yolo {
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
+    );
 
     // the same values again: nothing written, nothing published
     let (b, a) = t

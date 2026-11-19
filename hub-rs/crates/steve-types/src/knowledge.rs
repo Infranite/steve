@@ -28,3 +28,11 @@ impl KnowledgeEvent {
         }
     }
 }
+
+impl KnowledgeEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Kb { id, .. } => Some(id.as_str()),
+        }
+    }
+}

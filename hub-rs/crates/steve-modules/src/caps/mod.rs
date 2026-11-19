@@ -411,15 +411,15 @@ impl Capabilities {
 mod event_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use steve_store::{Published, Publisher, Store};
+    use steve_store::{BusEvent, Publisher, Store};
     use steve_types::{DomainEvent, Scope, Scoped};
 
     struct Events(Arc<Mutex<Vec<DomainEvent>>>);
     impl Publisher for Events {
-        fn publish(&self, _: steve_store::ChangeEvent) {}
-        fn publish_batch(&self, events: Vec<Published>) {
+        fn publish(&self, _: steve_store::BusEvent) {}
+        fn publish_batch(&self, events: Vec<BusEvent>) {
             for event in events {
-                if let Published::Domain(event) = event {
+                if let BusEvent::Domain(event) = event {
                     self.0.lock().unwrap().push(event);
                 }
             }

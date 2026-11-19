@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
-use crate::{Published, Store, StoreError};
+use crate::{BusEvent, Store, StoreError};
 
 static NEXT_SAVEPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
 struct Staged {
-    events: Vec<Published>,
+    events: Vec<BusEvent>,
     diagnostics: Vec<crate::diagnostics::Record>,
     diagnostic_until: i64,
     outbox: bool,
@@ -156,7 +156,7 @@ impl Drop for NestedFrameGuard {
 pub struct Tx<'a> {
     c: &'a Connection,
     store: Option<&'a Store>,
-    events: RefCell<Vec<Published>>,
+    events: RefCell<Vec<BusEvent>>,
     diagnostics: RefCell<Vec<crate::diagnostics::Record>>,
     /// New item capture windows become visible to producers only after commit.
     diagnostic_until: Cell<i64>,
@@ -166,7 +166,7 @@ pub struct Tx<'a> {
 
 impl Tx<'_> {
     /// Queues an event for after the commit.
-    pub fn publish(&self, e: impl Into<Published>) {
+    pub fn publish(&self, e: impl Into<BusEvent>) {
         let e = e.into();
         if let Some(store) = self.store {
             if let Err(e) = store.try_stage_event(e) {
@@ -267,7 +267,7 @@ impl Store {
         Some(unsafe { ptr.as_ref() })
     }
 
-    pub(crate) fn try_stage_event(&self, e: Published) -> Result<(), Published> {
+    pub(crate) fn try_stage_event(&self, e: BusEvent) -> Result<(), BusEvent> {
         let store_id = self.inner_id();
         ACTIVE_WRITES.with(|cell| {
             let mut list = cell.borrow_mut();
@@ -281,7 +281,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn emit_event(&self, e: Published) {
+    pub(crate) fn emit_event(&self, e: BusEvent) {
         if let Err(e) = self.try_stage_event(e) {
             self.inner.bus.publish_batch(vec![e]);
         }
@@ -426,7 +426,7 @@ impl Store {
     /// All `store.x()` repository reads and writes (as well as nested [`Store::atomic`] and
     /// [`Store::transaction`] calls) inside `f` reuse the active write connection without
     /// deadlocking, see uncommitted writes immediately, and isolate nested scopes with SQLite
-    /// `SAVEPOINT`s. `ChangeEvent`s, diagnostics, and outbox notifications are held back until the
+    /// `SAVEPOINT`s. `BusEvent`s, diagnostics, and outbox notifications are held back until the
     /// outermost transaction commits, and discarded on error or panic.
     #[track_caller]
     pub fn atomic<T, E: From<StoreError>>(&self, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {

@@ -58,14 +58,11 @@ fn gone(what: &str) -> BackendError {
     })
 }
 
-/// Forwards store change events to the Hub bus (the two enums serialize identically).
+/// Forwards one committed typed batch without changing its order or revision boundary.
 pub struct BusPublisher(pub Bus);
 
 impl s::Publisher for BusPublisher {
-    fn publish(&self, e: s::ChangeEvent) {
-        self.0.publish_batch(vec![s::Published::Legacy(e)]);
-    }
-    fn publish_batch(&self, events: Vec<s::Published>) {
+    fn publish_batch(&self, events: Vec<s::BusEvent>) {
         self.0.publish_batch(events);
     }
 }

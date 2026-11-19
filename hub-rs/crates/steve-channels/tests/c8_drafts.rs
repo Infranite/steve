@@ -239,7 +239,7 @@ async fn space_example_rules_disclosure_and_duty() {
         h.env
             .take_events()
             .iter()
-            .any(|e| matches!(e, steve_store::ChangeEvent::Space { id, .. } if *id == g1)),
+            .any(|e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Space { id, .. })) if id.as_str() == g1.as_str())),
         "SSE space"
     );
     // applying twice is a conflict

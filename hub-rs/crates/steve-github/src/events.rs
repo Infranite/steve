@@ -1,7 +1,7 @@
 //! Where GitHub changes go: signal events to S1's `steve_flow::ingest`, and
 //! the `{type:"gh", id, ws}` SSE notices. Both are small traits here so this crate does not depend
-//! on steve-flow or on a `ChangeEvent` variant that does not exist yet; the integrator forwards them
-//! (see the crate docs). `{type:"item", id}` goes straight through the store (`ChangeEvent::Item`).
+//! on steve-flow or on a `BusEvent` variant that does not exist yet; the integrator forwards them
+//! (see the crate docs). `{type:"item", id}` goes straight through the store (`WorkEvent::Item`).
 
 use std::sync::{Arc, Mutex};
 
@@ -52,7 +52,7 @@ pub trait EventSink: Send + Sync {
 }
 
 /// `{type:"gh", id, ws}`. Called after the commit. The integrator adds a
-/// `ChangeEvent::Gh { id, ws }` variant (and `"gh"` to `sse::MODULE_TYPES`) and publishes it.
+/// `IntegrationsEvent::Gh { id, ws }` variant (and `"gh"` to `the typed event contract`) and publishes it.
 pub trait GhNotifier: Send + Sync {
     fn gh(&self, ws: &str, id: &str);
 }

@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use steve_types::Scoped;
 
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -564,19 +565,45 @@ fn events_are_scoped_to_the_workspace() {
     t.kit.events.lock().unwrap().clear();
     t.yolo.put(WS, "u1", on()).unwrap();
     let ev = t.kit.events.lock().unwrap().clone();
-    assert!(ev.contains(&steve_store::ChangeEvent::Yolo { ws: WS.into() }));
-    assert_eq!(
-        serde_json::to_value(steve_store::ChangeEvent::YoloAction {
-            id: "ya_1".into(),
-            decision_id: Some("d".into()),
-            ws: WS.into()
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::Autonomy(steve_types::AutonomyEvent::Yolo {
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
         })
+    )));
+    assert_eq!(
+        serde_json::to_value(steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Autonomy(steve_types::AutonomyEvent::YoloAction {
+                id: {
+                    let value: String = "ya_1".into();
+                    steve_types::YoloActionId::from(value)
+                },
+                decision_id: {
+                    let value: Option<String> = Some("d".into());
+                    value.map(Into::into)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        ))
         .unwrap(),
         json!({"type": "yolo_action", "id": "ya_1", "decision_id": "d", "ws": WS})
     );
     assert_eq!(
-        steve_store::ChangeEvent::Yolo { ws: "w".into() }.ws(),
-        Some("w")
+        steve_types::BusEvent::Domain(steve_types::DomainEvent::Autonomy(
+            steve_types::AutonomyEvent::Yolo {
+                ws: {
+                    let value: String = "w".into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            }
+        ))
+        .scope(),
+        steve_types::Scope::Ws("w".into())
     );
 }
 

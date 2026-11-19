@@ -1,6 +1,6 @@
 //! What the knowledge module needs from the rest of the Hub, beyond [`steve_modules::Modules`]:
 //! a way to emit the
-//! `{type:"kb"}` SSE event (not yet a `ChangeEvent` variant), and the document loaders the index
+//! `{type:"kb"}` SSE event (not yet a `BusEvent` variant), and the document loaders the index
 //! queue reads bodies with (notes and folders always; files need the data directory, see
 //! [`crate::sources::files::FilesLoader`]).
 

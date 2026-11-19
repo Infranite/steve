@@ -51,7 +51,7 @@ install! { watch(reg, cx) [flow, mut jobs, tools] => [flow, jobs, tools] {
     let Env { bus, .. } = cx.clone();
     // new mailboxes get the triage template
     jobs.push(Box::pin(crate::wire::signals::watch_mailboxes(
-        bus.tap(&["connection"]),
+        bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))),
         flow.clone(),
         tools.mail.clone(),
     )));

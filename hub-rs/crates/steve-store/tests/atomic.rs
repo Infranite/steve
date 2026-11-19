@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 use steve_store::{
-    ChangeEvent, FnPublisher, NewBot, NewDecision, NewItem, NoPublisher, Store, StoreError, WS,
+    BusEvent, FnPublisher, NewBot, NewDecision, NewItem, NoPublisher, Store, StoreError, WS,
 };
 
-fn open_tracked() -> (tempfile::TempDir, Store, Arc<Mutex<Vec<ChangeEvent>>>) {
+fn open_tracked() -> (tempfile::TempDir, Store, Arc<Mutex<Vec<BusEvent>>>) {
     let dir = tempfile::tempdir().unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -97,7 +97,7 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
                 Ok::<_, StoreError>(())
             })?;
 
-            // Zero ChangeEvents have escaped while outer transaction is still open!
+            // Zero typed events have escaped while outer transaction is still open!
             assert!(events.lock().unwrap().is_empty());
             Ok((item.id, dec.id))
         })
@@ -112,14 +112,37 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
     assert_eq!(
         published,
         vec![
-            ChangeEvent::Item {
-                id: item_id.clone()
-            },
-            ChangeEvent::Decision {
-                id: dec_id,
-                item_id: Some(Some(item_id.clone())),
-            },
-            ChangeEvent::Item { id: item_id },
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = item_id.clone();
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Decision {
+                    id: {
+                        let value: String = dec_id;
+                        steve_types::DecisionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = Some(Some(item_id.clone()));
+                        value.map(|value| value.map(Into::into))
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = item_id;
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
         ]
     );
 
@@ -238,7 +261,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
                 )?
                 .unwrap();
 
-            // Inner `atomic` fails: its SQLite writes AND its staged ChangeEvents roll back via SAVEPOINT.
+            // Inner `atomic` fails: its SQLite writes AND its staged typed events roll back via SAVEPOINT.
             let inner_res = store.atomic(|| -> steve_store::Result<()> {
                 let inner = store
                     .items()
@@ -291,8 +314,24 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
     assert_eq!(
         *events.lock().unwrap(),
         vec![
-            ChangeEvent::Item { id: "ST-1".into() },
-            ChangeEvent::Item { id: "ST-2".into() },
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = "ST-1".into();
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = "ST-2".into();
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
         ]
     );
 }
