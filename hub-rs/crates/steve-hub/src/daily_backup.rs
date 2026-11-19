@@ -192,7 +192,16 @@ fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
         let mut b = tar::Builder::new(file);
         b.follow_symlinks(false);
         for part in parts {
-            append(&mut b, home, Path::new(part), &mut skipped, true)?;
+            // Only item workspaces contain regenerable toolchain data. The other parts
+            // hold durable user files even when their names or markers resemble caches.
+            append(
+                &mut b,
+                home,
+                Path::new(part),
+                &mut skipped,
+                true,
+                part == "workspaces",
+            )?;
         }
         let mut file = b.into_inner()?;
         file.flush()?;
@@ -227,13 +236,14 @@ fn report_skipped(skipped: &[SkippedDir]) {
     );
 }
 
-/// Visit every directory; the shared predicate has no backup-specific names or depth limit.
+/// Visit every directory; only the workspace part enables the shared cache predicate, at any depth.
 fn append(
     archive: &mut tar::Builder<fs::File>,
     home: &Path,
     relative: &Path,
     skipped: &mut Vec<SkippedDir>,
     top_level: bool,
+    skip_caches: bool,
 ) -> std::io::Result<()> {
     let path = home.join(relative);
     let metadata = if top_level {
@@ -244,7 +254,7 @@ fn append(
     if relative == Path::new("signing").join(NOT_COPIED) {
         return Ok(());
     }
-    if metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path, None) {
+    if skip_caches && metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path, None) {
         skipped.push(SkippedDir {
             path: relative.to_owned(),
             bytes: logical_bytes(&path),
@@ -263,6 +273,7 @@ fn append(
                 &relative.join(entry?.file_name()),
                 skipped,
                 false,
+                skip_caches,
             )?;
         }
     } else {
