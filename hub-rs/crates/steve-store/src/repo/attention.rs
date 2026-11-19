@@ -279,7 +279,7 @@ fn window(
     if let Some(t) = tx.query_row("SELECT token FROM attention_windows WHERE workspace_id=? AND user_id=? AND kind=? AND revision=? AND upper_seq=? AND position=? AND expires>? LIMIT 1",params![ws,user,kind,revision,upper,position,now+3_600_000], |r| r.get::<_,String>(0)).optional()? { return Ok(t); }
     let token = format!("{}{}", uid("aw"), uid(""));
     tx.execute(
-        "INSERT INTO attention_windows VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO attention_windows(token,workspace_id,user_id,kind,revision,upper_seq,position,expires) VALUES(?,?,?,?,?,?,?,?)",
         params![token, ws, user, kind, revision, upper, position, now + TTL],
     )?;
     Ok(token)

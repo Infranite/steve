@@ -23,7 +23,152 @@ pub struct SchemaObject {
     pub sql: Option<String>,
 }
 
-/// The same whitespace normalization is used by conversion and equivalence tests.
+#[derive(Debug)]
+struct DdlToken<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+    quoted: bool,
+}
+
+/// Lexical boundaries only: quotes and comments must never introduce delimiters.
+fn ddl_tokens(sql: &str) -> Option<Vec<DdlToken<'_>>> {
+    let b = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b[i..].starts_with(b"--") {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b[i..].starts_with(b"/*") {
+            i += 2;
+            i += sql[i..].find("*/")? + 2;
+            continue;
+        }
+        let start = i;
+        let quoted = b"'\"`[".contains(&b[i]);
+        if quoted {
+            let close = if b[i] == b'[' { b']' } else { b[i] };
+            i += 1;
+            loop {
+                let c = *b.get(i)?;
+                i += 1;
+                if c == close {
+                    if b.get(i) == Some(&close) {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 128 {
+            i += 1;
+            while b
+                .get(i)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 128)
+            {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+        tokens.push(DdlToken {
+            text: &sql[start..i],
+            start,
+            end: i,
+            quoted,
+        });
+    }
+    Some(tokens)
+}
+
+fn whitespace(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Ordinary table equality ignores physical column order, and nothing inside a
+/// column declaration. Constraints remain ordered; virtual tables stay strict.
+/// This is comparison data, not SQL to execute or a request to rebuild a table.
+fn table_identity(sql: &str) -> Option<String> {
+    let tokens = ddl_tokens(sql)?;
+    if !tokens.first()?.text.eq_ignore_ascii_case("CREATE")
+        || !tokens.get(1)?.text.eq_ignore_ascii_case("TABLE")
+    {
+        return None;
+    }
+    let open = tokens.iter().position(|t| !t.quoted && t.text == "(")?;
+    let mut depth = 1;
+    let mut start = tokens[open].end;
+    let mut declarations = Vec::new();
+    let mut close = None;
+    for t in &tokens[open + 1..] {
+        if t.quoted {
+            continue;
+        }
+        match t.text {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    declarations.push(sql[start..t.start].trim());
+                    close = Some(t);
+                    break;
+                }
+            }
+            "," if depth == 1 => {
+                declarations.push(sql[start..t.start].trim());
+                start = t.end;
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let mut columns = BTreeMap::new();
+    let mut constraints = Vec::new();
+    for declaration in declarations {
+        let tokens = ddl_tokens(declaration)?;
+        let first = tokens.first()?;
+        if !first.quoted
+            && ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"]
+                .iter()
+                .any(|word| first.text.eq_ignore_ascii_case(word))
+        {
+            constraints.push(declaration);
+        } else {
+            let name = if first.quoted {
+                let quote = first.text.chars().next()?;
+                let end = if quote == '[' { ']' } else { quote };
+                first.text[1..first.text.len() - 1]
+                    .replace(&format!("{end}{end}"), &end.to_string())
+            } else {
+                first.text.to_owned()
+            };
+            if columns.insert(name, declaration).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(
+        serde_json::to_string(&(
+            whitespace(&sql[..tokens[open].start]),
+            columns,
+            constraints,
+            whitespace(&sql[close.end..]),
+        ))
+        .expect("DDL strings are serializable"),
+    )
+}
+
+/// Tables compare complete declarations by name, preserving all literal bytes,
+/// comments and internal whitespace. Other objects retain the original strict
+/// whitespace-normalized comparison. sql is a comparison representation only.
 /// Excluding contracts also excludes their indexes and both retired version tables.
 pub fn normalized_structure(
     conn: &Connection,
@@ -32,11 +177,19 @@ pub fn normalized_structure(
     let mut stmt = conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name")?;
     let objects = stmt.query_map([], |r| {
         let sql: Option<String> = r.get(3)?;
+        let kind: String = r.get(0)?;
+        let sql = sql.map(|s| {
+            if kind == "table" {
+                table_identity(&s).unwrap_or_else(|| whitespace(&s))
+            } else {
+                whitespace(&s)
+            }
+        });
         Ok(SchemaObject {
-            kind: r.get(0)?,
+            kind,
             name: r.get(1)?,
             table: r.get(2)?,
-            sql: sql.map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")),
+            sql,
         })
     })?;
     objects
@@ -60,13 +213,16 @@ fn pragma_rows(conn: &Connection, pragma: &str, table: &str) -> rusqlite::Result
     let mut rows = stmt
         .query_map([], |r| (0..columns).map(|i| r.get(i)).collect())?
         .collect::<rusqlite::Result<Vec<Vec<Value>>>>()?;
-    if pragma == "index_list" {
-        // Enumeration position is not index identity or semantics.
+    if matches!(pragma, "index_list" | "table_info") {
+        // Enumeration position / physical cid is not logical schema identity.
         for row in &mut rows {
             row.remove(0);
         }
     }
-    rows.sort_by_key(|r| format!("{r:?}"));
+    rows.sort_by_key(|r| match (pragma, r.first()) {
+        ("table_info", Some(Value::Text(name))) => name.clone(),
+        _ => format!("{r:?}"),
+    });
     Ok(rows)
 }
 
