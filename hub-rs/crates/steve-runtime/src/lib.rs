@@ -21,3 +21,5 @@ pub mod jobs;
 pub use jobs::{FirstRun, Task, every, every_after, spawn};
 #[cfg(feature = "testkit")]
 pub mod testkit;
+#[cfg(feature = "cache")]
+pub mod cache;
