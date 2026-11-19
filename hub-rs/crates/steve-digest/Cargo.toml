@@ -6,6 +6,7 @@ publish.workspace = true
 description = "The digest base: conversation profiles, windows, digest packets, matters and personal todos"
 
 [dependencies]
+steve-runtime = { path = "../steve-runtime" }
 steve-types = { path = "../steve-types" }
 steve-store = { path = "../steve-store" }
 # Source adapter reuses channel visibility rather than widening personal-account access.

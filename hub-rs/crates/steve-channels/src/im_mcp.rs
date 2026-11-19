@@ -68,7 +68,8 @@ pub async fn call(ch: &Channels, cx: &McpCx, name: &str, args: &Value) -> Result
 pub(crate) fn tz_of(c: &rusqlite::Connection, ws: &str) -> chrono_tz::Tz {
     steve_flow::schedules::workspace_tz(c, ws)
         .ok()
-        .and_then(|t| steve_flow::cron::parse_tz(&t).ok())
+        .and_then(|t| steve_runtime::tz::Zone::parse(&t).ok())
+        .and_then(|z| z.name().parse().ok())
         .unwrap_or_else(steve_modules::zone::default_tz)
 }
 
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn times_parse_in_the_workspace_zone() {
-        let tz = steve_flow::cron::parse_tz("Asia/Shanghai").expect("tz");
+        let tz = "Asia/Shanghai".parse().expect("tz");
         assert_eq!(
             parse_time(&json!(1_762_400_000_000_i64), tz),
             Some(1_762_400_000_000)

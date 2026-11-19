@@ -16,10 +16,11 @@ use steve_store::Tx;
 use steve_store::base::{Change, Viewer, show};
 use tokio::sync::Notify;
 
-use crate::cron::{CronExpr, parse_tz, validate};
+use crate::cron::{DescribeCron, zone as parse_zone};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::schedules::{self, Fields, MAX_BUDGET_USD, Mode, Origin, Schedule, Spec};
 use crate::when::rule_cron;
+use steve_runtime::schedule::{CronExpr, validate};
 
 pub mod flow;
 pub mod source;
@@ -182,10 +183,10 @@ fn parse_budget(s: &str) -> Option<f64> {
 /// A `when` phrase (or a cron) → `(cron, zh-CN describe, describe for the card)` by the rules only;
 /// `None` = not understood.
 fn time_of(said: &str, tz: &str, now: i64) -> Option<(String, String, String)> {
-    let tz = parse_tz(tz).ok()?;
+    let tz = parse_zone(tz).ok()?;
     let now = DateTime::from_timestamp_millis(now)?;
     let rule = rule_cron(said).ok()??;
-    let expr = validate(&rule.cron, tz, now).ok()?;
+    let expr = validate(&rule.cron, &tz, now).ok()?;
     Some((
         expr.as_str().to_string(),
         expr.describe_zh(),

@@ -28,10 +28,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_flow::FlowResult;
 use steve_flow::alarms::{ALARM_FIRED_V, AlarmFired, AlarmLine, AlarmSource, BRIEFING_READY, Want};
-use steve_flow::cron::CronExpr;
 use steve_flow::policy::{MISSED_GRACE_MS, Staleness};
 use steve_flow::schedules::{self, Fields, Mode, Origin, Schedule, Spec};
 use steve_modules::ApiError;
+use steve_runtime::schedule::CronExpr;
 use steve_store::outbox::{Applied, ConsumeError, Consumer, Event, Since};
 use steve_store::{StoreError, Tx, uid};
 
@@ -149,11 +149,14 @@ fn day_end(zone: Zone, ms: i64) -> Option<i64> {
 /// fires; one not planned before is not added once its time is past, steve-flow `alarms::PAST_GRACE_MS`).
 pub fn wants(cron: &CronExpr, zone: Zone, owner: &str, now: i64) -> Vec<Want> {
     let mut out = Vec::new();
+    let Ok(cron_zone) = steve_runtime::tz::Zone::parse(zone.name()) else {
+        return out;
+    };
     let Some(mut t) = zone.day_start(now).map(|s| s - 1) else {
         return out;
     };
     for _ in 0..PLAN_STEPS_MAX {
-        let Some(next) = cron.next_after_ms(zone.tz, t) else {
+        let Some(next) = cron.next_after_ms(&cron_zone, t) else {
             break;
         };
         t = next;
@@ -621,7 +624,11 @@ pub fn render(a: &Agenda) -> String {
 /// When a brief planned for `planned` stops being pushed: [`PUSH_UNTIL_MINUTE`] of its day, or the end
 /// of its day for one planned at or after it.
 pub fn push_until(zone: Zone, planned: i64) -> Option<i64> {
-    let noon = Staleness::StaleAfter(PUSH_UNTIL_MINUTE).stale_at(planned, None, zone.tz)?;
+    let noon = Staleness::StaleAfter(PUSH_UNTIL_MINUTE).stale_at(
+        planned,
+        None,
+        steve_runtime::tz::Zone::parse(zone.name()).ok()?,
+    )?;
     if planned < noon {
         Some(noon)
     } else {

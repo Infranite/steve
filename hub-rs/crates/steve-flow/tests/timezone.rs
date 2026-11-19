@@ -12,13 +12,13 @@ fn runtime_dst_table() {
             parse_until(
                 &serde_json::json!(wall.format("%H:%M").to_string()),
                 z.day(ms).unwrap().0,
-                name.parse().unwrap()
+                z
             ),
             Some(ms)
         );
         let minute = (chrono::Timelike::hour(&wall) * 60 + chrono::Timelike::minute(&wall)) as u16;
         assert_eq!(
-            Staleness::StaleAfter(minute).stale_at(ms, None, name.parse().unwrap()),
+            Staleness::StaleAfter(minute).stale_at(ms, None, z),
             Some(ms)
         );
     }

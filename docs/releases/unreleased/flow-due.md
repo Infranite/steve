@@ -1,0 +1,1 @@
+Cron evaluation uses the shared runtime implementation and RFC 5545 time-zone rules: a time in a spring-forward gap is shifted using the pre-transition offset, and a repeated fall-back time runs on its first occurrence only.

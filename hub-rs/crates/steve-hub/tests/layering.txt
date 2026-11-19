@@ -35,6 +35,7 @@ edge	steve-digest	steve-flow
 edge	steve-digest	steve-i18n
 edge	steve-digest	steve-knowledge
 edge	steve-digest	steve-modules
+edge	steve-digest	steve-runtime
 edge	steve-digest	steve-store
 edge	steve-digest	steve-types
 edge	steve-flow	steve-i18n

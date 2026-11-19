@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_store::Tx;
 
-use crate::cron::{CronExpr, parse_tz};
+use crate::cron::zone;
 use crate::exec::RunStatus;
 use crate::policy::{
     ClaimAction, MissedPolicy, OVERLAP_SKIP_LABEL, OverlapPolicy, TriggerKind, overlap_blocks,
@@ -18,6 +18,7 @@ use crate::policy::{
 };
 use crate::runs::{self, NewRun, NewStep};
 use crate::{FlowCx, FlowResult};
+use steve_runtime::schedule::CronExpr;
 
 /// Longest sleep between two rounds.
 pub const IDLE_MS: i64 = 15_000;
@@ -90,8 +91,8 @@ fn open_item(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<Option<Strin
 /// `上一次还没结束，跳过 <time> 的这一次`: the open item's timeline line and the skipped run's label.
 pub fn open_item_skip_label(at: i64, tz: Option<&str>) -> String {
     let tz = tz
-        .and_then(|t| parse_tz(t).ok())
-        .unwrap_or(chrono_tz::Asia::Taipei);
+        .and_then(|t| zone(t).ok())
+        .unwrap_or_else(steve_runtime::tz::Zone::system);
     format!(
         "{OVERLAP_SKIP_LABEL} {} 的这一次",
         crate::schedules::local(at, tz, "%m-%d %H:%M")
@@ -235,7 +236,7 @@ fn due(c: &Connection, now: i64) -> FlowResult<Vec<Due>> {
 
 /// Claims one trigger. `None` = someone else claimed it first (or it is broken and was disabled).
 fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
-    let (Ok(expr), Ok(tz)) = (CronExpr::parse(&d.cron), parse_tz(&d.tz)) else {
+    let (Ok(expr), Ok(tz)) = (CronExpr::parse(&d.cron), zone(&d.tz)) else {
         tracing::error!(trigger = %d.id, cron = %d.cron, tz = %d.tz, "unusable time trigger, disabled");
         tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
         return Ok(None);

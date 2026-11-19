@@ -8,11 +8,12 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use regex::Regex;
 use serde::Serialize;
+use steve_runtime::tz::Zone;
 
-use crate::cron::{CronError, CronExpr, validate};
+use crate::cron::DescribeCron;
+use steve_runtime::schedule::{CronError, CronExpr, validate};
 
 /// Gateway timeout for the model fallback.
 pub const MODEL_TIMEOUT_SECS: u64 = 30;
@@ -28,7 +29,7 @@ pub enum WhenError {
     #[error("{}", steve_i18n::t!("flow.when.not_understood"))]
     NotUnderstood,
     /// Understood, but the result is not allowed (too frequent, unsupported cron…).
-    #[error(transparent)]
+    #[error("{}", crate::cron::error(.0))]
     Cron(#[from] CronError),
 }
 
@@ -63,15 +64,15 @@ pub struct RuleCron {
 }
 
 /// Rules, then validation. `Err(NotUnderstood)` means "ask the model".
-pub fn parse_when(when: &str, tz: Tz, now: DateTime<Utc>) -> Result<Parsed, WhenError> {
+pub fn parse_when(when: &str, tz: Zone, now: DateTime<Utc>) -> Result<Parsed, WhenError> {
     let rule = rule_cron(when)?.ok_or(WhenError::NotUnderstood)?;
-    let expr = validate(&rule.cron, tz, now)?;
+    let expr = validate(&rule.cron, &tz, now)?;
     Ok(build(expr, tz, now, rule.assumed, rule.notes, By::Rule))
 }
 
 /// Validates the model's answer. Anything that is not one valid 5-field cron → `NotUnderstood`;
 /// a valid but disallowed cron (e.g. every minute) keeps its specific error.
-pub fn accept_model_output(raw: &str, tz: Tz, now: DateTime<Utc>) -> Result<Parsed, WhenError> {
+pub fn accept_model_output(raw: &str, tz: Zone, now: DateTime<Utc>) -> Result<Parsed, WhenError> {
     let candidate = raw
         .lines()
         .map(|l| {
@@ -81,7 +82,7 @@ pub fn accept_model_output(raw: &str, tz: Tz, now: DateTime<Utc>) -> Result<Pars
         })
         .find(|l| CronExpr::parse(l).is_ok())
         .ok_or(WhenError::NotUnderstood)?;
-    let expr = validate(candidate, tz, now)?;
+    let expr = validate(candidate, &tz, now)?;
     Ok(build(expr, tz, now, None, Vec::new(), By::Model))
 }
 
@@ -107,7 +108,7 @@ pub fn model_prompt(when: &str) -> String {
 
 fn build(
     expr: CronExpr,
-    tz: Tz,
+    tz: Zone,
     now: DateTime<Utc>,
     assumed: Option<String>,
     notes: Vec<String>,
@@ -118,7 +119,7 @@ fn build(
         tz: tz.name().to_string(),
         describe: expr.describe(),
         next: expr
-            .upcoming(tz, now, 3)
+            .upcoming(&tz, now, 3)
             .iter()
             .map(|t| t.timestamp_millis())
             .collect(),
@@ -524,7 +525,7 @@ fn every_hours(n: u32) -> Result<Option<RuleCron>, WhenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cron::parse_tz;
+    use crate::cron::zone;
     use chrono::TimeZone;
 
     fn cron_of(when: &str) -> String {
@@ -694,7 +695,7 @@ mod tests {
             assert_eq!(rule_cron(when), Ok(None), "{when:?}");
             if !when.trim().is_empty() {
                 assert_eq!(
-                    parse_when(when, parse_tz("Asia/Taipei").unwrap(), now()),
+                    parse_when(when, zone("Asia/Taipei").unwrap(), now()),
                     Err(WhenError::NotUnderstood),
                     "{when:?}"
                 );
@@ -704,7 +705,7 @@ mod tests {
 
     #[test]
     fn too_frequent_and_bad_cron_are_specific_errors() {
-        let tz = parse_tz("Asia/Taipei").unwrap();
+        let tz = zone("Asia/Taipei").unwrap();
         assert_eq!(
             rule_cron("每隔 2 分钟"),
             Err(WhenError::Cron(CronError::TooFrequent))
@@ -731,7 +732,7 @@ mod tests {
 
     #[test]
     fn parse_response_shape() {
-        let tz = parse_tz("Asia/Taipei").unwrap();
+        let tz = zone("Asia/Taipei").unwrap();
         let p = parse_when("工作日早上九点半", tz, now()).unwrap();
         assert_eq!(p.cron, "30 9 * * 1-5");
         assert_eq!(p.describe, "工作日 09:30");
@@ -760,7 +761,7 @@ mod tests {
 
     #[test]
     fn describe_of_parsed_phrases() {
-        let tz = parse_tz("Asia/Taipei").unwrap();
+        let tz = zone("Asia/Taipei").unwrap();
         for (when, text) in [
             ("每天 08:30", "每天 08:30"),
             ("每周五 9 点", "每周五 09:00"),
@@ -781,7 +782,7 @@ mod tests {
 
     #[test]
     fn model_output() {
-        let tz = parse_tz("Asia/Taipei").unwrap();
+        let tz = zone("Asia/Taipei").unwrap();
         for raw in [
             "0 9 * * 1",
             "`0 9 * * 1`",
@@ -811,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn english_labels() {
-        let tz = parse_tz("Asia/Taipei").unwrap();
+        let tz = zone("Asia/Taipei").unwrap();
         steve_i18n::scope(steve_i18n::EN, async {
             let p = parse_when("每月 31 日", tz, now()).unwrap();
             assert_eq!(p.assumed.as_deref(), Some("No time given, using 09:00"));

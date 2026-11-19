@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{NodeKind, NodeOutcome, Rule, RunCx, one_of, opt_str, str_list};
-use crate::cron::{CronExpr, parse_tz};
+use crate::cron::zone;
+use steve_runtime::schedule::CronExpr;
 
 pub struct Trigger;
 
@@ -73,7 +74,7 @@ impl NodeKind for Trigger {
             let cron = opt_str(cfg, "cron")?.unwrap_or("");
             CronExpr::parse(cron).map_err(|_| steve_i18n::t!("flow.node.trigger_cron"))?;
             if let Some(tz) = opt_str(cfg, "tz")? {
-                parse_tz(tz).map_err(|_| steve_i18n::t!("flow.node.trigger_tz", tz = tz))?;
+                zone(tz).map_err(|_| steve_i18n::t!("flow.node.trigger_tz", tz = tz))?;
             }
         }
         if let Some(m) = opt_str(cfg, "missed")?
