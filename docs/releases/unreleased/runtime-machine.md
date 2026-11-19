@@ -1,0 +1,1 @@
+The shared runtime now provides dependency-free static state-machine tables and structural checks for domain implementations. Commands may be rejected; declared observations must have a transition in every state, including terminal self-loops. No domain behavior is switched to this mechanism yet; its interface remains provisional until the first real caller is validated.
