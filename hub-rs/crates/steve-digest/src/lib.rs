@@ -56,14 +56,14 @@ pub mod window;
 pub use api::routes;
 pub use conv::ConvRef;
 
-use steve_store::ChangeEvent;
-
 /// `{type:"digest", id, ws}` after the commit: a conversation profile, matter, todo or packet changed.
 pub(crate) fn event(tx: &steve_store::Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Digest {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Digest {
+            id: id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 /// The first `n` characters of `s`, with `…` when cut.
