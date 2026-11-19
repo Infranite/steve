@@ -181,7 +181,7 @@ steve-core/src/changes.rs	"settings:data — 会话记录、事件原文、邮�
 steve-core/src/changes.rs	"settings:general — 语言、启动页、离开期间汇报、时区"	1
 steve-core/src/changes.rs	"settings:items — 默认验收方式（自动验收）、事项编号前缀、前置完成后、交接阈值、完成后自动归档"	1
 steve-core/src/changes.rs	"settings:look — 字号、动态效果"	1
-steve-core/src/changes.rs	"settings:notify — 免打扰时段、每天汇报时间"	1
+steve-core/src/changes.rs	"settings:notify — 免打扰时段"	1
 steve-core/src/changes.rs	"tags — 事项标签：新建、改名、改分类、改描述、删除"	1
 steve-core/src/changes.rs	"不再询问：工具直接运行，由系统沙箱兜底"	2
 steve-core/src/changes.rs	"不加载"	1
