@@ -77,28 +77,11 @@ pub fn descriptors() -> Vec<EntityDesc> {
         protect: None,
         budget: Budget::default(),
     });
-    let mut entities = vec![
+    vec![
         CORE.to_wire(),
         COMMS.to_wire(),
         STREAM.to_wire(),
         CORE_STREAM.to_wire(),
         log,
-    ];
-    entities.extend(digest_descriptors());
-    entities
-}
-const TEXT: StaticFieldType = StaticFieldType::Text;
-const INT: StaticFieldType = StaticFieldType::Int;
-macro_rules! fields {($($name:literal : $ty:expr),* $(,)?)=>{&[$(Field{name:$name,ty:$ty,nullable:false}),*]};}
-steve_storage_api::entity_desc!(pub SOURCE={name:"verify_digest_source",domain:Domain::Comms,key:&["source","id"],fields:fields!["source":TEXT,"id":TEXT,"workspace_id":TEXT,"conv":TEXT,"status":TEXT,"at":INT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
-steve_storage_api::entity_desc!(pub RECEIPT={name:"verify_digest_receipt",domain:Domain::Comms,key:&["workspace_id","conv","message_id"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"message_id":TEXT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
-steve_storage_api::entity_desc!(pub PENDING={name:"verify_digest_pending",domain:Domain::Comms,key:&["workspace_id","conv","message_id"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"message_id":TEXT,"at":INT,"position":INT],indexes:&[],kind:StaticEntityKind::Log,retention:None});
-steve_storage_api::entity_desc!(pub CONVS={name:"verify_digest_convs",domain:Domain::Comms,key:&["workspace_id","conv"],fields:fields!["workspace_id":TEXT,"conv":TEXT,"messages":INT,"oldest":INT,"newest":INT],indexes:&[],kind:StaticEntityKind::Mutable,retention:None});
-pub fn digest_descriptors() -> Vec<EntityDesc> {
-    vec![
-        SOURCE.to_wire(),
-        RECEIPT.to_wire(),
-        PENDING.to_wire(),
-        CONVS.to_wire(),
     ]
 }
