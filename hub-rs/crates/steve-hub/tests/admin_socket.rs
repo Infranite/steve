@@ -17,7 +17,7 @@ struct Hub {
     _temp: tempfile::TempDir,
     cfg: Arc<Config>,
     store: Store,
-    jobs: Vec<tokio::task::JoinHandle<()>>,
+    jobs: Vec<steve_runtime::Task>,
     _lock: std::fs::File,
 }
 fn config(home: &std::path::Path) -> (Arc<Config>, steve_hub::wire::Vars) {
@@ -62,7 +62,7 @@ impl Hub {
         let wired = steve_hub::wire::wire_with(&cfg, &Bus::new(), vars).unwrap();
         let store = wired.modules.as_ref().unwrap().store.clone();
         store.ensure_workspace().unwrap();
-        let jobs = wired.jobs.into_iter().map(tokio::spawn).collect();
+        let jobs = wired.jobs.into_iter().map(|job| job.spawn()).collect();
         Self {
             _temp: temp,
             cfg,
@@ -87,17 +87,17 @@ impl Hub {
     }
     async fn stop(mut self) {
         for job in &self.jobs {
-            job.abort();
+            job.stop();
         }
         for job in self.jobs.drain(..) {
-            let _ = job.await;
+            job.await;
         }
     }
 }
 impl Drop for Hub {
     fn drop(&mut self) {
         for job in &self.jobs {
-            job.abort();
+            job.stop();
         }
     }
 }

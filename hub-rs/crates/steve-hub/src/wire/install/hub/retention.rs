@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, _cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Box::pin(run(db.clone())));
+    jobs.push(Job::new("storage.retention", run(db.clone())));
 }}
 
 struct State {
