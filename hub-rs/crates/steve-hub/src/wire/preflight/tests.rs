@@ -68,9 +68,10 @@ fn preflight_of(hs: &Arc<crate::harnesses::HubHarnesses>, linked: Vec<String>) -
 async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devices() {
     let (_d, s) = store();
     let home = tempfile::tempdir().unwrap();
-        let cfg = crate::config::Config::from_vars(|k| {
-            (k == "STEVE_HOME").then(|| home.path().display().to_string())
-        }).unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
     let hs = crate::harnesses::HubHarnesses::of(
         &cfg,
         crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),
@@ -132,9 +133,10 @@ async fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on
 async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     let (_d, s) = store();
     let home = tempfile::tempdir().unwrap();
-        let cfg = crate::config::Config::from_vars(|k| {
-            (k == "STEVE_HOME").then(|| home.path().display().to_string())
-        }).unwrap();
+    let cfg = crate::config::Config::from_vars(|k| {
+        (k == "STEVE_HOME").then(|| home.path().display().to_string())
+    })
+    .unwrap();
     let hs = crate::harnesses::HubHarnesses::of(
         &cfg,
         crate::system::RuntimeReports::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))),

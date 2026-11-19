@@ -611,7 +611,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config::from_vars(|k| {
             (k == "STEVE_HOME").then(|| home.path().display().to_string())
-        }).unwrap();
+        })
+        .unwrap();
         let reports = crate::system::RuntimeReports::new(Arc::new(
             steve_runtime::cache::Caches::new(cfg.cache),
         ));
