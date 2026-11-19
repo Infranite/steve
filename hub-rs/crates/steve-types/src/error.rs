@@ -83,7 +83,8 @@ impl Code {
             | Self::Exhausted
             | Self::Unavailable
             | Self::Timeout => Retry::Later { after_ms: None },
-            Self::OutcomeUnknown => Retry::Now,
+            // The operation may already have taken effect: ask (reconcile), do not resend. A
+            // producer that knows a resend is safe after reconciliation sets `retry` itself.
             _ => Retry::Never,
         }
     }

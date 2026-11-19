@@ -39,7 +39,7 @@ fn constructors_and_wire_values_round_trip() {
     let waiting = TestReason::wait(1500_i64, "busy");
     assert_eq!(waiting.params.0["delay_ms"], Param::Int(1500));
     assert_eq!(waiting.retry, Code::Busy.default_retry());
-    assert_eq!(TestReason::lost("lost reply").retry, Retry::Now);
+    assert_eq!(TestReason::lost("lost reply").retry, Retry::Never);
     let retry = Retry::Later {
         after_ms: Some(250),
     };

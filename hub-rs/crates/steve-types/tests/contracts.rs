@@ -55,7 +55,7 @@ fn ids_are_transparent_labels() {
 #[test]
 fn code_table_matches_the_contract() {
     use Code::*;
-    use Retry::{Later, Never, Now};
+    use Retry::{Later, Never};
     let table = [
         (Invalid, "invalid", 400, Never),
         (Unauthenticated, "unauthenticated", 401, Never),
@@ -72,7 +72,7 @@ fn code_table_matches_the_contract() {
         (Exhausted, "exhausted", 507, Later { after_ms: None }),
         (Unavailable, "unavailable", 503, Later { after_ms: None }),
         (Timeout, "timeout", 504, Later { after_ms: None }),
-        (OutcomeUnknown, "outcome_unknown", 502, Now),
+        (OutcomeUnknown, "outcome_unknown", 502, Never),
         (Incompatible, "incompatible", 500, Never),
         (Internal, "internal", 500, Never),
     ];
