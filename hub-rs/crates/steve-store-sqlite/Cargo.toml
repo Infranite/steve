@@ -3,11 +3,27 @@ name = "steve-store-sqlite"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
+description = "The built-in SQLite implementation of Steve's domain storage contract; the only crate that may use rusqlite"
 
 [dependencies]
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+steve-types = { path = "../steve-types" }
+steve-storage-api = { path = "../steve-storage-api" }
+# In-memory metrics (executor waits and holds, retention slices); the Hub installs the recorder.
+metrics = "=0.24.6"
+r2d2 = "=0.8.10"
+r2d2_sqlite = "=0.35.0"
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "hooks"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
 sha2 = "=0.11.1"
+thiserror = "=2.0.21"
+# Only the oneshot that hands a committed unit of work back to its async caller.
+tokio = { version = "=1.54.1", features = ["sync"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.29.0", features = ["v4"] }
 
 [dev-dependencies]
 # Temporary: only the legacy Store::open structural equivalence test; remove with the old runner.
 steve-store = { path = "../steve-store" }
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
