@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -95,17 +96,6 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -225,15 +215,20 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        // on the Node: its turn is under way (not only the session opening)
-        until(10, || async {
-            let s = e.session(&sid).await;
-            s["busy"] == true && s["status"] == "running"
-        })
-        .await,
-        "the first turn runs"
-    );
+    // Receiving the prompt proves the Node started the turn. The recorded fact survives a quick
+    // completion, whereas sampling busy/running can miss the entire turn under contention.
+    eventually(
+        "the fake adapter receives the first item prompt",
+        || async {
+            let session = e.session(&sid).await;
+            let Some(native) = session["harness_session_id"].as_str() else {
+                return false;
+            };
+            let sessions = std::collections::BTreeSet::from([native.to_owned()]);
+            e.prompts_in(Some(&sessions)).1 > 0
+        },
+    )
+    .await;
     sid
 }
 
@@ -306,7 +301,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     let (status, result) = act(&e, dep, "finish").await;
     assert_eq!(status, 200, "{result}");
     assert!(
-        until(15, || async {
+        eventually("item_actions condition", || async {
             let (_, ss) = e.call("GET", "/api/sessions", None).await;
             ss.as_array()
                 .unwrap()
@@ -326,7 +321,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     // the fake adapter records a prompt after its session is already running: wait for it
     assert!(
-        until(15, || async {
+        eventually("item_actions condition", || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
@@ -404,13 +399,16 @@ async fn pause_finish_drop_and_new_cycles() {
     let (s, v) = act(&e, &iid, "finish").await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(10, || async { e.session(&sid).await["busy"] == false }).await,
+        eventually("item_actions condition", || async {
+            e.session(&sid).await["busy"] == false
+        })
+        .await,
         "the running turn is cancelled: {} {}",
         e.session(&sid).await,
         lifecycle(&e, &iid).await
     );
     assert!(
-        until(15, || async {
+        eventually("item_actions condition", || async {
             lifecycle(&e, &iid).await["phase"] == "closed"
         })
         .await,
@@ -536,7 +534,7 @@ async fn pause_finish_drop_and_new_cycles() {
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
     assert!(
-        until(10, || async {
+        eventually("item_actions condition", || async {
             lifecycle(&e, &iid).await["phase"] == "closed"
         })
         .await,
@@ -561,14 +559,14 @@ async fn pause_finish_drop_and_new_cycles() {
     .await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(10, || async {
+        eventually("item_actions condition", || async {
             e.prompts().iter().any(|p| p.contains("再做一次"))
         })
         .await,
         "a new cycle with a goal starts the work"
     );
     assert!(
-        until(10, || async {
+        eventually("item_actions condition", || async {
             lifecycle(&e, &iid).await["phase"] == "active"
         })
         .await,

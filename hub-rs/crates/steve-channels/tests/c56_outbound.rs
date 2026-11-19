@@ -394,22 +394,24 @@ fn checks_pass(h: &H) {
 /// Runs the queue until no draft's disclosure check is still running (on your own account the check
 /// model runs after the draft is written).
 async fn checked(h: &H) {
-    for _ in 0..500 {
-        let waiting = row(
+    let checking = || {
+        row(
             h,
             "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
-              WHERE m.status = 'draft' AND b.verdict = 'checking'",
+             WHERE m.status = 'draft' AND b.verdict = 'checking'",
             &[],
         )[0]
         .as_i64()
-        .unwrap();
-        if waiting == 0 {
-            return;
+        .unwrap()
+    };
+    steve_runtime::testkit::eventually("draft disclosure checks finish", || async {
+        if checking() == 0 {
+            return true;
         }
         h.outbox.send_due(&h.ch).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("a disclosure check did not finish");
+        checking() == 0
+    })
+    .await;
 }
 
 fn nothing_sent(h: &H) {
@@ -4116,15 +4118,14 @@ async fn the_undo_window_follows_the_account() {
 /// Choose “改写后再看” on `decision` and wait for the new card.
 async fn rewrite_and_wait(h: &H, message_id: &str, decision: &str) -> String {
     decide(h, decision, "rewrite", "").expect("rewrite");
-    h.outbox.send_due(&h.ch).await;
-    for _ in 0..300 {
-        let again = decision_of(h, message_id);
-        if again != decision {
-            return again;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("no new card")
+    steve_runtime::testkit::eventually("rewritten draft has a new approval card", || async {
+        // Drive the same queue until the preceding check releases its busy guard and the rewrite
+        // commits its replacement card. A single early queue pass can legitimately find it busy.
+        h.outbox.send_due(&h.ch).await;
+        decision_of(h, message_id) != decision
+    })
+    .await;
+    decision_of(h, message_id)
 }
 
 /// #14: “改写后再看” checks the rewrite against the same knowledge the first check had, a retrieved
