@@ -4,9 +4,17 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
-/// Unix milliseconds. Dropping a sleep cancels that wait.
+/// Wall time for due-time calculations, paired with duration-based waits.
+///
+/// Use `now()` only to calculate when work is due. Always wait by a duration with `sleep()`.
+/// Loops must cap waits with a fallback interval and recalculate due times after waking.
+/// If a due time changes and the wait must end early, the loop owns that notification
+/// (for example, `due_loop`'s `wake`); it is not part of the clock contract.
+/// Dropping a sleep cancels that wait.
 pub trait Clock: Send + Sync {
+    /// Current wall time in Unix milliseconds, for due-time calculations.
     fn now(&self) -> i64;
+    /// Waits for a duration; changing a due time does not itself wake this wait.
     fn sleep(&self, d: Duration) -> BoxFuture<'_, ()>;
 }
 #[derive(Debug, Clone, Copy, Default)]
