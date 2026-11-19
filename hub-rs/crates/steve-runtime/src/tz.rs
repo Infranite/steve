@@ -2,9 +2,18 @@
 //! with RFC 5545 gap/fold resolution (W2b §1.4). Policy lookup stays in domains.
 #[cfg(feature = "schedule")]
 use chrono::Duration;
-use chrono::{LocalResult, NaiveDateTime, NaiveTime, Offset, TimeZone};
+use chrono::{DateTime, LocalResult, NaiveDateTime, NaiveTime, Offset, TimeZone, Utc};
 use chrono_tz::{GapInfo, Tz};
 pub type TzError = chrono_tz::ParseError;
+/// An instant, local time, or complete day is outside chrono's representable range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeError;
+impl std::fmt::Display for TimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("time outside representable range")
+    }
+}
+impl std::error::Error for TimeError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Zone {
     tz: Tz,
@@ -37,54 +46,53 @@ impl Zone {
     pub fn name(&self) -> &'static str {
         self.tz.name()
     }
-    /// Panics outside chrono's representable range; all other local times have one rule.
-    pub fn instant(&self, wall: NaiveDateTime) -> i64 {
+    /// RFC 5545: resolve gaps with the pre-transition offset, folds with the first pass.
+    pub fn instant(&self, wall: NaiveDateTime) -> Result<i64, TimeError> {
         match self.tz.from_local_datetime(&wall) {
-            LocalResult::Single(t) => t.timestamp_millis(),
-            LocalResult::Ambiguous(a, b) => a.min(b).timestamp_millis(),
+            LocalResult::Single(t) => Ok(t.timestamp_millis()),
+            LocalResult::Ambiguous(a, b) => Ok(a.min(b).timestamp_millis()),
             LocalResult::None => {
                 let (_, offset) = GapInfo::new(&wall, &self.tz)
                     .and_then(|g| g.begin)
-                    .expect("time outside zone range");
-                wall.and_utc().timestamp_millis() - i64::from(offset.fix().local_minus_utc()) * 1000
+                    .ok_or(TimeError)?;
+                Ok(wall
+                    .checked_sub_offset(offset.fix())
+                    .ok_or(TimeError)?
+                    .and_utc()
+                    .timestamp_millis())
             }
         }
     }
-    /// Panics when `ms` is outside chrono's representable range.
-    pub fn local(&self, ms: i64) -> NaiveDateTime {
-        self.tz
-            .timestamp_millis_opt(ms)
-            .single()
-            .expect("time outside chrono range")
-            .naive_local()
+    pub fn local(&self, ms: i64) -> Result<NaiveDateTime, TimeError> {
+        let utc = DateTime::<Utc>::from_timestamp_millis(ms)
+            .ok_or(TimeError)?
+            .naive_utc();
+        utc.checked_add_offset(self.tz.offset_from_utc_datetime(&utc).fix())
+            .ok_or(TimeError)
     }
-    pub fn day(&self, ms: i64) -> (i64, i64) {
-        let d = self.local(ms).date();
-        (
-            self.instant(d.and_time(NaiveTime::MIN)),
-            self.instant(
-                d.succ_opt()
-                    .expect("last chrono day")
-                    .and_time(NaiveTime::MIN),
-            ),
-        )
+    pub fn day(&self, ms: i64) -> Result<(i64, i64), TimeError> {
+        let d = self.local(ms)?.date();
+        Ok((
+            self.instant(d.and_time(NaiveTime::MIN))?,
+            self.instant(d.succ_opt().ok_or(TimeError)?.and_time(NaiveTime::MIN))?,
+        ))
     }
     #[cfg(feature = "schedule")]
-    pub(crate) fn search_start(&self, ms: i64) -> NaiveDateTime {
+    pub(crate) fn search_start(&self, ms: i64) -> Result<NaiveDateTime, TimeError> {
         // Shifted gap candidates can still be pending after the wall clock has passed the gap.
-        let offset = |t| {
+        let at = DateTime::<Utc>::from_timestamp_millis(ms).ok_or(TimeError)?;
+        let before = at.checked_sub_signed(Duration::days(2)).unwrap_or(at);
+        let offset = |t: DateTime<Utc>| {
             self.tz
-                .timestamp_millis_opt(t)
-                .single()
-                .unwrap()
-                .offset()
+                .offset_from_utc_datetime(&t.naive_utc())
                 .fix()
                 .local_minus_utc()
         };
-        self.local(ms)
-            - Duration::seconds(i64::from(
-                (offset(ms) - offset(ms.saturating_sub(172_800_000))).max(0),
-            ))
+        self.local(ms)?
+            .checked_sub_signed(Duration::seconds(i64::from(
+                (offset(at) - offset(before)).max(0),
+            )))
+            .ok_or(TimeError)
     }
 }
 /// Local [start,end), crossing midnight; equal endpoints disable quiet hours.
@@ -96,7 +104,7 @@ pub struct Quiet {
 }
 impl Quiet {
     pub fn holds(&self, ms: i64) -> Option<i64> {
-        let local = self.zone.local(ms);
+        let local = self.zone.local(ms).ok()?;
         let t = local.time();
         let inside = if self.start > self.end {
             t >= self.start || t < self.end
@@ -111,7 +119,10 @@ impl Quiet {
         } else {
             local.date()
         };
-        Some(self.zone.instant(date.and_time(self.end))).filter(|at| *at > ms)
+        self.zone
+            .instant(date.and_time(self.end))
+            .ok()
+            .filter(|at| *at > ms)
     }
 }
 const WINDOWS_ZONES: &[(&str, &str)] = &[
@@ -130,3 +141,18 @@ const WINDOWS_ZONES: &[(&str, &str)] = &[
     ("Pacific Standard Time", "America/Los_Angeles"),
     ("UTC", "UTC"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn system_detection_failure_is_observable() {
+        for name in [None, Some("Mars/Olympus")] {
+            let z = Zone::detected(name);
+            assert_eq!(z.name(), "UTC");
+            assert!(z.is_fallback());
+        }
+        assert!(!Zone::detected(Some("UTC")).is_fallback());
+        assert_eq!(Zone::detected(Some("Asia/Tokyo")).name(), "Asia/Tokyo");
+    }
+}
