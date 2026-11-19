@@ -1,7 +1,6 @@
 //! Hub task lifetimes and lifecycle polling. Core owns housekeeping and release maintenance.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use steve_runtime::{FirstRun, SystemClock, Task, every};
 
 use crate::api::AppState;
@@ -85,6 +84,7 @@ mod tests {
     use super::*;
     use crate::wire::modules::Job;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     async fn settle() {
         for _ in 0..100 {
