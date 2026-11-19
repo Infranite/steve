@@ -1,6 +1,7 @@
 //! Explicit SQLite entity, operation and legacy-outbox mappings; values are always bound.
 pub mod digest;
 pub mod fixtures;
+mod reads;
 mod sql;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params, types::Value};
 pub use sql::{cell_value, read_cell};
@@ -392,17 +393,30 @@ type FactAdapter = fn(&FactRecord) -> Result<OutboxFields, CommitError>;
 struct Topic {
     domain: Domain,
     adapt: FactAdapter,
+    decode: Option<reads::FactDecoder>,
 }
 type Handler = dyn Fn(&Connection, &AnyOp, Rev) -> Result<(), CommitError> + Send + Sync;
 struct Operation {
     domain: Domain,
     run: Arc<Handler>,
 }
-#[derive(Default)]
 pub struct Registry {
     entities: BTreeMap<String, SqlEntity>,
     topics: BTreeMap<String, Topic>,
     operations: BTreeMap<String, Operation>,
+    queries: BTreeMap<(Domain, String), Arc<reads::QueryHandler>>,
+    export_complete: BTreeSet<Domain>,
+}
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            entities: BTreeMap::new(),
+            topics: BTreeMap::new(),
+            operations: BTreeMap::new(),
+            queries: reads::builtin_queries(),
+            export_complete: BTreeSet::new(),
+        }
+    }
 }
 impl Registry {
     pub fn register(
@@ -448,6 +462,7 @@ impl Registry {
                 shapes: Mutex::default(),
             },
         );
+        self.export_complete.clear();
         Ok(())
     }
     pub fn entity(&self, name: &str, domain: Domain) -> Result<&SqlEntity, CommitError> {
@@ -473,7 +488,15 @@ impl Registry {
         if self.topics.contains_key(&name) {
             return Err(invalid("duplicate fact topic"));
         }
-        self.topics.insert(name, Topic { domain, adapt });
+        self.topics.insert(
+            name,
+            Topic {
+                domain,
+                adapt,
+                decode: None,
+            },
+        );
+        self.export_complete.remove(&domain);
         Ok(())
     }
     pub fn check_topic(&self, name: &str, domain: Domain) -> Result<(), CommitError> {
@@ -549,6 +572,7 @@ impl Registry {
                 .values()
                 .filter(|op| op.domain == domain)
                 .count()
+                + self.queries.keys().filter(|(d, _)| *d == domain).count()
                 >= steve_storage_api::registry::DOMAIN_LIMIT
         {
             return Err(invalid("duplicate operation"));
@@ -604,15 +628,23 @@ impl Registry {
             ("verify.stream.fact", Domain::Stream),
             ("verify.comms.fact", Domain::Comms),
         ] {
-            r.register_topic(name, d, |f| {
-                Ok(OutboxFields {
-                    workspace_id: "verify".into(),
-                    version: 1,
-                    payload: query::encode(f).map_err(CommitError::Fatal)?,
-                })
-            })?;
+            r.register_transfer_topic(
+                name,
+                d,
+                |f| {
+                    Ok(OutboxFields {
+                        workspace_id: "verify".into(),
+                        version: 1,
+                        payload: query::encode(f).map_err(CommitError::Fatal)?,
+                    })
+                },
+                |raw| query::decode(raw).map_err(CommitError::Fatal),
+            )?;
         }
         r.register_typed_op(digest::apply)?;
+        for d in [Domain::Core, Domain::Stream, Domain::Comms] {
+            r.allow_export(d)?;
+        }
         Ok(r)
     }
 }
