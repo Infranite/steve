@@ -22,42 +22,21 @@ use steve_storage_api::{
 };
 
 type Reply<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-static BLOCKING_JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
-// The production dependency enables only Tokio sync, so use the same oneshot
-// hand-off as commits without requiring a Tokio runtime or blocking its executor.
+// Jobs share the store's owning Tokio blocking pool, even when a caller polls
+// from a standard thread rather than a runtime worker.
 async fn blocking<T: Send + 'static>(
+    runtime: tokio::runtime::Handle,
     run: impl FnOnce() -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
-    let permit = BLOCKING_JOBS.acquire().await.map_err(|_| {
-        steve_storage_api::error(
-            steve_types::Code::Unavailable,
-            "SQLite read services stopped",
-        )
-    })?;
-    let (send, receive) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
-        .name("sqlite-read-service".into())
-        .spawn(move || {
-            let _permit = permit;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
-                .unwrap_or_else(|_| {
-                    Err(steve_storage_api::error(
-                        steve_types::Code::Internal,
-                        "SQLite read worker failed",
-                    ))
-                });
-            let _ = send.send(result);
-        })
-        .map_err(|_| {
-            steve_storage_api::error(
-                steve_types::Code::Unavailable,
-                "cannot start SQLite read worker",
-            )
-        })?;
-    receive.await.map_err(|_| {
-        steve_storage_api::error(steve_types::Code::Unavailable, "SQLite read worker stopped")
+    let task = {
+        let _context = runtime.enter();
+        tokio::task::spawn_blocking(run)
+    };
+    task.await.map_err(|_| {
+        steve_storage_api::error(steve_types::Code::Internal, "SQLite blocking task failed")
     })?
 }
+
 fn unsupported() -> Error {
     steve_storage_api::error(
         steve_types::Code::Unsupported,
@@ -145,9 +124,11 @@ pub struct SqliteStore<E: Send + 'static = ()> {
     reads: Arc<dyn ReadServices>,
     hello: Hello,
     clock: Arc<dyn WallClock>,
+    runtime: tokio::runtime::Handle,
 }
 impl<E: Send + 'static> SqliteStore<E> {
     /// Engines must all come from the same validated layout. No new connection is opened here.
+    /// Construct within the owning Tokio runtime; it must outlive the store and its reads.
     pub fn new(
         engines: Vec<Engine>,
         registry: Arc<Registry>,
@@ -155,6 +136,12 @@ impl<E: Send + 'static> SqliteStore<E> {
         publisher: Arc<dyn Publisher<E>>,
         runtime_probe: fn() -> bool,
     ) -> Result<Self, Error> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            steve_storage_api::error(
+                steve_types::Code::Invalid,
+                "SQLite store requires a Tokio runtime",
+            )
+        })?;
         let mut writers = BTreeMap::new();
         let mut layout = None;
         for engine in engines {
@@ -246,6 +233,7 @@ impl<E: Send + 'static> SqliteStore<E> {
             reads,
             hello,
             clock,
+            runtime,
         })
     }
     pub fn with_reads(mut self, reads: Arc<dyn ReadServices>) -> Self {
@@ -277,7 +265,7 @@ impl<E: Send + 'static> SqliteStore<E> {
     pub async fn end_export(&self, session: &ExportSession) -> Result<(), Error> {
         let reads = self.reads.clone();
         let session = session.clone();
-        blocking(move || reads.end_export(&session)).await
+        blocking(self.runtime.clone(), move || reads.end_export(&session)).await
     }
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
@@ -413,7 +401,9 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             self.engine(q.domain).clone(),
             self.registry.clone(),
         );
-        Box::pin(blocking(move || reads.query(&engine, &reg, q)))
+        Box::pin(blocking(self.runtime.clone(), move || {
+            reads.query(&engine, &reg, q)
+        }))
     }
     fn snapshot<'s, 'a>(
         &'s self,
@@ -429,7 +419,9 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             self.engine(d).clone(),
             self.registry.clone(),
         );
-        Box::pin(blocking(move || reads.snapshot(&engine, &reg, d, qs)))
+        Box::pin(blocking(self.runtime.clone(), move || {
+            reads.snapshot(&engine, &reg, d, qs)
+        }))
     }
     fn begin_snapshot<'s, 'a>(&'s self, d: Domain, lane: Lane) -> Reply<'a, Result<LeaseId, Error>>
     where
@@ -441,7 +433,9 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             self.engine(d).clone(),
             self.registry.clone(),
         );
-        Box::pin(blocking(move || reads.begin_snapshot(engine, reg, d, lane)))
+        Box::pin(blocking(self.runtime.clone(), move || {
+            reads.begin_snapshot(engine, reg, d, lane)
+        }))
     }
     fn lease_query<'s, 'a>(&'s self, l: LeaseId, q: AnyQuery) -> Reply<'a, Result<AnyOutput, Error>>
     where
@@ -449,7 +443,9 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
         Self: 'a,
     {
         let reads = self.reads.clone();
-        Box::pin(blocking(move || reads.lease_query(l, q)))
+        Box::pin(blocking(self.runtime.clone(), move || {
+            reads.lease_query(l, q)
+        }))
     }
     fn lease_end<'s, 'a>(&'s self, l: LeaseId) -> Reply<'a, Result<(), Error>>
     where
@@ -457,7 +453,7 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
         Self: 'a,
     {
         let reads = self.reads.clone();
-        Box::pin(blocking(move || reads.lease_end(l)))
+        Box::pin(blocking(self.runtime.clone(), move || reads.lease_end(l)))
     }
     fn begin_export<'s, 'a>(&'s self, d: Domain) -> Reply<'a, Result<ExportSession, Error>>
     where
@@ -469,7 +465,9 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             self.engine(d).clone(),
             self.registry.clone(),
         );
-        Box::pin(blocking(move || reads.begin_export(&engine, &reg, d)))
+        Box::pin(blocking(self.runtime.clone(), move || {
+            reads.begin_export(&engine, &reg, d)
+        }))
     }
     fn export<'s, 'e, 'a>(
         &'s self,
@@ -483,7 +481,7 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
     {
         let reads = self.reads.clone();
         let s = s.clone();
-        Box::pin(blocking(move || reads.export(&s, c)))
+        Box::pin(blocking(self.runtime.clone(), move || reads.export(&s, c)))
     }
     fn import<'s, 'a>(&'s self, b: ExportBatch) -> Reply<'a, Result<ImportReport, Error>>
     where
@@ -495,7 +493,7 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             if crate::exec::current_engine().is_some() {
                 return Err(CommitError::UowInsideGrant.into());
             }
-            blocking(move || reads.import(b)).await
+            blocking(self.runtime.clone(), move || reads.import(b)).await
         })
     }
     fn retention<'s, 'a>(
@@ -512,7 +510,7 @@ impl<E: Send + 'static> DomainStore for SqliteStore<E> {
             if crate::exec::current_engine().is_some() {
                 return Err(CommitError::UowInsideGrant.into());
             }
-            blocking(move || reads.retention(e, b)).await
+            blocking(self.runtime.clone(), move || reads.retention(e, b)).await
         })
     }
 }
