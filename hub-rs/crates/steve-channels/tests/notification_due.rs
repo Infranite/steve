@@ -147,3 +147,13 @@ async fn committed_notification_intake_wakes_the_idle_loop_without_advancing_tim
     task.abort();
     let _ = task.await;
 }
+
+#[path = "support/due_wakes.rs"]
+mod due_wakes;
+#[tokio::test]
+async fn notification_commits_do_not_self_wake_into_a_busy_loop() {
+    let f = Notifications::new();
+    f.add(NOW, true);
+    let ch = f.source.channels.clone();
+    due_wakes::assert_no_self_wake_loop(f.source, &ch, &["personal_notifications"]).await;
+}

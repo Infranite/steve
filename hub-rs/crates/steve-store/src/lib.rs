@@ -143,6 +143,7 @@ struct Inner {
 
 #[derive(Default)]
 struct CommitWakes {
+    hooked: bool,
     listeners: Vec<(Vec<&'static str>, std::sync::Weak<tokio::sync::Notify>)>,
     changed: std::collections::BTreeSet<String>,
 }
@@ -238,27 +239,6 @@ impl Store {
                 diagnostics: std::sync::OnceLock::new(),
             }),
         };
-        let wakes = store.inner.commit_wakes.clone();
-        store
-            .lock()
-            .update_hook(Some(move |_, _: &str, table: &str, _| {
-                let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
-                if wakes
-                    .listeners
-                    .iter()
-                    .any(|(tables, _)| tables.contains(&table))
-                {
-                    wakes.changed.insert(table.to_owned());
-                }
-            }))?;
-        let wakes = store.inner.commit_wakes.clone();
-        store.lock().rollback_hook(Some(move || {
-            wakes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .changed
-                .clear();
-        }))?;
         if !admin
             && let Some(recorder) =
                 diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
@@ -281,22 +261,88 @@ impl Store {
         self.inner.item_deleted.get().map(|b| b.as_ref())
     }
 
-    /// Wakes one worker after a successful outermost transaction changes any watched table.
-    /// Each subscriber has its own permit; dropped handles unsubscribe without keeping workers alive.
-    /// SQLite observes writes even in transaction-only producers and triggers. Notifications are
-    /// advisory: a rolled-back savepoint can cause an extra wake if its outer transaction commits.
+    /// Connect only to a DueSource's Notify. This content-free hint must never identify a row
+    /// or control a business-logic branch. Hints may coalesce or be spurious; in-process watched
+    /// row changes through the authoritative Store (or its clones) wake after the outermost commit.
+    /// Independently opened Stores and other processes are not observed. Correctness must still
+    /// rely on due_loop's 60-second fallback.
+    /// DomainEvent carries business facts; it must not be a second wake path for a due loop.
+    ///
+    /// SQLite update_hook observes trigger writes, but not truncate-optimized unconditional
+    /// DELETEs, REPLACE's implicit deleted rows, or WITHOUT ROWID tables. Use explicit row writes
+    /// for promptly making work due; these SQLite exceptions also rely on the fallback.
+    /// A rolled-back savepoint can leave a harmless extra hint when its outer write commits.
+    /// Hooks install lazily for live subscribers and detach before the next writer lease
+    /// without subscribers. Subscribing inside a write scope also hints at its outer commit.
     pub fn commit_wake(&self, tables: &[&'static str]) -> Arc<tokio::sync::Notify> {
         let wake = Arc::new(tokio::sync::Notify::new());
-        let mut wakes = self
+        let register = |c: &Connection| {
+            self.inner
+                .commit_wakes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .listeners
+                .push((tables.to_vec(), Arc::downgrade(&wake)));
+            self.sync_commit_hooks(c);
+        };
+        if let Some(c) = self.active_conn() {
+            register(c);
+            // Earlier statements may predate hook installation. A conservative hint is safe.
+            self.inner
+                .commit_wakes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .changed
+                .extend(tables.iter().map(|t| (*t).to_owned()));
+        } else {
+            let c = self.lock();
+            register(&c);
+        }
+        wake
+    }
+
+    // Registration and hook installation share the unique writer lease, so a new
+    // subscription cannot race an already-running transaction on another thread.
+    fn sync_commit_hooks(&self, c: &Connection) {
+        let mut state = self
             .inner
             .commit_wakes
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        wakes.listeners.retain(|(_, w)| w.strong_count() > 0);
-        wakes
-            .listeners
-            .push((tables.to_vec(), Arc::downgrade(&wake)));
-        wake
+        state.listeners.retain(|(_, w)| w.strong_count() > 0);
+        let needed = !state.listeners.is_empty();
+        if needed == state.hooked {
+            return;
+        }
+        if needed {
+            let wakes = self.inner.commit_wakes.clone();
+            c.update_hook(Some(move |_, _: &str, table: &str, _| {
+                let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
+                if wakes
+                    .listeners
+                    .iter()
+                    .any(|(tables, _)| tables.contains(&table))
+                {
+                    wakes.changed.insert(table.to_owned());
+                }
+            }))
+            .expect("writer lease permits installing update hook");
+            let wakes = self.inner.commit_wakes.clone();
+            c.rollback_hook(Some(move || {
+                wakes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .changed
+                    .clear();
+            }))
+            .expect("writer lease permits installing rollback hook");
+        } else {
+            c.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
+                .expect("remove update hook");
+            c.rollback_hook(None::<fn()>).expect("remove rollback hook");
+            state.changed.clear();
+        }
+        state.hooked = needed;
     }
 
     fn notify_committed(&self) {
@@ -342,6 +388,7 @@ impl Store {
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
         let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
         instrumentation::store_acquired();
+        self.sync_commit_hooks(&conn);
         WriteGuard {
             conn,
             timing: timing.map(LockTiming::acquired),

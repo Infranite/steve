@@ -7543,3 +7543,20 @@ async fn send_job_and_source_do_not_keep_channels_alive() {
     );
     task.await;
 }
+
+#[path = "support/due_wakes.rs"]
+mod due_wakes;
+#[tokio::test]
+async fn send_claim_commits_do_not_self_wake_into_a_busy_loop() {
+    use steve_runtime::due::contract::Fixture;
+    let f = QueueFixture::new().await;
+    f.add(f.h.ch.now(), false);
+    exec(
+        &f.h,
+        &format!(
+            "UPDATE connections SET status='paused' WHERE id='{}'",
+            f.h.me
+        ),
+    );
+    due_wakes::assert_no_self_wake_loop(f.source, &f.h.ch, &["chan_messages"]).await;
+}
