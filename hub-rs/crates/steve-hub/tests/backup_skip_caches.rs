@@ -22,6 +22,57 @@ impl io::Write for LogWriter {
         Ok(())
     }
 }
+
+#[test]
+fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces() {
+    use std::io::Read;
+    let home = tempfile::tempdir().unwrap();
+    let signature = "Signature: 8a477f597d28d172789f06886806bc55";
+    let parts = ["data/files", "signing", "secrets", "deliveries"];
+    for part in parts {
+        write(
+            home.path(),
+            &format!("{part}/node_modules/CACHEDIR.TAG"),
+            signature,
+        );
+        write(home.path(), &format!("{part}/node_modules/payload"), part);
+        write(
+            home.path(),
+            &format!("{part}/marked/CACHEDIR.TAG"),
+            signature,
+        );
+        write(home.path(), &format!("{part}/marked/payload"), part);
+    }
+    let db = home.path().join("database.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE evidence(v);")
+        .unwrap();
+    let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
+    let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
+    let files: BTreeMap<_, _> = archive
+        .entries()
+        .unwrap()
+        .filter_map(|entry| {
+            let mut entry = entry.unwrap();
+            if !entry.header().entry_type().is_file() {
+                return None;
+            }
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut content = String::new();
+            entry.read_to_string(&mut content).unwrap();
+            Some((path, content))
+        })
+        .collect();
+    assert_eq!(files.len(), parts.len() * 4);
+    for part in parts {
+        for dir in ["node_modules", "marked"] {
+            assert_eq!(files[&format!("{part}/{dir}/CACHEDIR.TAG")], signature);
+            assert_eq!(files[&format!("{part}/{dir}/payload")], part);
+        }
+    }
+}
+
 #[test]
 fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     let home = tempfile::tempdir().unwrap();
