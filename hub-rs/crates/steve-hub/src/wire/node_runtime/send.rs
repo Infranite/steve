@@ -32,10 +32,10 @@ impl NodeRuntime {
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
-                self.clock.now_ms(),
-                self.clock.now_ms() + LEASE_MS,
+                self.clock.now(),
+                self.clock.now() + LEASE_MS,
             )? {
-                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now_ms()).map(Some),
+                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now()).map(Some),
                 l => Ok(l),
             }
         }) {
@@ -68,7 +68,7 @@ impl NodeRuntime {
                 } else {
                     1_000
                 };
-                rt::retry_command_in(tx, &lease, self.clock.now_ms(), self.clock.now_ms() + delay, uncertain)?;
+                rt::retry_command_in(tx, &lease, self.clock.now(), self.clock.now() + delay, uncertain)?;
                 if !uncertain && !lease.maybe_sent {
                     tx.execute(
                         "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",
@@ -552,8 +552,8 @@ impl NodeRuntime {
         tx.execute(
             "UPDATE node_commands SET retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
             rusqlite::params![
-                self.clock.now_ms() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
-                self.clock.now_ms(),
+                self.clock.now() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
+                self.clock.now(),
                 op
             ],
         )?;

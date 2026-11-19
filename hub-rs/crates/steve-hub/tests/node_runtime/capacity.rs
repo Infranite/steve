@@ -49,7 +49,7 @@ async fn capacity_after_tools_retries_the_same_turn_then_exhausts_without_contin
             0
         );
         assert_eq!(h.stat_rows().last().unwrap().1.as_deref(), Some(STOP));
-        let delta = retry_at(&h) - h.clock().now_ms();
+        let delta = retry_at(&h) - h.clock().now();
         assert!((120_000..=125_000).contains(&delta), "{delta}");
         let spec: String = h.q("SELECT spec FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
         let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
@@ -143,14 +143,14 @@ async fn capacity_wait_has_a_durable_ceiling_and_never_sends_before_recovery() {
     let mut h = clocked_hub();
     h.bind();
     let exec = h.running("work").await;
-    let before = h.clock().now_ms();
+    let before = h.clock().now();
     h.node
         .finish(&exec, failure(&format!("{ERROR}; Retry-After: 3600")))
         .await
         .unwrap();
     until("bounded wait", || h.attempts().len() == 2).await;
     let at = retry_at(&h);
-    assert!((before + 900_000..=h.clock().now_ms() + 900_000).contains(&at));
+    assert!((before + 900_000..=h.clock().now() + 900_000).contains(&at));
     assert!(
         h.ends().is_empty(),
         "no immediate failure card for a long outage"
@@ -182,7 +182,7 @@ async fn capacity_wait_has_a_durable_ceiling_and_never_sends_before_recovery() {
 #[tokio::test]
 async fn simultaneous_capacity_outages_use_independent_jitter() {
     let h = clocked_hub();
-    let common = h.clock().now_ms() + 120_000;
+    let common = h.clock().now() + 120_000;
     let error =
         steve_acp::capacity_summary(&format!("{ERROR}; Retry-After: 120"), common - 120_000);
     let mut times = std::collections::HashSet::new();
@@ -313,7 +313,7 @@ async fn a_question_committed_during_a_capacity_wait_prevents_the_retry() {
         tx.execute("INSERT INTO decisions(id,workspace_id,item_id,session_id,kind,subject_type,subject_id,question,status,requested_by,created) VALUES ('d1','default','i1','s1','ask','item','i1','input','open','steve',1)", [])?;
         Ok(())
     }).unwrap();
-    h.advance_to(h.clock().now_ms() + 1_000).await;
+    h.advance_to(h.clock().now() + 1_000).await;
     until("question boundary ends wait", || h.ends().len() == 1).await;
     assert_eq!(h.count("start_turn"), 1);
     assert_eq!(
@@ -331,7 +331,7 @@ async fn capacity_without_a_valid_hint_uses_bounded_backoff() {
         h.bind();
         let mut exec = h.running("work").await;
         for (ordinal, delay) in [(1, 20_000), (2, 60_000), (3, 120_000)] {
-            let before = h.clock().now_ms();
+            let before = h.clock().now();
             h.node
                 .finish(&exec, failure(&format!("{ERROR}{hint}")))
                 .await
@@ -359,14 +359,14 @@ async fn capacity_with_an_elapsed_hint_retries_after_jitter_without_a_new_backof
         let h = clocked_hub();
         h.bind();
         let exec = h.running("work").await;
-        let before = h.clock().now_ms();
+        let before = h.clock().now();
         h.node
             .finish(&exec, failure(&format!("{ERROR}{hint}")))
             .await
             .unwrap();
         until("elapsed hint retry planned", || h.attempts().len() == 2).await;
         assert!(
-            (before + 1_000..=h.clock().now_ms() + 5_000).contains(&retry_at(&h)),
+            (before + 1_000..=h.clock().now() + 5_000).contains(&retry_at(&h)),
             "{hint}"
         );
         assert!(h.ends().is_empty());

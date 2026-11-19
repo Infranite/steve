@@ -13,9 +13,7 @@ use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
 use steve_store::{BusEvent, FileRef, FnPublisher, Store, StoreError};
 
-#[path = "node_runtime/clock.rs"]
-mod clock;
-use clock::ManualClock;
+use steve_runtime::FakeClock;
 
 #[path = "node_runtime/capacity.rs"]
 mod capacity;
@@ -89,7 +87,7 @@ struct H {
     store: Store,
     node: Arc<FakeNode>,
     rt: Arc<NodeRuntime>,
-    clock: Option<Arc<ManualClock>>,
+    clock: Option<Arc<FakeClock>>,
     ends: Arc<Ends>,
     seen: Arc<Tee>,
     published: Arc<Mutex<Vec<BusEvent>>>,
@@ -132,10 +130,10 @@ fn hub() -> H {
 }
 
 fn clocked_hub() -> H {
-    hub_with_clock(Some(Arc::new(ManualClock::new())))
+    hub_with_clock(Some(Arc::new(FakeClock::new(steve_store::now()))))
 }
 
-fn hub_with_clock(clock: Option<Arc<ManualClock>>) -> H {
+fn hub_with_clock(clock: Option<Arc<FakeClock>>) -> H {
     let dir = tempfile::tempdir().unwrap();
     let published = Arc::new(Mutex::new(vec![]));
     let p = published.clone();
@@ -183,7 +181,7 @@ fn hub_with_clock(clock: Option<Arc<ManualClock>>) -> H {
 }
 
 impl H {
-    fn clock(&self) -> &ManualClock {
+    fn clock(&self) -> &FakeClock {
         self.clock.as_deref().expect("clocked fixture")
     }
 

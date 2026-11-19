@@ -3,11 +3,8 @@
 use super::*;
 use steve_node_api::testkit::FakeNode;
 
-#[path = "../../../tests/node_runtime/clock.rs"]
-#[allow(dead_code)]
-mod test_clock;
+use steve_runtime::FakeClock;
 use steve_stats::realtime::{Quality, Realtime, Scope};
-use test_clock::ManualClock;
 
 struct Noop;
 impl NodeDomain for Noop {
@@ -28,8 +25,8 @@ impl Collected {
         let store = Store::open(dir.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         // receipt times come from this clock, so a slow machine cannot push them past `at`
-        let clock = Arc::new(ManualClock::new());
-        let at = (clock.now_ms().div_euclid(1000) + 1) * 1000;
+        let clock = Arc::new(FakeClock::new(steve_store::now()));
+        let at = (clock.now().div_euclid(1000) + 1) * 1000;
         clock.advance_to(at);
         store.with_conn(|c| {
             c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','running',?1,?1)",[at-70_000])?;

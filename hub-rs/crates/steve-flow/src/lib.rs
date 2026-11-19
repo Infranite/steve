@@ -254,6 +254,26 @@ impl FlowCx {
 pub struct LateClock(OnceLock<Arc<dyn Clock>>);
 
 impl Clock for LateClock {
+    fn sleep_or_change(
+        &self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        match self.0.get() {
+            Some(c) => c.sleep_or_change(d),
+            None => steve_modules::clock::SystemClock.sleep_or_change(d),
+        }
+    }
+
+    fn sleep(
+        &self,
+        d: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        match self.0.get() {
+            Some(c) => c.sleep(d),
+            None => steve_modules::clock::SystemClock.sleep(d),
+        }
+    }
+
     fn now(&self) -> i64 {
         self.0.get().map_or_else(steve_store::now, |c| c.now())
     }

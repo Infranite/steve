@@ -434,7 +434,7 @@ impl NodeRuntime {
                 target_attempt: None,
                 dependency: None,
             },
-            self.clock.now_ms(),
+            self.clock.now(),
         )?;
         d.expected = None;
         set_desired_in(tx, session, Some(&d))?;
@@ -730,7 +730,7 @@ impl NodeRuntime {
                     target_attempt: None,
                     dependency: None,
                 },
-                self.clock.now_ms(),
+                self.clock.now(),
             )?;
             self.wake_send.notify_one();
             "releasing"

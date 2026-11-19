@@ -301,7 +301,7 @@ impl NodeRuntime {
                 target_attempt: Some(&attempt),
                 dependency: None,
             },
-            self.clock.now_ms(),
+            self.clock.now(),
         )?;
         let trev = turn_revision(tx, turn)?;
         rt::turn_cas_in(
@@ -525,7 +525,7 @@ impl NodeRuntime {
                 target_attempt: Some(attempt),
                 dependency: None,
             },
-            self.clock.now_ms(),
+            self.clock.now(),
         )?;
         self.wake_send.notify_one();
         Ok(())

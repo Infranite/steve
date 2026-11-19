@@ -8,6 +8,11 @@ use tokio::sync::watch;
 pub trait Clock: Send + Sync {
     fn now(&self) -> i64;
     fn sleep(&self, d: Duration) -> BoxFuture<'_, ()>;
+    /// Retry polling may wake early on a wall-clock change; callers recheck durable deadlines.
+    /// System time has no change signal, so its normal timer remains the fallback.
+    fn sleep_or_change(&self, d: Duration) -> BoxFuture<'_, ()> {
+        self.sleep(d)
+    }
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
@@ -92,6 +97,10 @@ impl FakeClock {
     }
 }
 impl Clock for FakeClock {
+    fn sleep_or_change(&self, _: Duration) -> BoxFuture<'_, ()> {
+        self.changed()
+    }
+
     fn now(&self) -> i64 {
         *self.time.borrow()
     }

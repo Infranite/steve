@@ -1,9 +1,7 @@
 use super::*;
 use steve_node_api::testkit::{FakeNode, build};
 
-#[path = "../../../tests/node_runtime/clock.rs"]
-mod test_clock;
-use test_clock::ManualClock;
+use steve_runtime::FakeClock;
 
 /// Counts what the runtime books after commits.
 #[derive(Default)]
@@ -658,7 +656,7 @@ fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
 #[tokio::test]
 async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until_resume() {
     let mut h = super::super::node_tools::tests::fixture(vec![]).await;
-    let clock = Arc::new(ManualClock::new());
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
     // Reassemble the coordinator over the same durable running attempt, with a controllable
     // retry clock. Keep the Node and domain used by the shared tool fixture.
     let rt = NodeRuntime::with_clock(
@@ -756,7 +754,7 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
             )?)
         })
         .unwrap();
-    assert_eq!(at, clock.now_ms() + 20_000);
+    assert_eq!(at, clock.now() + 20_000);
     clock.advance_to(at - 1);
     until("sender observed time before deadline", || {
         clock.observed(at - 1)

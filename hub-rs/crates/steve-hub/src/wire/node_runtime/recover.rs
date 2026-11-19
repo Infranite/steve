@@ -156,7 +156,7 @@ impl NodeRuntime {
                 target_attempt,
                 dependency: None,
             },
-            self.clock.now_ms(),
+            self.clock.now(),
         )?;
         self.wake_send.notify_one();
         Ok(())
@@ -409,7 +409,7 @@ impl NodeRuntime {
                             target_attempt: None,
                             dependency: None,
                         },
-                        self.clock.now_ms(),
+                        self.clock.now(),
                     )?;
                     self.reopen_after_in(tx, &session, Some(&prep))?;
                     self.wake_send.notify_one();

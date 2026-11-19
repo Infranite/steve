@@ -59,7 +59,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
         .await;
         let mut done = build::done();
         done.acted = true;
-        let before = h.clock().now_ms();
+        let before = h.clock().now();
         h.node.finish(&exec, done).await.unwrap();
         until("provider retry planned", || {
             h.attempts().len() == ordinal + 1
@@ -80,7 +80,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             at >= before + delay,
             "backoff was skipped: {at} vs {before}"
         );
-        assert!(at <= h.clock().now_ms() + delay);
+        assert!(at <= h.clock().now() + delay);
         let spec: String = h.q("SELECT spec FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
         let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
         assert_eq!(spec.turn, turn);
@@ -126,7 +126,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             h.count("start_turn") == ordinal + 1
         })
         .await;
-        assert!(h.clock().now_ms() >= at);
+        assert!(h.clock().now() >= at);
         exec = h.attempts().last().unwrap().clone();
     }
     say(&h, &exec, Role::Assistant, &[ERROR]).await;
@@ -163,7 +163,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
         h.q::<i64>("SELECT retry_ordinal FROM runtime_turns ORDER BY rowid DESC LIMIT 1"),
         1
     );
-    assert_eq!(retry_at(&h), h.clock().now_ms() + 20_000);
+    assert_eq!(retry_at(&h), h.clock().now() + 20_000);
     assert_eq!(h.ends().len(), 2);
 }
 

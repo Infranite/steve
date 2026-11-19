@@ -47,3 +47,24 @@ async fn manual_clock_registration_handshake_deadlines_and_cancellation() {
     let mut zero = c.sleep(Duration::ZERO);
     assert!(poll!(&mut zero).is_ready());
 }
+
+#[tokio::test]
+async fn retry_waits_observe_any_wall_clock_change_without_waiting_for_the_period() {
+    let c = FakeClock::new(100);
+    let mut retry = c.sleep_or_change(Duration::from_secs(5));
+    // Registration happens before the send, even if the wait has not polled yet.
+    c.advance(1);
+    assert!(poll!(&mut retry).is_ready());
+    let mut retry = c.sleep_or_change(Duration::from_secs(5));
+    assert!(poll!(&mut retry).is_pending());
+    assert!(c.observed(101));
+    c.advance(1);
+    assert!(poll!(&mut retry).is_ready());
+    let mut period = c.sleep(Duration::from_secs(5));
+    assert!(poll!(&mut period).is_pending());
+    c.advance(1);
+    assert!(
+        poll!(&mut period).is_pending(),
+        "periodic waits retain their deadline"
+    );
+}
