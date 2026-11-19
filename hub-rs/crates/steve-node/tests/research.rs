@@ -1583,20 +1583,55 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
     n.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// The workspace supplies Tokio's test-util feature; isolated runs need --features tokio/test-util.
+#[tokio::test]
 async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     let t = T::new();
-    let (files, mut spec) = with_file(&t, Duration::from_millis(1_500));
-    let deadline = wall() + 3_000;
-    spec.run.limits.deadline = Timestamp(deadline);
+    let (files, spec) = with_file(&t, Duration::from_millis(1_500));
+    // Use the ordinary job budget for real process startup, then advance the runtime clock.
+    // A 3 s wall deadline can correctly expire before Node.js has written its spawn/child logs.
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis((spec.run.limits.deadline.0 - wall()) as u64);
     let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    let c = t.end_of(&n, "op_j").await;
-    let late = wall() - deadline;
-    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    until("the fetched job has a child to stop", || {
+        !t.read("pid").is_empty()
+    })
+    .await;
+    let child = pid_of(&t.log("pid"));
     assert_eq!(t.spawns(), 1);
-    // ended at the job's deadline, not the fetch's time past it
-    assert!(late < 1_000, "{late} ms past the deadline");
-    assert!(!alive(pid_of(&t.log("pid"))));
+
+    tokio::time::pause();
+    // External process I/O must not make a paused runtime auto-advance past the assertion point.
+    let awake = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    tokio::time::advance(deadline - tokio::time::Instant::now() - Duration::from_millis(100)).await;
+    assert!(alive(child), "the original deadline has not arrived");
+    tokio::time::advance(Duration::from_millis(1_099)).await;
+    // Hold time below deadline + 1 s while the OS reaps the child. Resetting the budget after
+    // the 1.5 s fetch would leave it running here, regardless of CPU scheduling or cleanup time.
+    let waiting = Instant::now();
+    while alive(child) {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(15),
+            "the fetch moved the job's deadline"
+        );
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    awake.abort();
+    let c = t.end_of(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(
+        c.job.unwrap().end,
+        JobEnd::Budget {
+            hit: BudgetHit::Time
+        }
+    );
+    assert_eq!(t.spawns(), 1);
+    assert!(!alive(child));
     n.shutdown().await;
 }
