@@ -9,8 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
+use steve_store::Tx;
 use steve_store::base::{self, Viewer};
-use steve_store::{ChangeEvent, Tx};
 
 use crate::adapters::feishu;
 use crate::bindings::{self, PersonaRef};
@@ -723,10 +723,12 @@ pub fn patch(
         conn,
         &json!({ "fields": fields }),
     )?;
-    tx.publish(ChangeEvent::Channel {
-        id: conn.into(),
-        ws: ws.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Channel {
+            id: conn.into(),
+            ws: ws.clone().into(),
+        },
+    ));
     Ok(())
 }
 
@@ -765,10 +767,12 @@ pub fn created(
         conn,
         &json!({"mode": mode.code(), "persona_id": persona}),
     )?;
-    tx.publish(ChangeEvent::Channel {
-        id: conn.into(),
-        ws: ws.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Channel {
+            id: conn.into(),
+            ws: ws.clone().into(),
+        },
+    ));
     Ok(())
 }
 

@@ -1108,10 +1108,13 @@ async fn check_later(
             &json!({"decision": d, "verdict": verdict_code(&res, !rewrites.is_empty()),
                     "check_model": res.check_model}),
         )?;
-        tx.publish(steve_store::ChangeEvent::Decision {
-            id: d.into(),
-            item_id: Some(None),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: cur.ws.clone().into(),
+                id: d.into(),
+                item_id: Some(None),
+            },
+        ));
         messages::event(tx, &cur.ws, &cur.space_id, &cur.id);
         Ok(())
     })
@@ -1689,10 +1692,8 @@ async fn send_chosen(
             &json!({"decision": dd, "card": decision, "choice": respond::SEND_DRAFT,
                     "verdict": verdict}),
         )?;
-        tx.publish(steve_store::ChangeEvent::Decision {
-            id: decision.into(),
-            item_id: Some(None),
-        });
+        tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision { ws: ws.into(), id: decision.into(),
+        item_id: Some(None), }));
         messages::event(tx, ws, &plan.space_id, &m);
         Ok(())
     })
@@ -3261,7 +3262,7 @@ impl Outbox {
                 };
                 ch.store().transaction(|tx| -> ChannelResult<()> {
                     tx.execute("UPDATE decisions SET result = json_set(result, '$.item', ?) WHERE id = ? AND status = 'resolved'", params![item, decision])?;
-                    tx.publish(steve_store::ChangeEvent::Decision { id: decision.clone(), item_id: None });
+                    tx.publish(steve_types::DomainEvent::from(steve_types::WorkEvent::Decision { ws: ws.clone().into(), id: decision.clone().into(), item_id: None }));
                     Ok(())
                 })
             }.await;

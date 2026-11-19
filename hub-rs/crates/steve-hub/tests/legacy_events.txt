@@ -1,15 +1,4 @@
 # Remaining production legacy publications. Shrink per crate; remove with the last legacy path.
-steve-channels/src/bindings.rs	ChangeEvent::	2
-steve-channels/src/channel_accounts.rs	ChangeEvent::	2
-steve-channels/src/cleanup.rs	ChangeEvent::	2
-steve-channels/src/conversations.rs	ChangeEvent::	2
-steve-channels/src/decide.rs	ChangeEvent::	1
-steve-channels/src/drafts.rs	ChangeEvent::	1
-steve-channels/src/messages.rs	ChangeEvent::	1
-steve-channels/src/outbound.rs	ChangeEvent::	3
-steve-channels/src/personas.rs	ChangeEvent::	1
-steve-channels/src/recovery.rs	ChangeEvent::	2
-steve-channels/src/spaces.rs	ChangeEvent::	2
 steve-github/src/accept.rs	ChangeEvent::	2
 steve-github/src/link.rs	ChangeEvent::	2
 steve-github/src/sync.rs	ChangeEvent::	3

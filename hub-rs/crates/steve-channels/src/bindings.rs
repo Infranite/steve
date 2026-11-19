@@ -8,8 +8,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use steve_modules::ApiError;
+use steve_store::Tx;
 use steve_store::base::Viewer;
-use steve_store::{ChangeEvent, Tx};
 
 use crate::ChannelResult;
 use crate::personas::{self, Moved, PersonaRow, UsedAccount, UsedBy, UsedSpace};
@@ -208,10 +208,12 @@ pub fn set_account_default(
     personas::own(tx, ws, persona)?;
     personas::ensure_default(tx, ws, now)?;
     upsert(tx, ws, &account, "", persona, now)?;
-    tx.publish(ChangeEvent::Channel {
-        id: conn.into(),
-        ws: ws.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Channel {
+            id: conn.into(),
+            ws: ws.clone().into(),
+        },
+    ));
     Ok(())
 }
 
@@ -255,10 +257,12 @@ pub(crate) fn release(
         if space.is_empty() {
             moved.accounts += 1;
             if !conn.is_empty() {
-                tx.publish(ChangeEvent::Channel {
-                    id: conn,
-                    ws: ws.into(),
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::ChannelsEvent::Channel {
+                        id: conn.into(),
+                        ws: ws.into(),
+                    },
+                ));
             }
         } else {
             moved.spaces += 1;

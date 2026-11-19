@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steve_modules::{ApiError, Check};
 use steve_store::base::{self, Viewer};
 use steve_store::seeded;
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::ChannelResult;
 use crate::bindings;
@@ -632,10 +632,12 @@ pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> Cha
 
 /// SSE `{type:"persona", id, ws}`.
 pub fn event(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Persona {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ChannelsEvent::Persona {
+            id: id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 // ---------------------------------------------------------------- output
