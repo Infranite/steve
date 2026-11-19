@@ -6,31 +6,36 @@ use steve_storage_api::uow::Op;
 
 pub fn apply(c: &Connection, request: &SyncPendingMembership, _: Rev) -> Result<(), CommitError> {
     request.validate().map_err(CommitError::Fatal)?;
-    if request.source == Source::Receipt {
-        let (conv, id) = request.receipt_identity().map_err(CommitError::Fatal)?;
-        let scope = Scope {
-            workspace: request.workspace_id.as_str().into(),
-            conv,
-        };
-        if !digest::receipt_exists(c, &scope, &id).map_err(sql_error)? {
-            return Err(invalid("receipt must exist in the work unit"));
-        }
-        return match request.entry {
-            EntryPoint::DequeueOnReceipt => {
-                digest::dequeue_on_receipt(c, &scope.workspace, &scope.conv, [&id])
-            }
-            EntryPoint::SyncPendingConversation => digest::reconcile_conversations(c, [scope]),
-            EntryPoint::EnqueueDigestible => {
-                return Err(invalid("receipt is not a message source"));
-            }
-        }
-        .map_err(sql_error);
+    match request.source {
+        Source::Receipt => apply_receipt(c, request),
+        Source::ChanMessage => apply_message(c, request, digest::Source::ChanMessage),
+        Source::MailMessage => apply_message(c, request, digest::Source::MailMessage),
     }
-    let source = match request.source {
-        Source::ChanMessage => digest::Source::ChanMessage,
-        Source::MailMessage => digest::Source::MailMessage,
-        Source::Receipt => return Err(invalid("message source required")),
+}
+fn apply_receipt(c: &Connection, request: &SyncPendingMembership) -> Result<(), CommitError> {
+    let (conv, id) = request.receipt_identity().map_err(CommitError::Fatal)?;
+    let scope = Scope {
+        workspace: request.workspace_id.as_str().into(),
+        conv,
     };
+    if !digest::receipt_exists(c, &scope, &id).map_err(sql_error)? {
+        return Err(invalid("receipt must exist in the work unit"));
+    }
+    match request.entry {
+        EntryPoint::DequeueOnReceipt => {
+            digest::dequeue_on_receipt(c, &scope.workspace, &scope.conv, [&id]).map_err(sql_error)
+        }
+        EntryPoint::SyncPendingConversation => {
+            digest::reconcile_conversations(c, [scope]).map_err(sql_error)
+        }
+        EntryPoint::EnqueueDigestible => Err(invalid("receipt is not a message source")),
+    }
+}
+fn apply_message(
+    c: &Connection,
+    request: &SyncPendingMembership,
+    source: digest::Source,
+) -> Result<(), CommitError> {
     let current = source.scope(c, &request.id).map_err(sql_error)?;
     // Source::scope now names the *new* row. Recover old scopes from pending, never
     // pretend the new workspace/conversation is the pre-mutation source scope.
