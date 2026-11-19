@@ -57,20 +57,6 @@ pub fn hub_private_vars() -> Vec<std::ffi::OsString> {
         .collect()
 }
 
-/// `STEVE_HOME` as the Hub resolves it (`~/.steve` when unset), absolute.
-pub fn steve_home_from_env() -> PathBuf {
-    let home = std::env::var_os("STEVE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/"))
-                .join(".steve")
-        });
-    std::path::absolute(&home).unwrap_or(home)
-}
-
 /// `steve_home` with symlinks resolved when it exists (the harnesses match real paths).
 fn real(steve_home: &Path) -> PathBuf {
     std::fs::canonicalize(steve_home).unwrap_or_else(|_| steve_home.to_path_buf())
@@ -107,25 +93,6 @@ pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
 /// The settings object (`--settings`, or the ACP adapter's `_meta.claudeCode.options.settings`).
 pub fn claude_settings(steve_home: &Path) -> serde_json::Value {
     serde_json::json!({ "permissions": { "deny": claude_deny_rules(steve_home) } })
-}
-
-/// A Codex permission profile entry (`permissions.<name>.filesystem`) for each of [`PROTECTED`]:
-/// directories by path, name prefixes as globs. Codex keeps deny entries as deny-read.
-pub fn codex_deny_filesystem(steve_home: &Path) -> String {
-    let root = real(steve_home);
-    let root = root.to_string_lossy();
-    let root = root.trim_end_matches('/');
-    let entries: Vec<String> = PROTECTED
-        .iter()
-        .map(|p| {
-            let path = match p.strip_suffix('/') {
-                Some(dir) => format!("{root}/{dir}"),
-                None => format!("{root}/{p}"),
-            };
-            format!("{}=\"deny\"", toml_str(&path))
-        })
-        .collect();
-    format!("{{{}}}", entries.join(","))
 }
 
 /// The parts of a Node's own home (its journal, and the secrets, pushes and attachments it keeps
@@ -348,22 +315,6 @@ pub fn bwrap_plan(steve_home: &Path, node_home: &Path) -> BwrapPlan {
         v.dedup();
     }
     p
-}
-
-/// A TOML basic string.
-fn toml_str(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            c if c.is_control() => o.push_str(&format!("\\u{:04X}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
 }
 
 #[cfg(test)]
@@ -618,24 +569,5 @@ mod tests {
         assert_eq!(p.masked, vec![r.clone()]);
         assert_eq!(p.writable, vec![r.join("node/local")]);
         let _ = std::fs::remove_dir_all(&t);
-    }
-
-    #[test]
-    fn codex_filesystem_is_a_toml_inline_table() {
-        let fs = codex_deny_filesystem(Path::new("/nonexistent-steve-home/.st\"eve"));
-        assert!(fs.starts_with('{') && fs.ends_with('}'), "{fs}");
-        assert!(
-            fs.contains(r#""/nonexistent-steve-home/.st\"eve/signing"="deny""#),
-            "{fs}"
-        );
-        assert!(
-            fs.contains(r#""/nonexistent-steve-home/.st\"eve/steve.env*"="deny""#),
-            "{fs}"
-        );
-        assert!(
-            fs.contains(r#""/nonexistent-steve-home/.st\"eve/updates"="deny""#),
-            "{fs}"
-        );
-        assert_eq!(fs.matches("=\"deny\"").count(), PROTECTED.len());
     }
 }
