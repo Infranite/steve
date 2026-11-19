@@ -1,7 +1,7 @@
 # SSE golden fixtures
 
 These tools record real HTTP mutations against a fresh isolated Hub, keeping both workspace streams.
-The contract reference is `3b69ca887`. They prepare the S1 comparison without modifying producers or the bus.
+The contract reference is `d19ded22d`. They prepare the S1 comparison without modifying producers or the bus.
 This guide lives with the fixture tests so it follows the repository's public-document boundary.
 
 From the repository root, build the checkout's own binary and record three runs:
@@ -11,18 +11,18 @@ export CARGO_TARGET_DIR="$PWD/scratch/target"
 export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 buildslot cargo build --manifest-path hub-rs/Cargo.toml -p steve-hub --bin steve-hub
 G=hub-rs/codemods/w1/golden
-python3 "$G/scenario.py" "$G/baseline-3b69ca887" --port 18720
+python3 "$G/scenario.py" "$G/baseline-d19ded22d" --port 18720
 python3 "$G/scenario.py" scratch/golden-repeat-2 --port 18730
 python3 "$G/scenario.py" scratch/golden-repeat-3 --port 18740
-python3 "$G/compare.py" "$G/baseline-3b69ca887" scratch/golden-repeat-2
-python3 "$G/compare.py" "$G/baseline-3b69ca887" scratch/golden-repeat-3
+python3 "$G/compare.py" "$G/baseline-d19ded22d" scratch/golden-repeat-2
+python3 "$G/compare.py" "$G/baseline-d19ded22d" scratch/golden-repeat-3
 python3 "$G/compare.py" scratch/golden-repeat-2 scratch/golden-repeat-3
 python3 -m unittest discover -s "$G/tests"
 ```
 
 `buildslot` is the maintainer's optional build-resource wrapper; an ordinary checkout can run Cargo directly.
 Python needs only its standard library (3.11+). An existing output directory is refused: choose a new name
-for another recording. The committed `repeat-2` and `repeat-3` directories are the other two reference runs.
+for another recording. Only the baseline is committed; repeat recordings remain under `scratch/`.
 Inspect normalized evidence with `python3 "$G/normalize.py" <run>`.
 
 The binary must resolve inside this checkout. Every run gets a newly created empty `scratch/golden-*`
@@ -59,7 +59,7 @@ is kept in raw JSONL and excluded from mutation comparison because its count dep
 For S1, record the same scenario with the new binary and run:
 
 ```sh
-python3 "$G/compare.py" "$G/baseline-3b69ca887" scratch/golden-after --scoped
+python3 "$G/compare.py" "$G/baseline-d19ded22d" scratch/golden-after --scoped
 ```
 
 Without `--scoped`, both complete workspace streams must match (including legacy cross-workspace
@@ -81,6 +81,10 @@ The comparator's negative tests exercise these cases; scoped comparison has not 
 
 Coverage and the exact counts below are derived from the committed two-stream recordings, not
 inferred from API success. There are 36 ChangeEvent wire types plus `kb`, `gh`, `mail` (39 total).
+The `d19ded22d` recordings cover 20 of these 39 types. Each of the three runs has 86 raw frames
+on A and 57 on B, including seven pings per connection and one `stream.gap` per connection.
+All three pairwise comparisons pass; comparison with the previous `3b69ca887` baseline also
+passes with no normalized mutation differences. The per-type counts below are unchanged.
 
 | Wire type | A frames | B frames | Coverage / reason absent |
 |---|---:|---:|---|
@@ -138,10 +142,11 @@ YOLO's project scope is explicitly set to `off`; autonomous execution is never e
 ## Cache generations
 
 `bus_generation.rs` pins all 39 wire types, typed HubEvent publishing/accumulation, and invalid/missing
-workspace behavior using only the Bus public API. Ordinary tests pass on the reference baseline.
+workspace behavior using only the Bus public API. The following test results are from the original
+preparatory baseline `3b69ca887`; this SSE re-recording does not rerun the Rust tests. Ordinary tests pass.
 Three ignored tests express S1: workspace isolation (including `steve.thinking`), global Hub/User
 invalidation except `client`, and the unchanged stateless set: `event`, `steve.draft`, `steve.tool`,
-`stats`, `client`. All three pass with `--ignored` on the reference baseline. Workspace fixtures
+`stats`, `client`. All three pass with `--ignored` on that preparatory baseline. Workspace fixtures
 explicitly inject `ws`, so this does not prove that legacy producers now supply it: none of these
 tests currently fails for missing producer metadata. W1.3a must replace the JSON construction with
 typed events and remove the ignores. No production behavior is changed by these preparatory tests.

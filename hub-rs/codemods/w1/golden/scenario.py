@@ -142,7 +142,7 @@ def run(api, output, port):
         recorder.quiet(6)
     finally:
         recorder.close()
-    manifest = {'schema': 1, 'baseline': '3b69ca887', 'workspaces': workspaces,
+    manifest = {'schema': 1, 'baseline': 'd19ded22d', 'workspaces': workspaces,
                 'entities': entities, 'steps': steps}
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
