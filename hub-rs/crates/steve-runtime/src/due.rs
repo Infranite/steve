@@ -34,6 +34,12 @@ impl std::error::Error for DueError {}
 pub trait DueSource: Send + Sync + 'static {
     /// The loop's name, also its metric label.
     fn name(&self) -> &'static str;
+    /// A source may retain a shorter legacy recovery interval when some writers
+    /// cannot notify it. The loop always caps this at the shared 60s safety net.
+    fn max_sleep(&self) -> Duration {
+        FALLBACK
+    }
+
     fn next_due(&self) -> impl Future<Output = Result<Option<i64>, DueError>> + Send;
     fn run_due(&self, now: i64) -> impl Future<Output = Result<(), DueError>> + Send;
 }
@@ -50,7 +56,12 @@ pub async fn due_loop<S: DueSource>(
 ) {
     let name = source.name();
     let lag = metrics::histogram!("steve_due_lag_seconds", "loop" => name);
-    let fallback = FALLBACK.as_millis() as i64;
+    let fallback = source.max_sleep().min(FALLBACK).as_millis();
+    assert!(
+        fallback > 0,
+        "due source fallback must be at least one millisecond"
+    );
+    let fallback = fallback as i64;
     let mut failures = 0u32;
     loop {
         let now = clock.now();

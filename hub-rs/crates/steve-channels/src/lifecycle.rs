@@ -339,7 +339,7 @@ impl ConnectionRuntime {
         tokio::spawn(async move {
             me.start_all();
             // names of the people met: kicked runs and the periodic one
-            drop(me.inner.channels.spawn_names());
+            let _names = me.inner.channels.spawn_names();
             loop {
                 let ev = tokio::select! {
                     biased;

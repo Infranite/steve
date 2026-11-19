@@ -7316,3 +7316,140 @@ async fn a_callers_false_flag_cannot_erase_the_composers_approval_requirement() 
     }
     assert_eq!(sent(&h).len(), 1, "only the unflagged control may send");
 }
+
+struct QueueFixture {
+    space: String,
+    h: H,
+    source: steve_channels::outbound::QueueDue,
+}
+impl QueueFixture {
+    async fn new() -> Self {
+        let h = setup().await;
+        checks_pass(&h);
+        h.env.gateway.script(H_SAFETY, REPLY);
+        let r = push(
+            &h,
+            &h.me,
+            msg(
+                "C_DEV",
+                "queue-contract-template",
+                "ulilei",
+                "@你 在吗",
+                true,
+            ),
+        )
+        .await
+        .response
+        .unwrap();
+        let (m, d) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
+        decide(&h, &d, "yes", "").unwrap();
+        exec(&h, &format!(
+            "CREATE TEMP TABLE contract_message AS SELECT * FROM chan_messages WHERE id='{m}';
+             CREATE TEMP TABLE contract_decision AS SELECT * FROM decisions WHERE id='{d}';
+             CREATE TEMP TABLE contract_space AS SELECT * FROM spaces WHERE id=(SELECT space_id FROM chan_messages WHERE id='{m}');
+             UPDATE contract_space SET id='contract-orphan',external_id='contract-orphan',status='left';
+             INSERT INTO spaces SELECT * FROM contract_space;
+             UPDATE chan_messages SET status='discarded' WHERE id='{m}';"));
+        let space = row(&h, "SELECT space_id FROM chan_messages WHERE id=?", &[&m])[0]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let source = steve_channels::outbound::QueueDue {
+            channels: h.ch.clone(),
+            outbox: h.outbox.clone(),
+        };
+        Self { h, source, space }
+    }
+    fn ids(&self, status: &str) -> Vec<String> {
+        self.h
+            .env
+            .store()
+            .reader(|c| {
+                let mut st = c.prepare(
+                    "SELECT id FROM chan_messages WHERE id LIKE 'contract-msg-%' AND status=?",
+                )?;
+                Ok::<_, steve_store::StoreError>(
+                    st.query_map([status], |r| r.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                )
+            })
+            .unwrap()
+    }
+}
+impl steve_runtime::due::contract::Fixture for QueueFixture {
+    type Source = steve_channels::outbound::QueueDue;
+    fn source(&self) -> &Self::Source {
+        &self.source
+    }
+    fn batch(&self) -> usize {
+        50
+    }
+    fn add(&self, at: i64, poison: bool) -> String {
+        let id = format!("contract-msg-{}", uid("q"));
+        let decision = uid("contract-decision");
+        // A disconnected space is terminal failed/manual review on its first attempt,
+        // rather than a new retry-count dead letter. Other messages use a valid approval.
+        let space = if poison {
+            "contract-orphan"
+        } else {
+            &self.space
+        };
+        exec(&self.h, &format!(
+            "UPDATE contract_message SET id='{id}',space_id='{space}', decision_id='{decision}';
+             INSERT INTO chan_messages SELECT * FROM contract_message;
+             UPDATE contract_decision SET id='{decision}',subject_id='{id}',result=json_set(result,'$.send_at',{at});
+             INSERT INTO decisions SELECT * FROM contract_decision;"));
+        id
+    }
+    fn done(&self) -> Vec<String> {
+        self.ids("sent")
+    }
+    fn dead(&self) -> Vec<String> {
+        self.ids("failed")
+    }
+}
+#[tokio::test]
+async fn durable_send_queue_obeys_the_shared_due_contract() {
+    let fixtures =
+        std::cell::RefCell::new(vec![QueueFixture::new().await, QueueFixture::new().await]);
+    let now = fixtures.borrow()[0].h.ch.now();
+    // Put both clocks at the contract's instant before any rows are inserted.
+    for f in fixtures.borrow().iter() {
+        f.h.env.clock.set(now);
+    }
+    steve_runtime::due::contract::check(|| fixtures.borrow_mut().pop().unwrap(), now, 1).await;
+}
+
+#[tokio::test]
+async fn durable_send_deadlines_keep_direct_claim_strict_boundaries() {
+    use steve_runtime::due::DueSource;
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    exec(
+        &f.h,
+        &format!(
+        "UPDATE contract_message SET id='contract-direct',decision_id=NULL,created={now},sent=NULL;
+         INSERT INTO chan_messages SELECT * FROM contract_message;"),
+    );
+    f.h.env
+        .store()
+        .transaction(|tx| steve_channels::send_state::keep(tx, "contract-direct", &Auth::None))
+        .unwrap();
+    assert_eq!(
+        f.source.next_due().await.unwrap(),
+        Some(now + steve_channels::outbound::UNCLAIMED_MS + 1)
+    );
+    exec(
+        &f.h,
+        &format!("UPDATE chan_messages SET sent={now} WHERE id='contract-direct'"),
+    );
+    assert_eq!(
+        f.source.next_due().await.unwrap(),
+        Some(now + steve_channels::outbound::CLAIM_STALE_MS + 1)
+    );
+    exec(
+        &f.h,
+        "UPDATE chan_messages SET status='failed' WHERE id='contract-direct'",
+    );
+    assert_eq!(f.source.next_due().await.unwrap(), None);
+}

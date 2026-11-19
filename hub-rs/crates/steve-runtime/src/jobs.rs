@@ -109,6 +109,43 @@ pub fn every<F, Fut>(
     clock: Arc<dyn Clock>,
     period: Duration,
     first: FirstRun,
+    f: F,
+) -> Task
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    repeating(name, clock, period, first, Cadence::FromStart, f)
+}
+
+/// Fixed-delay work: wait a complete period after each callback finishes.
+/// Idle waiting is outside the measured run, just as it is for [`every`].
+pub fn every_after<F, Fut>(
+    name: &'static str,
+    clock: Arc<dyn Clock>,
+    period: Duration,
+    first: FirstRun,
+    f: F,
+) -> Task
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    repeating(name, clock, period, first, Cadence::AfterWork, f)
+}
+
+#[derive(Clone, Copy)]
+enum Cadence {
+    FromStart,
+    AfterWork,
+}
+
+fn repeating<F, Fut>(
+    name: &'static str,
+    clock: Arc<dyn Clock>,
+    period: Duration,
+    first: FirstRun,
+    cadence: Cadence,
     mut f: F,
 ) -> Task
 where
@@ -129,7 +166,10 @@ where
                 let _run = Run::new(name);
                 f().await;
             };
-            futures::future::join(clock.sleep(period), run).await;
+            match cadence {
+                Cadence::FromStart => { futures::future::join(clock.sleep(period), run).await; }
+                Cadence::AfterWork => { run.await; clock.sleep(period).await; }
+            }
         }
     })
 }

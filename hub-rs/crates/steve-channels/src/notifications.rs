@@ -769,7 +769,10 @@ pub fn seen(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<()> {
 /// A bounded recovery pass. Only unsubmitted `now` entries can create an E1 delivery. Held digest
 /// and log records never turn into individual sends on a later preference change.
 pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
-    let now = ch.now();
+    pump_at(ch, outbox, ch.now()).await
+}
+
+async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usize> {
     type Due = (String, String, String, String, String, Option<String>);
     let rows=ch.store().reader(|c|->ChannelResult<Vec<Due>> {
         let mut st=c.prepare("SELECT workspace_id,user_id,delivery_key,body,topic,message_id FROM personal_notifications WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL AND next_attempt_at<=? AND created>=? ORDER BY next_attempt_at,created LIMIT 50")?;
@@ -827,13 +830,64 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     Ok(n)
 }
 
-pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
-    loop {
-        if let Err(e) = pump(&ch, &outbox).await {
-            tracing::error!("personal notification recovery: {e}");
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+/// Waiting notification attempts and body expiry share one durable due source.
+/// There is no retry-count dead letter: the existing 30-day body tombstone is terminal.
+pub struct NotificationDue {
+    pub channels: Channels,
+    pub outbox: Arc<Outbox>,
+}
+impl steve_runtime::due::DueSource for NotificationDue {
+    fn name(&self) -> &'static str {
+        "channels.notifications"
     }
+    fn max_sleep(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(10)
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        self.channels
+            .store()
+            .reader(|c| -> ChannelResult<_> {
+                Ok(c.query_row(
+                    "SELECT min(at) FROM (
+                   SELECT next_attempt_at AS at FROM personal_notifications
+                     WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL
+                   UNION ALL SELECT created+?1+1 FROM personal_notifications WHERE body IS NOT NULL
+                 )",
+                    [KEEP_MS],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        pump_at(&self.channels, &self.outbox, now)
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+}
+
+pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
+    let clock = ch.modules().clock.clone();
+    let source = Arc::new(NotificationDue {
+        channels: ch,
+        outbox,
+    });
+    // Existing transactional intake writers need no new coupling to a task handle; keep their 10s recovery bound.
+    steve_runtime::due::due_loop(
+        source,
+        clock,
+        Arc::new(tokio::sync::Notify::new()),
+        steve_runtime::policy::Backoff {
+            base: std::time::Duration::from_secs(10),
+            max: std::time::Duration::from_secs(60),
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::None,
+            attempts: None,
+            reset_after: None,
+        },
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------- a starred contact's message

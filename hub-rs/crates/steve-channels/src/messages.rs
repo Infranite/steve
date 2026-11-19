@@ -550,15 +550,24 @@ pub fn sweep(m: &Modules, now: i64) -> ApiResult<usize> {
 }
 
 /// The hourly job; each sweep runs off the async runtime.
-pub async fn retention(m: Modules) {
-    loop {
-        match m.blocking(|m| sweep(m, m.clock.now())).await {
-            Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("channels.retention: {e}"),
-        }
-        tokio::time::sleep(RETENTION_EVERY).await;
-    }
+/// The returned task must be held until shutdown.
+pub fn retention(m: Modules) -> steve_runtime::Task {
+    steve_runtime::every_after(
+        "channels.retention",
+        m.clock.clone(),
+        RETENTION_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let m = m.clone();
+            async move {
+                match m.blocking(|m| sweep(m, m.clock.now())).await {
+                    Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("channels.retention: {e}"),
+                }
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------- timeline

@@ -222,13 +222,21 @@ pub async fn sweep(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
 }
 
 /// The job: [`sweep`] every [`REPORT_EVERY`].
-pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
-    loop {
-        if let Err(e) = sweep(&ch, &outbox).await {
-            tracing::warn!("trigger reports: {e}");
-        }
-        tokio::time::sleep(REPORT_EVERY).await;
-    }
+pub fn run(ch: Channels, outbox: Arc<Outbox>) -> steve_runtime::Task {
+    steve_runtime::every_after(
+        "channels.trigger_report",
+        ch.modules().clock.clone(),
+        REPORT_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let (ch, outbox) = (ch.clone(), outbox.clone());
+            async move {
+                if let Err(e) = sweep(&ch, &outbox).await {
+                    tracing::warn!("trigger reports: {e}");
+                }
+            }
+        },
+    )
 }
 
 #[cfg(test)]

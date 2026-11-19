@@ -73,7 +73,7 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     core.set_conv_host(Arc::new(crate::wire::chan::ChanConvHost(channels.downgrade())));
     {
         let (outbox, channels) = (outbox.clone(), channels.clone());
-        jobs.push(Job::new("channels.send", outbox.queue(channels)));
+        jobs.push(Job::task("channels.send", move || outbox.clone().spawn_queue(&channels)));
     }
 }}
 
@@ -88,12 +88,11 @@ install! { notifications(reg, _cx) [channels, mut jobs, outbox] => [channels, jo
             channels.clone(),
             outbox.clone(),
         )));
-    jobs.push(Job::new("channels.trigger_report", steve_channels::trigger_report::run(
-            channels.clone(),
-            outbox.clone(),
-        )));
+    let (ch, out) = (channels.clone(), outbox.clone());
+    jobs.push(Job::task("channels.trigger_report", move || steve_channels::trigger_report::run(ch, out)));
 }}
 
 install! { retention(reg, _cx) [mut jobs, modules] => [jobs, modules] {
-    jobs.push(Job::new("channels.retention", steve_channels::messages::retention(modules.clone())));
+    let m = modules.clone();
+    jobs.push(Job::task("channels.retention", move || steve_channels::messages::retention(m)));
 }}

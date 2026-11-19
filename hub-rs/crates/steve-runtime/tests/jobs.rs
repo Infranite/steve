@@ -265,3 +265,38 @@ async fn rewinding_wall_time_does_not_extend_a_periodic_wait() {
     task.stop();
     task.await;
 }
+
+#[tokio::test]
+async fn a_slow_pass_keeps_the_full_delay_and_cancellation_stops_it() {
+    let clock = Arc::new(FakeClock::new(0));
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (c, n) = (clock.clone(), runs.clone());
+    let task = steve_runtime::every_after(
+        "channels.test",
+        clock.clone(),
+        Duration::from_secs(5),
+        FirstRun::Immediate,
+        move || {
+            let (c, n) = (c.clone(), n.clone());
+            async move {
+                n.fetch_add(1, Ordering::SeqCst);
+                steve_runtime::Clock::sleep(&*c, Duration::from_secs(8)).await;
+            }
+        },
+    );
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    clock.advance(8000);
+    settle().await;
+    clock.advance(4999);
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    clock.advance(1);
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    task.stop();
+    task.await;
+    clock.advance(100000);
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+}

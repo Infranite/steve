@@ -33,7 +33,7 @@
 //! let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
 //! // … Channels::builder(…).responder(replies.clone()).build(); late.set(&channels);
 //! link.bind_clock(modules.clock.clone());
-//! tokio::spawn(outbox.clone().queue(channels.clone()));
+//! let send_job = outbox.clone().spawn_queue(&channels);
 //! ```
 
 use std::collections::BTreeMap;
@@ -3090,6 +3090,12 @@ impl Outbox {
     /// delay is over are sent; handoffs answered “to_item” become items. Returns how many were
     /// sent.
     pub async fn send_due(&self, ch: &Channels) -> usize {
+        self.maintain(ch).await;
+        self.send_ready(ch, ch.now()).await + self.settle_unknown(ch, ch.now()).await
+    }
+
+    // Conversions, expiry's cursor and draft checks are maintenance, not send deadlines.
+    async fn maintain(&self, ch: &Channels) {
         self.bind(ch);
         for a in self.link.take() {
             match a {
@@ -3101,6 +3107,13 @@ impl Outbox {
         if let Err(e) = self.expire_stale(ch) {
             tracing::warn!("stale cards: {e}");
         }
+        self.queue_instructed_drafts(ch);
+        self.queue_chosen_drafts(ch);
+        self.queue_disclosure_checks(ch);
+        self.queue_rewrites(ch);
+    }
+
+    fn queue_instructed_drafts(&self, ch: &Channels) {
         // “告诉它怎么回”: the composer drafts with your words, each on a task of its own
         match ch.store().reader(|c| instructions_asked(c, ch.now())) {
             Ok(asked) => {
@@ -3119,6 +3132,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("cards answered with your words: {e}"),
         }
+    }
+
+    fn queue_chosen_drafts(&self, ch: &Channels) {
         // “发这条草稿”: the card's draft is checked first, each on a task of its own
         match ch.store().reader(|c| drafts_chosen(c, ch.now())) {
             Ok(chosen) => {
@@ -3144,6 +3160,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("cards answered with their draft: {e}"),
         }
+    }
+
+    fn queue_disclosure_checks(&self, ch: &Channels) {
         // drafts on your own account whose disclosure check runs after they were written, each on a
         // task of its own
         match ch.store().reader(checks_waiting) {
@@ -3169,6 +3188,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("drafts to check: {e}"),
         }
+    }
+
+    fn queue_rewrites(&self, ch: &Channels) {
         // “改写后再看”: each on a task of its own, so a slow model does not hold up the sends
         match ch.store().reader(rewrites_asked) {
             Ok(asked) => {
@@ -3195,7 +3217,9 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("drafts to rewrite: {e}"),
         }
-        let now = ch.now();
+    }
+
+    async fn send_ready(&self, ch: &Channels, now: i64) -> usize {
         // B3: only due messages are selected before the LIMIT, so approved ones still inside their
         // delay can't fill the batch and starve those that are due
         let due = ch.store().reader(|c| -> ChannelResult<Vec<(String, String)>> {
@@ -3228,7 +3252,7 @@ impl Outbox {
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
-        n + self.resume_direct(ch, now).await + self.settle_unknown(ch, now).await
+        n + self.resume_direct(ch, now).await
     }
 
     async fn convert_due(&self, ch: &Channels) {
@@ -3467,25 +3491,51 @@ impl Outbox {
         })
     }
 
-    /// Runs [`Outbox::send_due`] every [`QUEUE_EVERY`] until the channel module is gone.
-    pub async fn queue(self: Arc<Self>, ch: Channels) {
-        struct Scope(Arc<Outbox>);
-        impl Drop for Scope {
-            fn drop(&mut self) {
-                self.0.stop_background();
-            }
-        }
-        let _scope = Scope(self.clone());
+    /// Owns the durable send loop and the independent 2s maintenance pass.
+    /// Keep this task until shutdown; dropping it cancels both loops.
+    pub fn spawn_queue(self: Arc<Self>, ch: &Channels) -> steve_runtime::Task {
+        let source = Arc::new(QueueDue {
+            channels: ch.clone(),
+            outbox: self.clone(),
+        });
+        let clock = ch.modules().clock.clone();
         let weak = ch.downgrade();
-
-        let mut tick = tokio::time::interval(QUEUE_EVERY);
-        // A slow round of sends is not followed by a burst of catch-up rounds.
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let Some(ch) = weak.upgrade() else { break };
-            self.send_due(&ch).await;
-        }
+        steve_runtime::spawn("channels.send", async move {
+            struct Scope(Arc<Outbox>);
+            impl Drop for Scope {
+                fn drop(&mut self) { self.0.stop_background(); }
+            }
+            let _scope = Scope(self.clone());
+            let _maintenance = steve_runtime::every(
+                "channels.send.maintenance",
+                clock.clone(),
+                QUEUE_EVERY,
+                steve_runtime::FirstRun::Immediate,
+                move || {
+                    let (weak, outbox) = (weak.clone(), self.clone());
+                    async move {
+                        if let Some(ch) = weak.upgrade() {
+                            outbox.maintain(&ch).await;
+                            outbox.settle_unknown(&ch, ch.now()).await;
+                        }
+                    }
+                },
+            );
+            steve_runtime::due::due_loop(
+                source,
+                clock,
+                Arc::new(tokio::sync::Notify::new()),
+                steve_runtime::policy::Backoff {
+                    base: QUEUE_EVERY,
+                    max: QUEUE_EVERY,
+                    factor: 1,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                },
+            )
+            .await;
+        })
     }
 
     /// Back to the source: an item made from a chat message finished → “<编号> 已完成：<结果>”
@@ -4462,5 +4512,52 @@ mod permission_tests {
         ));
         assert!(!missing_permission("连接超时"));
         assert!(!missing_permission("飞书限流（99991400）"));
+    }
+}
+
+/// Approved sends and abandoned direct claims: the earliest executable durable deadline.
+/// A refused send already enters the existing failed/manual-review state; no migration is needed.
+pub struct QueueDue {
+    pub channels: Channels,
+    pub outbox: Arc<Outbox>,
+}
+impl steve_runtime::due::DueSource for QueueDue {
+    fn name(&self) -> &'static str {
+        "channels.send"
+    }
+    fn max_sleep(&self) -> Duration {
+        QUEUE_EVERY
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        self.channels.store().reader(|c| -> ChannelResult<_> {
+            Ok(c.query_row(
+                "SELECT min(at) FROM (
+                   SELECT max(json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
+                      coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+                        JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0)) AS at
+                   FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
+                   WHERE m.direction='out' AND m.status='pending' AND d.status='resolved'
+                     AND d.subject_type=?2 AND d.subject_id=m.id AND json_extract(d.result,'$.send_at') IS NOT NULL
+                   UNION ALL
+                   SELECT CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END
+                   FROM chan_messages m JOIN chan_send_state s ON s.message_id=m.id
+                   WHERE m.direction='out' AND m.status='pending' AND m.decision_id IS NULL
+                     AND (s.first_at IS NOT NULL OR NOT EXISTS (
+                       SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+                       JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+                       WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?4 OR p.mode='log'
+                         OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
+                )", params![CLAIM_STALE_MS, SUBJECT_MESSAGE, UNCLAIMED_MS, self.channels.now()], |r|r.get(0))?)
+        }).map_err(|e| steve_runtime::due::DueError(e.to_string()))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        self.outbox.bind(&self.channels);
+        let sent = self.outbox.send_ready(&self.channels, now).await;
+        // A paused store or a live authorization check may defer every row. Back off at the
+        // legacy cadence instead of spinning on the same past deadline; do not change its state.
+        if sent == 0 && self.next_due().await?.is_some_and(|at| at <= now) {
+            return Err(steve_runtime::due::DueError("send batch deferred".into()));
+        }
+        Ok(())
     }
 }

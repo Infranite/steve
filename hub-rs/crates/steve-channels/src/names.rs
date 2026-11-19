@@ -596,7 +596,7 @@ impl Channels {
 
     /// Starts the name job (once): kicked runs after their debounce, and every workspace with
     /// profile identities every [`PERIOD_MS`]. Returns `None` when it already runs.
-    pub fn spawn_names(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn spawn_names(&self) -> Option<steve_runtime::Task> {
         {
             let mut m = lock(&self.names().mem);
             if m.running {
@@ -604,16 +604,31 @@ impl Channels {
             }
             m.running = true;
         }
-        let me = self.downgrade();
-        Some(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let Some(ch) = me.upgrade() else { return };
-                let adapters = ch.profile_adapter_ids();
-                if adapters.is_empty() {
-                    continue;
+        struct Running(crate::WeakChannels);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                if let Some(ch) = self.0.upgrade() {
+                    lock(&ch.names().mem).running = false;
                 }
-                let all = ch
+            }
+        }
+        let running = std::sync::Arc::new(Running(self.downgrade()));
+        let me = self.downgrade();
+        Some(steve_runtime::every_after(
+            "channels.names",
+            self.modules().clock.clone(),
+            Duration::from_secs(5),
+            steve_runtime::FirstRun::AfterPeriod,
+            move || {
+                let (me, running) = (me.clone(), running.clone());
+                async move {
+                    let _running = running;
+                    let Some(ch) = me.upgrade() else { return };
+                    let adapters = ch.profile_adapter_ids();
+                    if adapters.is_empty() {
+                        return;
+                    }
+                    let all = ch
                     .store()
                     .reader(|c| -> ChannelResult<Vec<String>> {
                         let mut st = c.prepare(
@@ -625,25 +640,26 @@ impl Channels {
                         Ok(rows)
                     })
                     .unwrap_or_default();
-                for ws in ch.names().take_due(ch.now(), &all) {
-                    match ch.resolve_names(&ws).await {
-                        Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
-                            ws,
-                            candidates = r.candidates,
-                            named_local = r.named_local,
-                            named_remote = r.named_remote,
-                            promoted = r.promoted,
-                            merged = r.merged,
-                            orgs_linked = r.orgs_linked,
-                            nameless = r.nameless,
-                            "names: run"
-                        ),
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+                    for ws in ch.names().take_due(ch.now(), &all) {
+                        match ch.resolve_names(&ws).await {
+                            Ok(r) if r.candidates > 0 || r.orgs_linked > 0 => tracing::info!(
+                                ws,
+                                candidates = r.candidates,
+                                named_local = r.named_local,
+                                named_remote = r.named_remote,
+                                promoted = r.promoted,
+                                merged = r.merged,
+                                orgs_linked = r.orgs_linked,
+                                nameless = r.nameless,
+                                "names: run"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(ws, "names: run failed: {e}"),
+                        }
                     }
                 }
-            }
-        }))
+            },
+        ))
     }
 
     /// One run over `ws` (module doc). Safe to call any time; the provider lookups are cached.
