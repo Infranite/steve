@@ -318,10 +318,25 @@ impl NodeRuntime {
                         session
                     ],
                 )?;
-                tx.publish(steve_store::ChangeEvent::Session {
-                    id: session.clone(),
-                    item_id: None,
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: tx
+                            .query_row::<String, _, _>(
+                                "SELECT workspace_id FROM sessions WHERE id = ?",
+                                rusqlite::params![session],
+                                |r| r.get(0),
+                            )?
+                            .into(),
+                        id: {
+                            let value: String = session.clone();
+                            steve_types::SessionId::from(value)
+                        },
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
                 if delta.is_some_and(|d| d > 0.0) {
                     out.push(After::Cost { session });
                 }
@@ -376,10 +391,25 @@ impl NodeRuntime {
                         session
                     ],
                 )?;
-                tx.publish(steve_store::ChangeEvent::Session {
-                    id: session,
-                    item_id: None,
-                });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: tx
+                            .query_row::<String, _, _>(
+                                "SELECT workspace_id FROM sessions WHERE id = ?",
+                                rusqlite::params![session],
+                                |r| r.get(0),
+                            )?
+                            .into(),
+                        id: {
+                            let value: String = session;
+                            steve_types::SessionId::from(value)
+                        },
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
             }
             EventBody::AttemptStarted => {
                 if let Subject::Execution(x) = &ev.subject

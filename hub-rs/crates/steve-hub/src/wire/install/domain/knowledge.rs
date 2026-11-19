@@ -65,19 +65,30 @@ install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
                     .unwrap_or_default()
                     .to_string()
             };
-            // Transitional Value tap -> legacy subscriber bridge. The subscriber still accepts
-            // ChangeEvent until the final W1.3b commit; do not invent a ws for legacy Bot notices (they have none).
-            let e = match s("type").as_str() {
-                "mm" => steve_store::ChangeEvent::Mm {
-                    id: s("id"),
-                    ws: s("ws"),
-                },
-                "bot" => steve_store::ChangeEvent::Bot { id: s("id") },
-                _ => continue,
-            };
+            let kind = s("type");
+            let id = s("id");
             let m = m.clone();
-            match tokio::task::spawn_blocking(move || steve_knowledge::sync::on_event(&m, &e)).await
-            {
+            // Preserve the subscriber's existing sync scope without reconstructing a legacy event.
+            match tokio::task::spawn_blocking(move || {
+                let now = m.clock.now();
+                match kind.as_str() {
+                    "mm" => {
+                        m.store.transaction(|tx| steve_knowledge::sync::sync_mem(tx, &id, now))?;
+                    }
+                    "bot" => {
+                        let mut workspaces = m.store.workspaces().ids()?;
+                        workspaces.sort();
+                        m.store.transaction(|tx| {
+                            for ws in &workspaces {
+                                steve_knowledge::sync::sync_bot_mems(tx, ws, "steve", now)?;
+                            }
+                            Ok::<_, steve_store::StoreError>(())
+                        })?;
+                    }
+                    _ => {}
+                }
+                Ok::<_, steve_store::StoreError>(())
+            }).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("kb sync: {e}"),
                 Err(e) => tracing::warn!("kb sync: {e}"),

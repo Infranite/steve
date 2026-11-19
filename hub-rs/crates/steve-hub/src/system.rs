@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::backend::{BResult, BackendError, ImportedSession, Repo};
-use crate::bus::{Bus, HubEvent};
+use crate::bus::Bus;
 use crate::config::{Config, home_dir};
 use crate::js;
 
@@ -701,10 +701,19 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
     for x in &rows {
         r.events_add(&id, &x.kind, &x.data)?;
     }
-    bus.publish(HubEvent::Session {
-        id: id.clone(),
-        item_id: None,
-    });
+    bus.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            ws: ws.into(),
+            id: {
+                let value: String = id.clone();
+                steve_types::SessionId::from(value)
+            },
+            item_id: {
+                let value: Option<Option<String>> = None;
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     Ok(id)
 }
 

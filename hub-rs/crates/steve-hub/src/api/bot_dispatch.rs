@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_store::{
-    ChangeEvent, Store, StoreError,
+    Store, StoreError,
     bot_dispatch::{self, LEGACY, Member},
 };
 
@@ -194,7 +194,15 @@ pub async fn set_bindings(
                 )?;
             }
             audit(tx, &cx, "bot.nodes", &id, &json!({"nodes":nodes}))?;
-            tx.publish(ChangeEvent::Bot { id });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: cx.ws.clone().into(),
+                    id: {
+                        let value: String = id;
+                        steve_types::BotId::from(value)
+                    },
+                },
+            ));
             Ok(json!({"ok":true}))
         });
         result.map_err(Into::into)
@@ -330,7 +338,15 @@ async fn save(st: AppState, cx: Ctx, id: Option<String>, b: Preset) -> ApiResult
                 &id,
                 &json!({"name": name, "members": members}),
             )?;
-            tx.publish(ChangeEvent::Settings { id: cx.ws.clone() });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Settings {
+                    ws: cx.ws.clone().into(),
+                    id: {
+                        let value: String = cx.ws.clone();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                },
+            ));
             Ok(json!({"id":id,"name":name,"members":members}))
         });
         result.map_err(Into::into)
@@ -366,7 +382,15 @@ pub async fn set_default(
                 )?;
             }
             audit(tx, &cx, "bot.team.default", &b.team, &json!({}))?;
-            tx.publish(ChangeEvent::Settings { id: cx.ws.clone() });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Settings {
+                    ws: cx.ws.clone().into(),
+                    id: {
+                        let value: String = cx.ws.clone();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                },
+            ));
             Ok(json!({"default":b.team}))
         });
         result.map_err(Into::into)

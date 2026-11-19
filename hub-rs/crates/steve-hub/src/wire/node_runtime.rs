@@ -941,10 +941,25 @@ fn status_in(tx: &Tx, session: &str, status: &str) -> Result<(), StoreError> {
         rusqlite::params![status, now(), session],
     )?;
     if n > 0 {
-        tx.publish(steve_store::ChangeEvent::Session {
-            id: session.into(),
-            item_id: None,
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Session {
+                ws: tx
+                    .query_row::<String, _, _>(
+                        "SELECT workspace_id FROM sessions WHERE id = ?",
+                        rusqlite::params![session],
+                        |r| r.get(0),
+                    )?
+                    .into(),
+                id: {
+                    let value: String = session.into();
+                    steve_types::SessionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = None;
+                    value.map(|value| value.map(Into::into))
+                },
+            },
+        ));
     }
     Ok(())
 }

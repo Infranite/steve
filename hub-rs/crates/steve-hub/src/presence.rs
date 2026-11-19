@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use steve_store::{ChangeEvent, Store};
+#[cfg(test)]
+use steve_store::ChangeEvent;
+use steve_store::Store;
 use tokio::sync::watch;
 
 /// How often clients signed out elsewhere are looked for.
@@ -68,10 +70,18 @@ impl Drop for Here {
 
 fn tell(store: Option<&Store>, id: &str, user: &str) {
     if let Some(s) = store {
-        s.publish(ChangeEvent::Client {
-            id: id.into(),
-            user: user.into(),
-        });
+        s.publish(steve_types::DomainEvent::from(
+            steve_types::DevicesEvent::Client {
+                id: {
+                    let value: String = id.into();
+                    steve_types::ClientId::from(value)
+                },
+                user: {
+                    let value: String = user.into();
+                    steve_types::UserId::from(value)
+                },
+            },
+        ));
     }
 }
 

@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use crate::backend::{BResult, Obj, Repo};
-use crate::bus::{Bus, HubEvent};
+use crate::bus::Bus;
 
 const SPACE: &str = "notify";
 const SEEN: &str = "notifySeen";
@@ -82,7 +82,15 @@ pub fn dismiss(r: &dyn Repo, bus: &Bus, ws: &str, id: &str) -> BResult<()> {
         DISMISSED,
         &serde_json::to_string(&ids[skip..]).unwrap_or_default(),
     )?;
-    bus.publish(HubEvent::Settings { id: ws.into() });
+    bus.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Settings {
+            ws: ws.into(),
+            id: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 
@@ -245,7 +253,15 @@ pub fn seen(r: &dyn Repo, ws: &str) -> BResult<Value> {
 /// Everything up to `at` has been seen; publishes `settings` (no revision row).
 pub fn mark_seen(r: &dyn Repo, bus: &Bus, ws: &str, at: i64) -> BResult<i64> {
     r.setting_put_raw(ws, SEEN, &at.to_string())?;
-    bus.publish(HubEvent::Settings { id: ws.into() });
+    bus.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Settings {
+            ws: ws.into(),
+            id: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
     Ok(at)
 }
 

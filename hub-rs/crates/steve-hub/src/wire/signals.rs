@@ -239,19 +239,12 @@ pub async fn watch_mailboxes(
     // what existed at boot is not “new”
     let mut known: std::collections::BTreeSet<String> =
         connections(&flow).into_iter().map(|c| c.0).collect();
-    while let Some(v) = changes.recv().await {
+    while changes.recv().await.is_some() {
         // E6: a mailbox that appears, recovers or goes away starts or stops its runner now (the
         // first sync of a new mailbox runs at once)
-        let field = |k: &str| {
-            v.get(k)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        mail.on_event(&steve_store::ChangeEvent::Connection {
-            id: field("id"),
-            ws: field("ws"),
-        });
+        if let Err(err) = mail.reconcile() {
+            tracing::warn!(error = %err, "mail runners");
+        }
         while changes.try_recv().is_ok() {}
         for (id, ws, adapter, status, by) in connections(&flow) {
             if !known.insert(id.clone()) || !live(&status) {

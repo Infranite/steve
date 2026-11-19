@@ -752,13 +752,22 @@ impl NodeRuntime {
         let existing: Option<String> = tx.query_row("SELECT id FROM decisions WHERE session_id=? AND subject_type=? AND question=? ORDER BY created LIMIT 1", [session, reason, &question], |r| r.get(0)).optional()?;
         if let Some(id) = existing {
             tx.execute("UPDATE decisions SET status='open',result=NULL,resolved=NULL,undo=NULL WHERE id=? AND status<>'open'", [&id])?;
-            tx.publish(steve_store::ChangeEvent::Decision {
-                id,
-                item_id: Some(item.clone()),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Decision {
+                    ws: ws.clone().into(),
+                    id: {
+                        let value: String = id;
+                        steve_types::DecisionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = Some(item.clone());
+                        value.map(|value| value.map(Into::into))
+                    },
+                },
+            ));
         } else {
             steve_store::decision_create_in(tx, &steve_store::NewDecision {
-                workspace_id: ws, kind: "fail".into(), subject_type: reason.into(),
+                workspace_id: ws.clone(), kind: "fail".into(), subject_type: reason.into(),
                 subject_id: bot.unwrap_or_default(), item_id: item.clone(), session_id: Some(session.into()),
                 question: question.clone(), draft: Some("自动重试已停止。请先修正 Bot 的模型或思考强度，再点击重试；你修改执行器后，重试会创建新会话。".into()),
                 options: Some(vec!["retry".into()]), requested_by: "steve".into(),
@@ -766,7 +775,15 @@ impl NodeRuntime {
         }
         if let Some(item) = item {
             tx.execute("UPDATE items SET status='wait',now=?,updated=? WHERE id=? AND phase<>'closed' AND status<>'pause'", rusqlite::params![question,now(),item])?;
-            tx.publish(steve_store::ChangeEvent::Item { id: item });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: ws.clone().into(),
+                    id: {
+                        let value: String = item;
+                        steve_types::ItemId::from(value)
+                    },
+                },
+            ));
         }
         Ok(())
     }
