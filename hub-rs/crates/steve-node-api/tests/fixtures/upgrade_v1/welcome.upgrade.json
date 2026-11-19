@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "h_1",
+  "m": "welcome",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "gen": 7,
+    "proto": 10,
+    "upgrade_protocol": 1,
+    "mode": "upgrade",
+    "paused": false,
+    "heartbeat_ms": 10000,
+    "hub_key": "2222222222222222222222222222222222222222222222222222222222222222",
+    "pins": [
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "sig": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444"
+  }
+}

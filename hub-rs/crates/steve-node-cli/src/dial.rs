@@ -622,11 +622,6 @@ async fn link_once(
             node: node_id,
             identity: id,
             incarnation: node.incarnation(),
-            // The Hub obtains all stream heads from the paged post-link snapshot. Including
-            // them here grows the fixed-size control hello with every historical stream and
-            // eventually prevents the Node from linking at all.
-            heads: Vec::new(),
-            caps: None,
             hub_id: Some(hub.id),
             hub_key: hub.key,
         },
@@ -652,11 +647,14 @@ async fn link_once(
             heartbeat: Duration::from_millis(welcome.heartbeat_ms.max(1000)),
             dead_after: Duration::from_millis(welcome.heartbeat_ms.max(1000) * 3),
             side: "n",
-            peer: welcome.proto,
+            mode: welcome.mode,
         },
     );
-    tracing::info!(generation = welcome.generation, "linked to the hub");
-    linked();
+    tracing::info!(generation = welcome.generation, mode = ?welcome.mode, "linked to the hub");
+    // An incompatible link can fetch an upgrade, but is not proof the new build is healthy.
+    if welcome.mode == steve_node_api::upgrade_v1::Mode::Normal {
+        linked();
+    }
     link.set(Some(conn.clone()));
     let (code, reason) = conn.closed().await;
     link.set(None);

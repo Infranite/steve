@@ -26,7 +26,7 @@ struct Entry {
     tools: Option<Arc<dyn HubTools>>,
     files: Option<Arc<dyn HubFiles>>,
     /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
-    proto: Option<(u16, u16)>,
+    proto: Option<u32>,
     /// What a remote Node last reported it could not link with, and when (ms), since it last
     /// linked (handshake `report`).
     link_failure: Option<(i64, String)>,
@@ -189,11 +189,19 @@ impl NodeFleet {
     }
 
     /// Records the protocol the Node's hello said, for each link it opens.
-    pub fn linked(&self, node: &NodeId, proto: (u16, u16)) {
+    pub fn linked(&self, node: &NodeId, proto: u32) {
         self.entry(node, |e| {
             e.proto = Some(proto);
             e.link_failure = None;
         });
+    }
+
+    pub fn protocol(&self, node: &str) -> Option<u32> {
+        self.nodes
+            .lock()
+            .unwrap()
+            .get(node)
+            .and_then(|entry| entry.proto)
     }
 
     /// A remote Node said why it could not link (a handshake `report`): shown until it links.

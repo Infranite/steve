@@ -161,6 +161,27 @@ impl HubFiles for RemoteFiles {
     ) -> ApiResult<ReadChunk> {
         // hex doubles the bytes: keep a chunk's frame within a bulk frame
         let max = max.min(CHUNK_BYTES);
+        if let FileAccess::Operation { operation } = &access
+            && id.as_str().starts_with(upgrade_v1::ARTIFACT_PREFIX)
+        {
+            let request = upgrade_v1::FetchRequest {
+                access: upgrade_v1::FileAccess::Operation {
+                    operation: operation.to_string(),
+                },
+                id: id.to_string(),
+                offset,
+                max,
+            };
+            let value = self
+                .0
+                .conn()?
+                .call_upgrade(upgrade_v1::BLOB_FETCH, to_value(&request)?, None)
+                .await
+                .map_err(ApiError::from)?;
+            let response: upgrade_v1::FetchResponse =
+                crate::upgrade::decode(value).map_err(ApiError::from)?;
+            return Ok(response.into());
+        }
         let a = FetchArgs {
             access,
             id,

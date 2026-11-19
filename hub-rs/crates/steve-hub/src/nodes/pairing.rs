@@ -420,6 +420,20 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
                 v["link_error"] = json!({ "at": at, "error": why });
             }
+            let upgrade_only = svc
+                .registry
+                .conn(&n.node_id)
+                .is_some_and(|c| !c.is_closed() && c.is_upgrade());
+            v["protocol"] = json!(svc.fleet.protocol(&n.node_id));
+            v["protocol_mode"] = json!(if upgrade_only { "upgrade" } else { "normal" });
+            v["protocol_status"] = if upgrade_only {
+                json!("版本不一致，需要升级")
+            } else {
+                Value::Null
+            };
+            if upgrade_only {
+                v["link_error"] = json!({ "at": now(), "error": "版本不一致，需要升级" });
+            }
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));
@@ -427,7 +441,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             if let Some(rm) = &rm {
                 v["removal"] = rm.view(&n, linked, removal.as_ref());
                 // asked in the background: the next list shows whether it can remove itself
-                if linked && !n.local && rm.seen(&n.node_id).is_none() {
+                if linked && !upgrade_only && !n.local && rm.seen(&n.node_id).is_none() {
                     let (rm, id) = (rm.clone(), n.node_id.clone());
                     tokio::spawn(async move {
                         rm.look(&id).await;

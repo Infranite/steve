@@ -25,6 +25,7 @@ pub mod sock;
 pub mod tailcat;
 pub mod testkit;
 pub mod tls;
+pub mod upgrade;
 pub mod ws;
 
 pub use conn::{Conn, ConnOptions, Handler};
@@ -36,8 +37,8 @@ pub use remote_hub::{HubLink, RemoteFiles, RemoteSecrets, RemoteSink, RemoteTool
 pub use remote_node::RemoteNode;
 pub use serve_hub::ServeHub;
 
-/// Version of the envelope itself; [`steve_node_api::PROTOCOL`] is the version of what it carries.
-pub const WIRE: (u16, u16) = (1, 0);
+/// Ordinary frames use the single application protocol number; upgrade/bootstrap frames use v1.
+pub use steve_node_api::PROTOCOL as WIRE;
 
 /// Close codes (application range).
 pub mod close {
@@ -49,7 +50,7 @@ pub mod close {
     pub const DEAD: u16 = 4408;
     /// A newer connection of the same Node took over.
     pub const FENCED: u16 = 4409;
-    /// No common protocol major.
+    /// No supported bootstrap upgrade protocol.
     pub const UNSUPPORTED: u16 = 4426;
     /// The Hub could not decide (store error, timeout); dial again.
     pub const INTERNAL: u16 = 1011;

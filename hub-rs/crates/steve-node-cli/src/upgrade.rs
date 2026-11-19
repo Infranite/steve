@@ -305,6 +305,11 @@ impl Upgrader for ServiceUpgrader {
             return Ok(r.state);
         }
         let running = node.running_work()?;
+        steve_node_api::upgrade_bridge::refuse_downgrade(
+            &self.build.version,
+            &r.request.build.version,
+        )
+        .map_err(ApiError::from)?;
         if running > 0 && !s.force {
             return Err(err(
                 ErrorCode::Busy,
@@ -1036,6 +1041,76 @@ mod tests {
         assert!(check_request(&me, &v).is_err(), "not a release version");
         assert!(op_name(&OperationId::new("..").unwrap()).is_err());
         assert!(op_name(&OperationId::new("a:b").unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn switching_a_staged_older_release_is_refused_before_service_or_record_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let request = request("nup_older", "1.9.0", b"unused");
+        let record = Record {
+            state: NodeUpgradeState {
+                operation: request.operation.clone(),
+                phase: "staged".into(),
+                version: "1.9.0".into(),
+                previous: Some("1.10.0".into()),
+                error: None,
+                updated: Timestamp(1),
+            },
+            request,
+            release: Some(home.path().join("releases/older")),
+            previous_release: None,
+        };
+        save(home.path(), &record).unwrap();
+        let upgrader = ServiceUpgrader {
+            home: home.path().into(),
+            build: build("1.10.0"),
+            release: home.path().join("releases/current"),
+            lock: tokio::sync::Mutex::new(()),
+        };
+        let root = home.path();
+        let node = LocalNode::open(steve_node::NodeConfig {
+            node: NodeId::new("fixture").unwrap(),
+            home: root.join("journal"),
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+            ceiling: Default::default(),
+            acp: steve_acp::AcpConfig {
+                adapters: Default::default(),
+                declared: Default::default(),
+                node: "/usr/bin/false".into(),
+                claude_executable: "/usr/bin/false".into(),
+                steve_home: root.join("steve"),
+                codex_home: root.join("codex"),
+                user_home: root.into(),
+                version: "test".into(),
+            },
+        })
+        .unwrap();
+        for force in [false, true] {
+            let error = upgrader
+                .switch(
+                    &node,
+                    UpgradeSwitch {
+                        operation: record.request.operation.clone(),
+                        abandon: false,
+                        force,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Invalid);
+            assert!(error.safe_detail.contains("refusing downgrade"));
+            let after = load(root, "nup_older").unwrap().unwrap();
+            assert_eq!(after.state.phase, "staged");
+            assert!(after.previous_release.is_none());
+            assert_eq!(after.state.updated, Timestamp(1));
+        }
+        node.shutdown().await;
     }
 
     /// The service as a test drives it: `link` says whether the release started links.

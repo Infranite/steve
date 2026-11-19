@@ -28,6 +28,21 @@ impl ServeHub {
 
 #[async_trait]
 impl Handler for ServeHub {
+    async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+        if method != upgrade_v1::BLOB_FETCH {
+            return Err(upgrade_v1::Error::incompatible());
+        }
+        let request: upgrade_v1::FetchRequest = crate::upgrade::decode(p)?;
+        let (access, id, offset, max) = upgrade_bridge::fetch_request(request)?;
+        let chunk = self
+            .files()
+            .map_err(upgrade_v1::Error::from)?
+            .fetch(access, id, offset, max)
+            .await
+            .map_err(upgrade_v1::Error::from)?;
+        crate::upgrade::encode(upgrade_v1::FetchResponse::from(chunk))
+    }
+
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         match method {
             EVENTS_COMMIT => en(&self.sink.commit(de(p)?).await?),

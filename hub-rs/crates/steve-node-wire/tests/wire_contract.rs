@@ -325,6 +325,11 @@ async fn component_integrity_and_other_installation_evidence_survive_the_wire() 
 #[tokio::test]
 async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
     let fake = FakeNode::new("n1");
+    fake.set_build(Some(BuildIdentity {
+        version: "1.0.0".into(),
+        commit: "a".repeat(40),
+        target: "aarch64-apple-darwin".into(),
+    }));
     let w = wire(fake.clone(), 1);
     let op = OperationId::new("nup_1").unwrap();
     // a node that does not say it can is told so, nothing staged

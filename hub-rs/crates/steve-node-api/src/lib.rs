@@ -22,6 +22,8 @@ pub mod ports;
 pub mod run;
 pub mod stop;
 pub mod tools;
+pub mod upgrade_bridge;
+pub mod upgrade_v1;
 pub mod workspace;
 
 #[cfg(any(test, feature = "testkit"))]
@@ -39,8 +41,9 @@ pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
-/// Major.minor of this contract. A major change refuses the connection.
-pub const PROTOCOL: (u16, u16) = (0, 9);
+/// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
+/// A different value permits only the independent, permanent upgrade protocol.
+pub const PROTOCOL: u32 = 10;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.

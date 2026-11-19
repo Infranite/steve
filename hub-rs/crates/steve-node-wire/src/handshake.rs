@@ -1,102 +1,37 @@
-//! The first three frames of every link (control, JSON, 10 s budget):
+//! Authenticated bootstrap using the self-contained upgrade-v1 schema.
 //!
-//! 1. Hub → Node `challenge {nonce, hub_id, conn_id, proto, hub_time}`
-//! 2. Node → Hub `hello {node_id, incarnation, proto, codecs, heads, caps, sig}`, where `sig` is
-//!    Ed25519 over `"steve-node-hello-v1" ‖ hub_id ‖ conn_id ‖ nonce ‖ sha256(canonical hello
-//!    without sig)`: bound to this Hub, this connection and this nonce, so it replays nowhere.
-//! 3. Hub → Node `welcome {gen, proto, paused, heartbeat_ms, hub_key, sig}`, or `error {code}` and
-//!    a close. `sig` is the Hub's Ed25519 over `"steve-hub-welcome-v1" ‖ conn_id ‖ nonce ‖
-//!    sha256(canonical hello) ‖ sha256(canonical welcome without sig)` (M1): the Hub's identity end
-//!    to end, wherever TLS ends (a proxy, a tunnel, plain loopback). A Node that knows its Hub's
-//!    key (from pairing, or remembered from the first signed welcome) refuses any other; a Hub of
-//!    an earlier release sends neither field, and a Node of one ignores them.
+//! Hub challenge → signed Node hello → signed Hub welcome. The signed welcome confirms both
+//! application protocol numbers and the mode: exact equality is Normal; every mismatch is
+//! Upgrade, without closing an authenticated connection. Capabilities and stream heads are
+//! ordinary data, never part of bootstrap. Existing identity pins, replay binding, generation
+//! fencing and the 10-second handshake budget remain in force.
 //!
-//! A Node that could not link (a fault the Hub cannot see from its side: a hello over the frame
-//! limit, a welcome that does not hold) may answer a challenge with `report {node_id, error, sig}`
-//! instead of a hello, `sig` the same binding over `"steve-node-report-v1"`. The Hub notes the
-//! reason for the Node's owner, answers `noted` and closes; nothing is linked. At most
-//! [`REPORT_MAX`] bytes of reason; a Hub of an earlier release refuses it as `invalid`.
-//!
-//! Unknown, pending and revoked Nodes and bad signatures all get one `denied` text: a refusal tells
-//! the dialler nothing about which it was. `denied` means only that: a Hub that could not decide
-//! (its store failed, the handshake ran out of time) answers `internal`, which a Node retries.
+//! Unknown/revoked Nodes and bad signatures receive the same denied error. A store failure is
+//! internal (retry), not an authorization verdict. Signed reports carry a bounded diagnostic
+//! instead of linking, receive an empty noted acknowledgement, and close.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use steve_node_api::{Capabilities, NodeId, PROTOCOL, StreamHead, canonical_json};
+use serde_json::Value;
+use steve_node_api::upgrade_v1::{self as upgrade, Mode, UPGRADE_PROTOCOL};
+use steve_node_api::{NodeId, PROTOCOL};
 
 use crate::envelope::{Envelope, Frame, FrameSink, FrameStream, Kind};
 use crate::identity::{self, Identity};
 
-pub const BUDGET: Duration = Duration::from_secs(10);
+pub const BUDGET: Duration = Duration::from_millis(upgrade::HANDSHAKE_BUDGET_MS);
 pub const DENIED: &str = "denied";
 /// The Hub could not decide (store error, timeout): not a refusal, the Node dials again.
 pub const INTERNAL: &str = "internal";
 /// The handshake ended with a [`Report`] noted, not a link.
 pub const REPORTED: &str = "reported";
 /// The longest reason a [`Report`] carries, in bytes.
-pub const REPORT_MAX: usize = 1024;
+pub use steve_node_api::upgrade_v1::REPORT_MAX;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProtoRange {
-    pub min: (u16, u16),
-    pub max: (u16, u16),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Challenge {
-    pub nonce: String,
-    pub hub_id: String,
-    pub conn_id: String,
-    pub proto: ProtoRange,
-    pub hub_time: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Hello {
-    pub node_id: NodeId,
-    pub incarnation: u64,
-    pub proto: (u16, u16),
-    pub codecs: Vec<String>,
-    #[serde(default)]
-    pub heads: Vec<StreamHead>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caps: Option<Capabilities>,
-    #[serde(default)]
-    pub sig: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Welcome {
-    #[serde(rename = "gen")]
-    pub generation: u64,
-    pub proto: (u16, u16),
-    pub paused: bool,
-    pub heartbeat_ms: u64,
-    /// The Hub's public identity key (hex); empty from a Hub without one.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub hub_key: String,
-    /// The pins of the Hub's certificate now (`sha256:…`), when it terminates TLS itself: a Node
-    /// that pinned it takes these (L4), signed as the rest of the welcome.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pins: Vec<String>,
-    /// [`welcome_message`] signed by that key (hex).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sig: String,
-}
-
-/// Why a Node could not link, said instead of a hello.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Report {
-    pub node_id: NodeId,
-    pub error: String,
-    #[serde(default)]
-    pub sig: String,
-}
+pub use steve_node_api::upgrade_v1::{Challenge, Hello, Report, Welcome};
+pub use steve_node_api::upgrade_v1::{hello_message, report_message, welcome_message};
 
 /// `s` cut to at most [`REPORT_MAX`] bytes, on a character boundary.
 pub fn clip_report(s: &str) -> &str {
@@ -105,39 +40,6 @@ pub fn clip_report(s: &str) -> &str {
         end -= 1;
     }
     &s[..end]
-}
-
-/// The bytes a report signs: this Hub, this connection, this nonce, and the report.
-pub fn report_message(c: &Challenge, r: &Report) -> Vec<u8> {
-    let mut unsigned = r.clone();
-    unsigned.sig = String::new();
-    let v = serde_json::to_value(&unsigned).unwrap_or(Value::Null);
-    let mut m = b"steve-node-report-v1".to_vec();
-    for part in [&c.hub_id, &c.conn_id, &c.nonce] {
-        m.push(0);
-        m.extend_from_slice(part.as_bytes());
-    }
-    m.push(0);
-    m.extend_from_slice(&identity::sha256(canonical_json(&v).as_bytes()));
-    m
-}
-
-/// The bytes a welcome signs: this connection, this nonce, the hello it answers, and itself.
-pub fn welcome_message(c: &Challenge, h: &Hello, w: &Welcome) -> Vec<u8> {
-    let mut unsigned = w.clone();
-    unsigned.sig = String::new();
-    let hello = serde_json::to_value(h).unwrap_or(Value::Null);
-    let welcome = serde_json::to_value(&unsigned).unwrap_or(Value::Null);
-    let mut m = b"steve-hub-welcome-v1".to_vec();
-    for part in [&c.conn_id, &c.nonce] {
-        m.push(0);
-        m.extend_from_slice(part.as_bytes());
-    }
-    m.push(0);
-    m.extend_from_slice(&identity::sha256(canonical_json(&hello).as_bytes()));
-    m.push(0);
-    m.extend_from_slice(&identity::sha256(canonical_json(&welcome).as_bytes()));
-    m
 }
 
 /// The key a signed welcome proves, `None` for an unsigned one; an error when it is signed and
@@ -198,25 +100,10 @@ pub trait Admission: Send + Sync {
     async fn reported(&self, _node: &NodeId, _error: &str) {}
 }
 
-/// The bytes a hello signs.
-pub fn hello_message(c: &Challenge, h: &Hello) -> Vec<u8> {
-    let mut unsigned = h.clone();
-    unsigned.sig = String::new();
-    let v = serde_json::to_value(&unsigned).unwrap_or(Value::Null);
-    let mut m = b"steve-node-hello-v1".to_vec();
-    for part in [&c.hub_id, &c.conn_id, &c.nonce] {
-        m.push(0);
-        m.extend_from_slice(part.as_bytes());
-    }
-    m.push(0);
-    m.extend_from_slice(&identity::sha256(canonical_json(&v).as_bytes()));
-    m
-}
-
 async fn send_ctl(sink: &mut FrameSink, m: &str, p: Value) -> Result<(), Refused> {
     let text = Envelope::ctl(format!("hs_{m}"), m, 0, p)
         .encode()
-        .map_err(|e| refused("internal", e.safe_detail))?;
+        .map_err(|e| refused("internal", e.detail))?;
     sink.send(Frame::Text(text))
         .await
         .map_err(|e| refused("offline", e.to_string()))
@@ -231,11 +118,17 @@ async fn recv_ctl_of(stream: &mut FrameStream, want: &[&str]) -> Result<(String,
     let want0 = want[0];
     match stream.next().await {
         Some(Ok(Frame::Text(t))) => match Envelope::decode(&t) {
-            Some(e) if e.t == Kind::Ctl && want.contains(&e.m.as_str()) => Ok((e.m, e.p)),
-            Some(e) if e.t == Kind::Ctl && e.m == "error" => Err(refused(
-                e.p["code"].as_str().unwrap_or(DENIED),
-                e.p["detail"].as_str().unwrap_or(""),
-            )),
+            Some(e)
+                if e.v == UPGRADE_PROTOCOL && e.t == Kind::Ctl && want.contains(&e.m.as_str()) =>
+            {
+                Ok((e.m, e.p))
+            }
+            Some(e) if e.v == UPGRADE_PROTOCOL && e.t == Kind::Ctl && e.m == upgrade::ERROR => {
+                let error: upgrade::Error = serde_json::from_value(e.p)
+                    .map_err(|_| refused("invalid", "malformed bootstrap error"))?;
+                let code = serde_json::to_value(error.code).unwrap();
+                Err(refused(code.as_str().unwrap(), error.detail))
+            }
             _ => Err(refused("invalid", format!("expected {want0}"))),
         },
         // a bare close is a refusal only when it says so (a proxy or a restart closes too)
@@ -258,9 +151,52 @@ async fn refuse(sink: &mut FrameSink, r: &Refused) {
         DENIED => crate::close::DENIED,
         _ => crate::close::INTERNAL,
     };
-    let _ = send_ctl(sink, "error", json!({"code": r.code, "detail": r.detail})).await;
+    let kind =
+        serde_json::from_value(Value::String(r.code.clone())).unwrap_or(upgrade::Code::Internal);
+    let error = upgrade::Error::new(kind, r.detail.clone());
+    let _ = send_ctl(sink, upgrade::ERROR, serde_json::to_value(error).unwrap()).await;
     let _ = sink.send(Frame::Close(code, r.code.clone())).await;
     let _ = sink.close().await;
+}
+
+async fn receive_hello(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    admission: &dyn Admission,
+    challenge: &Challenge,
+) -> Result<(Hello, Admitted), Refused> {
+    let (m, p) = recv_ctl_of(stream, &[upgrade::HELLO, upgrade::REPORT]).await?;
+    if m == upgrade::REPORT {
+        return Err(take_report(sink, admission, challenge, p).await);
+    }
+    let hello: Hello =
+        serde_json::from_value(p).map_err(|_| refused("invalid", "malformed hello"))?;
+    if hello.upgrade_protocol != UPGRADE_PROTOCOL {
+        return Err(refused("unsupported", "no supported bootstrap protocol"));
+    }
+    let node = NodeId::new(hello.node_id.clone())
+        .map_err(|_| refused(DENIED, "this node may not connect"))?;
+    let denied = || refused(DENIED, "this node may not connect");
+    let internal = |e: String| {
+        // the store's text stays in the Hub's log
+        tracing::warn!("node handshake: {e}");
+        refused(INTERNAL, "the hub could not decide; dial again")
+    };
+    let key = admission
+        .key(&node)
+        .await
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    let sig = hex::decode(&hello.sig).map_err(|_| denied())?;
+    if !identity::verify(&key, &hello_message(challenge, &hello), &sig) {
+        return Err(denied());
+    }
+    let admitted = admission
+        .admit(&hello)
+        .await
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    Ok((hello, admitted))
 }
 
 /// The Hub's side, its welcome unsigned (a Hub without an identity key). On refusal the error and
@@ -283,6 +219,21 @@ pub async fn accept_as(
     hub: Option<&Identity>,
     pins: &[String],
 ) -> Result<(Hello, Admitted), Refused> {
+    accept_version(sink, stream, hub_id, admission, hub, pins, PROTOCOL).await
+}
+
+/// Test seam for a Hub built with a different ordinary protocol, without global state.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_version(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    hub_id: &str,
+    admission: &dyn Admission,
+    hub: Option<&Identity>,
+    pins: &[String],
+    proto: u32,
+) -> Result<(Hello, Admitted), Refused> {
     let run = async {
         let challenge = Challenge {
             nonce: hex::encode(
@@ -292,50 +243,22 @@ pub async fn accept_as(
             conn_id: hex::encode(
                 identity::random::<12>().map_err(|e| refused("internal", e.to_string()))?,
             ),
-            proto: ProtoRange {
-                min: (PROTOCOL.0, 0),
-                max: PROTOCOL,
-            },
+            proto,
+            upgrade_protocol: UPGRADE_PROTOCOL,
             hub_time: crate::now_ms(),
         };
         send_ctl(
             sink,
-            "challenge",
+            upgrade::CHALLENGE,
             serde_json::to_value(&challenge).unwrap_or_default(),
         )
         .await?;
-        let (m, p) = recv_ctl_of(stream, &["hello", "report"]).await?;
-        if m == "report" {
-            return Err(take_report(sink, admission, &challenge, p).await);
-        }
-        let hello: Hello =
-            serde_json::from_value(p).map_err(|_| refused("invalid", "malformed hello"))?;
-        if hello.proto.0 != PROTOCOL.0 || !hello.codecs.iter().any(|c| c == "json") {
-            return Err(refused("unsupported", "no common protocol"));
-        }
-        let denied = || refused(DENIED, "this node may not connect");
-        let internal = |e: String| {
-            // the store's text stays in the Hub's log
-            tracing::warn!("node handshake: {e}");
-            refused(INTERNAL, "the hub could not decide; dial again")
-        };
-        let key = admission
-            .key(&hello.node_id)
-            .await
-            .map_err(internal)?
-            .ok_or_else(denied)?;
-        let sig = hex::decode(&hello.sig).map_err(|_| denied())?;
-        if !identity::verify(&key, &hello_message(&challenge, &hello), &sig) {
-            return Err(denied());
-        }
-        let admitted = admission
-            .admit(&hello)
-            .await
-            .map_err(internal)?
-            .ok_or_else(denied)?;
+        let (hello, admitted) = receive_hello(sink, stream, admission, &challenge).await?;
         let mut welcome = Welcome {
             generation: admitted.generation,
-            proto: PROTOCOL,
+            proto,
+            upgrade_protocol: UPGRADE_PROTOCOL,
+            mode: Mode::between(proto, hello.proto),
             paused: admitted.paused,
             heartbeat_ms: 10_000,
             hub_key: hub.map(|k| hex::encode(k.public())).unwrap_or_default(),
@@ -348,7 +271,7 @@ pub async fn accept_as(
         }
         send_ctl(
             sink,
-            "welcome",
+            upgrade::WELCOME,
             serde_json::to_value(&welcome).unwrap_or_default(),
         )
         .await?;
@@ -382,7 +305,10 @@ async fn take_report(
         return refused("invalid", "report too long");
     }
     let denied = || refused(DENIED, "this node may not connect");
-    let key = match admission.key(&report.node_id).await {
+    let Ok(node) = NodeId::new(report.node_id.clone()) else {
+        return denied();
+    };
+    let key = match admission.key(&node).await {
         Ok(Some(k)) => k,
         Ok(None) => return denied(),
         Err(e) => {
@@ -395,11 +321,48 @@ async fn take_report(
     if !ok {
         return denied();
     }
-    admission.reported(&report.node_id, &report.error).await;
-    let _ = send_ctl(sink, "noted", json!({})).await;
+    admission.reported(&node, &report.error).await;
+    let _ = send_ctl(
+        sink,
+        upgrade::NOTED,
+        serde_json::to_value(upgrade::Noted {}).unwrap(),
+    )
+    .await;
     let _ = sink.send(Frame::Close(1000, REPORTED.into())).await;
     let _ = sink.close().await;
     refused(REPORTED, report.error)
+}
+
+fn check_challenge(challenge: &Challenge, hub_id: Option<&str>) -> Result<(), Refused> {
+    if hub_id.is_some_and(|want| want != challenge.hub_id) {
+        return Err(refused(DENIED, "not the hub this node paired with"));
+    }
+    if challenge.upgrade_protocol != UPGRADE_PROTOCOL {
+        return Err(refused("unsupported", "no supported bootstrap protocol"));
+    }
+    Ok(())
+}
+
+fn check_welcome(
+    challenge: &Challenge,
+    hello: &Hello,
+    welcome: &Welcome,
+    hub_key: Option<[u8; 32]>,
+) -> Result<(), Refused> {
+    if welcome.proto != challenge.proto
+        || welcome.upgrade_protocol != UPGRADE_PROTOCOL
+        || welcome.mode != Mode::between(hello.proto, challenge.proto)
+    {
+        return Err(refused(
+            "invalid",
+            "welcome does not confirm the authenticated protocol mode",
+        ));
+    }
+    let signed = welcome_key(challenge, hello, welcome)?;
+    if hub_key.is_some_and(|want| signed != Some(want)) {
+        return Err(refused(DENIED, "not the hub this node paired with"));
+    }
+    Ok(())
 }
 
 /// The Node's side of a [`Report`]: answers the challenge with `error` (clipped to [`REPORT_MAX`])
@@ -414,22 +377,26 @@ pub async fn report(
     error: &str,
 ) -> Result<(), Refused> {
     let run = async {
-        let p = recv_ctl(stream, "challenge").await?;
+        let p = recv_ctl(stream, upgrade::CHALLENGE).await?;
         let challenge: Challenge =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed challenge"))?;
-        if let Some(want) = hub_id
-            && want != challenge.hub_id
-        {
-            return Err(refused(DENIED, "not the hub this node paired with"));
-        }
+        check_challenge(&challenge, hub_id)?;
         let mut r = Report {
-            node_id: node.clone(),
+            node_id: node.to_string(),
             error: clip_report(error).to_string(),
             sig: String::new(),
         };
         r.sig = hex::encode(identity.sign(&report_message(&challenge, &r)));
-        send_ctl(sink, "report", serde_json::to_value(&r).unwrap_or_default()).await?;
-        recv_ctl(stream, "noted").await.map(|_| ())
+        send_ctl(
+            sink,
+            upgrade::REPORT,
+            serde_json::to_value(&r).unwrap_or_default(),
+        )
+        .await?;
+        let noted = recv_ctl(stream, upgrade::NOTED).await?;
+        serde_json::from_value::<upgrade::Noted>(noted)
+            .map_err(|_| refused("invalid", "malformed report acknowledgement"))?;
+        Ok(())
     };
     match tokio::time::timeout(BUDGET, run).await {
         Ok(r) => r,
@@ -442,8 +409,6 @@ pub struct NodeIntro<'a> {
     pub node: &'a NodeId,
     pub identity: &'a Identity,
     pub incarnation: u64,
-    pub heads: Vec<StreamHead>,
-    pub caps: Option<Capabilities>,
     /// The Hub this Node paired with: a challenge from any other is refused.
     pub hub_id: Option<&'a str>,
     /// That Hub's identity key, when known: a welcome it did not sign is refused (M1).
@@ -465,48 +430,31 @@ pub async fn dial_as(
     sink: &mut FrameSink,
     stream: &mut FrameStream,
     intro: NodeIntro<'_>,
-    proto: (u16, u16),
+    proto: u32,
 ) -> Result<(Challenge, Welcome), Refused> {
     let run = async {
-        let p = recv_ctl(stream, "challenge").await?;
+        let p = recv_ctl(stream, upgrade::CHALLENGE).await?;
         let challenge: Challenge =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed challenge"))?;
-        if let Some(want) = intro.hub_id
-            && want != challenge.hub_id
-        {
-            return Err(refused(DENIED, "not the hub this node paired with"));
-        }
-        if challenge.proto.max.0 < proto.0 || challenge.proto.min.0 > proto.0 {
-            return Err(refused("unsupported", "no common protocol"));
-        }
+        check_challenge(&challenge, intro.hub_id)?;
         let mut hello = Hello {
-            node_id: intro.node.clone(),
+            node_id: intro.node.to_string(),
             incarnation: intro.incarnation,
             proto,
-            codecs: vec!["json".into()],
-            heads: intro.heads,
-            caps: intro.caps,
+            upgrade_protocol: UPGRADE_PROTOCOL,
             sig: String::new(),
         };
         hello.sig = hex::encode(intro.identity.sign(&hello_message(&challenge, &hello)));
         send_ctl(
             sink,
-            "hello",
+            upgrade::HELLO,
             serde_json::to_value(&hello).unwrap_or_default(),
         )
         .await?;
-        let p = recv_ctl(stream, "welcome").await?;
+        let p = recv_ctl(stream, upgrade::WELCOME).await?;
         let welcome: Welcome =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed welcome"))?;
-        if welcome.proto.0 != proto.0 {
-            return Err(refused("unsupported", "no common protocol"));
-        }
-        let signed = welcome_key(&challenge, &hello, &welcome)?;
-        if let Some(want) = intro.hub_key
-            && signed != Some(want)
-        {
-            return Err(refused(DENIED, "not the hub this node paired with"));
-        }
+        check_welcome(&challenge, &hello, &welcome, intro.hub_key)?;
         Ok((challenge, welcome))
     };
     match tokio::time::timeout(BUDGET, run).await {

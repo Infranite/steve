@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "t": "res",
+  "id": "n_1",
+  "re": "h_1",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "ok": {
+      "operation": "op_upgrade",
+      "phase": "succeeded",
+      "version": "2.0.0",
+      "previous": "1.9.0",
+      "error": null,
+      "updated": 1700000000000
+    }
+  }
+}

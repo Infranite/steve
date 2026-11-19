@@ -125,6 +125,9 @@ impl RemoteNode {
         let slot = self.slot.lock().unwrap();
         match slot.link.as_ref() {
             Some(l) if l.conn.is_closed() => Err(ApiError::new(ErrorCode::Offline, "node offline")),
+            Some(l) if new_work && l.conn.is_upgrade() => {
+                Err(upgrade_v1::Error::incompatible().into())
+            }
             Some(_) if new_work && slot.reconciling => Err(ApiError::new(
                 ErrorCode::Offline,
                 "node restarted, reconciling first",
@@ -153,6 +156,29 @@ impl RemoteNode {
         new_work: bool,
     ) -> ApiResult<Receipt> {
         self.go(method, c, Some(&c.id), new_work).await
+    }
+
+    async fn upgrade_go<A: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        args: A,
+        operation: Option<&OperationId>,
+    ) -> ApiResult<R> {
+        let value = self
+            .conn(false)?
+            .call_upgrade(method, to_value(&args)?, operation)
+            .await
+            .map_err(ApiError::from)?;
+        crate::upgrade::decode(value).map_err(ApiError::from)
+    }
+
+    pub fn is_upgrade(&self) -> bool {
+        self.slot
+            .lock()
+            .unwrap()
+            .link
+            .as_ref()
+            .is_some_and(|l| l.conn.is_upgrade())
     }
 }
 
@@ -301,16 +327,47 @@ impl Discovery for RemoteNode {
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }
+    async fn probe_build(&self) -> ApiResult<upgrade_v1::ProbeBuildResponse> {
+        self.upgrade_go(
+            upgrade_v1::PROBE_BUILD,
+            upgrade_v1::ProbeBuildRequest {},
+            None,
+        )
+        .await
+    }
     async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         let op = u.operation.clone();
-        self.go(NODE_UPGRADE, &u, Some(&op), false).await
+        let state: upgrade_v1::StageResponse = self
+            .upgrade_go(
+                upgrade_v1::UPGRADE_STAGE,
+                upgrade_v1::StageRequest::from(u),
+                Some(&op),
+            )
+            .await?;
+        state.try_into().map_err(ApiError::from)
     }
     async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
         let op = s.operation.clone();
-        self.go(NODE_UPGRADE_SWITCH, &s, Some(&op), false).await
+        let state: upgrade_v1::SwitchResponse = self
+            .upgrade_go(
+                upgrade_v1::UPGRADE_SWITCH,
+                upgrade_v1::SwitchRequest::from(s),
+                Some(&op),
+            )
+            .await?;
+        state.try_into().map_err(ApiError::from)
     }
     async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
-        self.go(NODE_UPGRADE_STATUS, &operation, None, false).await
+        let state: upgrade_v1::StatusResponse = self
+            .upgrade_go(
+                upgrade_v1::UPGRADE_STATUS,
+                upgrade_v1::StatusRequest {
+                    operation: operation.to_string(),
+                },
+                None,
+            )
+            .await?;
+        state.try_into().map_err(ApiError::from)
     }
     async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
         let op = r.operation.clone();

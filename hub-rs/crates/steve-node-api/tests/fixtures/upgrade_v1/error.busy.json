@@ -1,0 +1,6 @@
+{
+  "code": "busy",
+  "retry": "later",
+  "operation": null,
+  "detail": "golden error"
+}

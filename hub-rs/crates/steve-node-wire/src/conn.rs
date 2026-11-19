@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
-use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId, PROTOCOL};
+use serde_json::Value;
+use steve_node_api::upgrade_v1 as upgrade;
+use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -24,6 +25,10 @@ use crate::methods::{self, Lane};
 #[async_trait]
 pub trait Handler: Send + Sync + 'static {
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value>;
+    /// Permanent upgrade requests are decoded independently of the ordinary payload/error types.
+    async fn handle_upgrade(&self, _method: &str, _p: Value) -> upgrade::Result<Value> {
+        Err(upgrade::Error::incompatible())
+    }
     /// A control message other than a heartbeat (`paused`, `fenced`, `goodbye`…).
     fn control(&self, _m: &str, _p: &Value) {}
 }
@@ -35,10 +40,8 @@ pub struct ConnOptions {
     pub dead_after: Duration,
     /// Prefix of request ids (`h` on the Hub, `n` on the Node), for logs.
     pub side: &'static str,
-    /// The protocol both ends speak on this link (the peer's, capped at this end's). A peer of an
-    /// older minor ignores fields newer than it, so callers check [`Conn::peer_minor`] before
-    /// sending one ([`crate::RemoteNode`] does).
-    pub peer: (u16, u16),
+    /// The authenticated handshake's decision, never a negotiated application version.
+    pub mode: upgrade::Mode,
 }
 
 impl Default for ConnOptions {
@@ -47,7 +50,7 @@ impl Default for ConnOptions {
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "x",
-            peer: PROTOCOL,
+            mode: upgrade::Mode::Normal,
         }
     }
 }
@@ -134,7 +137,8 @@ impl LaneQ {
 }
 
 struct Pending {
-    tx: oneshot::Sender<Outcome>,
+    tx: oneshot::Sender<Value>,
+    upgrade: bool,
 }
 
 struct CloseReq {
@@ -146,7 +150,7 @@ struct CloseReq {
 struct Shared {
     generation: u64,
     side: &'static str,
-    peer: (u16, u16),
+    mode: upgrade::Mode,
     ctl: LaneQ,
     events: LaneQ,
     bulk: LaneQ,
@@ -181,7 +185,7 @@ impl Conn {
         let s = Arc::new(Shared {
             generation,
             side: opts.side,
-            peer: opts.peer.min(PROTOCOL),
+            mode: opts.mode,
             ctl,
             events,
             bulk,
@@ -208,9 +212,12 @@ impl Conn {
         self.s.generation
     }
 
-    /// The protocol minor both ends speak ([`ConnOptions::peer`]).
-    pub fn peer_minor(&self) -> u16 {
-        self.s.peer.1
+    pub fn is_upgrade(&self) -> bool {
+        self.s.mode == upgrade::Mode::Upgrade
+    }
+
+    pub fn mode(&self) -> upgrade::Mode {
+        self.s.mode
     }
 
     pub fn is_closed(&self) -> bool {
@@ -238,23 +245,27 @@ impl Conn {
     /// what is in flight resolves by the written rule. `pre` is one last control message
     /// (`fenced`, `goodbye`) written before the close frame.
     pub fn close(&self, pre: Option<(&str, Value)>, code: u16, reason: &str) {
-        let pre = pre.and_then(|(m, p)| {
-            Envelope::ctl(self.s.id(), m, self.s.generation, p)
-                .encode()
-                .ok()
-        });
+        let pre = pre.and_then(|(m, p)| self.s.control(m, p).encode().ok());
         shut(&self.s, pre, code, reason);
     }
 
     /// A control message (not a request: nobody answers it).
     pub fn notify(&self, m: &str, p: Value) {
-        if let Ok(text) = Envelope::ctl(self.s.id(), m, self.s.generation, p).encode() {
+        if self.is_upgrade()
+            && !matches!(m, upgrade::HEARTBEAT | upgrade::FENCED | upgrade::GOODBYE)
+        {
+            return;
+        }
+        if let Ok(text) = self.s.control(m, p).encode() {
             let _ = self.s.ctl.try_send(text, None);
         }
     }
 
     /// Calls `method` with the table's lane and deadline.
     pub async fn call(&self, method: &str, p: Value, op: Option<&OperationId>) -> ApiResult<Value> {
+        if self.is_upgrade() {
+            return Err(upgrade::Error::incompatible().into());
+        }
         let spec = methods::spec(method)
             .ok_or_else(|| ApiError::new(ErrorCode::Internal, format!("no method {method}")))?;
         self.call_with(method, p, spec.lane, spec.class.deadline(), op)
@@ -269,13 +280,73 @@ impl Conn {
         deadline: Duration,
         op: Option<&OperationId>,
     ) -> ApiResult<Value> {
+        if self.is_upgrade() {
+            return Err(upgrade::Error::incompatible().into());
+        }
+        let raw = self.call_raw(method, p, lane, deadline, op, false).await?;
+        let outcome: Outcome = serde_json::from_value(raw)
+            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("bad result: {e}")))?;
+        match outcome {
+            Outcome::Ok(value) => Ok(value),
+            Outcome::Err(mut error) => {
+                error.safe_detail = peer_text(&error.safe_detail);
+                Err(error)
+            }
+        }
+    }
+
+    /// The five permanent methods always use v1 frames and v1 errors, even on a normal link.
+    pub async fn call_upgrade(
+        &self,
+        method: &str,
+        p: Value,
+        op: Option<&OperationId>,
+    ) -> upgrade::Result<Value> {
+        if !upgrade::is_method(method) {
+            return Err(upgrade::Error::incompatible());
+        }
+        let (lane, budget) = if method == upgrade::BLOB_FETCH {
+            (Lane::Bulk, Duration::from_secs(60))
+        } else {
+            (Lane::Control, Duration::from_secs(60))
+        };
+        let raw = self
+            .call_raw(method, p, lane, budget, op, true)
+            .await
+            .map_err(upgrade::Error::from)?;
+        let outcome: upgrade::Outcome = serde_json::from_value(raw).map_err(|_| {
+            upgrade::Error::new(upgrade::Code::Invalid, "malformed upgrade response")
+        })?;
+        match outcome {
+            upgrade::Outcome::Ok(value) => Ok(value),
+            upgrade::Outcome::Err(mut error) => {
+                error.detail = peer_text(&error.detail);
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_raw(
+        &self,
+        method: &str,
+        p: Value,
+        lane: Lane,
+        deadline: Duration,
+        op: Option<&OperationId>,
+        upgrade: bool,
+    ) -> ApiResult<Value> {
         let offline = |why: &str| ApiError::new(ErrorCode::Offline, format!("{method}: {why}"));
         if self.is_closed() {
             return Err(offline("not connected"));
         }
         let id = self.s.id();
         let env = Envelope {
-            v: crate::WIRE,
+            v: if upgrade {
+                upgrade::UPGRADE_PROTOCOL
+            } else {
+                crate::WIRE
+            },
             t: Kind::Req,
             id: id.clone(),
             re: None,
@@ -292,7 +363,7 @@ impl Conn {
             .pending
             .lock()
             .unwrap()
-            .insert(id.clone(), Pending { tx });
+            .insert(id.clone(), Pending { tx, upgrade });
         let lane_q = self.s.lane(lane);
         let until = Instant::now() + deadline;
         let lost = |why: &str| {
@@ -315,8 +386,7 @@ impl Conn {
         let got = tokio::time::timeout_at(until, rx).await;
         self.s.pending.lock().unwrap().remove(&id);
         match got {
-            Ok(Ok(Outcome::Ok(v))) => Ok(v),
-            Ok(Ok(Outcome::Err(e))) => Err(e),
+            Ok(Ok(value)) => Ok(value),
             Ok(Err(_)) => Err(lost("link lost")),
             Err(_) => Err(lost("deadline passed")),
         }
@@ -330,6 +400,15 @@ impl Drop for Conn {
 }
 
 impl Shared {
+    fn control(&self, method: &str, payload: Value) -> Envelope {
+        let mut env = Envelope::ctl(self.id(), method, self.generation, payload);
+        env.v = if self.mode == upgrade::Mode::Upgrade {
+            upgrade::UPGRADE_PROTOCOL
+        } else {
+            crate::WIRE
+        };
+        env
+    }
     fn id(&self) -> String {
         format!("{}_{}", self.side, self.next.fetch_add(1, Ordering::SeqCst))
     }
@@ -344,8 +423,28 @@ impl Shared {
 
     /// Answers from the reader itself (stale, unknown kind): never waits, so a full lane drops
     /// the answer and its sender meets its deadline.
-    fn respond_now(&self, re: String, outcome: Outcome, generation: u64) {
-        if let Some(text) = self.response(re, "", outcome, generation) {
+    fn respond_now(&self, re: String, outcome: Outcome, generation: u64, frozen: bool) {
+        let text = if frozen {
+            let outcome = match outcome {
+                Outcome::Ok(value) => upgrade::Outcome::Ok(value),
+                Outcome::Err(error) => upgrade::Outcome::Err(error.into()),
+            };
+            self.response_upgrade(re, "", outcome, generation)
+        } else {
+            self.response(re, "", outcome, generation)
+        };
+        if let Some(text) = text {
+            let _ = self.ctl.try_send(text, None);
+        }
+    }
+
+    fn incompatible(&self, re: String, method: &str, generation: u64) {
+        if let Some(text) = self.response_upgrade(
+            re,
+            method,
+            upgrade::Outcome::Err(upgrade::Error::incompatible()),
+            generation,
+        ) {
             let _ = self.ctl.try_send(text, None);
         }
     }
@@ -361,8 +460,34 @@ impl Shared {
         generation: u64,
     ) -> Option<String> {
         let p = serde_json::to_value(&outcome).unwrap_or(Value::Null);
+        self.response_payload(re, method, p, generation, false)
+    }
+
+    fn response_upgrade(
+        &self,
+        re: String,
+        method: &str,
+        outcome: upgrade::Outcome,
+        generation: u64,
+    ) -> Option<String> {
+        let p = serde_json::to_value(outcome).ok()?;
+        self.response_payload(re, method, p, generation, true)
+    }
+
+    fn response_payload(
+        &self,
+        re: String,
+        method: &str,
+        p: Value,
+        generation: u64,
+        frozen: bool,
+    ) -> Option<String> {
         let env = Envelope {
-            v: crate::WIRE,
+            v: if frozen {
+                upgrade::UPGRADE_PROTOCOL
+            } else {
+                crate::WIRE
+            },
             t: Kind::Res,
             id: self.id(),
             re: Some(re),
@@ -377,12 +502,16 @@ impl Shared {
             Err(mut e) => {
                 // too large to answer: answer that instead of breaking the link
                 if !method.is_empty() {
-                    e.safe_detail =
-                        e.safe_detail
-                            .replacen("request ", &format!("{method} request "), 1);
+                    e.detail = e
+                        .detail
+                        .replacen("request ", &format!("{method} request "), 1);
                 }
                 let mut env = env;
-                env.p = serde_json::to_value(Outcome::Err(e)).unwrap_or(Value::Null);
+                env.p = if frozen {
+                    serde_json::to_value(upgrade::Outcome::Err(e)).ok()?
+                } else {
+                    serde_json::to_value(Outcome::Err(e.into())).ok()?
+                };
                 env.encode().ok()?
             }
         };
@@ -530,7 +659,15 @@ async fn reader(
             shut(&s, None, crate::close::MALFORMED, "malformed envelope");
             return;
         };
-        if env.v.0 != crate::WIRE.0 {
+        let frozen = env.v == upgrade::UPGRADE_PROTOCOL;
+        if s.mode == upgrade::Mode::Upgrade
+            && env.t == Kind::Req
+            && (!frozen || !upgrade::is_method(&env.m))
+        {
+            s.incompatible(env.id, &env.m, env.generation);
+            continue;
+        }
+        if !frozen && env.v != crate::WIRE {
             shut(&s, None, crate::close::UNSUPPORTED, "envelope version");
             return;
         }
@@ -541,26 +678,26 @@ async fn reader(
                     continue;
                 }
                 let Some(re) = env.re else { continue };
-                let mut outcome = serde_json::from_value::<Outcome>(env.p).unwrap_or_else(|e| {
-                    Outcome::Err(ApiError::new(
-                        ErrorCode::Internal,
-                        format!("bad result: {e}"),
-                    ))
-                });
-                // the peer's words go to logs and pages: one plain line (L6)
-                if let Outcome::Err(e) = &mut outcome {
-                    e.safe_detail = peer_text(&e.safe_detail);
-                }
-                if let Some(p) = s.pending.lock().unwrap().remove(&re) {
-                    let _ = p.tx.send(outcome);
+                if let Some(p) = s.pending.lock().unwrap().remove(&re)
+                    && p.upgrade == frozen
+                {
+                    let _ = p.tx.send(env.p);
                 }
             }
             Kind::Req => {
+                // Decide the schema before touching the ordinary payload or any business port.
+                if (s.mode == upgrade::Mode::Upgrade && !frozen)
+                    || (frozen && !upgrade::is_method(&env.m))
+                {
+                    s.incompatible(env.id, &env.m, env.generation);
+                    continue;
+                }
                 if env.generation != s.generation {
                     s.respond_now(
                         env.id,
                         Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
                         env.generation,
+                        frozen,
                     );
                     continue;
                 }
@@ -579,16 +716,34 @@ async fn reader(
                             "too many requests in flight on this link",
                         )),
                         s.generation,
+                        frozen,
                     );
                     continue;
                 };
                 drop(frame);
                 // the answer goes on its request's lane: a file chunk never sits in the
                 // control lane in front of a permission answer
-                let lane = methods::spec(&env.m).map_or(Lane::Control, |m| m.lane);
+                let lane = if env.m == upgrade::BLOB_FETCH {
+                    Lane::Bulk
+                } else {
+                    methods::spec(&env.m).map_or(Lane::Control, |m| m.lane)
+                };
                 let (h, s2) = (handler.clone(), s.clone());
                 // the work outlives the link: a port never ties what it started to its caller
                 tokio::spawn(async move {
+                    if frozen {
+                        let outcome = match h.handle_upgrade(&env.m, env.p).await {
+                            Ok(value) => upgrade::Outcome::Ok(value),
+                            Err(error) => upgrade::Outcome::Err(error),
+                        };
+                        if let Some(text) =
+                            s2.response_upgrade(env.id, &env.m, outcome, s2.generation)
+                        {
+                            s2.lane(lane).send(text, None).await;
+                        }
+                        drop(permit);
+                        return;
+                    }
                     let outcome = match h.handle(&env.m, env.p).await {
                         Ok(v) => Outcome::Ok(v),
                         Err(e) => Outcome::Err(e),
@@ -602,23 +757,32 @@ async fn reader(
                 });
             }
             Kind::Ctl => match env.m.as_str() {
-                "heartbeat" => {}
-                "fenced" => {
-                    handler.control(&env.m, &env.p);
-                    shut(&s, None, crate::close::FENCED, "fenced");
+                upgrade::HEARTBEAT => {}
+                upgrade::FENCED => {
+                    if s.mode == upgrade::Mode::Normal {
+                        handler.control(&env.m, &env.p);
+                    }
+                    shut(&s, None, crate::close::FENCED, upgrade::FENCED);
                     return;
                 }
-                "goodbye" => {
-                    handler.control(&env.m, &env.p);
-                    shut(&s, None, crate::close::GOODBYE, "goodbye");
+                upgrade::GOODBYE => {
+                    if s.mode == upgrade::Mode::Normal {
+                        handler.control(&env.m, &env.p);
+                    }
+                    shut(&s, None, crate::close::GOODBYE, upgrade::GOODBYE);
                     return;
                 }
-                m => handler.control(m, &env.p),
+                m if s.mode == upgrade::Mode::Normal => handler.control(m, &env.p),
+                _ => {}
             },
+            Kind::Unknown if frozen || s.mode == upgrade::Mode::Upgrade => {
+                s.incompatible(env.id, &env.m, env.generation);
+            }
             Kind::Unknown => s.respond_now(
                 env.id,
                 Outcome::Err(ApiError::new(ErrorCode::Unsupported, "unknown frame kind")),
                 s.generation,
+                frozen,
             ),
         }
     }
@@ -633,11 +797,12 @@ async fn heartbeat(s: std::sync::Weak<Shared>, every: Duration) {
         if s.closing.load(Ordering::SeqCst) {
             return;
         }
-        let env = Envelope::ctl(
-            s.id(),
-            "heartbeat",
-            s.generation,
-            json!({"at": crate::now_ms()}),
+        let env = s.control(
+            upgrade::HEARTBEAT,
+            serde_json::to_value(upgrade::Heartbeat {
+                at: crate::now_ms(),
+            })
+            .unwrap(),
         );
         if let Ok(text) = env.encode() {
             let _ = s.ctl.try_send(text, None);

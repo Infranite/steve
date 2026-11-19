@@ -36,6 +36,44 @@ async fn row(h: &Hub, node: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgrade() {
+    use steve_node_api::{Discovery, PROTOCOL};
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let linked = dial_url_as(
+        &h.ws_url(),
+        &h.svc.hub_id,
+        &id,
+        &node,
+        FakeNode::new(node.as_str()),
+        1,
+        PROTOCOL + 1,
+    )
+    .await
+    .unwrap();
+    until("upgrade link installed", 5, || {
+        h.svc.registry.current(node.as_str()).is_some()
+            && h.svc.fleet.protocol(node.as_str()) == Some(PROTOCOL + 1)
+    })
+    .await;
+    assert!(linked.conn.is_upgrade());
+    let device = row(&h, node.as_str()).await;
+    assert_eq!(device["linked"], true);
+    assert_eq!(device["protocol"], PROTOCOL + 1);
+    assert_eq!(device["protocol_mode"], "upgrade");
+    assert_eq!(device["protocol_status"], "版本不一致，需要升级");
+    assert_eq!(device["link_error"]["error"], "版本不一致，需要升级");
+    assert!(
+        device["host"].is_null(),
+        "ordinary host discovery is skipped"
+    );
+    let remote = h.svc.fleet.remote(&node);
+    assert!(remote.probe(false).await.is_err());
+    remote.probe_build().await.unwrap();
+    assert!(!linked.conn.is_closed());
+}
+
 /// A Hub whose store's change events are kept, to read back which reached the stream.
 async fn watched() -> (Hub, Arc<Mutex<Vec<BusEvent>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));

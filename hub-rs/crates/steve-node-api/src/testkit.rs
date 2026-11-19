@@ -2214,6 +2214,14 @@ impl WorkspaceExecutor for FakeNode {
 
 #[async_trait]
 impl Discovery for FakeNode {
+    async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {
+        let state = self.st();
+        Ok(crate::upgrade_v1::ProbeBuildResponse {
+            build: state.build.clone().map(Into::into),
+            upgradable: state.features.iter().any(|f| f == FEATURE_NODE_UPGRADE),
+            running: state.active.len() as u64,
+        })
+    }
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         let mut st = self.st();
         if !st.live_session_capacity {

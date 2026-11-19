@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "t": "res",
+  "id": "n_1",
+  "re": "h_1",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "ok": {
+      "build": {
+        "version": "2.0.0",
+        "commit": "abababababababababababababababababababab",
+        "target": "aarch64-apple-darwin"
+      },
+      "upgradable": true,
+      "running": 2
+    }
+  }
+}

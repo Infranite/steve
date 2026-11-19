@@ -115,6 +115,14 @@ pub trait WorkspaceExecutor: Send + Sync {
 
 #[async_trait]
 pub trait Discovery: Send + Sync {
+    /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
+    /// This must not fall back to a harness probe on an incompatible link.
+    async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "minimal build discovery unsupported",
+        ))
+    }
     /// Idempotently replace the active-turn capacity (1–256). Running turns are never interrupted;
     /// lowering it defers new starts until enough finish. The Hub persists the setting and reapplies
     /// it before dispatching turns, including after reconnect/restart. Workspace-only Nodes refuse.

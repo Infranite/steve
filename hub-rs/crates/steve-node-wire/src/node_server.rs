@@ -25,6 +25,10 @@ impl<N: Node + ?Sized> NodeServer<N> {
 
 #[async_trait]
 impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
+    async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+        crate::upgrade::serve_node(&*self.node, method, p).await
+    }
+
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         let n = &self.node;
         match method {

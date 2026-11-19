@@ -153,6 +153,11 @@ struct LinkHandler {
 
 #[async_trait]
 impl Handler for LinkHandler {
+    async fn handle_upgrade(&self, method: &str, p: Value) -> upgrade_v1::Result<Value> {
+        let _ = self.installed.clone().wait_for(|done| *done).await;
+        self.ctx.live().map_err(upgrade_v1::Error::from)?;
+        self.ports.handle_upgrade(method, p).await
+    }
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         let _ = self.installed.clone().wait_for(|done| *done).await;
         self.ctx.live()?;
@@ -201,7 +206,7 @@ async fn serve_after(
             return;
         }
     };
-    let node = hello.node_id.clone();
+    let node = NodeId::new(hello.node_id.clone()).expect("handshake validated the node id");
     let generation = admitted.generation;
     let ctx = LinkCtx {
         node: node.clone(),
@@ -231,8 +236,7 @@ async fn serve_after(
             heartbeat: Duration::from_secs(10),
             dead_after: Duration::from_secs(30),
             side: "h",
-            // what the Node said it speaks: requests newer than it are refused, not sent
-            peer: hello.proto,
+            mode: upgrade_v1::Mode::between(PROTOCOL, hello.proto),
         },
     );
     let previous = admit.previous.lock().unwrap().take().flatten();
@@ -245,13 +249,15 @@ async fn serve_after(
     svc.fleet.linked(&node, hello.proto);
     // its owner's pages show it linked; what its machine is, asked once per link (G2)
     super::tell(&svc.store, node.as_str()).await;
-    tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
+    if !conn.is_upgrade() {
+        tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
+    }
     if paused != admitted.paused {
         // paused or resumed since the welcome went out
         conn.notify("paused", serde_json::json!({ "paused": paused }));
     }
     tracing::info!(node = %node, generation, restarted, paused, "node linked");
-    if remote.is_reconciling() {
+    if !conn.is_upgrade() && remote.is_reconciling() {
         match svc.fleet.runtime_for(node.as_str()) {
             Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
             None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
@@ -372,7 +378,7 @@ pub async fn install_link(
     }
     // a coordinator runs for every Node with sessions bound to it (started at boot or on bind)
     if let Some(rt) = svc.fleet.runtime_for(node.as_str()) {
-        rt.set_paused(paused);
+        rt.set_paused(paused || conn.is_upgrade());
     }
     Some(paused)
 }

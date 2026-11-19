@@ -4512,6 +4512,13 @@ impl Discovery for LocalNode {
             build: self.0.upgrader.get().map(|u| u.build()),
         })
     }
+    async fn probe_build(&self) -> ApiResult<upgrade_v1::ProbeBuildResponse> {
+        Ok(upgrade_v1::ProbeBuildResponse {
+            build: self.0.upgrader.get().map(|u| u.build().into()),
+            upgradable: self.0.upgrader.get().is_some(),
+            running: self.running_work()? as u64,
+        })
+    }
     async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
         match self.0.upgrader.get().cloned() {
             Some(up) => {

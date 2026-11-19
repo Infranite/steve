@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "t": "req",
+  "id": "h_1",
+  "m": "blob.fetch",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "access": {
+      "for": "operation",
+      "operation": "op_upgrade"
+    },
+    "id": "node-upgrade.op_upgrade",
+    "offset": 0,
+    "max": 1024
+  }
+}

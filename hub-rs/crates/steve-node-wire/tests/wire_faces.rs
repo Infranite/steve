@@ -603,9 +603,9 @@ struct Newer;
 impl Handler for Newer {
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
         Ok(match method {
-            // a receipt state from a later minor
+            // an unknown receipt state from a malformed peer
             GIT_APPLY => json!({"operation": p["id"], "state": {"state": "teleported"}}),
-            // a read answer of a kind from a later minor
+            // an unknown read answer from a malformed peer
             GIT_INSPECT => json!({
                 "revision": "g1", "head": "abc", "dirty": false,
                 "reads": [{"read": {"type": "status"}, "observed": "abc",

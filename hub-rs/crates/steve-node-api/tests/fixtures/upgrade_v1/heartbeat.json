@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "h_1",
+  "m": "heartbeat",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "at": 1700000000000
+  }
+}

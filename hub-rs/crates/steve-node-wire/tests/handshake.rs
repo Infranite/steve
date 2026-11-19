@@ -72,8 +72,6 @@ async fn run(
             node: &nodeid,
             identity: id,
             incarnation: 3,
-            heads: vec![],
-            caps: None,
             hub_id: Some("hub_1"),
             hub_key: None,
         },
@@ -103,6 +101,83 @@ async fn the_right_key_is_welcomed_with_a_new_generation() {
     assert_eq!(n.unwrap().1.generation, a.generation);
     let (_, n2, _) = run(adm, "n1", &id).await;
     assert_eq!(n2.unwrap().1.generation, 2, "each link a new generation");
+}
+
+#[tokio::test]
+async fn exact_equality_is_normal_and_every_other_protocol_stays_linked_for_upgrade() {
+    use steve_node_api::upgrade_v1::{Heartbeat, Mode};
+    for (hub_proto, node_proto) in [
+        (10, 10),
+        (10, 9),
+        (10, 11),
+        (9, 10),
+        (11, 10),
+        (10, 0),
+        (10, u32::MAX),
+        (u32::MAX, 10),
+    ] {
+        let admission = Arc::new(Mem::default());
+        let node_key = Identity::generate().unwrap();
+        let hub_key = Identity::generate().unwrap();
+        let pinned_hub = hub_key.public();
+        admission
+            .keys
+            .lock()
+            .unwrap()
+            .insert("n1".into(), node_key.public());
+        let (mut hub, mut node) = pair();
+        let accepting = tokio::spawn(async move {
+            let result = handshake::accept_version(
+                &mut hub.sink,
+                &mut hub.stream,
+                "hub_1",
+                &*admission,
+                Some(&hub_key),
+                &[],
+                hub_proto,
+            )
+            .await;
+            (result, hub)
+        });
+        let id = nid("n1");
+        let (challenge, welcome) = handshake::dial_as(
+            &mut node.sink,
+            &mut node.stream,
+            NodeIntro {
+                node: &id,
+                identity: &node_key,
+                incarnation: 1,
+                hub_id: Some("hub_1"),
+                hub_key: Some(pinned_hub),
+            },
+            node_proto,
+        )
+        .await
+        .unwrap();
+        let ((hello, _), mut hub) = {
+            let (result, end) = accepting.await.unwrap();
+            (result.unwrap(), end)
+        };
+        assert_eq!(
+            (challenge.proto, hello.proto, welcome.proto),
+            (hub_proto, node_proto, hub_proto)
+        );
+        assert_eq!(welcome.mode, Mode::between(hub_proto, node_proto));
+        let heartbeat = Envelope::ctl(
+            "still-open",
+            "heartbeat",
+            welcome.generation,
+            serde_json::to_value(Heartbeat { at: 1 }).unwrap(),
+        );
+        hub.sink
+            .send(Frame::Text(heartbeat.encode().unwrap()))
+            .await
+            .unwrap();
+        let Some(Ok(Frame::Text(text))) = node.stream.next().await else {
+            panic!("mismatch must not close the socket")
+        };
+        assert_eq!(Envelope::decode(&text).unwrap().m, "heartbeat");
+    }
 }
 
 #[tokio::test]
@@ -144,12 +219,10 @@ async fn manual(
     };
     let ch: handshake::Challenge = serde_json::from_value(Envelope::decode(&t).unwrap().p).unwrap();
     let mut hello = Hello {
-        node_id: nid("n1"),
+        node_id: "n1".into(),
         incarnation: 1,
         proto: steve_node_api::PROTOCOL,
-        codecs: vec!["json".into()],
-        heads: vec![],
-        caps: None,
+        upgrade_protocol: 1,
         sig: String::new(),
     };
     hello.sig = hex::encode(id.sign(&handshake::hello_message(&ch, &hello)));
@@ -180,14 +253,6 @@ async fn tampering_is_denied() {
     // garbage signature
     let e = manual(Arc::new(Mem::default()), |h, _, _| h.sig = "zz".into()).await;
     assert_eq!(e.code, "denied");
-    // another protocol major
-    let e = manual(Arc::new(Mem::default()), |h, ch, id| {
-        h.proto = (steve_node_api::PROTOCOL.0 + 1, 0);
-        h.sig = String::new();
-        h.sig = hex::encode(id.sign(&handshake::hello_message(ch, h)));
-    })
-    .await;
-    assert_eq!(e.code, "unsupported");
 }
 
 #[tokio::test]
@@ -207,8 +272,6 @@ async fn a_node_refuses_a_hub_it_did_not_pair_with() {
             node: &nodeid,
             identity: &id,
             incarnation: 1,
-            heads: vec![],
-            caps: None,
             hub_id: Some("hub_1"),
             hub_key: None,
         },
@@ -251,8 +314,6 @@ async fn a_bare_close_is_not_a_refusal() {
             node: &nodeid,
             identity: &id,
             incarnation: 1,
-            heads: vec![],
-            caps: None,
             hub_id: Some("hub_1"),
             hub_key: None,
         },
@@ -299,8 +360,6 @@ async fn run_pinned(
             node: &nodeid,
             identity: &id,
             incarnation: 1,
-            heads: vec![],
-            caps: None,
             hub_id: Some("hub_1"),
             hub_key: known,
         },
@@ -334,7 +393,7 @@ async fn a_node_that_knows_its_hub_takes_only_its_signed_welcome() {
     assert_eq!(other.code, handshake::DENIED);
     let unsigned = run_signed(None, Some(key)).await.unwrap_err();
     assert_eq!(unsigned.code, handshake::DENIED);
-    // a Node that knows nothing still takes an unsigned welcome (a Hub of an earlier release)
+    // a Node that knows nothing still takes an unsigned welcome (an explicitly unpinned test Hub)
     let (_, w) = run_signed(None, None).await.unwrap();
     assert!(w.hub_key.is_empty() && w.sig.is_empty());
 }
@@ -343,30 +402,28 @@ async fn a_node_that_knows_its_hub_takes_only_its_signed_welcome() {
 /// nothing.
 #[test]
 fn a_changed_welcome_no_longer_holds() {
-    use handshake::{Challenge, ProtoRange, Welcome, welcome_key, welcome_message};
+    use handshake::{Challenge, Welcome, welcome_key, welcome_message};
     let hub = Identity::generate().unwrap();
     let c = Challenge {
         nonce: "nn".into(),
         hub_id: "hub_1".into(),
         conn_id: "cc".into(),
-        proto: ProtoRange {
-            min: (1, 0),
-            max: (1, 0),
-        },
+        proto: 10,
+        upgrade_protocol: 1,
         hub_time: 0,
     };
     let h = Hello {
-        node_id: nid("n1"),
+        node_id: "n1".into(),
         incarnation: 1,
-        proto: (1, 0),
-        codecs: vec!["json".into()],
-        heads: vec![],
-        caps: None,
+        proto: 10,
+        upgrade_protocol: 1,
         sig: "ab".into(),
     };
     let mut w = Welcome {
         generation: 4,
-        proto: (1, 0),
+        proto: 10,
+        upgrade_protocol: 1,
+        mode: steve_node_api::upgrade_v1::Mode::Normal,
         paused: false,
         heartbeat_ms: 10_000,
         hub_key: hex::encode(hub.public()),
@@ -378,6 +435,12 @@ fn a_changed_welcome_no_longer_holds() {
     let mut paused = w.clone();
     paused.paused = true;
     assert!(welcome_key(&c, &h, &paused).is_err());
+    let mut protocol = w.clone();
+    protocol.proto += 1;
+    assert!(welcome_key(&c, &h, &protocol).is_err());
+    let mut mode = w.clone();
+    mode.mode = steve_node_api::upgrade_v1::Mode::Upgrade;
+    assert!(welcome_key(&c, &h, &mode).is_err());
     let mut pins = w.clone();
     pins.pins = vec!["sha256:ee".into()];
     assert!(

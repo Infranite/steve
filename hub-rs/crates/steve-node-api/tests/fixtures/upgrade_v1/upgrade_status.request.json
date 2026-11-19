@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "t": "req",
+  "id": "h_1",
+  "m": "upgrade_status",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "operation": "op_upgrade"
+  }
+}

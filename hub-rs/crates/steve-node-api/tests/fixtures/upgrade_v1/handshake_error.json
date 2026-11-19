@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "t": "ctl",
+  "id": "h_1",
+  "m": "error",
+  "gen": 7,
+  "trace": "trace-golden",
+  "deadline_at": 1700000001000,
+  "p": {
+    "code": "denied",
+    "retry": "never",
+    "operation": null,
+    "detail": "not admitted"
+  }
+}

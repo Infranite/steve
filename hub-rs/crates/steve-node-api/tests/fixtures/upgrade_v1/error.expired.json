@@ -1,0 +1,6 @@
+{
+  "code": "expired",
+  "retry": "never",
+  "operation": null,
+  "detail": "golden error"
+}
