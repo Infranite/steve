@@ -14,6 +14,7 @@ const NOW: i64 = 1_900_000_000_000;
 struct Notifications {
     source: NotificationDue,
     env: TestEnv,
+    unknown_topic: bool,
 }
 impl Notifications {
     fn new() -> Self {
@@ -48,6 +49,7 @@ impl Notifications {
                 outbox: Arc::new(Outbox::new(OutLink::new())),
             },
             env,
+            unknown_topic: false,
         }
     }
     fn ids(&self, state: &str) -> Vec<String> {
@@ -75,9 +77,21 @@ impl Fixture for Notifications {
         // A poison record has a permanently broken route (enabled policy, no self party).
         // Other records are processed by terminal cancellation (no policy), not a network send.
         let user = if poison { ME } else { "usr_other" };
+        let topic = if poison && self.unknown_topic {
+            "future.topic"
+        } else {
+            "todo.due"
+        };
         self.env.store().with_conn(|c| {
-            c.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,topic)
-              VALUES (?1,?2,?3,?1,?1,'now','body','waiting',?4,?5,'todo.due')", rusqlite::params![id,WS,user,at,NOW])?;
+            // Simulate a row from a newer producer/import; the migrated schema rejects unknown topics.
+            c.pragma_update(None, "ignore_check_constraints", self.unknown_topic)?;
+            let inserted = c.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,topic)
+              VALUES (?1,?2,?3,?1,?1,'now','body','waiting',?4,?5,'todo.due')", rusqlite::params![id,WS,user,at,NOW]);
+            if inserted.is_ok() {
+                c.execute("UPDATE personal_notifications SET topic=? WHERE id=?", [&topic, &id.as_str()])?;
+            }
+            c.pragma_update(None, "ignore_check_constraints", false)?;
+            inserted?;
             Ok(())
         }).unwrap();
         id
@@ -111,4 +125,20 @@ async fn the_owned_name_job_is_singleton_and_can_restart_after_cancellation() {
         .expect("cancelled job released its running flag");
     restarted.stop();
     restarted.await;
+}
+
+#[tokio::test]
+async fn unknown_topics_advance_and_obey_the_shared_contract() {
+    use steve_runtime::due::DueSource;
+    let new = || {
+        let mut f = Notifications::new();
+        f.unknown_topic = true;
+        f
+    };
+    let f = new();
+    let poison = f.add(NOW, true);
+    f.source.run_due(NOW).await.unwrap();
+    assert_eq!(f.source.next_due().await.unwrap(), Some(NOW + 10_000));
+    assert!(!f.done().contains(&poison));
+    contract::check(new, NOW, 32).await;
 }

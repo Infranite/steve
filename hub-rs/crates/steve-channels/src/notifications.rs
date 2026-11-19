@@ -780,6 +780,8 @@ async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usiz
     })?;
     let mut n = 0;
     for (ws, me, key, body, topic, message) in rows {
+        // Every attempted row advances, including topics this version cannot interpret.
+        ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
         let Some(topic) = Topic::parse(&topic) else {
             tracing::warn!(
                 key,
@@ -798,8 +800,6 @@ async fn pump_at(ch: &Channels, outbox: &Outbox, now: i64) -> ChannelResult<usiz
                 continue;
             }
         }
-        // Round-robin due work even when the first member is quiet or has a broken route.
-        ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
         let who = Caller { ws, me };
         let p = ch.store().reader(|c| -> ChannelResult<Option<Policy>> {
             if require_person(c, &who).is_err() {
