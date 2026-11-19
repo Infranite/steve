@@ -16,7 +16,7 @@ use std::{
 };
 use steve_storage_api::{
     query::{self, IndexName, KeyRange, Order, Page, ResumeToken, Scan, ScanBudget},
-    retention::{Action, Budget, KeepFrom, RetentionReport, Select},
+    retention::{Action, Budget, KeepFrom, RetentionPolicy, RetentionReport, Select},
     *,
 };
 fn invalid(s: &str) -> Error {
@@ -365,83 +365,32 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             ));
         }
         let mut after = lock(&self.after);
-        self.write(e.desc.domain,Lane::Background,|c,runner|{
-        let start = Instant::now();
-        let root = runner.reserve_root(c).map_err(Error::from)?;
-        let tx = rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
-            .map_err(crate::domains::sql_error)
-            .map_err(Error::from)?;
-        let mut physical = e.desc.clone();
-        physical.name = e.table.clone();
-        let request = Scan::<Row> {
-            index: IndexName {
-                entity: e.table.clone(),
-                name: String::new(),
-            },
-            range: KeyRange::default(),
-            filter: vec![],
-            order: Order::Asc,
-            limit: budget.rows.min(500),
-            budget: ScanBudget(budget.rows),
-            resume: after.get(&name).cloned(),
-            marker: std::marker::PhantomData,
-        };
-        let page: Page<Row> = crate::scan::query(
-            &tx,
-            &physical,
-            AnyQuery {
-                name: "scan".into(),
-                domain: e.desc.domain,
-                body: Payload::Json(query::encode(&request)?),
-            },
-        )?
-        .body
-        .decode()?;
-        let keep = match policy.keep_from {
-            KeepFrom::Fixed { millis } => millis,
-            KeepFrom::Setting { default_ms, .. } => default_ms,
-        };
-        let old = |row: &Row, field: &str| matches!(crate::domains::value(row,field),Some(Cell::Millis(at)) if i128::from(self.clock.now().0)-i128::from(*at)>i128::from(keep));
-        let mut affected = 0;
-        for (row, _) in page.rows {
-            let selected = match &policy.select {
-                Select::MaxAge { field, .. } => old(&row, field),
-                Select::Terminal {
-                    state, done, since, ..
-                } => {
-                    crate::domains::value(&row, state).is_some_and(|v| done.contains(v))
-                        && old(&row, since)
-                }
-                _ => false,
-            };
-            if !selected {
-                continue;
-            }
-            let key = crate::domains::values(&row, &e.desc.key);
-            match &policy.action {
-                Action::Delete => {
-                    e.delete(&tx, &key).map_err(Error::from)?;
-                    affected += 1;
-                }
-                Action::Purge { fields } => {
-                    if fields
-                        .iter()
-                        .any(|f| crate::domains::value(&row, f).is_some_and(|v| *v != Cell::Null))
-                    {
-                        let patch = Row(fields.iter().map(|f| (f.clone(), Cell::Null)).collect());
-                        e.update(&tx, &key, &patch, root.rev(), None)
-                            .map_err(Error::from)?;
-                        affected += 1;
-                    }
-                }
-                Action::Op(_) => unreachable!("validated above"),
-            }
-        }
-        tx.commit()
-            .map_err(crate::domains::sql_error)
-            .map_err(Error::from)?;
-        let more = page.resume.is_some();
-        if let Some(next) = page.resume {
+        let (affected, resume, start) =
+            self.write(e.desc.domain, Lane::Background, |c, runner| {
+                let start = Instant::now();
+                let root = runner.reserve_root(c).map_err(Error::from)?;
+                let tx = rusqlite::Transaction::new_unchecked(
+                    c,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+                .map_err(crate::domains::sql_error)
+                .map_err(Error::from)?;
+                let (affected, resume) = retention_slice(
+                    &tx,
+                    e,
+                    policy,
+                    budget,
+                    after.get(&name).cloned(),
+                    self.clock.now(),
+                    root.rev(),
+                )?;
+                tx.commit()
+                    .map_err(crate::domains::sql_error)
+                    .map_err(Error::from)?;
+                Ok((affected, resume, start))
+            })?;
+        let more = resume.is_some();
+        if let Some(next) = resume {
             after.insert(name.clone(), next);
         } else {
             after.remove(&name);
@@ -455,6 +404,89 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             overruns: u32::from(ms > budget.target_ms),
             more,
         })
-        })
+    }
+}
+
+/// Apply one bounded slice inside the caller's writer transaction. Purge updates use
+/// the reserved root revision; continuation is published only after the caller commits.
+fn retention_slice(
+    tx: &rusqlite::Transaction<'_>,
+    entity: &crate::domains::SqlEntity,
+    policy: &RetentionPolicy,
+    budget: Budget,
+    resume: Option<ResumeToken>,
+    now: Millis,
+    rev: Rev,
+) -> Result<(u64, Option<ResumeToken>), Error> {
+    let mut physical = entity.desc.clone();
+    physical.name = entity.table.clone();
+    let request = Scan::<Row> {
+        index: IndexName {
+            entity: entity.table.clone(),
+            name: String::new(),
+        },
+        range: KeyRange::default(),
+        filter: vec![],
+        order: Order::Asc,
+        limit: budget.rows.min(500),
+        budget: ScanBudget(budget.rows),
+        resume,
+        marker: std::marker::PhantomData,
+    };
+    let page: Page<Row> = crate::scan::query(
+        tx,
+        &physical,
+        AnyQuery {
+            name: "scan".into(),
+            domain: entity.desc.domain,
+            body: Payload::Json(query::encode(&request)?),
+        },
+    )?
+    .body
+    .decode()?;
+    let mut affected = 0;
+    for (row, _) in page.rows {
+        if !retention_selected(&row, policy, now) {
+            continue;
+        }
+        let key = crate::domains::values(&row, &entity.desc.key);
+        match &policy.action {
+            Action::Delete => {
+                entity.delete(tx, &key).map_err(Error::from)?;
+                affected += 1;
+            }
+            Action::Purge { fields } => {
+                if fields
+                    .iter()
+                    .any(|f| crate::domains::value(&row, f).is_some_and(|v| *v != Cell::Null))
+                {
+                    let patch = Row(fields.iter().map(|f| (f.clone(), Cell::Null)).collect());
+                    entity
+                        .update(tx, &key, &patch, rev, None)
+                        .map_err(Error::from)?;
+                    affected += 1;
+                }
+            }
+            Action::Op(_) => unreachable!("validated before acquiring the grant"),
+        }
+    }
+    Ok((affected, page.resume))
+}
+
+fn retention_selected(row: &Row, policy: &RetentionPolicy, now: Millis) -> bool {
+    let keep = match policy.keep_from {
+        KeepFrom::Fixed { millis } => millis,
+        KeepFrom::Setting { default_ms, .. } => default_ms,
+    };
+    let old = |field: &str| {
+        matches!(crate::domains::value(row, field), Some(Cell::Millis(at))
+            if i128::from(now.0) - i128::from(*at) > i128::from(keep))
+    };
+    match &policy.select {
+        Select::MaxAge { field, .. } => old(field),
+        Select::Terminal {
+            state, done, since, ..
+        } => crate::domains::value(row, state).is_some_and(|v| done.contains(v)) && old(since),
+        _ => false,
     }
 }

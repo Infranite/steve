@@ -118,6 +118,7 @@ fn import_advances_live_and_persistent_revision_ranges_and_never_publishes() {
     let events: Events = Arc::default();
     let log = events.clone();
     let time = Arc::new(Time::default());
+    let _runtime = runtime().enter();
     let target = SqliteStore::new(
         vec![steve_store_sqlite::open::open_admin(dir.path()).unwrap()],
         Arc::new(Registry::verification().unwrap()),
@@ -239,6 +240,7 @@ fn registry_aliases_and_read_capabilities_use_the_real_services() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn a_blocked_named_query_does_not_block_the_async_executor() {
+    let runtime_id = tokio::runtime::Handle::current().id();
     let (ready, started) = tokio::sync::oneshot::channel();
     let ready = Mutex::new(Some(ready));
     let (release, resume) = std::sync::mpsc::channel();
@@ -247,6 +249,7 @@ async fn a_blocked_named_query_does_not_block_the_async_executor() {
     registry
         .register_query("test.block", Domain::Core, move |_, _| {
             ready.lock().unwrap().take().unwrap().send(()).unwrap();
+            assert_eq!(tokio::runtime::Handle::current().id(), runtime_id);
             resume.lock().unwrap().recv().unwrap();
             encode(&7)
         })
