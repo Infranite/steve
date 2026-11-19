@@ -1,6 +1,6 @@
 //! Typed, ordered in-process notifications. Encoding belongs to SSE and plugin boundaries.
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -581,14 +581,7 @@ impl Sender {
 /// Latest statistics notice per workspace in each five-second window.
 #[derive(Default)]
 struct StatsThrottle {
-    streams: HashMap<
-        String,
-        (
-            std::time::Instant,
-            steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>,
-        ),
-    >,
-    pending: HashSet<String>,
+    streams: HashMap<String, steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>>,
 }
 impl StatsThrottle {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
@@ -601,47 +594,25 @@ impl StatsThrottle {
             unreachable!("statistics are workspace scoped")
         };
         let ws = ws.to_string();
-        if self.streams.len() > 10_000
-            && self
-                .streams
-                .get(&ws)
-                .is_none_or(|(last, _)| now.duration_since(*last) >= Self::WINDOW)
-        {
-            self.streams.retain(|_, (last, throttle)| {
-                throttle.deadline().is_some() || now.duration_since(*last) < Self::WINDOW
-            });
+        let now = now.into();
+        if self.streams.len() > 10_000 && self.streams.get(&ws).is_none_or(|t| t.idle(now)) {
+            self.streams.retain(|_, t| !t.idle(now));
         }
-        let (last, throttle) = self
-            .streams
-            .entry(ws.clone())
-            .or_insert_with(|| (now, steve_runtime::policy::Throttle::new(Self::WINDOW)));
-        let out = throttle.offer(frame, now.into());
-        if out.is_some() {
-            *last = now;
-            self.pending.remove(&ws);
-        } else {
-            self.pending.insert(ws);
-        }
-        out
+        self.streams
+            .entry(ws)
+            .or_insert_with(|| steve_runtime::policy::Throttle::new(Self::WINDOW))
+            .offer(frame, now)
     }
     fn deadline(&self) -> Option<std::time::Instant> {
-        self.pending
-            .iter()
-            .filter_map(|ws| self.streams.get(ws)?.1.deadline().map(|t| t.into_std()))
+        self.streams
+            .values()
+            .filter_map(|t| t.deadline().map(|t| t.into_std()))
             .min()
     }
     fn due(&mut self, now: std::time::Instant) -> Vec<Arc<Envelope<BusEvent>>> {
-        let keys: Vec<_> = self.pending.iter().cloned().collect();
-        keys.into_iter()
-            .filter_map(|ws| {
-                let (last, t) = self.streams.get_mut(&ws)?;
-                let out = t.due(now.into());
-                if out.is_some() {
-                    *last = now;
-                    self.pending.remove(&ws);
-                }
-                out
-            })
+        self.streams
+            .values_mut()
+            .filter_map(|t| t.due(now.into()))
             .collect()
     }
 }
@@ -741,6 +712,9 @@ mod tests {
             t.offer(enveloped(stats("a", "5")), at + Duration::from_secs(10))
                 .is_some()
         );
+        // A new leading frame at the boundary supersedes the older held frame.
+        assert_eq!(t.deadline(), None);
+        assert!(t.due(at + Duration::from_secs(10)).is_empty());
     }
 
     #[test]

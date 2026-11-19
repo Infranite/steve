@@ -37,10 +37,12 @@ pub struct Limiter {
     global: RateLimiter<()>,
 }
 const PER_CODE: RateLimit = RateLimit::Gcra {
+    units: std::num::NonZeroU32::MIN,
     per: Duration::from_secs(10),
     burst: 5,
 };
 const GLOBAL: RateLimit = RateLimit::Gcra {
+    units: std::num::NonZeroU32::MIN,
     per: Duration::from_millis(20),
     burst: 200,
 };

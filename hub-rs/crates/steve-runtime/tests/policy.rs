@@ -1,6 +1,7 @@
 #![cfg(feature = "policy")]
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::{
+    num::NonZeroU32,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -144,6 +145,7 @@ async fn retry_classification_server_delay_limit_and_profile_table() {
 async fn fixed_sliding_windows_bucket_eviction_and_trailing_stats() {
     // hub/access.rs:134: ten attempts per 600 seconds, window anchored at first failure.
     let fixed = Limiter::new(RateLimit::Window {
+        sliding: false,
         len: sec(600),
         max: 10,
     });
@@ -156,10 +158,18 @@ async fn fixed_sliding_windows_bucket_eviction_and_trailing_stats() {
     assert!(fixed.check(&"ip").is_ok());
     // github/hooks.rs:53 sliding window: later requests do not reset with first request.
     let rate = RateLimit::Window {
+        sliding: false,
         len: sec(60),
         max: 2,
     };
-    let (fixed, sliding) = (Limiter::new(rate), Limiter::sliding(rate));
+    let (fixed, sliding) = (
+        Limiter::new(rate),
+        Limiter::new(RateLimit::Window {
+            len: sec(60),
+            max: 2,
+            sliding: true,
+        }),
+    );
     for l in [&fixed, &sliding] {
         assert!(l.check(&0).is_ok());
     }
@@ -175,7 +185,11 @@ async fn fixed_sliding_windows_bucket_eviction_and_trailing_stats() {
     assert_eq!(sliding.check(&0), Err(Wait(sec(30))));
     // hub/nodes/pairing.rs:35: per-code burst 5, refill 0.1/s; global burst 200, 50/s.
     for (per, burst) in [(sec(10), 5), (Duration::from_millis(20), 200)] {
-        let l = Limiter::new(RateLimit::Gcra { per, burst });
+        let l = Limiter::new(RateLimit::Gcra {
+            units: std::num::NonZeroU32::MIN,
+            per,
+            burst,
+        });
         for _ in 0..burst {
             assert!(l.check(&0).is_ok());
         }
@@ -275,6 +289,7 @@ fn weighted_checks_are_atomic_and_oversize_is_permanent() {
     let clock = Arc::new(FakeClock::new(100));
     let l = Limiter::with_clock(
         RateLimit::Gcra {
+            units: std::num::NonZeroU32::MIN,
             per: sec(1),
             burst: 5,
         },
@@ -306,6 +321,7 @@ fn window_peek_hit_and_injected_clock_table() {
     let clock = Arc::new(FakeClock::new(-50));
     let l = Limiter::with_clock(
         RateLimit::Window {
+            sliding: false,
             len: sec(600),
             max: 10,
         },
@@ -340,12 +356,12 @@ fn injected_gcra_and_sliding_windows_keep_boundaries_and_keys_separate() {
     let clock = Arc::new(FakeClock::new(1_000_000));
     let l = Limiter::with_clock(
         RateLimit::Window {
+            sliding: true,
             len: sec(60),
             max: 2,
         },
         clock.clone(),
-    )
-    .into_sliding();
+    );
     for (ms, allowed) in [
         (0, true),
         (30_000, true),
@@ -363,43 +379,6 @@ fn injected_gcra_and_sliding_windows_keep_boundaries_and_keys_separate() {
 }
 
 #[test]
-fn byte_rate_quantization_is_explicit_at_one_mib_per_second() {
-    use std::num::NonZeroU32;
-    use steve_runtime::{FakeClock, policy::CheckError};
-    const MIB: u32 = 1024 * 1024;
-    // Duration cannot represent the exact 953.67431640625 ns per byte.
-    // Verify BOTH roundings, rather than silently weakening the old guard's table.
-    for (nanos, accepted_at_one_second, wait_ns) in [(953, true, 0), (954, false, 341_504)] {
-        let clock = Arc::new(FakeClock::new(0));
-        let l = Limiter::with_clock(
-            RateLimit::Gcra {
-                per: Duration::from_nanos(nanos),
-                burst: 64 * MIB,
-            },
-            clock.clone(),
-        );
-        assert_eq!(
-            l.check_n(&"node", NonZeroU32::new(64 * MIB).unwrap()),
-            Ok(())
-        );
-        clock.advance(1000);
-        let actual = l.check_n(&"node", NonZeroU32::new(MIB).unwrap());
-        assert_eq!(actual.is_ok(), accepted_at_one_second);
-        if wait_ns != 0 {
-            assert_eq!(
-                actual,
-                Err(CheckError::Wait(Wait(Duration::from_nanos(wait_ns))))
-            );
-        } else {
-            assert!(
-                l.check_n(&"node", NonZeroU32::new(741).unwrap()).is_ok(),
-                "floor rounding admits extra bytes"
-            );
-        }
-    }
-}
-
-#[test]
 fn exact_byte_rate_preserves_fractional_credit_and_long_running_keys() {
     use std::num::NonZeroU32;
     use steve_runtime::{FakeClock, policy::CheckError};
@@ -407,12 +386,12 @@ fn exact_byte_rate_preserves_fractional_credit_and_long_running_keys() {
     let clock = Arc::new(FakeClock::new(0));
     let l = Limiter::with_clock(
         RateLimit::Gcra {
+            units: NonZeroU32::new(MIB).unwrap(),
             per: sec(1),
             burst: 64 * MIB,
         },
         clock.clone(),
-    )
-    .with_units(NonZeroU32::new(MIB).unwrap());
+    );
     let check = |n| l.check_n(&"node", NonZeroU32::new(n).unwrap());
     assert_eq!(
         check(64 * MIB + 1),
@@ -454,10 +433,10 @@ async fn exact_byte_rate_rounds_only_waits_not_admission() {
     use steve_runtime::policy::CheckError;
     const MIB: u32 = 1024 * 1024;
     let l = Limiter::new(RateLimit::Gcra {
+        units: NonZeroU32::new(MIB).unwrap(),
         per: sec(1),
         burst: 64 * MIB,
-    })
-    .with_units(NonZeroU32::new(MIB).unwrap());
+    });
     let check = |n| l.check_n(&"node", NonZeroU32::new(n).unwrap());
     assert_eq!(check(64 * MIB), Ok(()));
     assert_eq!(
@@ -478,33 +457,120 @@ async fn exact_byte_rate_rounds_only_waits_not_admission() {
 }
 
 #[test]
-fn scaled_gcra_matches_governor_for_integral_unit_periods() {
-    use std::num::NonZeroU32;
-    use steve_runtime::FakeClock;
+fn integral_unit_periods_keep_the_hand_calculated_admission_table() {
+    use steve_runtime::{FakeClock, policy::CheckError};
+    for (units, per) in [
+        (NonZeroU32::MIN, Duration::from_millis(500)),
+        (NonZeroU32::new(2).unwrap(), sec(1)),
+    ] {
+        let clock = Arc::new(FakeClock::new(0));
+        let l = Limiter::with_clock(
+            RateLimit::Gcra {
+                units,
+                per,
+                burst: 5,
+            },
+            clock.clone(),
+        );
+        for (ms, weight, expected) in [
+            (0, 6, Err(CheckError::InsufficientCapacity { capacity: 5 })),
+            (0, 4, Ok(())),
+            (
+                0,
+                2,
+                Err(CheckError::Wait(Wait(Duration::from_millis(500)))),
+            ),
+            (0, 1, Ok(())),
+            (
+                499,
+                1,
+                Err(CheckError::Wait(Wait(Duration::from_millis(1)))),
+            ),
+            (500, 1, Ok(())),
+            (
+                500,
+                1,
+                Err(CheckError::Wait(Wait(Duration::from_millis(500)))),
+            ),
+            (
+                1000,
+                2,
+                Err(CheckError::Wait(Wait(Duration::from_millis(500)))),
+            ),
+            (1000, 1, Ok(())),
+            (2000, 2, Ok(())),
+            (
+                2000,
+                1,
+                Err(CheckError::Wait(Wait(Duration::from_millis(500)))),
+            ),
+            (4500, 5, Ok(())),
+        ] {
+            clock.set(ms);
+            assert_eq!(
+                l.check_n(&"node", NonZeroU32::new(weight).unwrap()),
+                expected,
+                "{units} at {ms}"
+            );
+        }
+        assert_eq!(l.check_n(&"other", NonZeroU32::new(5).unwrap()), Ok(()));
+    }
+}
+
+#[test]
+fn sliding_hit_keeps_latest_capacity_without_changing_waits() {
+    use steve_runtime::{FakeClock, policy::CheckError};
     let clock = Arc::new(FakeClock::new(0));
-    let governor = Limiter::with_clock(
-        RateLimit::Gcra {
-            per: Duration::from_millis(500),
-            burst: 5,
+    let l = Limiter::with_clock(
+        RateLimit::Window {
+            len: sec(10),
+            max: 3,
+            sliding: true,
         },
         clock.clone(),
     );
-    let scaled = Limiter::with_clock(
-        RateLimit::Gcra {
-            per: sec(1),
-            burst: 5,
-        },
-        clock.clone(),
-    )
-    .with_units(NonZeroU32::new(2).unwrap());
-    for attempt in 0..2000 {
-        clock.advance([0, 17, 333, 2500][attempt % 4]);
-        let weight = NonZeroU32::new((attempt as u32 * 37) % 7 + 1).unwrap();
-        let key = attempt % 3;
-        assert_eq!(
-            scaled.check_n(&key, weight),
-            governor.check_n(&key, weight),
-            "attempt {attempt}"
-        );
+    for ms in (0..8).map(|n| n * 1000) {
+        clock.set(ms);
+        l.hit(&"ip");
     }
+    assert_eq!(l.peek(&"ip"), Err(Wait(sec(8))));
+    assert_eq!(
+        l.check_n(&"ip", NonZeroU32::new(2).unwrap()),
+        Err(CheckError::Wait(Wait(sec(9))))
+    );
+    clock.set(14_999);
+    assert_eq!(l.peek(&"ip"), Err(Wait(Duration::from_millis(1))));
+    clock.set(15_000);
+    assert_eq!(l.peek(&"ip"), Ok(()));
+    assert_eq!(
+        l.check_n(&"ip", NonZeroU32::new(3).unwrap()),
+        Err(CheckError::Wait(Wait(sec(2))))
+    );
+    clock.set(17_000);
+    assert!(l.is_empty());
+    assert_eq!(l.check_n(&"ip", NonZeroU32::new(3).unwrap()), Ok(()));
+}
+
+#[test]
+fn throttle_idle_and_boundary_emit_have_only_one_pending_state() {
+    let at = tokio::time::Instant::now();
+    let mut t = Throttle::new(sec(5));
+    assert!(t.idle(at));
+    assert_eq!(t.offer(1, at), Some(1));
+    assert!(!t.idle(at + sec(4)));
+    assert!(t.idle(at + sec(5)));
+    assert_eq!(t.offer(2, at + sec(1)), None);
+    assert!(
+        !t.idle(at + sec(30)),
+        "an overdue held event must not be evicted"
+    );
+    assert_eq!(t.offer(3, at + sec(5)), Some(3));
+    assert_eq!(t.deadline(), None);
+    assert_eq!(
+        t.due(at + sec(5)),
+        None,
+        "the older held event must not follow the new leading event"
+    );
+    assert!(!t.idle(at + sec(9)));
+    assert!(t.idle(at + sec(10)));
 }

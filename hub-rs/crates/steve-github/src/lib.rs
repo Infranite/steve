@@ -209,6 +209,7 @@ struct Inner {
 
 impl GitHub {
     pub fn new(conns: Connections, env: GitHubEnv) -> Self {
+        let limiter = hooks::Limiter::new(conns.modules().clock.clone());
         Self(Arc::new(Inner {
             conns,
             env,
@@ -217,7 +218,7 @@ impl GitHub {
             sink: RwLock::new(Arc::new(NoSink)),
             notifier: RwLock::new(Arc::new(NoSink)),
             queue: Default::default(),
-            limiter: Default::default(),
+            limiter,
             secrets: Default::default(),
             available: Default::default(),
             core: RwLock::new(Arc::new(NoCore)),

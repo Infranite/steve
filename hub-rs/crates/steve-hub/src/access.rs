@@ -136,6 +136,7 @@ const TRIES_WINDOW: Duration = Duration::from_secs(600);
 type FailureLimit = steve_runtime::policy::Limiter<String>;
 fn failure_limit() -> FailureLimit {
     FailureLimit::new(steve_runtime::policy::RateLimit::Window {
+        sliding: false,
         len: TRIES_WINDOW,
         max: TRIES,
     })
@@ -785,6 +786,7 @@ mod tests {
         let make = || {
             FailureLimit::with_clock(
                 steve_runtime::policy::RateLimit::Window {
+                    sliding: false,
                     len: TRIES_WINDOW,
                     max: TRIES,
                 },

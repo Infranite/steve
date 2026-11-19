@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Path;
@@ -160,24 +160,21 @@ pub fn hook_limiter(
     }
     steve_runtime::policy::Limiter::with_clock(
         steve_runtime::policy::RateLimit::Window {
+            sliding: true,
             len: std::time::Duration::from_secs(60),
             max: RATE_PER_MINUTE as u32,
         },
         Arc::new(DomainClock(clock)),
     )
-    .into_sliding()
 }
 
-// GitHub's constructor predates its first delivery. Bind to its Modules clock lazily,
-// without allocating a second clock or changing the public GitHub constructor.
-#[derive(Default)]
-pub(crate) struct Limiter(OnceLock<steve_runtime::policy::Limiter<String>>);
+pub(crate) struct Limiter(steve_runtime::policy::Limiter<String>);
 impl Limiter {
-    fn allow(&self, key: &str, clock: Arc<dyn steve_modules::Clock>) -> bool {
-        self.0
-            .get_or_init(|| hook_limiter(clock))
-            .check(&key.to_owned())
-            .is_ok()
+    pub(crate) fn new(clock: Arc<dyn steve_modules::Clock>) -> Self {
+        Self(hook_limiter(clock))
+    }
+    fn allow(&self, key: &str) -> bool {
+        self.0.check(&key.to_owned()).is_ok()
     }
 }
 
@@ -360,11 +357,7 @@ impl GitHub {
             return empty(StatusCode::BAD_REQUEST);
         };
         let now = self.now();
-        if !self
-            .0
-            .limiter
-            .allow(rate_key, self.0.conns.modules().clock.clone())
-        {
+        if !self.0.limiter.allow(rate_key) {
             return empty(StatusCode::TOO_MANY_REQUESTS);
         }
         let ws = match &source {
@@ -801,12 +794,12 @@ mod tests {
 
     #[test]
     fn hook_window_table_keeps_later_hits_and_rejections_do_not_count() {
-        let l = Limiter::default();
         let clock = Arc::new(steve_modules::FakeClock::new(0));
+        let l = Limiter::new(clock.clone());
         for (at, count) in [(0, 60), (30_000, 60)] {
             clock.set(at);
             for _ in 0..count {
-                assert!(l.allow("a", clock.clone()));
+                assert!(l.allow("a"));
             }
         }
         for (at, count, allowed) in [
@@ -818,27 +811,27 @@ mod tests {
         ] {
             clock.set(at);
             for _ in 0..count {
-                assert_eq!(l.allow("a", clock.clone()), allowed, "at {at}");
+                assert_eq!(l.allow("a"), allowed, "at {at}");
             }
         }
-        assert!(l.allow("b", clock.clone()));
+        assert!(l.allow("b"));
         clock.advance(60_000);
-        assert!(l.0.get().unwrap().is_empty());
+        assert!(l.0.is_empty());
     }
 
     #[test]
     fn limiter_allows_120_a_minute_per_key() {
-        let l = Limiter::default();
         let clock = Arc::new(steve_modules::FakeClock::new(1000));
+        let l = Limiter::new(clock.clone());
         for i in 0..RATE_PER_MINUTE {
             clock.set(1_000 + i as i64);
-            assert!(l.allow("a", clock.clone()));
+            assert!(l.allow("a"));
         }
         clock.set(2_000);
-        assert!(!l.allow("a", clock.clone()));
-        assert!(l.allow("b", clock.clone()), "keys are separate");
+        assert!(!l.allow("a"));
+        assert!(l.allow("b"), "keys are separate");
         clock.set(61_000);
-        assert!(l.allow("a", clock.clone()), "the window slides");
+        assert!(l.allow("a"), "the window slides");
     }
 
     #[test]

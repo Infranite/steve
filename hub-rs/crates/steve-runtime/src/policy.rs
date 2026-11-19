@@ -113,15 +113,17 @@ impl Backoff {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum RateLimit {
-    /// One unit per `per`, initially `burst` units. Limiter::with_units can express
-    /// multiple units per period without rounding a fractional nanosecond per unit.
+    /// Replenish `units` per `per`, initially `burst` resource units. Integer debt
+    /// preserves fractional unit periods without rounding admission or refill.
     Gcra {
+        units: NonZeroU32,
         per: Duration,
         burst: u32,
     },
     Window {
         len: Duration,
         max: u32,
+        sliding: bool,
     },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,12 +134,11 @@ pub enum CheckError {
     Wait(Wait),
     InsufficientCapacity { capacity: u32 },
 }
-#[derive(Clone)]
 struct PolicyClock {
     source: Option<Arc<dyn crate::clock::Clock>>,
     origin: Instant,
     epoch: i64,
-    high_water: Arc<AtomicU64>,
+    high_water: AtomicU64,
 }
 impl PolicyClock {
     fn new(source: Option<Arc<dyn crate::clock::Clock>>) -> Self {
@@ -145,7 +146,7 @@ impl PolicyClock {
             epoch: source.as_ref().map_or(0, |c| c.now()),
             source,
             origin: Instant::now(),
-            high_water: Arc::default(),
+            high_water: AtomicU64::new(0),
         }
     }
     fn now(&self) -> Duration {
@@ -161,23 +162,9 @@ impl PolicyClock {
         )
     }
 }
-impl governor::clock::Clock for PolicyClock {
-    type Instant = Duration;
-    fn now(&self) -> Self::Instant {
-        self.now()
-    }
-}
-type Bucket = governor::RateLimiter<
-    governor::state::NotKeyed,
-    governor::state::InMemoryState,
-    PolicyClock,
-    governor::middleware::NoOpMiddleware<Duration>,
->;
 enum State {
-    Bucket(Bucket),
-    // GCRA theoretical arrival time relative to `at`, scaled by units per period.
-    // governor's integer-nanosecond quota cannot express fractional unit periods.
-    // Keep this debt in u128 so byte-sized rates neither round nor accumulate drift.
+    // Theoretical arrival debt relative to `at`, scaled by units per period.
+    // Keep it in u128 so byte-sized rates neither round nor accumulate drift.
     Fractional {
         at: Duration,
         debt: u128,
@@ -193,8 +180,6 @@ struct Entry {
 }
 pub struct Limiter<K> {
     rate: RateLimit,
-    sliding: bool,
-    units: NonZeroU32,
     clock: PolicyClock,
     keys: Mutex<HashMap<K, Entry>>,
 }
@@ -209,53 +194,27 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
     }
     fn build(rate: RateLimit, clock: Option<Arc<dyn crate::clock::Clock>>) -> Self {
         match rate {
-            RateLimit::Gcra { per, burst } => {
+            RateLimit::Gcra { per, burst, .. } => {
                 assert!(!per.is_zero() && burst > 0);
                 per.checked_mul(burst).expect("quota horizon overflow");
             }
-            RateLimit::Window { len, max } => assert!(!len.is_zero() && max > 0),
+            RateLimit::Window { len, max, .. } => assert!(!len.is_zero() && max > 0),
         }
         Self {
             rate,
-            sliding: false,
-            units: NonZeroU32::MIN,
             clock: PolicyClock::new(clock),
             keys: Mutex::new(HashMap::new()),
         }
     }
-    /// Configure a fresh GCRA limiter for `units` per `RateLimit::Gcra::per`.
-    /// Burst and check_n weights remain resource units (e.g. bytes), not batches.
-    /// Integer scaled GCRA debt preserves rates such as 1 MiB/s exactly.
-    pub fn with_units(mut self, units: NonZeroU32) -> Self {
-        assert!(matches!(self.rate, RateLimit::Gcra { .. }));
-        assert!(
-            self.keys.get_mut().unwrap().is_empty(),
-            "configure units before admission"
-        );
-        self.units = units;
-        self
-    }
-    pub fn sliding(rate: RateLimit) -> Self {
-        Self::new(rate).into_sliding()
-    }
-    pub fn into_sliding(mut self) -> Self {
-        assert!(matches!(self.rate, RateLimit::Window { .. }));
-        assert!(
-            self.keys.get_mut().unwrap().is_empty(),
-            "configure windows before admission"
-        );
-        self.sliding = true;
-        self
-    }
     /// Prunes fully recovered keys even if no further requests arrive for those keys.
     pub fn prune(&self) {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
     }
     pub fn len(&self) -> usize {
         self.prune();
-        self.keys.lock().unwrap().len()
+        self.keys.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -276,23 +235,13 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         if n.get() > capacity {
             return Err(CheckError::InsufficientCapacity { capacity });
         }
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
         match (&mut e.state, self.rate) {
-            (State::Bucket(b), RateLimit::Gcra { per, burst }) => {
-                let result = b
-                    .check_n(n)
-                    .map_err(|_| CheckError::InsufficientCapacity { capacity: burst })?
-                    .map_err(|w| CheckError::Wait(Wait(w.wait_time_from(now))));
-                if result.is_ok() {
-                    e.expires = now + per * burst;
-                }
-                result
-            }
-            (State::Fractional { at, debt }, RateLimit::Gcra { per, burst }) => {
-                let units = u128::from(self.units.get());
+            (State::Fractional { at, debt }, RateLimit::Gcra { units, per, burst }) => {
+                let units = u128::from(units.get());
                 *debt = debt.saturating_sub(now.saturating_sub(*at).as_nanos() * units);
                 *at = now;
                 let next = *debt + per.as_nanos() * u128::from(n.get());
@@ -307,20 +256,22 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
                 e.expires = now + scaled_duration(next, units);
                 Ok(())
             }
-            (State::Window { start, hits }, RateLimit::Window { len, max }) => {
-                self.refresh(start, hits, now, len);
+            (State::Window { start, hits }, RateLimit::Window { len, max, sliding }) => {
+                Self::refresh(start, hits, now, len, sliding);
                 if hits.len().saturating_add(n.get() as usize) > max as usize {
                     return Err(CheckError::Wait(Wait(
-                        self.until(*start, hits, now, len, max, n.get())
-                            .saturating_sub(now),
+                        Self::until(
+                            *start,
+                            hits,
+                            len,
+                            sliding,
+                            hits.len() + n.get() as usize - max as usize,
+                        )
+                        .saturating_sub(now),
                     )));
                 }
                 hits.extend(std::iter::repeat_n(now, n.get() as usize));
-                e.expires = if self.sliding {
-                    now + len
-                } else {
-                    *start + len
-                };
+                e.expires = if sliding { now + len } else { *start + len };
                 Ok(())
             }
             _ => unreachable!(),
@@ -330,15 +281,7 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         Entry {
             expires: now,
             state: match self.rate {
-                RateLimit::Gcra { .. } if self.units.get() > 1 => {
-                    State::Fractional { at: now, debt: 0 }
-                }
-                RateLimit::Gcra { per, burst } => State::Bucket(Bucket::direct_with_clock(
-                    governor::Quota::with_period(per)
-                        .expect("GCRA period out of range")
-                        .allow_burst(NonZeroU32::new(burst).unwrap()),
-                    self.clock.clone(),
-                )),
+                RateLimit::Gcra { .. } => State::Fractional { at: now, debt: 0 },
                 RateLimit::Window { .. } => State::Window {
                     start: now,
                     hits: VecDeque::new(),
@@ -347,13 +290,13 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         }
     }
     fn refresh(
-        &self,
         start: &mut Duration,
         hits: &mut VecDeque<Duration>,
         now: Duration,
         len: Duration,
+        sliding: bool,
     ) {
-        if self.sliding {
+        if sliding {
             while hits.front().is_some_and(|t| now.saturating_sub(*t) >= len) {
                 hits.pop_front();
             }
@@ -363,30 +306,27 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         }
     }
     fn until(
-        &self,
         start: Duration,
         hits: &VecDeque<Duration>,
-        now: Duration,
         len: Duration,
-        capacity: u32,
-        units: u32,
+        sliding: bool,
+        expiring: usize,
     ) -> Duration {
-        if self.sliding {
-            let needed = hits
-                .len()
-                .saturating_add(units as usize)
-                .saturating_sub(capacity as usize);
-            hits.get(needed.saturating_sub(1)).copied().unwrap_or(now) + len
+        if sliding {
+            hits[expiring - 1] + len
         } else {
             start + len
         }
     }
     /// Window-only query. Does not record an event or allocate an idle key.
+    ///
+    /// # Panics
+    /// Panics for Gcra; use check or check_n for GCRA admission.
     pub fn peek(&self, key: &K) -> Result<(), Wait> {
-        let RateLimit::Window { len, max } = self.rate else {
+        let RateLimit::Window { len, max, sliding } = self.rate else {
             panic!("peek requires a Window");
         };
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let Some(e) = keys.get_mut(key) else {
@@ -395,37 +335,39 @@ impl<K: Hash + Eq + Clone> Limiter<K> {
         let State::Window { start, hits } = &mut e.state else {
             unreachable!()
         };
-        self.refresh(start, hits, now, len);
+        Self::refresh(start, hits, now, len, sliding);
         if hits.len() >= max as usize {
             Err(Wait(
-                self.until(*start, hits, now, len, max, 1)
-                    .saturating_sub(now),
+                Self::until(*start, hits, len, sliding, 1).saturating_sub(now),
             ))
         } else {
             Ok(())
         }
     }
     /// Window-only record, including failures racing with an earlier peek. Never denies a hit.
+    /// Both window kinds retain at most max timestamps; sliding windows keep the latest ones.
+    ///
+    /// # Panics
+    /// Panics for Gcra; use check_n for weighted GCRA admission.
     pub fn hit(&self, key: &K) {
-        let RateLimit::Window { len, max } = self.rate else {
+        let RateLimit::Window { len, max, sliding } = self.rate else {
             panic!("hit requires a Window");
         };
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
         keys.retain(|_, e| e.expires > now);
         let e = keys.entry(key.clone()).or_insert_with(|| self.entry(now));
         let State::Window { start, hits } = &mut e.state else {
             unreachable!()
         };
-        self.refresh(start, hits, now, len);
-        if self.sliding || hits.len() < max as usize {
+        Self::refresh(start, hits, now, len, sliding);
+        if sliding || hits.len() < max as usize {
             hits.push_back(now);
         }
-        e.expires = if self.sliding {
-            now + len
-        } else {
-            *start + len
-        };
+        while hits.len() > max as usize {
+            hits.pop_front();
+        }
+        e.expires = if sliding { now + len } else { *start + len };
     }
 }
 // Round only the reported wait/expiry up to a whole nanosecond. Admission uses
@@ -464,6 +406,13 @@ impl<T> Throttle<T> {
             Some(value)
         }
     }
+    /// No pending trailing event and the leading-event cooldown has expired.
+    pub fn idle(&self, now: Instant) -> bool {
+        self.held.is_none()
+            && self
+                .last
+                .is_none_or(|last| now.saturating_duration_since(last) >= self.every)
+    }
     pub fn deadline(&self) -> Option<Instant> {
         self.held.as_ref().and(self.last.map(|t| t + self.every))
     }
@@ -474,5 +423,68 @@ impl<T> Throttle<T> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FakeClock;
+
+    #[test]
+    fn both_window_kinds_keep_bounded_hit_history() {
+        for sliding in [false, true] {
+            let clock = Arc::new(FakeClock::new(0));
+            let l = Limiter::with_clock(
+                RateLimit::Window {
+                    len: Duration::from_secs(10),
+                    max: 3,
+                    sliding,
+                },
+                clock.clone(),
+            );
+            for n in 0..8 {
+                clock.set(n * 1000);
+                l.hit(&"ip");
+                let keys = l.keys.lock().unwrap();
+                let State::Window { hits, .. } = &keys["ip"].state else {
+                    unreachable!()
+                };
+                assert_eq!(hits.len(), (n as usize + 1).min(3));
+            }
+            assert_eq!(
+                l.peek(&"ip"),
+                Err(Wait(Duration::from_secs(if sliding { 8 } else { 3 })))
+            );
+        }
+    }
+
+    #[test]
+    fn a_poisoned_failure_window_still_serves_queries_hits_checks_and_pruning() {
+        let clock = Arc::new(FakeClock::new(0));
+        let l = Limiter::with_clock(
+            RateLimit::Window {
+                len: Duration::from_secs(600),
+                max: 2,
+                sliding: false,
+            },
+            clock.clone(),
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = l.keys.lock().unwrap();
+                panic!("poison the failure-table lock");
+            }))
+            .is_err()
+        );
+        assert!(l.keys.is_poisoned());
+        l.hit(&"ip");
+        assert_eq!(l.peek(&"ip"), Ok(()));
+        assert_eq!(l.check(&"ip"), Ok(()));
+        assert_eq!(l.peek(&"ip"), Err(Wait(Duration::from_secs(600))));
+        assert_eq!(l.len(), 1);
+        clock.advance(600_000);
+        l.prune();
+        assert!(l.is_empty());
     }
 }

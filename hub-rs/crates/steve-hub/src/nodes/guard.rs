@@ -238,12 +238,13 @@ const EVENT_RATE: u32 = 1024 * 1024;
 type EventBudget = steve_runtime::policy::Limiter<String>;
 fn event_rate() -> steve_runtime::policy::RateLimit {
     steve_runtime::policy::RateLimit::Gcra {
+        units: std::num::NonZeroU32::new(EVENT_RATE).unwrap(),
         per: std::time::Duration::from_secs(1),
         burst: EVENT_BURST,
     }
 }
 fn event_budget() -> EventBudget {
-    EventBudget::new(event_rate()).with_units(std::num::NonZeroU32::new(EVENT_RATE).unwrap())
+    EventBudget::new(event_rate())
 }
 static EVENT_BUDGET: std::sync::LazyLock<EventBudget> = std::sync::LazyLock::new(event_budget);
 fn take_event_bytes(node: &str, bytes: usize) -> bool {
@@ -390,8 +391,7 @@ mod tests {
     #[test]
     fn byte_budget_table_is_atomic_and_refills_one_mib_per_second() {
         let clock = Arc::new(steve_runtime::FakeClock::new(0));
-        let budget = EventBudget::with_clock(event_rate(), clock.clone())
-            .with_units(std::num::NonZeroU32::new(EVENT_RATE).unwrap());
+        let budget = EventBudget::with_clock(event_rate(), clock.clone());
         let mib = EVENT_RATE as usize;
         for (ms, bytes, allowed) in [
             (0, EVENT_BURST as usize + 1, false),
@@ -411,8 +411,7 @@ mod tests {
     #[test]
     fn a_flooding_node_runs_out_and_another_does_not() {
         let budget =
-            EventBudget::with_clock(event_rate(), Arc::new(steve_runtime::FakeClock::new(0)))
-                .with_units(std::num::NonZeroU32::new(EVENT_RATE).unwrap());
+            EventBudget::with_clock(event_rate(), Arc::new(steve_runtime::FakeClock::new(0)));
         assert!(take_bytes(&budget, "n_flood", EVENT_BURST as usize));
         assert!(!take_bytes(&budget, "n_flood", 64 * 1024));
         assert!(take_bytes(&budget, "n_quiet", 64 * 1024));
