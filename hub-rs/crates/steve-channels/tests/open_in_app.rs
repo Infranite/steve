@@ -9,6 +9,9 @@
 //! - a space the viewer does not see gives no decision link.
 //! Synthetic ids only.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -18,7 +21,7 @@ use steve_channels::{Channels, Inbound, SpaceKind, api, conversations, open_link
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;

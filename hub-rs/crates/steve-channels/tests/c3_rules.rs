@@ -5,6 +5,9 @@
 //! restores the rules. Nothing is ever sent. Plus the cross-connection duplicate (F8 gap), rule
 //! validation and the REST routes.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -24,7 +27,7 @@ use steve_flow::{FlowCx, FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
@@ -838,9 +841,8 @@ async fn replies_to_the_bot_and_rule_validation_over_rest() {
     let first = push(&h, &c, msg("C_OPS", "r1", "uhan", "早", false)).await;
     let space = first.space_id.clone();
     // a message the bot sent earlier
-    h.env
-        .store()
-        .with_conn(|cn| {
+    digest_env::write(h.env
+        .store(), |cn| {
             cn.execute(
                 "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                  VALUES ('cm_sent1', ?, ?, 'fm_1', 'out', '备份已恢复', 'sent', 1, 1)",

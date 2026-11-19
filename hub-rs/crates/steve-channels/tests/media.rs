@@ -5,6 +5,9 @@
 //! visibility, membership, purge — also while the bytes are coming), the size limit, provider
 //! refusals and safe headers; an old card is read again from its own raw event.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +25,7 @@ use steve_channels::fake::feishu::{Endpoint, FakeFeishu, WsClientConfig, fixture
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -125,13 +128,14 @@ async fn setup() -> H {
 
 fn sql(h: &H, s: &str) {
     let s = s.to_string();
-    h.env
-        .store()
-        .transaction(move |tx| -> Result<(), steve_store::StoreError> {
+    digest_env::write(
+        h.env.store(),
+        move |tx| -> Result<(), steve_store::StoreError> {
             tx.execute_batch(&s)?;
             Ok(())
-        })
-        .expect("sql");
+        },
+    )
+    .expect("sql");
 }
 
 fn one(h: &H, s: &str) -> Value {

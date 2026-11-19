@@ -5,6 +5,9 @@
 //! with a bot re-evaluated on the bot's events, and shutdown aborting a run that does not stop;
 //! the read views bound to one connection (`ConnQueries`).
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,7 +29,7 @@ use steve_modules::accounts::connections::{
     self, AccountInfo, AuthKind, ConnCx, ConnectionProvider, Connections, ConnectionsConfig,
     ProviderError,
 };
-use steve_modules::testkit::{ME, TestEnv, WS};
+use steve_modules::testkit::{ME, WS};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -279,15 +282,27 @@ fn fast() -> Timing {
 
 impl H {
     fn exec(&self, sql: &str) {
-        self.env
-            .store()
-            .with_conn(|c| {
-                c.execute_batch(&format!(
-                    "PRAGMA foreign_keys = OFF; {sql}; PRAGMA foreign_keys = ON;"
-                ))?;
+        {
+            let store = self.env.store();
+            store
+                .with_conn(|c| {
+                    c.execute_batch("PRAGMA foreign_keys=OFF")?;
+                    Ok(())
+                })
+                .unwrap();
+            let result = digest_env::write(store, |c| {
+                c.execute_batch(sql)?;
                 Ok(())
-            })
-            .expect(sql);
+            });
+            store
+                .with_conn(|c| {
+                    c.execute_batch("PRAGMA foreign_keys=ON")?;
+                    Ok(())
+                })
+                .unwrap();
+            result
+        }
+        .expect(sql);
     }
 
     fn one(&self, sql: &str) -> String {

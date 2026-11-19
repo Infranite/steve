@@ -1,7 +1,10 @@
 //! Personal channel indicators respect visibility/read state, not Steve's participation mode.
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use steve_channels::conversations;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2};
+use steve_modules::testkit::{ME, OTHER, WS, WS2};
 use steve_store::base::Viewer;
 
 fn setup() -> TestEnv {
@@ -21,7 +24,7 @@ fn setup() -> TestEnv {
     e
 }
 fn add(e: &TestEnv, id: &str, kind: &str, connection: &str) {
-    e.store().with_conn(|c| {
+    digest_env::write(e.store(), |c| {
         c.execute("INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated) VALUES(?1,'default','feishu',?2,?3,?1,?1,1,1)",params![id,connection,kind])?;
         c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created) VALUES(?1,'default',?2,'in','Private body',100)",params![format!("message_{id}"),id])?;
         Ok(())
@@ -107,7 +110,7 @@ fn channel_attention_is_personal_visible_enabled_and_quiet_is_not_mute() {
 fn channels_use_actual_live_incoming_visible_ids_not_unread_count_or_rowid() {
     let e = setup();
     add(&e, "dm", "dm", "bot");
-    e.store().with_conn(|c| {
+    digest_env::write(e.store(), |c| {
         c.execute_batch("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,history,sender_party_id,created) VALUES
           ('out','default','dm','out','sent',NULL,NULL,101),
           ('history','default','dm','in','old','sync',NULL,102),
@@ -115,7 +118,7 @@ fn channels_use_actual_live_incoming_visible_ids_not_unread_count_or_rowid() {
         Ok(())
     }).unwrap();
     assert_eq!(list(&e, ME)[0].event_id, "message_dm");
-    e.store().with_conn(|c| {
+    digest_env::write(e.store(), |c| {
         c.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created) VALUES('new-live','default','dm','in','New',104)",[])?;Ok(())
     }).unwrap();
     let a = list(&e, ME);

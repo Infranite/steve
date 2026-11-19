@@ -3,9 +3,10 @@
 //! line with the reason, no operation) and `reply`, the channel target (persona, rules, duty,
 //! trigger words / where), names that are not recognized, and the `global` candidates. The model is
 //! always the scripted gateway; nothing real is called.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -19,7 +20,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::changes::{self, Origin, Proposal, STALE};
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, Caller, SystemClock};
@@ -940,12 +941,4 @@ async fn english_request_zh_cn_card_and_prompt() {
         err.to_string(),
         "An account connected as you can't reply directly, only draft"
     );
-}
-
-impl Drop for H {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            digest_audit::check(self.env.store());
-        }
-    }
 }

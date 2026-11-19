@@ -3,6 +3,9 @@
 //! answered as you (however the adapter named you), a new contact that looks like you gets a merge
 //! proposal into “我”, and `steve_im_read` reads a conversation as context only.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -16,7 +19,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, ConnCx, Connections, ConnectionsConfig};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

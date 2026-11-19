@@ -1,6 +1,9 @@
 //! `STEVE_FEISHU_API_BASE` (FeishuEnv) in a process of its own: the base is process-wide. A bot
 //! connected without `config.api_base` and the user provider both talk to the fake.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -10,7 +13,7 @@ use steve_channels::fake::feishu::{FakeFeishu, ids};
 use steve_modules::accounts::connections::{
     self, ConnectionProvider, Connections, ConnectionsConfig,
 };
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use zeroize::Zeroizing;

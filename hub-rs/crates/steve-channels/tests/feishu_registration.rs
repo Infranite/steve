@@ -5,6 +5,9 @@
 //! another person's attempt is invisible; a stop is resumed within the original deadline; brand
 //! switch to Lark.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +21,7 @@ use steve_channels::adapters::feishu::client::is_real_host;
 use steve_channels::fake::feishu::{Endpoint, FakeFeishu, World, ids};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

@@ -5,6 +5,9 @@
 //! `archive_on_done` archives the thread when its item finishes. The fake IMAP/SMTP, the flow engine on
 //! the same store, a scripted fake gateway; no real mail server, no `~/.steve`.
 
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +26,7 @@ use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::StoreError;

@@ -2,13 +2,16 @@
 //! `todo` alarm source plans it, the alarm clock fires it once, and the notification intake writes its
 //! owner's notification and feed entry. Synthetic data only.
 
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use rusqlite::params;
 use steve_digest::todo;
 use steve_digest::todo_alarms::TodoAlarms;
 use steve_flow::alarms::{self, AlarmSources};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::outbox::Dispatcher;
 
 /// 2027-01-31 10:00 UTC

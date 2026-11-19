@@ -667,14 +667,11 @@ pub fn supersede(
         if !closes(src)? {
             continue;
         }
-        steve_store_sqlite::digest::status_changed(
+        crate::messages::set_status(
             tx,
-            steve_store_sqlite::digest::Source::ChanMessage,
             id,
-            tx.execute(
-                "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
-                params![id, status],
-            )?,
+            "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
+            params![id, status],
         )?;
         // closed while its disclosure check still ran: the record says the check did not finish
         crate::basis::checking_stopped(tx, id, crate::outbound::R_DEALT_FIRST)?;

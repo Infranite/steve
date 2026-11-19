@@ -273,10 +273,11 @@ pub(crate) fn open_draft_as(
             now
         ],
     )?;
-    steve_store_sqlite::digest::enqueue_digestible(
+    steve_store_sqlite::digest::sync_message(
         tx,
         steve_store_sqlite::digest::Source::ChanMessage,
         &id,
+        None,
     )?;
     let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {

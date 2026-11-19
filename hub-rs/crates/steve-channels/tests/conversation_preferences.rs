@@ -1,10 +1,13 @@
 //! Personal conversation closure is independent from channel processing and visibility.
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_channels::conversations::{self, ListQuery};
 use steve_modules::{
     ApiResult,
-    testkit::{ME, OTHER, TestEnv, WS, WS2},
+    testkit::{ME, OTHER, WS, WS2},
 };
 use steve_store::base::Viewer;
 
@@ -217,7 +220,7 @@ fn invalid_query_is_rejected() {
 }
 
 fn outgoing(h: &TestEnv, space: &str, id: &str, status: &str, approval: Option<(&str, &str)>) {
-    h.store().with_conn(|c| {
+    digest_env::write(h.store(), |c| {
         let decision = approval.map(|_| format!("decision-{id}"));
         c.execute("INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, decision_id, created)
             VALUES (?1, ?2, ?3, 'out', 'reply', ?4, ?5, 2)", params![id, WS, space, status, decision])?;
@@ -286,7 +289,7 @@ fn replied_requires_a_sent_message_or_a_draft_still_awaiting_approval() {
         )
         .unwrap();
     close(&h, WS, ME, "chan:sent", true).unwrap();
-    h.store().with_conn(|c| {
+    digest_env::write(h.store(), |c| {
         // Draft-only channel records need not have any internal conversation turns.
         c.execute("DELETE FROM messages WHERE space = 'chan:draft'", [])?;
         // Latest-author filtering would lose a conversation with a reply followed by incoming text.
@@ -416,7 +419,7 @@ fn replied_does_not_reveal_other_users_sends_or_drafts() {
         Some(("approve", "open")),
     );
     outgoing(&h, "private-space", "own-out", "sent", None);
-    h.store().with_conn(|c| {
+    digest_env::write(h.store(), |c| {
         // The groups are visible, but these two messages only reached ME's personal identity.
         c.execute("INSERT INTO space_identities (space_id, connection_id, workspace_id, ordinal, owner_user, joined)
             VALUES ('hidden-sent', 'mine', ?2, 0, ?1, 1), ('hidden-draft', 'mine', ?2, 0, ?1, 1),

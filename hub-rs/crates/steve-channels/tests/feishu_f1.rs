@@ -4,6 +4,9 @@
 //! cached until 5 minutes before expiry and re-minted once after an invalid-token error, and the
 //! user connection by OAuth + PKCE and by the lark-cli device flow.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use steve_modules::Caller;
 use steve_modules::accounts::connections::{
     self, Connections, ConnectionsConfig, Health, ProviderError,
 };
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

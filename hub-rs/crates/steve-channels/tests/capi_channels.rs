@@ -4,6 +4,9 @@
 //! and the connection runtime with the Feishu hooks starting the long connection, `sync_bot_chats`
 //! and the self poller as connections change.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually_sync;
@@ -20,7 +23,7 @@ use steve_channels::{Channels, SpaceEvent, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, OTHER, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{Caller, decisions};
@@ -158,13 +161,11 @@ impl H {
 
     fn exec(&self, sql: &str) {
         let sql = sql.to_string();
-        self.env
-            .store()
-            .with_conn(move |c| {
-                c.execute_batch(&sql)?;
-                Ok(())
-            })
-            .expect("exec");
+        digest_env::write(self.env.store(), move |c| {
+            c.execute_batch(&sql)?;
+            Ok(())
+        })
+        .expect("exec");
     }
 
     async fn new_persona(&self, name: &str) -> String {
@@ -1006,13 +1007,16 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 200);
     // … until the account itself is deleted: then only the workspace owner does
-    h.exec(&format!(
+    h.env.store().with_conn(|c| {
+        c.execute_batch(&format!(
         "PRAGMA foreign_keys = OFF;
          DELETE FROM account_handles WHERE account_id IN (SELECT account_id FROM spaces WHERE id = '{id}');
          DELETE FROM accounts WHERE id IN (SELECT account_id FROM spaces WHERE id = '{id}');
          PRAGMA foreign_keys = ON;",
         id = s(&list[0]["id"])
-    ));
+    ))?;
+        Ok(())
+    }).unwrap();
     let (st, _) = send(&h.api, &caller(WS, OTHER), "GET", &one, None).await;
     assert_eq!(st, 404);
     let (st, _) = h.call("GET", &one, None).await;

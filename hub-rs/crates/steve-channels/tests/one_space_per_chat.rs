@@ -4,6 +4,9 @@
 //! workspace sees what the bot received, you see everything that reached you. A generic service
 //! that names no platform keeps its own space.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -16,7 +19,7 @@ use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::contacts::service::ensure_base;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::uid;

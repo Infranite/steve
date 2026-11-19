@@ -622,17 +622,16 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
           learned_space_id = CASE WHEN learned_space_id IN (SELECT value FROM json_each(?1)) THEN NULL ELSE learned_space_id END",
         [&spaces],
     )?;
+    let digest_messages = tx.prepare_cached(
+        "SELECT workspace_id,'space:' || space_id,id FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))"
+    )?.query_map([&msgs], |r| Ok((steve_store_sqlite::digest::Scope {
+        workspace: r.get(0)?, conv: r.get(1)?,
+    }, r.get::<_, String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     tx.execute(
         "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
         [&msgs],
     )?;
-    for id in &p.messages {
-        steve_store_sqlite::digest::remove_message(
-            tx,
-            steve_store_sqlite::digest::Source::ChanMessage,
-            id,
-        )?;
-    }
+    steve_store_sqlite::digest::remove_message(tx, digest_messages)?;
     for table in SPACE_OWNED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE space_id IN (SELECT value FROM json_each(?1))"),

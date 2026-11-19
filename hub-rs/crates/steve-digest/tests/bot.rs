@@ -1,11 +1,12 @@
 //! Tool contracts on an isolated database; no harness, model, network or live installation.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{ConvRef, changes, queue, summary, tools, window};
 use steve_modules::contacts::mcp::McpCx;
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::StoreError;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -31,7 +32,7 @@ fn build(count: i64, large: bool) -> TestEnv {
             VALUES ('alice', 'default', 'person', 'Alice', 'usr_dev', 1, 1);")?;
         for n in 1..=count {
             tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, thread_key, created) VALUES (?, 'default', 's1', ?, 'in', 'alice', ?, '[]', 'digest-topic', ?)", params![format!("m{n}"), format!("m{n}"), if large { "deployment details ".repeat(50) } else { format!("Owner commitment {n}: before Friday") }, NOW - 60_000 + n])?;
-            steve_store_sqlite::digest::enqueue_digestible(tx, steve_store_sqlite::digest::Source::ChanMessage, &format!("m{n}"))?;
+            steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, &format!("m{n}"), None)?;
         }
         tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES (?, 'digest', ?, ?)", params![WS, json!({"packets": 1, "chunk_tokens": if large {600} else {6000}}).to_string(), NOW])?;
         Ok::<_, StoreError>(())
@@ -59,7 +60,6 @@ fn chunk(e: &TestEnv, l: &Value) -> Value {
 #[test]
 fn batch_resumes_and_read_returns_deterministic_chunk_text() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     assert!(l["packet"].as_str().unwrap().starts_with("dpk"));
     let r = call(&e, tools::BATCH, json!({})).unwrap();
@@ -77,7 +77,6 @@ fn batch_resumes_and_read_returns_deterministic_chunk_text() {
 #[test]
 fn chunk_and_finish_are_atomic_and_report_is_undoable() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let premature = json!({"packet": l["packet"], "batch": l["batch"], "summary": "too soon", "expected_version": 0});
     assert!(call(&e, tools::FINISH, premature).is_err());
@@ -114,7 +113,6 @@ fn chunk_and_finish_are_atomic_and_report_is_undoable() {
 #[test]
 fn invalid_late_write_rolls_back_segments_and_new_matters() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let mut write = chunk(&e, &l);
     write["todos"] = json!([{"text": "bad deadline", "positions": [1], "due": NOW + 1000, "due_quote": "invented words"}]);
@@ -134,7 +132,6 @@ fn invalid_late_write_rolls_back_segments_and_new_matters() {
 #[test]
 fn stale_and_other_run_cannot_read_or_write() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let args = json!({"packet": l["packet"], "batch": l["batch"]});
     let mut other = cx();
@@ -150,7 +147,6 @@ fn chunk_before_expiry(l: &Value) -> Value {
 #[test]
 fn retry_retains_chunks_yield_does_not_exhaust_attempt_budget() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     call(&e, tools::CHUNK, chunk(&e, &l)).unwrap();
     call(
@@ -177,7 +173,6 @@ fn retry_retains_chunks_yield_does_not_exhaust_attempt_budget() {
 #[test]
 fn service_and_nonowner_are_not_implicitly_the_owner() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     for user in [OTHER, "svc:default"] {
         let mut c = cx();
         c.user = user.into();
@@ -187,7 +182,6 @@ fn service_and_nonowner_are_not_implicitly_the_owner() {
 #[test]
 fn positions_must_be_real_and_all_chunk_positions_must_be_accounted_for() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let mut write = chunk(&e, &l);
     write["segments"][0]["last"] = json!(4);
@@ -197,7 +191,6 @@ fn positions_must_be_real_and_all_chunk_positions_must_be_accounted_for() {
 #[test]
 fn associations_cannot_be_added_to_summary_only_packet() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     e.store()
         .transaction(|tx| {
             tx.execute(
@@ -214,7 +207,6 @@ fn associations_cannot_be_added_to_summary_only_packet() {
 #[test]
 fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let mut write = chunk(&e, &l);
     write["todos"] = json!([{"text": "Follow up", "positions": [1], "due": NOW + 86_400_000, "due_quote": "before Friday", "matter_at": 1}]);
@@ -261,7 +253,6 @@ fn todo_deadline_uses_source_quote_and_memory_remains_a_confirmable_candidate() 
 #[test]
 fn finish_retains_deterministic_alert_rollup_and_user_classification() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let l = lease(&e);
     let cv = ConvRef::new("space", "s1");
     e.store()
@@ -365,7 +356,6 @@ fn large_window_resumes_in_another_session_and_chain_reuses_module_matter_id() {
 fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmation() {
     use steve_store::base::mems::{self, NewMem};
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let seed = |owner: &str| {
         e.store()
             .transaction(|tx| {
@@ -437,11 +427,10 @@ fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmatio
 #[test]
 fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     e.store().transaction(|tx| {
         tx.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated) VALUES ('s2','default','test','group','g2','Other team',1,1);
             INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, created) VALUES ('m4','default','s2','m4','in','alice','Same follow up',1799999990000);")?;
-        steve_store_sqlite::digest::enqueue_digestible(tx, steve_store_sqlite::digest::Source::ChanMessage, "m4")?;
+        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, "m4", None)?;
         Ok::<_, StoreError>(())
     }).unwrap();
     window::cut_now(e.store(), WS, &ConvRef::new("space", "s2"), NOW).unwrap();
@@ -471,7 +460,6 @@ fn one_run_batches_conversations_and_confirms_the_same_cross_conversation_matter
 #[test]
 fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let ids = e
         .store()
         .transaction(|tx| {
@@ -499,7 +487,6 @@ fn visibility_filter_does_not_spend_an_attempt_or_lease_hidden_packets() {
 #[test]
 fn private_sources_do_not_starve_readable_packets_after_the_first_five_hundred() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let ids = e.store().transaction(|tx| {
         let original = queue::list(tx, WS, None, None, 1)?.remove(0);
         for n in 0..501 {

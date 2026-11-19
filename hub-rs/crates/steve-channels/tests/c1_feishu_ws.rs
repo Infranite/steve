@@ -3,6 +3,9 @@
 //! server land as spaces, identified senders, `chan_messages` and `ext_events`; repeats of an
 //! `event_id` are processed once, also after a restart of the long connection.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use steve_channels::inbound::{LABEL_BOT, LABEL_OWN};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

@@ -6,6 +6,9 @@
 //! merge; an edit is no new message when every side times to the ms; the Hub's
 //! own ids never leave it.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -22,7 +25,7 @@ use steve_modules::ApiError;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::contacts::service::ensure_base;
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::uid;

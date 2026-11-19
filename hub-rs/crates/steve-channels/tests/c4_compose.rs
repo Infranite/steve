@@ -4,6 +4,9 @@
 //! `create_item` act creates the item, links it, and answers its number; `reply_as` and
 //! `send_to_space` validate in the compiled flow and only ever draft.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -32,7 +35,7 @@ use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig}
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
 use steve_modules::contacts::{self, Ports};
-use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, WS, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::mems::{self, NewMem};
@@ -133,13 +136,11 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
 }
 
 fn exec(h: &H, sql: &str) {
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute_batch(sql)?;
-            Ok(())
-        })
-        .expect("sql");
+    digest_env::write(h.env.store(), |c| {
+        c.execute_batch(sql)?;
+        Ok(())
+    })
+    .expect("sql");
 }
 
 fn one(h: &H, sql: &str, p: &[&str]) -> Vec<Value> {

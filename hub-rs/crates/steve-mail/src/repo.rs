@@ -553,10 +553,11 @@ pub fn insert_message(tx: &Tx, m: &MessageRow) -> MailResult<()> {
         m.status,
         m.created
     ])?;
-    steve_store_sqlite::digest::enqueue_digestible(
+    steve_store_sqlite::digest::sync_message(
         tx,
         steve_store_sqlite::digest::Source::MailMessage,
         &m.id,
+        None,
     )?;
     Ok(())
 }
@@ -737,9 +738,11 @@ pub fn raw_paths(c: &Connection, conn: &str) -> MailResult<Vec<String>> {
 
 /// Deletes everything of a connection (disconnect), children first.
 pub fn delete_connection(tx: &Tx, conn: &str) -> MailResult<()> {
-    let digest_ids = tx
-        .prepare_cached("SELECT id FROM mail_messages WHERE connection_id=?")?
-        .query_map([conn], |r| r.get::<_, String>(0))?
+    let digest_messages = tx
+        .prepare_cached("SELECT workspace_id,'mail_thread:' || thread_id,id FROM mail_messages WHERE connection_id=?")?
+        .query_map([conn], |r| Ok((steve_store_sqlite::digest::Scope {
+            workspace: r.get(0)?, conv: r.get(1)?,
+        }, r.get::<_, String>(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for sql in [
         "DELETE FROM mail_drafts WHERE connection_id = ?1",
@@ -751,13 +754,7 @@ pub fn delete_connection(tx: &Tx, conn: &str) -> MailResult<()> {
     ] {
         tx.prepare_cached(sql)?.execute([conn])?;
     }
-    for id in digest_ids {
-        steve_store_sqlite::digest::remove_message(
-            tx,
-            steve_store_sqlite::digest::Source::MailMessage,
-            &id,
-        )?;
-    }
+    steve_store_sqlite::digest::remove_message(tx, digest_messages)?;
     Ok(())
 }
 

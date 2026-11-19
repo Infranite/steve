@@ -78,13 +78,31 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     if added == 0 {
         return Ok(None);
     }
-    steve_store_sqlite::digest::enqueue_digestible(
+    steve_store_sqlite::digest::sync_message(
         tx,
         steve_store_sqlite::digest::Source::ChanMessage,
         &id,
+        None,
     )?;
     event(tx, n.ws, n.space_id, &id);
     Ok(Some(id))
+}
+
+/// Apply a single-message status UPDATE and maintain its digest membership in this transaction.
+/// A zero-match conditional write leaves the FIFO position and projection untouched.
+pub fn set_status(
+    tx: &Tx,
+    id: &str,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<usize> {
+    use steve_store_sqlite::digest::{self, Source};
+    let old = Source::ChanMessage.scope(tx, id)?;
+    let matched = tx.execute(sql, params)?;
+    if matched != 0 {
+        digest::sync_message(tx, Source::ChanMessage, id, old.as_ref())?;
+    }
+    Ok(matched)
 }
 
 /// The message with this provider id in a space.

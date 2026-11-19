@@ -2,6 +2,9 @@
 //! alarms on their clock, fired once per day, made by rule from their todos, items and 待处理, and kept in
 //! their feed or sent under their policy. Synthetic data only.
 
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use chrono::{NaiveDate, TimeZone};
@@ -10,7 +13,7 @@ use steve_digest::brief::{self, BriefAlarms, BriefIntake};
 use steve_digest::todo;
 use steve_flow::alarms::{self, AlarmSources};
 use steve_flow::schedules::{self, Fields, Mode};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+use steve_modules::testkit::{ME, OTHER, WS};
 use steve_store::outbox::Dispatcher;
 
 const TZ: chrono_tz::Tz = chrono_tz::Asia::Taipei;

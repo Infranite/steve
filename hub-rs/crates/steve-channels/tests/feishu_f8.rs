@@ -5,6 +5,9 @@
 //! limit ends the round and carries the rest over; quiet hours slow the pace down, a new private
 //! message speeds it up; topic replies are read through their thread.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +29,7 @@ use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::clock::Clock;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

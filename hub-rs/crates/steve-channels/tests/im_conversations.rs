@@ -14,6 +14,9 @@
 //! - once the space's connection was removed: the reaction ends here without a provider call, and
 //!   Steve's reply there is recorded as not sent (`chan_out.status = "disconnected"`).
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -34,7 +37,7 @@ use steve_modules::ApiResult;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_store::base::Viewer;
@@ -126,13 +129,11 @@ fn set_rules(h: &H, conn: &str, rules: Value) {
 
 fn exec(h: &H, sql: &str, p: &[&str]) {
     let (sql, p): (String, Vec<String>) = (sql.into(), p.iter().map(|s| s.to_string()).collect());
-    h.env
-        .store()
-        .with_conn(move |c| {
-            c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
-            Ok(())
-        })
-        .expect("sql");
+    digest_env::write(h.env.store(), move |c| {
+        c.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
+        Ok(())
+    })
+    .expect("sql");
 }
 
 fn one(h: &H, sql: &str, p: &[&str]) -> Value {

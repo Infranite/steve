@@ -4,6 +4,9 @@
 //! (departments, single users, user groups); permission errors and rate limits; directory events
 //! trigger one debounced sync.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +24,7 @@ use steve_modules::contacts::sync::{
     DAILY_HOUR, DEBOUNCE_MS, DirConnection, DirectoryAdapter, DirectoryConnections, DirectoryError,
     DirectorySync, JobState, Snapshot, TableConnections, next_daily,
 };
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{ApiError, Clock};

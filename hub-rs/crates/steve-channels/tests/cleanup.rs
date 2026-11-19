@@ -1,9 +1,10 @@
 //! Cleaning up what an identity brought in (`steve_channels::cleanup`): the dry run, the text
 //! purge, the full cleanup with everything referenced kept, a disconnected identity by its
 //! account, the backup taken first, the leftovers list, and the confirmation.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::sync::Arc;
 
 use axum::Router;
@@ -16,7 +17,7 @@ use steve_channels::{Channels, channels_api, space_decisions};
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowSetup, LinearExecutor};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -156,13 +157,11 @@ impl H {
 
     fn exec(&self, sql: &str) {
         let sql = sql.to_string();
-        self.env
-            .store()
-            .with_conn(move |c| {
-                c.execute_batch(&sql)?;
-                Ok(())
-            })
-            .expect("exec");
+        digest_env::write(self.env.store(), move |c| {
+            c.execute_batch(&sql)?;
+            Ok(())
+        })
+        .expect("exec");
     }
 
     /// Spaces of `con` (or, `con` empty, of disconnected account `acc`): 客户群 with an auto
@@ -206,10 +205,11 @@ impl H {
             .store()
             .transaction(|tx| {
                 for n in 1..=4 {
-                    steve_store_sqlite::digest::enqueue_digestible(
+                    steve_store_sqlite::digest::sync_message(
                         tx,
                         steve_store_sqlite::digest::Source::ChanMessage,
                         &format!("{p}m{n}"),
+                        None,
                     )?;
                 }
                 Ok::<_, steve_store::StoreError>(())
@@ -811,12 +811,4 @@ async fn output_foreign_keys_follow_full_cleanup_and_rollback() {
     );
     assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='bob' AND manual_space_id='sp_b' AND learned_space_id IS NULL"), 1);
     assert_eq!(h.n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
-}
-
-impl Drop for H {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            digest_audit::check(self.env.store());
-        }
-    }
 }

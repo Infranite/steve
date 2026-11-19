@@ -5,8 +5,9 @@
 
 #![allow(dead_code)]
 
-#[path = "../../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
+#[path = "../../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +20,7 @@ use steve_mail::usage::MailUsage;
 use steve_mail::{ImapAdapter, Mail, MailConfig};
 use steve_modules::Caller;
 use steve_modules::accounts::connections::{Connections, ConnectionsConfig};
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
@@ -339,12 +340,4 @@ impl H {
 /// Unix seconds, `days` ago.
 pub fn days_ago(days: i64) -> i64 {
     steve_store::now() / 1000 - days * 86_400
-}
-
-impl Drop for H {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            digest_audit::check(self.env.store());
-        }
-    }
 }

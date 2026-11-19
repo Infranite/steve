@@ -56,10 +56,11 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         [],
     )
     .unwrap();
-    digest::enqueue_digestible(&tx, Source::ChanMessage, "late").unwrap();
+    digest::sync_message(&tx, Source::ChanMessage, "late", None).unwrap();
+    let old = Source::ChanMessage.scope(&tx, "out").unwrap();
     tx.execute("UPDATE chan_messages SET status='sent' WHERE id='out'", [])
         .unwrap();
-    digest::sync_message(&tx, Source::ChanMessage, "out", None).unwrap();
+    digest::sync_message(&tx, Source::ChanMessage, "out", old.as_ref()).unwrap();
     assert_eq!(
         tx.query_row(
             "SELECT messages FROM digest_pending_convs WHERE conv='space:s'",
@@ -75,24 +76,26 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
     )
     .unwrap();
     digest::dequeue_on_receipt(&tx, "ws", "space:s", "late").unwrap();
+    let old = Source::MailMessage.scope(&tx, "mail").unwrap();
     tx.execute(
         "UPDATE mail_messages SET status='pending' WHERE id='mail'",
         [],
     )
     .unwrap();
-    digest::sync_message(&tx, Source::MailMessage, "mail", None).unwrap();
+    digest::sync_message(&tx, Source::MailMessage, "mail", old.as_ref()).unwrap();
+    let old = Source::MailMessage.scope(&tx, "mail").unwrap();
     tx.execute(
         "UPDATE mail_messages SET status='sent',date=-1 WHERE id='mail'",
         [],
     )
     .unwrap();
-    digest::sync_message(&tx, Source::MailMessage, "mail", None).unwrap();
+    digest::sync_message(&tx, Source::MailMessage, "mail", old.as_ref()).unwrap();
     tx.execute(
         "INSERT INTO mail_messages VALUES('mail-late','ws','t','received',-2)",
         [],
     )
     .unwrap();
-    digest::enqueue_digestible(&tx, Source::MailMessage, "mail-late").unwrap();
+    digest::sync_message(&tx, Source::MailMessage, "mail-late", None).unwrap();
     assert_eq!(
         tx.query_row(
             "SELECT messages FROM digest_pending_convs WHERE conv='mail_thread:t'",
@@ -102,9 +105,10 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         .unwrap(),
         2
     );
+    let old = Source::MailMessage.scope(&tx, "mail").unwrap().unwrap();
     tx.execute("DELETE FROM mail_messages WHERE id='mail'", [])
         .unwrap();
-    digest::remove_message(&tx, Source::MailMessage, "mail").unwrap();
+    digest::remove_message(&tx, [(old, "mail".into())]).unwrap();
     tx.execute(
         "INSERT INTO digest_receipts VALUES('ws','mail_thread:t','mail-late')",
         [],

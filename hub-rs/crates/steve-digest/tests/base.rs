@@ -1,12 +1,13 @@
 //! Deterministic intake and storage contracts. No network, live home, harness or model.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
-mod digest_audit;
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{
     ConvRef, candidates, changes, conv, facts, matter, memindex, profile, queue, todo, window,
 };
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
+use steve_modules::testkit::{ME, OTHER, WS, WS2, call, caller};
 use steve_store::{
     StoreError,
     base::mems::{self, NewMem},
@@ -45,7 +46,7 @@ fn msg(
         tx.execute("INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id,
             text, mentions, reply_to, thread_key, created) VALUES (?, 'default', ?, ?, 'in', 'alice', ?, ?, ?, ?, ?)",
             params![id, space, id, text, json!([{"account_id": "owner_acc", "name": "Owner"}]).to_string(), reply, thread, at])?;
-        steve_store_sqlite::digest::enqueue_digestible(tx, steve_store_sqlite::digest::Source::ChanMessage, id)?;
+        steve_store_sqlite::digest::sync_message(tx, steve_store_sqlite::digest::Source::ChanMessage, id, None)?;
         Ok::<_, StoreError>(())
     }).unwrap();
 }
@@ -82,7 +83,6 @@ fn segments(e: &TestEnv, mat: &str, id: &str, space: &str, chains: Value) {
 #[test]
 fn defaults_overrides_null_reset_and_revision_are_independent() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     for kind in profile::KINDS {
         assert_eq!(profile::defaults(kind).window, 50);
     }
@@ -124,7 +124,6 @@ fn defaults_overrides_null_reset_and_revision_are_independent() {
 #[test]
 fn windows_are_per_conversation_atomic_idempotent_and_accept_late_messages() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"window": 5}));
     patch(&e, "s2", json!({"window": 5}));
     for n in 1..=6 {
@@ -175,7 +174,6 @@ fn windows_are_per_conversation_atomic_idempotent_and_accept_late_messages() {
 #[test]
 fn quiet_max_wait_pause_record_and_daily_budget() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"depth": "paused"}));
     msg(&e, "s1", "m1", NOW, None, None, "hello");
     assert_eq!(
@@ -230,7 +228,6 @@ fn quiet_max_wait_pause_record_and_daily_budget() {
 #[test]
 fn large_windows_chunk_and_keep_deterministic_reply_roots_and_facts() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"window": 500}));
     for n in 0..500 {
         let id = format!("m{n:04}");
@@ -275,7 +272,6 @@ fn large_windows_chunk_and_keep_deterministic_reply_roots_and_facts() {
 #[test]
 fn queue_fences_stale_leases_retries_only_unfinished_chunks_and_counts_crashes() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "m1", NOW, None, None, "hello");
     window::cut_now(e.store(), WS, &cv("s1"), NOW).unwrap();
     let id = packets(&e)[0].id.clone();
@@ -322,7 +318,6 @@ fn queue_fences_stale_leases_retries_only_unfinished_chunks_and_counts_crashes()
 #[test]
 fn matter_timeline_split_merge_and_not_same_survive_merge_aliases() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let (a, b, c) = e
         .store()
         .transaction(|tx| {
@@ -363,7 +358,6 @@ fn matter_timeline_split_merge_and_not_same_survive_merge_aliases() {
 #[test]
 fn deterministic_candidates_use_topics_people_fts_and_workspace() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let mat = e
         .store()
         .transaction(|tx| matter::create(tx, WS, "deploy deployment", ME, NOW))
@@ -403,7 +397,6 @@ fn deterministic_candidates_use_topics_people_fts_and_workspace() {
 #[test]
 fn memory_index_validates_ids_ranges_and_unlinks_only_what_it_added() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "m1", NOW, None, None, "deadline tomorrow");
     let mem = e
         .store()
@@ -488,7 +481,6 @@ fn memory_index_validates_ids_ranges_and_unlinks_only_what_it_added() {
 #[test]
 fn personal_todo_deadlines_need_source_words_and_handoff_needs_real_item() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "m1", NOW, None, None, "I will finish tomorrow");
     e.store()
         .transaction(|tx| {
@@ -524,7 +516,6 @@ fn personal_todo_deadlines_need_source_words_and_handoff_needs_real_item() {
 #[tokio::test]
 async fn rest_owner_scope_foreign_ids_profile_resets_and_undo() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let app = steve_digest::routes().with_state(e.modules.clone());
     let me = caller(WS, ME);
     assert_eq!(
@@ -606,7 +597,6 @@ async fn rest_owner_scope_foreign_ids_profile_resets_and_undo() {
 #[test]
 fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "m1", NOW, None, None, "persisted");
     let failed: Result<(), StoreError> = e.store().transaction(|tx| {
         let mut report = window::Report::default();
@@ -653,7 +643,6 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
 #[test]
 fn mail_threads_use_the_same_stored_message_window_contract() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     e.store().transaction(|c| -> Result<(), steve_store::StoreError> {
         c.execute_batch("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
             VALUES ('mailconn', 'default', 'owner_acc', 'fixture', 'none', 'usr_dev', 1, 1);
@@ -668,7 +657,7 @@ fn mail_threads_use_the_same_stored_message_window_contract() {
             UPDATE mail_messages SET in_reply_to = '<root>', refs = '[\"<root>\"]' WHERE id = 'mail2';
             INSERT INTO mail_attachments (id, workspace_id, message_id, part, name, mime, size, created)
             VALUES ('attachment', 'default', 'mail2', '1.2', 'contract.pdf', 'application/pdf', 1024, 10);")?;
-        for id in ["mail1","mail2"] { steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::MailMessage, id)?; }
+        for id in ["mail1","mail2"] { steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::MailMessage, id, None)?; }
         Ok(())
     }).unwrap();
     let mail = ConvRef::new("mail_thread", "mt1");
@@ -689,7 +678,6 @@ fn mail_threads_use_the_same_stored_message_window_contract() {
 #[test]
 fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"kind": "feed"}));
     e.store().with_conn(|c| {
         c.execute_batch("INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
@@ -753,7 +741,6 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
 #[test]
 fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     e.store().with_conn(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
             VALUES ('other_person', 'default', 'person', 'Other', 'usr_other', 'usr_other', 1, 1);
@@ -832,7 +819,6 @@ fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() 
 #[test]
 fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "source1", NOW - 2, None, Some("topic"), "one");
     msg(&e, "s1", "source2", NOW - 1, None, Some("topic"), "two");
     window::cut_now(e.store(), WS, &cv("s1"), NOW).unwrap();
@@ -902,7 +888,6 @@ fn segment_positions_are_validated_and_manual_reassignment_prevents_undo() {
 #[test]
 fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"window": 5}));
     for n in 0..10 {
         msg(&e, "s1", &format!("retry{n}"), NOW, None, None, "work");
@@ -940,7 +925,6 @@ fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
 #[tokio::test]
 async fn matter_detail_never_exposes_other_members_private_memories() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let app = steve_digest::routes()
         .merge(steve_knowledge::routes(steve_knowledge::Knowledge::new(
             |_| {},
@@ -1006,7 +990,6 @@ async fn matter_detail_never_exposes_other_members_private_memories() {
 #[tokio::test]
 async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let app = steve_digest::routes().with_state(e.modules.clone());
     let owner = caller(WS, ME);
     msg(&e, "s1", "range1", NOW, None, None, "first");
@@ -1095,7 +1078,6 @@ async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion(
 #[tokio::test]
 async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     let app = steve_digest::routes().with_state(e.modules.clone());
     let owner = caller(WS, ME);
     let (a, b, mem) = e
@@ -1171,7 +1153,6 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
 #[test]
 fn intake_consumes_only_new_positions_including_older_backfill() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     patch(&e, "s1", json!({"depth": "record"}));
     for n in 0..100 {
         msg(&e, "s1", &format!("history{n}"), NOW, None, None, "history");
@@ -1244,10 +1225,10 @@ fn intake_consumes_only_new_positions_including_older_backfill() {
 #[test]
 fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(&e, "s1", "outbound", NOW, None, None, "draft");
     e.store()
         .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
                 [],
@@ -1256,10 +1237,11 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 c,
                 steve_store_sqlite::digest::Source::ChanMessage,
                 "outbound",
-                None,
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             // Same physical source row, newly eligible after an earlier tick saw pending status.
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
                 [],
@@ -1268,9 +1250,10 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 c,
                 steve_store_sqlite::digest::Source::ChanMessage,
                 "outbound",
-                None,
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 1);
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET space_id = 's2', created = ? WHERE id = 'outbound'",
                 [NOW - 1],
@@ -1279,7 +1262,7 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 c,
                 steve_store_sqlite::digest::Source::ChanMessage,
                 "outbound",
-                None,
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?, (1, NOW - 1, NOW - 1));
@@ -1294,6 +1277,7 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
     );
     e.store()
         .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
                 [],
@@ -1302,8 +1286,9 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 c,
                 steve_store_sqlite::digest::Source::ChanMessage,
                 "outbound",
-                None,
+                old.as_ref(),
             )?;
+            let old = steve_store_sqlite::digest::Source::ChanMessage.scope(c, "outbound")?;
             c.execute(
                 "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
                 [],
@@ -1312,7 +1297,7 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
                 c,
                 steve_store_sqlite::digest::Source::ChanMessage,
                 "outbound",
-                None,
+                old.as_ref(),
             )?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?.0, 0);
             Ok::<_, StoreError>(())
@@ -1329,12 +1314,11 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
     );
     e.store()
         .transaction(|c| -> Result<(), steve_store::StoreError> {
+            let old = steve_store_sqlite::digest::Source::ChanMessage
+                .scope(c, "deleted")?
+                .unwrap();
             c.execute("DELETE FROM chan_messages WHERE id = 'deleted'", [])?;
-            steve_store_sqlite::digest::remove_message(
-                c,
-                steve_store_sqlite::digest::Source::ChanMessage,
-                "deleted",
-            )?;
+            steve_store_sqlite::digest::remove_message(c, [(old, "deleted".into())])?;
             assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
             Ok::<_, StoreError>(())
         })
@@ -1344,7 +1328,6 @@ fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
 #[test]
 fn bounded_initial_lookback_does_not_exclude_later_backfill() {
     let e = env();
-    let _digest_audit = digest_audit::Audit(e.store().clone());
     msg(
         &e,
         "s1",

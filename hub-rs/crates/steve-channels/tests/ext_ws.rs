@@ -3,6 +3,9 @@
 //! (protocol §11.2, §11.3). A connection is made through the credential form, its feed runs under
 //! the connection runtime, and every message goes through the real inbound pipeline.
 
+#[path = "support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +28,7 @@ use steve_modules::accounts::connections::{
 };
 use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::ensure_seeds;
-use steve_modules::testkit::{ME, TestEnv, WS, caller};
+use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;

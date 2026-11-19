@@ -292,12 +292,14 @@ fn set_status(tx: &Tx, id: &str, from: &[&str], to: &str) -> ChannelResult<bool>
     for f in from {
         p.push(f);
     }
-    let changed = digest::status_changed(tx, DigestSource::ChanMessage, id, tx.execute(
+    let changed = crate::messages::set_status(
+        tx,
+        id,
         &format!(
             "UPDATE chan_messages SET status = ?, sent = NULL WHERE id = ? AND status IN ({list})"
         ),
         p.as_slice(),
-    )?)? > 0;
+    )? > 0;
     // a draft dealt with while its check still ran: the record says the check did not finish
     if changed && from.contains(&"draft") && to != "draft" {
         basis::checking_stopped(tx, id, R_DEALT_FIRST)?;
@@ -461,7 +463,7 @@ fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
             now
         ],
     )?;
-    digest::enqueue_digestible(tx, DigestSource::ChanMessage, &id)?;
+    digest::sync_message(tx, DigestSource::ChanMessage, &id, None)?;
     Ok(id)
 }
 
@@ -1221,7 +1223,7 @@ async fn rewrite_draft(
             tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
                 SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
                 params![next, now, row.id])?;
-            digest::enqueue_digestible(tx, DigestSource::ChanMessage, &next)?;
+            digest::sync_message(tx, DigestSource::ChanMessage, &next, None)?;
             set_status(tx, &row.id, &["draft"], DISCARDED)?;
             tx.execute("UPDATE output_deliveries SET message_id=? WHERE message_id=?", params![next, row.id])?;
             tx.execute("UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?", params![next, decision_id])?;
@@ -1537,10 +1539,12 @@ fn approve_draft(
 ) -> ApiResult<i64> {
     let row = own_out(tx, ws, m)?;
     let send_at = now + send_delay_ms(tx, &row)?;
-    digest::status_changed(tx, DigestSource::ChanMessage, m, tx.execute(
+    crate::messages::set_status(
+        tx,
+        m,
         "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
         [m],
-    )?)?;
+    )?;
     base::decisions::settle(
         tx,
         dd,
@@ -2461,10 +2465,12 @@ impl Outbox {
                     .and_then(|(conn, a)| self.send_dedup(ch, tx, &row.ws, &conn, &a))
                     .map(|d| d.as_millis() as i64);
                 if !window.is_some_and(|w| now < first + w) {
-                    digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                    crate::messages::set_status(
+                        tx,
+                        &row.id,
                         "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
                         [&row.id],
-                    )?)?;
+                    )?;
                     messages::event(tx, &row.ws, &row.space_id, &row.id);
                     return Ok(Err(SendOutcome::Skipped));
                 }
@@ -2482,10 +2488,12 @@ impl Outbox {
                 .optional()?
                 .unwrap_or(false);
             if !live {
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
                     [&row.id],
-                )?)?;
+                )?;
                 if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
                     tx.execute(
                         "UPDATE decisions SET status = 'resolved', result = ?, resolved = ? WHERE id = ?",
@@ -2516,10 +2524,12 @@ impl Outbox {
                 // tried before and may be out: not a draft to approve again (a new text under the
                 // same dedupe key would be dropped), it stays unknown and you are asked
                 if tried.is_some() {
-                    digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                    crate::messages::set_status(
+                        tx,
+                        &row.id,
                         "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status IN ('pending', 'unknown')",
                         [&row.id],
-                    )?)?;
+                    )?;
                     messages::event(tx, &row.ws, &row.space_id, &row.id);
                     return Ok(Err(SendOutcome::Skipped));
                 }
@@ -2543,11 +2553,13 @@ impl Outbox {
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(Err(SendOutcome::Drafted { decision_id: d }));
             }
-            let n = digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+            let n = crate::messages::set_status(
+                tx,
+                &row.id,
                 "UPDATE chan_messages SET status = 'pending', sent = ?1 WHERE id = ?2
                    AND ((status = 'pending' AND (sent IS NULL OR sent < ?3)) OR (status = 'unknown' AND ?4))",
                 params![now, row.id, now - CLAIM_STALE_MS, again],
-            )?)?;
+            )?;
             Ok(if n == 1 { Ok(row) } else { Err(SendOutcome::Skipped) })
         })?;
         let row = match claimed {
@@ -2708,10 +2720,12 @@ impl Outbox {
             .is_some_and(|r| matches!(r, Err(WriteRefusal::Later(_))));
         if waits {
             ch.store().transaction(|tx| -> ChannelResult<()> {
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET sent = NULL, status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id = ?1 AND status = 'pending' AND sent=?2",
                     params![row.id, claim],
-                )?)?;
+                )?;
                 Ok(())
             })?;
             return Ok(SendOutcome::Skipped);
@@ -2749,7 +2763,12 @@ impl Outbox {
                 || verify(tx, &row, auth, now)?.is_err()
                 || may_write_in(tx, &row.ws, &space.connection_id, cap)?.is_err()
             {
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute("UPDATE chan_messages SET sent=NULL,status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id=?1 AND status='pending' AND sent=?2",params![row.id,claim])?)?;
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
+                    "UPDATE chan_messages SET sent=NULL,status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id=?1 AND status='pending' AND sent=?2",
+                    params![row.id,claim],
+                )?;
                 tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
                 return Ok(None);
             }
@@ -2815,7 +2834,9 @@ impl Outbox {
                     // voice is by then. The content key: a copy read back without a provider id,
                     // or of a send without one, is this message.
                     let key = fallback::out_key(ch, tx, &row.ws, &space.connection_id, &text)?;
-                    if digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                    if crate::messages::set_status(
+                        tx,
+                        &row.id,
                         "UPDATE chan_messages SET status = 'sent', external_id = ?, text = ?, sent = ?,
                                 sent_via = ?, ext_created = ?, thread_key = coalesce(thread_key, ?),
                                 content_key = ?
@@ -2831,7 +2852,7 @@ impl Outbox {
                             row.id,
                             claim
                         ],
-                    )?)? == 0
+                    )? == 0
                     {
                         return Ok(false);
                     }
@@ -2894,10 +2915,12 @@ impl Outbox {
     ) -> ChannelResult<SendOutcome> {
         tracing::info!(message = %row.id, error, "channel message: no answer, may be out");
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            if digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+            if crate::messages::set_status(
+                tx,
+                &row.id,
                 "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
                 params![row.id, claim],
-            )?)? == 0
+            )? == 0
             {
                 return Ok(());
             }
@@ -2936,10 +2959,12 @@ impl Outbox {
         let now = ch.now();
         let d = ch.store().transaction(|tx| -> ChannelResult<Option<Option<String>>> {
             // only on our claim: a late answer of one another took over changes nothing
-            if digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+            if crate::messages::set_status(
+                tx,
+                &row.id,
                 "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
                 params![row.id, claim],
-            )?)? == 0
+            )? == 0
             {
                 return Ok(None);
             }
@@ -3375,10 +3400,12 @@ impl Outbox {
             // not late; [`Outbox::settle_unknown`] takes it from there
             if tried.is_some() {
                 let r = ch.store().transaction(|tx| -> ChannelResult<()> {
-                    digest::status_changed(tx, DigestSource::ChanMessage, &m, tx.execute(
+                    crate::messages::set_status(
+                        tx,
+                        &m,
                         "UPDATE chan_messages SET status = 'unknown', sent = NULL WHERE id = ? AND status = 'pending'",
                         [&m],
-                    )?)?;
+                    )?;
                     Ok(())
                 });
                 if let Err(e) = r {
@@ -3413,10 +3440,12 @@ impl Outbox {
             let Some(row) = out_row(tx, id)? else {
                 return Ok(());
             };
-            if digest::status_changed(tx, DigestSource::ChanMessage, id, tx.execute(
+            if crate::messages::set_status(
+                tx,
+                id,
                 "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending'",
                 [id],
-            )?)? == 0
+            )? == 0
             {
                 return Ok(());
             }
@@ -3802,14 +3831,11 @@ impl Outbox {
             ApiError::rule(steve_i18n::t!("channels.error.recall_failed", error = e))
         })?;
         ch.store().transaction(|tx| -> ChannelResult<()> {
-            digest::status_changed(
+            crate::messages::set_status(
                 tx,
-                DigestSource::ChanMessage,
                 id,
-                tx.execute(
-                    "UPDATE chan_messages SET status = 'recalled' WHERE id = ?",
-                    [id],
-                )?,
+                "UPDATE chan_messages SET status = 'recalled' WHERE id = ?",
+                [id],
             )?;
             base::audit(tx, ws, actor, "chan_message.recall", id, &json!({}))?;
             messages::event(tx, ws, &row.space_id, id);
@@ -4082,10 +4108,12 @@ impl MessageDecisions {
                 } else {
                     now + send_delay_ms(tx, &row)?
                 };
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
                     params![text, row.id],
-                )?)?;
+                )?;
                 // Undo reopens this card: its formal draft must match the edited outbound body.
                 tx.execute(
                     "UPDATE decisions SET draft = ? WHERE id = ?",
@@ -4183,10 +4211,12 @@ impl MessageDecisions {
                 {
                     return Err(ApiError::rule("渠道拒绝需要你处理权限后主动重试"));
                 }
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'failed'",
                     [&row.id],
-                )?)?;
+                )?;
                 result["hash"] = json!(text_hash(&row.text));
                 result["send_at"] = json!(now);
                 if cx.actor == b1::YOLO_ACTOR {
@@ -4222,10 +4252,12 @@ impl MessageDecisions {
                         "text: an uncertain send cannot be edited",
                     ));
                 }
-                digest::status_changed(tx, DigestSource::ChanMessage, &row.id, tx.execute(
+                crate::messages::set_status(
+                    tx,
+                    &row.id,
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'unknown'",
                     [&row.id],
-                )?)?;
+                )?;
                 result["hash"] = json!(text_hash(&row.text));
                 result["send_at"] = json!(now);
             }

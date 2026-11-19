@@ -53,10 +53,17 @@ pub fn cursor(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Cursor>
 }
 
 // The retired NOT NULL column retains the initial exclusion for audits, never live intake.
-fn save_cursor(tx: &Tx, ws: &str, conv: &ConvRef, k: &Cursor, now: i64) -> Result<()> {
+fn save_cursor(
+    tx: &Tx,
+    ws: &str,
+    conv: &ConvRef,
+    k: &Cursor,
+    now: i64,
+    initial_since: i64,
+) -> Result<()> {
     tx.execute(
-        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, coalesce((SELECT since FROM digest_cursors WHERE workspace_id=?1 AND conv=?2),0))",
-        params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now],
+        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, coalesce((SELECT since FROM digest_cursors WHERE workspace_id=?1 AND conv=?2),?9))",
+        params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now, initial_since],
     )?;
     Ok(())
 }
@@ -149,15 +156,17 @@ fn run_conv_step(
         return Ok(());
     };
     let p = profile::profile(tx, ws, &info)?;
-    let mut initial_floor = None;
+    let initial_since = if b.backlog_days > 0 {
+        now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS))
+    } else {
+        0
+    };
     let mut k = if let Some(k) = cursor(tx, ws, conv)? {
         k
     } else {
         // Apply lookback once. Later insertions are eligible even with older provider timestamps.
         if b.backlog_days > 0 {
-            let floor = now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS));
-            steve_store_sqlite::digest::remove_before(tx, ws, &conv.key(), floor)?;
-            initial_floor = Some(floor);
+            steve_store_sqlite::digest::remove_before(tx, ws, &conv.key(), initial_since)?;
         }
         Cursor {
             at: i64::MIN,
@@ -171,14 +180,8 @@ fn run_conv_step(
         k.spent = 0;
     }
     // Persist initialization even when paused or budget-deferred.
-    save_cursor(tx, ws, conv, &k, now)?;
-    if let Some(floor) = initial_floor {
-        // Audit metadata only: intake still accepts later backfill at any provider time.
-        tx.execute(
-            "UPDATE digest_cursors SET since=? WHERE workspace_id=? AND conv=?",
-            params![floor, ws, conv.key()],
-        )?;
-    }
+    save_cursor(tx, ws, conv, &k, now, initial_since)?;
+
     rep.conversations += 1;
     match p.settings.depth.as_str() {
         "paused" => return Ok(()),
@@ -194,7 +197,7 @@ fn run_conv_step(
                     k.at = last.at;
                     k.msg_id = last.id.clone();
                 }
-                save_cursor(tx, ws, conv, &k, now)?;
+                save_cursor(tx, ws, conv, &k, now, initial_since)?;
             }
             return Ok(());
         }
@@ -240,7 +243,7 @@ fn run_conv_step(
         let seq = k.windows + 1;
         let tokens = cut_window(tx, ws, &info, &p, seq, why, &context, &msgs, b, now, rep)?;
         rep.windows += 1;
-        // The receipt trigger consumes the inbox positions. Packets, acknowledgement and the
+        // The explicit receipt acknowledgement consumes the inbox positions. Packets, acknowledgement and the
         // display cursor share this transaction, so a crash here leaves the entire window pending.
         checkpoint();
         receipt(tx, ws, conv, &msgs, seq, now)?;
@@ -251,7 +254,7 @@ fn run_conv_step(
         }
         k.windows = seq;
         k.spent += tokens;
-        save_cursor(tx, ws, conv, &k, now)?;
+        save_cursor(tx, ws, conv, &k, now, initial_since)?;
         if why != "size" {
             break;
         }
@@ -384,7 +387,7 @@ mod tests {
                 VALUES ('s1', 'default', 'test', 'group', 's1', 'Group', 1, 1);
                 INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created)
                 VALUES ('m1', 'default', 's1', 'in', 'backfilled message', 1);")?;
-            steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, "m1")?;
+            steve_store_sqlite::digest::sync_message(c, steve_store_sqlite::digest::Source::ChanMessage, "m1", None)?;
             Ok::<_, StoreError>(())
         }).unwrap();
             let conv = ConvRef::new("space", "s1");
