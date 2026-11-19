@@ -169,6 +169,9 @@ pub fn open_store(
         }
     }
     engines.push(engine);
+    let _runtime = tokio::runtime::Handle::try_current()
+        .err()
+        .map(|_| runtime().enter());
     steve_store_sqlite::store::SqliteStore::new(
         engines,
         registry,
@@ -197,4 +200,16 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
             std::task::Poll::Pending => std::thread::park(),
         }
     }
+}
+
+/// One Tokio runtime per test process supplies the store's real blocking pool.
+/// The conformance suite still polls futures on its independent standard threads.
+pub fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap()
+    })
 }
