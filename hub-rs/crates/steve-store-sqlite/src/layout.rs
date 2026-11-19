@@ -73,6 +73,12 @@ impl Layout {
     /// Parse the core manifest. Unknown physical generations fail closed.
     pub fn read(conn: &Connection) -> Result<Self, Error> {
         check_min_reader(conn)?;
+        let layout = Self::read_state(conn)?;
+        layout.validate()?;
+        Ok(layout)
+    }
+    /// Parse observable identity without applying this binary's reader range.
+    pub(crate) fn read_state(conn: &Connection) -> Result<Self, Error> {
         let generation = meta(conn, META_DOMAIN, "layout")?
             .parse()
             .map_err(|_| incompatible("invalid storage layout"))?;
@@ -96,18 +102,22 @@ impl Layout {
             layout.files.insert(file.clone(), id);
             layout.domains.insert(domain, file);
         }
-        layout.validate()?;
+        layout.validate_shape()?;
         Ok(layout)
     }
     /// Validate before opening/attaching files. No operator-specific absolute paths are stored.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.generation != LAYOUT_GENERATION
-            || self.min_reader > LAYOUT_GENERATION
-            || self.store_generation.is_empty()
+        if self.generation != LAYOUT_GENERATION || self.min_reader > LAYOUT_GENERATION {
+            return Err(incompatible("unsupported or incomplete storage layout"));
+        }
+        self.validate_shape()
+    }
+    pub(crate) fn validate_shape(&self) -> Result<(), Error> {
+        if self.store_generation.is_empty()
             || self.domains.len() != DOMAINS.len()
             || self.domains.get(&Domain::Core).map(String::as_str) != Some(CORE_FILE)
         {
-            return Err(incompatible("unsupported or incomplete storage layout"));
+            return Err(incompatible("incomplete storage layout"));
         }
         let mut ids = std::collections::BTreeSet::new();
         for (file, id) in &self.files {
@@ -140,6 +150,7 @@ impl Layout {
             .files
             .get(file)
             .ok_or_else(|| steve_storage_api::error(Code::Invalid, "unknown physical file"))?;
+        crate::compat::stamp_reader_fence(conn)?;
         for (key, value) in [
             ("layout", self.generation.to_string()),
             ("min_reader", self.min_reader.to_string()),

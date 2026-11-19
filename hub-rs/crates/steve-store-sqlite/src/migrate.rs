@@ -192,25 +192,13 @@ pub fn stamp_current(conn: &Connection) -> Result<(), Error> {
 }
 /// Read-only preflight. Admin requires exact heads; runtime permits only known older schemas.
 pub fn check_versions(conn: &Connection, exact: bool) -> Result<(), Error> {
-    let unknown: u32 = conn
-        .query_row(
-            "SELECT count(*) FROM domain_schema WHERE domain NOT IN ('core','stream','comms')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    if unknown != 0 {
-        return Err(incompatible("unknown domain schema"));
+    let state = crate::open::inspect(conn)?;
+    if !matches!(state, crate::compat::StorageState::Current { .. }) {
+        return Err(incompatible(
+            "storage is not current; start or upgrade the Hub first",
+        ));
     }
-    for set in CATALOG {
-        let v = version(conn, set.domain)?;
-        if v > head(set) || (exact && v != head(set)) {
-            return Err(incompatible(
-                "storage schema differs from this program; start or upgrade the Hub first",
-            ));
-        }
-    }
-    Ok(())
+    crate::compat::StorageCapabilities::compiled().can_open(&state, exact)
 }
 /// Atomically initialize all domains and the manifest; a failed initial schema leaves no
 /// half-initialized metadata. Each domain's pending migrations are contained in this transaction.
