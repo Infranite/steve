@@ -99,7 +99,9 @@ async fn start(node: bool) -> Env {
     for p in [&cfg.home, &cfg.data_dir, &cfg.scratch, &cfg.worktrees] {
         std::fs::create_dir_all(p).unwrap();
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get)).unwrap();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)

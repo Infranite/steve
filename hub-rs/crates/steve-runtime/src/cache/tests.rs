@@ -1,0 +1,224 @@
+use super::*;
+use std::sync::atomic::AtomicUsize;
+static SPACE: CacheSpace<String, usize> = CacheSpace {
+    name: "contract",
+    ttl: Duration::from_secs(5),
+    share_pct: 50,
+    tags: |k| vec![Tag::of("entity", k)],
+    weigh: |_| 64,
+};
+fn caches(mode: CacheMode) -> Caches {
+    Caches::new(CacheConfig { mode, memory_mb: 1 })
+}
+#[tokio::test]
+async fn concurrent_hundred_reads_share_one_load() {
+    let caches = caches(CacheMode::Memory);
+    let cache = caches.space(&SPACE);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut tasks = Vec::new();
+    for _ in 0..100 {
+        let (cache, calls, entered, release) = (
+            cache.clone(),
+            calls.clone(),
+            entered.clone(),
+            release.clone(),
+        );
+        tasks.push(tokio::spawn(async move {
+            cache
+                .get_or_load("a".into(), || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok::<_, ()>(7)
+                })
+                .await
+                .unwrap()
+        }));
+    }
+    entered.notified().await;
+    release.notify_one();
+    for task in tasks {
+        assert_eq!(*task.await.unwrap(), 7);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn invalidation_during_a_held_load_cannot_poison_a_new_read() {
+    let caches = caches(CacheMode::Memory);
+    let cache = caches.space(&SPACE);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (old, e, r) = (cache.clone(), entered.clone(), release.clone());
+    let old = tokio::spawn(async move {
+        old.get_or_load("a".into(), || async {
+            e.notify_one();
+            r.notified().await;
+            Ok::<_, ()>(1)
+        })
+        .await
+        .unwrap()
+    });
+    entered.notified().await;
+    caches.invalidate(&[Tag::of("entity", "a")]);
+    let new = cache.clone();
+    let new = tokio::spawn(async move {
+        new.get_or_load("a".into(), || async { Ok::<_, ()>(2) })
+            .await
+            .unwrap()
+    });
+    release.notify_one();
+    assert_eq!(*old.await.unwrap(), 1);
+    assert_eq!(*new.await.unwrap(), 2);
+    assert_eq!(*cache.peek(&"a".into()).await.unwrap().0, 2);
+}
+#[tokio::test(start_paused = true)]
+async fn ttl_uses_the_tokio_clock_and_invalidated_stale_values_are_hidden() {
+    let caches = caches(CacheMode::Memory);
+    let cache = caches.space(&SPACE);
+    cache
+        .get_or_load("a".into(), || async { Ok::<_, ()>(1) })
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_millis(4999)).await;
+    assert_eq!(
+        *cache
+            .get_or_load("a".into(), || async { Ok::<_, ()>(2) })
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(!cache.peek(&"a".into()).await.unwrap().1);
+    assert_eq!(
+        *cache
+            .get_or_load("a".into(), || async { Ok::<_, ()>(2) })
+            .await
+            .unwrap(),
+        2
+    );
+    caches.invalidate(&[Tag::of("entity", "a")]);
+    assert!(cache.peek(&"a".into()).await.is_none());
+    assert_eq!(
+        *cache
+            .get_or_load("a".into(), || async { Ok::<_, ()>(3) })
+            .await
+            .unwrap(),
+        3
+    );
+}
+#[tokio::test]
+async fn off_has_no_moka_and_errors_are_not_cached() {
+    for mode in [CacheMode::Memory, CacheMode::Off] {
+        let cache = caches(mode).space(&SPACE);
+        assert_eq!(cache.cache.is_none(), mode == CacheMode::Off);
+        assert!(
+            cache
+                .get_or_load("a".into(), || async { Err::<usize, _>("failed") })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *cache
+                .get_or_load("a".into(), || async { Ok::<_, ()>(1) })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            *cache
+                .get_or_load("a".into(), || async { Ok::<_, ()>(2) })
+                .await
+                .unwrap(),
+            if mode == CacheMode::Off { 2 } else { 1 }
+        );
+    }
+}
+static SMALL: CacheSpace<String, usize> = CacheSpace {
+    name: "small",
+    ttl: Duration::from_secs(5),
+    share_pct: 25,
+    tags: |_| vec![],
+    weigh: |n| *n as u32,
+};
+#[tokio::test]
+async fn byte_budget_and_administrative_registry_do_not_erase_types() {
+    let caches = caches(CacheMode::Memory);
+    let small = caches.space(&SMALL);
+    assert_eq!(
+        small.cache.as_ref().unwrap().policy().max_capacity(),
+        Some(262144)
+    );
+    for i in 0..20 {
+        small
+            .get_or_load(i.to_string(), || async { Ok::<_, ()>(100_000) })
+            .await
+            .unwrap();
+    }
+    small.cache.as_ref().unwrap().run_pending_tasks().await;
+    let admin = caches.0.spaces.read().unwrap();
+    assert_eq!(admin[0].name(), "small");
+    assert_eq!(admin[0].share(), 25);
+    assert!(admin[0].usage().1 <= 262144);
+    admin[0].clear();
+    assert!(small.peek(&"19".into()).await.is_none());
+}
+#[tokio::test]
+async fn table_rollover_and_conditional_responses_cannot_revalidate_revoked_values() {
+    let caches = caches(CacheMode::Memory);
+    let cache = caches.space(&SPACE);
+    let key = "a".to_owned();
+    let old = cache.version(&key);
+    for i in 0..10_100 {
+        caches.invalidate(&[Tag::of("entity", &i.to_string())]);
+    }
+    assert!(!cache.put_if_current(key.clone(), 1, old).await);
+    let current = cache.version(&key);
+    assert!(cache.put_if_current(key.clone(), 2, current).await);
+    assert_eq!(*cache.peek(&key).await.unwrap().0, 2);
+    caches.invalidate(&[Tag::global("entity")]);
+    assert!(cache.peek(&key).await.is_none());
+    let long = "标签".repeat(100);
+    assert_eq!(Tag::of("id", &long), Tag::of("id", &long));
+    assert_ne!(Tag::of("id", &long), Tag::of("id", &(long + "x")));
+}
+static TAG_CALLS: AtomicUsize = AtomicUsize::new(0);
+static HOT: CacheSpace<String, usize> = CacheSpace {
+    name: "hot",
+    ttl: Duration::from_secs(5),
+    share_pct: 50,
+    tags: |k| {
+        TAG_CALLS.fetch_add(1, Ordering::SeqCst);
+        vec![Tag::of("hot", k)]
+    },
+    weigh: |_| 1,
+};
+#[tokio::test]
+async fn hits_do_not_rebuild_tags_and_constant_invalidation_finishes_the_request() {
+    let caches = caches(CacheMode::Memory);
+    let cache = caches.space(&HOT);
+    let key = "a".to_owned();
+    cache
+        .get_or_load(key.clone(), || async { Ok::<_, ()>(1) })
+        .await
+        .unwrap();
+    let before = TAG_CALLS.load(Ordering::SeqCst);
+    for _ in 0..100 {
+        cache
+            .get_or_load(key.clone(), || async { Ok::<_, ()>(9) })
+            .await
+            .unwrap();
+    }
+    assert_eq!(TAG_CALLS.load(Ordering::SeqCst), before);
+    caches.invalidate(&[Tag::of("hot", &key)]);
+    let value = cache
+        .get_or_load(key.clone(), || async {
+            caches.invalidate(&[Tag::of("hot", &key)]);
+            Ok::<_, ()>(2)
+        })
+        .await
+        .unwrap();
+    assert_eq!(*value, 2);
+    assert!(cache.peek(&key).await.is_none());
+}

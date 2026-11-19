@@ -154,7 +154,12 @@ static AVAILABLE_SPACE: steve_runtime::cache::CacheSpace<String, Vec<Available>>
         name: "github-repositories",
         ttl: std::time::Duration::from_millis(AVAILABLE_TTL_MS as u64),
         share_pct: 10,
-        tags: |id| vec![steve_runtime::cache::Tag::of("connection", id)],
+        tags: |id| {
+            vec![
+                steve_runtime::cache::Tag::of("connection", id),
+                steve_runtime::cache::Tag::of("github-list", id),
+            ]
+        },
         weigh: |v| {
             v.iter()
                 .map(|r| {
@@ -165,9 +170,10 @@ static AVAILABLE_SPACE: steve_runtime::cache::CacheSpace<String, Vec<Available>>
         },
     };
 pub(crate) type AvailableCache = steve_runtime::cache::Cached<String, Vec<Available>>;
-pub(crate) fn available_cache() -> AvailableCache {
-    steve_runtime::cache::Caches::process().space(&AVAILABLE_SPACE)
+pub(crate) fn available_cache(caches: &steve_runtime::cache::Caches) -> AvailableCache {
+    caches.space(&AVAILABLE_SPACE)
 }
+pub(crate) const AVAILABLE_SPEC: (&str, u8) = (AVAILABLE_SPACE.name, AVAILABLE_SPACE.share_pct);
 
 /// `owner/name` of a GitHub remote URL (https, `git@github.com:`, `ssh://`), lowercased.
 pub fn parse_remote(url: &str) -> Option<String> {
@@ -275,7 +281,9 @@ impl GitHub {
     }
 
     pub(crate) fn forget_available(&self, connection: &str) {
-        self.0.available.invalidate(&connection.to_owned());
+        self.0
+            .caches
+            .invalidate(&[steve_runtime::cache::Tag::of("github-list", connection)]);
     }
 
     /// The repos a connection can see (cached 5 minutes unless `fresh`). App:
@@ -288,7 +296,9 @@ impl GitHub {
     ) -> VaultResult<Vec<Available>> {
         let key = connection.to_owned();
         if fresh {
-            self.0.available.invalidate(&key);
+            self.0
+                .caches
+                .invalidate(&[steve_runtime::cache::Tag::of("github-list", &key)]);
         }
         let list = self
             .0

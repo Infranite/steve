@@ -199,7 +199,9 @@ async fn start(node: Arc<dyn Node>) -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let store = w.modules.as_ref().unwrap().store.clone();
     let fleet = steve_hub::nodes::NodeFleet::new(store.clone(), cfg.data_dir.clone(), None, None);

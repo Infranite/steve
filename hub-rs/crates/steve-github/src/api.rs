@@ -3,6 +3,7 @@
 //! on a connection ([`GhConn`]) one re-mint after a 401 before handing over to the connection's
 //! health (`reauth`). No octocrab: the dozen endpoints Steve uses are plain JSON.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -285,10 +286,13 @@ pub fn api_base_or<'a>(cx: &'a ConnCx, fallback: &'a str) -> &'a str {
         .unwrap_or(fallback)
 }
 
-/// Cached bodies of conditional reads, per connection and path. Bounded; when full it starts over
-/// (a cold entry only costs one counted request).
-#[derive(Clone)]
-pub struct EtagCache(steve_runtime::cache::Cached<(String, String), (String, Value)>);
+/// Weighted conditional bodies per connection and path. Services inject the root registry;
+/// Default bypasses caching for a one-shot credential verification.
+#[derive(Clone, Default)]
+pub struct EtagCache {
+    cache: Option<steve_runtime::cache::Cached<(String, String), (String, Value)>>,
+    caches: Option<Arc<steve_runtime::cache::Caches>>,
+}
 static ETAG_SPACE: steve_runtime::cache::CacheSpace<(String, String), (String, Value)> =
     steve_runtime::cache::CacheSpace {
         name: "github-etags",
@@ -297,34 +301,28 @@ static ETAG_SPACE: steve_runtime::cache::CacheSpace<(String, String), (String, V
         tags: |(id, _)| vec![steve_runtime::cache::Tag::of("connection", id)],
         weigh: |(e, v)| (e.len() + v.to_string().len()).min(u32::MAX as usize) as u32,
     };
-impl Default for EtagCache {
-    fn default() -> Self {
-        Self(steve_runtime::cache::Caches::process().space(&ETAG_SPACE))
-    }
-}
 impl EtagCache {
-    async fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
-        self.0
-            .read(&(conn.into(), path.into()))
-            .await
-            .map(|v| v.as_ref().clone())
+    pub fn new(caches: Arc<steve_runtime::cache::Caches>) -> Self {
+        Self {
+            cache: Some(caches.space(&ETAG_SPACE)),
+            caches: Some(caches),
+        }
     }
-    async fn put(&self, conn: &str, path: &str, etag: String, body: Value, version: Vec<u64>) {
-        self.0
-            .put_if_current((conn.into(), path.into()), (etag, body), version)
-            .await;
+    async fn get(&self, conn: &str, path: &str) -> Option<(String, Value)> {
+        self.cache
+            .as_ref()?
+            .peek(&(conn.into(), path.into()))
+            .await
+            .map(|(v, _)| v.as_ref().clone())
     }
     /// Credential changes revoke both lists and conditional bodies synchronously.
     pub fn forget(&self, conn: &str) {
-        self.0.invalidate(&(conn.into(), String::new()));
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        if let Some(caches) = &self.caches {
+            caches.invalidate(&[steve_runtime::cache::Tag::of("connection", conn)]);
+        }
     }
 }
+pub(crate) const ETAG_SPEC: (&str, u8) = (ETAG_SPACE.name, ETAG_SPACE.share_pct);
 
 /// The client bound to one connection: its token (installation token or PAT) on every request.
 #[derive(Clone)]
@@ -406,10 +404,8 @@ impl GhConn {
 
     /// A read through the ETag cache: the cached body when GitHub answers 304.
     pub async fn get(&self, path: &str) -> Result<Value, GhError> {
-        let version = self
-            .etags
-            .0
-            .version(&(self.cx.id().to_owned(), path.to_owned()));
+        let key = (self.cx.id().to_owned(), path.to_owned());
+        let version = self.etags.cache.as_ref().map(|cache| cache.version(&key));
         let cached = self.etags.get(self.cx.id(), path).await;
         let r = self
             .send(
@@ -427,9 +423,11 @@ impl GhConn {
         if let Some(e) = r.etag
             && !r.body.is_null()
         {
-            self.etags
-                .put(self.cx.id(), path, e, r.body.clone(), version)
-                .await;
+            if let (Some(cache), Some(version)) = (&self.etags.cache, version) {
+                cache
+                    .put_if_current(key, (e, r.body.clone()), version)
+                    .await;
+            }
         }
         Ok(r.body)
     }

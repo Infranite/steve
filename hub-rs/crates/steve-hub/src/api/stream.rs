@@ -458,7 +458,9 @@ mod tests {
             .into(),
         ];
         for event in events {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let start = bus.cursor();
             let subscriber = || Sub {
                 ws: "a".into(),
@@ -597,7 +599,9 @@ mod tests {
 
         #[tokio::test]
         async fn cursorless_frames_keep_scoped_payload_without_cursor_lines() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut sub = Sub {
                 ws: "a".into(),
                 here: None,
@@ -618,7 +622,9 @@ mod tests {
 
         #[tokio::test]
         async fn resume_replays_only_later_visible_frames_then_a_gap() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut watch = bus.subscribe();
             item(&bus, "ST-1");
             sent(&mut watch, 1).await;
@@ -661,7 +667,9 @@ mod tests {
 
         #[tokio::test]
         async fn a_frame_sent_between_subscribe_and_replay_arrives_once() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let c = bus.cursor();
             let rx = bus.subscribe();
             let mut watch = bus.subscribe();
@@ -717,7 +725,9 @@ mod tests {
 
         #[tokio::test]
         async fn lag_replays_from_the_log_instead_of_a_workspace_frame() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut watch = bus.subscribe();
             let c = bus.cursor();
             for i in 0..5 {
@@ -829,7 +839,9 @@ mod tests {
 
         #[tokio::test]
         async fn pings_carry_no_id_and_do_not_move_the_cursor() {
-            let bus = Bus::new();
+            let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            )));
             let mut sub = Sub::resumed(&bus, "a".into(), &bus.cursor().to_string());
             sub.ping = interval_at(Instant::now(), PING_EVERY);
             assert_eq!(drain(&mut sub), "data: {\"type\":\"stream.gap\"}\n\n");

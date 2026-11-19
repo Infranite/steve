@@ -293,7 +293,7 @@ fn hash_tap_key(k: &(&'static str, Option<steve_types::WorkspaceId>, String)) ->
 }
 
 struct Inner {
-    caches: std::sync::OnceLock<steve_runtime::cache::Caches>,
+    caches: Arc<steve_runtime::cache::Caches>,
     tx: std::sync::mpsc::Sender<Arc<Envelope<BusEvent>>>,
     revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Delivery>>,
@@ -304,20 +304,25 @@ struct Inner {
 /// with internal taps and the replay log; egress owns encoding. Revisions are independent of cursors.
 #[derive(Clone)]
 pub struct Bus(Arc<Inner>);
-impl Default for Bus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+
 impl Bus {
     pub const CAPACITY: usize = 4096;
     pub const TAP_CAPACITY: usize = TAP_CAPACITY;
     pub const TAP_OVERFLOW_MAX: usize = TAP_OVERFLOW_MAX;
-    pub fn new() -> Self {
-        Self::with_window(RING_FRAMES, RING_BYTES)
+    pub fn new(caches: Arc<steve_runtime::cache::Caches>) -> Self {
+        Self::open(RING_FRAMES, RING_BYTES, caches)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
+        Self::open(
+            frames,
+            bytes,
+            Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+        )
+    }
+
+    fn open(frames: usize, bytes: usize, caches: Arc<steve_runtime::cache::Caches>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let out = broadcast::channel(Self::CAPACITY).0;
         let taps: Taps = Arc::default();
@@ -334,7 +339,7 @@ impl Bus {
             tracing::error!("bus dispatcher: {e}");
         }
         Self(Arc::new(Inner {
-            caches: std::sync::OnceLock::new(),
+            caches,
             tx,
             revision: Mutex::new(0),
             out,
@@ -375,13 +380,8 @@ impl Bus {
             }));
         }
     }
-    pub fn caches(&self) -> &steve_runtime::cache::Caches {
-        self.0
-            .caches
-            .get_or_init(|| steve_runtime::cache::Caches::new(Default::default()))
-    }
-    pub fn use_caches(&self, caches: steve_runtime::cache::Caches) {
-        let _ = self.0.caches.set(caches);
+    pub fn caches(&self) -> &Arc<steve_runtime::cache::Caches> {
+        &self.0.caches
     }
     /// Published state events, independent of dispatcher coalescing.
     pub fn generation(&self) -> u64 {
@@ -687,7 +687,9 @@ mod tests {
     }
     #[test]
     fn generation_for_isolates_workspaces_and_keeps_global_monotonicity() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         bus.publish(item("a", "a"));
         assert_eq!(
             (state_generation(&bus, "a"), state_generation(&bus, "b")),
@@ -716,7 +718,9 @@ mod tests {
     }
     #[tokio::test]
     async fn fan_out_in_order_with_scopes() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         bus.publish(item("one", "a"));
         bus.publish(item("two", "b"));
@@ -752,7 +756,9 @@ mod tests {
     }
     #[tokio::test]
     async fn stats_frames_stay_in_their_workspace() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         bus.publish(stats("a", "1"));
         bus.publish(stats("b", "2"));
@@ -765,7 +771,9 @@ mod tests {
     }
     #[tokio::test]
     async fn tap_overflow_coalesces_same_key_and_drains_without_new_publishes() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|e| {
             matches!(
                 e.as_domain(),
@@ -816,7 +824,9 @@ mod tests {
     }
     #[tokio::test]
     async fn tap_flood_never_blocks_bounds_memory_evicts_oldest_and_drops_closed_tap() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|e| {
             matches!(
                 e.as_domain(),
@@ -864,7 +874,9 @@ mod tests {
     }
     #[tokio::test]
     async fn transcript_overflow_keeps_distinct_chunks_and_mixed_event_order() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut tap = bus.tap(|_| true);
         let mut sse = bus.subscribe();
         for i in 0..TAP_CAPACITY {
@@ -908,7 +920,9 @@ mod tests {
     }
     #[tokio::test]
     async fn ids_follow_send_order_even_for_held_stats() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         let start = bus.cursor();
         bus.publish(stats("a", "1"));
@@ -927,7 +941,9 @@ mod tests {
     }
     #[tokio::test]
     async fn transient_frames_are_not_kept() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         let start = bus.cursor();
         bus.live(
@@ -1002,10 +1018,14 @@ mod tests {
     }
     #[tokio::test]
     async fn foreign_future_or_malformed_cursors_reset() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut rx = bus.subscribe();
         publish_items(&bus, &mut rx, 2).await;
-        let other = Bus::new();
+        let other = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         assert_ne!(bus.epoch(), other.epoch());
         assert_eq!(reset(bus.replay(&other.cursor())), 2);
         assert_eq!(
@@ -1030,7 +1050,9 @@ mod tests {
     }
     #[tokio::test]
     async fn replay_at_head_is_empty_and_cursor_tracks_each_kept_frame() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         assert!(frames(bus.replay(&bus.cursor())).0.is_empty());
         let mut rx = bus.subscribe();
         for i in 1..=20 {

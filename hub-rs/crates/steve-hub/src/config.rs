@@ -255,7 +255,6 @@ pub struct Models {
 pub struct Config {
     pub home: PathBuf,
     pub cache: steve_runtime::cache::CacheConfig,
-    pub caches: steve_runtime::cache::Caches,
     pub data_dir: PathBuf,
     pub worktrees: PathBuf,
     pub scratch: PathBuf,
@@ -500,8 +499,7 @@ fn validate_url(var: &'static str, value: &str) -> Result<(), ConfigError> {
 impl Config {
     /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let mut cfg = Self::from_vars(|k| std::env::var(k).ok())?;
-        cfg.caches = steve_runtime::cache::Caches::configure_process(cfg.cache);
+        let cfg = Self::from_vars(|k| std::env::var(k).ok())?;
         for d in [
             &cfg.data_dir,
             &cfg.worktrees,
@@ -719,16 +717,13 @@ impl Config {
                 msg: "expected a positive integer".into(),
             });
         }
+        crate::cache_tags::validate_spaces(crate::cache_tags::SPACES)?;
         let cache = steve_runtime::cache::CacheConfig {
             mode: cache_mode,
             memory_mb,
         };
         Ok(Config {
-            caches: steve_runtime::cache::Caches::new(cache),
-            cache: steve_runtime::cache::CacheConfig {
-                mode: cache_mode,
-                memory_mb,
-            },
+            cache,
             data_dir: home.join("data"),
             worktrees: home.join("worktrees"),
             scratch: home.join("scratch"),

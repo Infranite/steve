@@ -777,7 +777,9 @@ mod tests {
             Arc::new(cfg),
             Arc::new(crate::wire::store::StoreBackend::new(store.clone()).unwrap()),
             Arc::new(crate::backend::NoDomain),
-            crate::bus::Bus::new(),
+            crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
         );
         let recorder = recorder();
         let handle = recorder.handle();

@@ -248,7 +248,9 @@ fn route_literals() -> BTreeSet<String> {
 #[tokio::test]
 async fn the_built_in_wiring_matches_the_snapshot() {
     let h = home();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&h.cfg, &bus, h.vars.clone()).expect("wire");
     let want: BTreeSet<String> = SNAPSHOT
         .lines()
@@ -415,7 +417,14 @@ fn probe(id: &'static str) -> Probe {
 
 fn wire_err(asm: Assembly) -> String {
     let h = home();
-    match steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm) {
+    match steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    ) {
         Ok(_) => panic!("assembly accepted"),
         Err(e) => e.to_string(),
     }
@@ -454,8 +463,15 @@ async fn feishu_self_wires_without_feishu_bot() {
     // you on Feishu runs its own self poller; the bot is an optional pair
     let h = home();
     let asm = Assembly::builtin().without("feishu.bot").expect("known id");
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     assert_eq!(
         w.seams.channels.connections().provider_ids(),
         [
@@ -479,7 +495,17 @@ async fn feishu_self_wires_without_feishu_bot() {
         .without("feishu.bot")
         .and_then(|a| a.without("feishu.self"))
         .expect("known ids");
-    assert!(steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).is_ok());
+    assert!(
+        steve_hub::wire::wire_assembly(
+            &h.cfg,
+            &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default()
+            ))),
+            h.vars.clone(),
+            &asm
+        )
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -559,8 +585,15 @@ async fn an_extension_runs_its_own_connection_hook() {
         hooks: vec!["github_pat"],
         ..probe("probe")
     });
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
     // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
@@ -578,8 +611,15 @@ async fn an_assembly_registers_only_its_extensions() {
             hello: true,
             ..probe("probe")
         });
-    let w =
-        steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm,
+    )
+    .expect("wire");
     let channels = &w.seams.channels;
     assert_eq!(
         channels.connections().provider_ids(),
@@ -627,8 +667,15 @@ async fn an_assembly_registers_only_its_extensions() {
 #[tokio::test]
 async fn an_empty_assembly_still_wires_the_hub() {
     let h = home();
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &Assembly::empty())
-        .expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &Assembly::empty(),
+    )
+    .expect("wire");
     assert!(w.seams.channels.connections().provider_ids().is_empty());
     assert!(w.tools.mail.adapter_ids().is_empty());
     assert!(w.seams.flow.events.all().is_empty());
@@ -709,8 +756,15 @@ async fn an_extension_declares_its_own_handle_systems() {
             })
             .expect("systems")
     };
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部账号"))
-        .expect("wire");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm("内部账号"),
+    )
+    .expect("wire");
     assert_eq!(
         rows(&w),
         [(
@@ -721,8 +775,15 @@ async fn an_extension_declares_its_own_handle_systems() {
         )]
     );
     drop(w);
-    let w = steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm("内部 ID"))
-        .expect("wire again");
+    let w = steve_hub::wire::wire_assembly(
+        &h.cfg,
+        &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        ))),
+        h.vars.clone(),
+        &asm("内部 ID"),
+    )
+    .expect("wire again");
     assert_eq!(rows(&w).len(), 1);
     assert_eq!(rows(&w)[0].1, "内部 ID");
 }

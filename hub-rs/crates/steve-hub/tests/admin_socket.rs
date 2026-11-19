@@ -59,7 +59,14 @@ impl Hub {
             std::fs::create_dir_all(dir).unwrap();
         }
         let lock = steve_hub::upgrades::instance_lock(&cfg).unwrap();
-        let wired = steve_hub::wire::wire_with(&cfg, &Bus::new(), vars).unwrap();
+        let wired = steve_hub::wire::wire_with(
+            &cfg,
+            &Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            vars,
+        )
+        .unwrap();
         let store = wired.modules.as_ref().unwrap().store.clone();
         store.ensure_workspace().unwrap();
         let jobs = wired.jobs.into_iter().map(|job| job.spawn()).collect();

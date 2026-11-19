@@ -12,6 +12,7 @@ install! { install(reg, cx) [mut registry, vault] => [caps, library, registry, v
             steve_home,
             &data_dir.join("node"),
         )),
+        cx.bus.caches().clone(),
     );
     registry.prompt_context(Box::new(crate::wire::tool_service::CatalogContext {
         library: library.clone(),

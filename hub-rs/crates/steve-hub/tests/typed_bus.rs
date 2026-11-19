@@ -38,7 +38,9 @@ fn thinking() -> LiveEvent {
 #[tokio::test]
 async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     let dir = tempfile::tempdir().unwrap();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let store = Store::open(dir.path().join("store.db"), BusPublisher(bus.clone())).unwrap();
     let mut rx = bus.subscribe();
     let start = bus.cursor();
@@ -86,7 +88,9 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
 #[tokio::test]
 async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() {
     let tags = steve_types::WIRE_TYPES;
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     let mut tap = bus.tap(|_| true);
     for tag in tags {
@@ -141,7 +145,9 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
 
 #[tokio::test]
 async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     bus.publish(item("entity-1"));
     let (frame, _) = next(&mut rx).await;
@@ -159,7 +165,9 @@ async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
 
 #[tokio::test]
 async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let mut rx = bus.subscribe();
     let mut tap = bus.tap(|e| {
         matches!(

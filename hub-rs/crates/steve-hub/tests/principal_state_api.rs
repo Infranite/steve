@@ -86,7 +86,9 @@ async fn start() -> Env {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
@@ -521,7 +523,9 @@ async fn principal_state_returns_503_when_modules_store_is_absent() {
     for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
         std::fs::create_dir_all(d).expect("dirs");
     }
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
     // Deliberately omit `.with_modules(...)`.
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus);

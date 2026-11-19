@@ -96,12 +96,10 @@ pub fn tags(event: &BusEvent) -> Tags {
             DomainEvent::Devices(event) => match event {
                 DevicesEvent::Node { id, .. } => {
                     tags.push(Tag::of("node", id.as_str()));
-                    tags.push(Tag::global("hub"));
+                    tags.push(Tag::global("runtimes"));
                 }
-                DevicesEvent::Device { .. } | DevicesEvent::ReleaseHold { .. } => {
-                    tags.push(Tag::global("node"))
-                }
-                DevicesEvent::Client { .. } => tags.push(Tag::global("hub")),
+                DevicesEvent::Device { .. } => tags.push(Tag::global("runtimes")),
+                DevicesEvent::ReleaseHold { .. } | DevicesEvent::Client { .. } => {}
             },
             DomainEvent::Channels(event) => match event {
                 ChannelsEvent::Connection { id, .. } | ChannelsEvent::Channel { id, .. } => {
@@ -112,18 +110,104 @@ pub fn tags(event: &BusEvent) -> Tags {
                 | ChannelsEvent::Persona { .. }
                 | ChannelsEvent::Digest { .. } => {}
             },
-            DomainEvent::Config(_) => tags.push(Tag::global("hub")),
-            // Vault use-audit events can be emitted by a cache loader itself. Server edits
-            // publish Config::Bot and carry server.updated; audit writes are not metadata edits.
-            DomainEvent::Vault(_) => {}
-            DomainEvent::Work(_)
-            | DomainEvent::People(_)
-            | DomainEvent::Automation(_)
-            | DomainEvent::Autonomy(_)
-            | DomainEvent::Knowledge(_)
-            | DomainEvent::Integrations(_) => {}
+            DomainEvent::Config(event) => match event {
+                ConfigEvent::Bot { .. }
+                | ConfigEvent::Project { .. }
+                | ConfigEvent::Tag { .. }
+                | ConfigEvent::Workspace { .. }
+                | ConfigEvent::Settings { .. }
+                | ConfigEvent::Mm { .. }
+                | ConfigEvent::Changeset { .. } => {}
+            },
+            DomainEvent::Work(event) => match event {
+                WorkEvent::Item { .. }
+                | WorkEvent::Decision { .. }
+                | WorkEvent::Session { .. }
+                | WorkEvent::Message { .. }
+                | WorkEvent::ThreadRun { .. } => {}
+            },
+            DomainEvent::People(event) => match event {
+                PeopleEvent::Party { .. } | PeopleEvent::Account { .. } => {}
+            },
+            DomainEvent::Vault(event) => match event {
+                VaultEvent::Vault { .. } => {}
+            },
+            DomainEvent::Automation(event) => match event {
+                AutomationEvent::Signal { .. }
+                | AutomationEvent::Flow { .. }
+                | AutomationEvent::Run { .. }
+                | AutomationEvent::Calendar { .. } => {}
+            },
+            DomainEvent::Autonomy(event) => match event {
+                AutonomyEvent::Yolo { .. } | AutonomyEvent::YoloAction { .. } => {}
+            },
+            DomainEvent::Knowledge(event) => match event {
+                KnowledgeEvent::Kb { .. } => {}
+            },
+            DomainEvent::Integrations(event) => match event {
+                IntegrationsEvent::Gh { .. } | IntegrationsEvent::Mail { .. } => {}
+            },
         },
-        BusEvent::Live(LiveEvent::Work(_)) => {}
+        BusEvent::Live(LiveEvent::Work(event)) => match event {
+            WorkLiveEvent::Event { .. }
+            | WorkLiveEvent::SteveDraft { .. }
+            | WorkLiveEvent::SteveTool { .. }
+            | WorkLiveEvent::SteveThinking { .. } => {}
+        },
     }
     tags
+}
+
+/// The complete process cache catalogue. Startup and preflight share this validation.
+pub(crate) const SPACES: &[(&str, u8)] = &[
+    crate::access::CACHE_SPEC,
+    crate::system::CACHE_SPEC,
+    crate::api::stats::CACHE_SPEC,
+    crate::api::NODE_CACHE_SPEC,
+    crate::wire::library_mcp::CACHE_SPECS[0],
+    crate::wire::library_mcp::CACHE_SPECS[1],
+    steve_github::CACHE_SPACES[0],
+    steve_github::CACHE_SPACES[1],
+];
+pub(crate) fn validate_spaces(spaces: &[(&str, u8)]) -> Result<(), crate::config::ConfigError> {
+    let mut names = std::collections::HashSet::new();
+    let mut share = 0u16;
+    for (name, pct) in spaces {
+        if !names.insert(*name) || *pct == 0 {
+            return Err(crate::config::ConfigError::Invalid {
+                var: "STEVE_CACHE",
+                msg: "duplicate cache space or zero share".into(),
+            });
+        }
+        share += u16::from(*pct);
+    }
+    if share > 100 {
+        return Err(crate::config::ConfigError::Invalid {
+            var: "STEVE_CACHE",
+            msg: "cache space shares exceed 100 percent".into(),
+        });
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn all_spaces_register_from_the_startup_catalogue() {
+        validate_spaces(SPACES).unwrap();
+        assert_eq!(SPACES.len(), 8);
+        let caches = steve_runtime::cache::Caches::new(Default::default());
+        for &(name, share_pct) in SPACES {
+            let definition = Box::leak(Box::new(steve_runtime::cache::CacheSpace::<(), ()> {
+                name,
+                share_pct,
+                ttl: std::time::Duration::from_secs(1),
+                tags: |_| vec![],
+                weigh: |_| 1,
+            }));
+            let _handle = caches.space(definition);
+        }
+        assert!(validate_spaces(&[("same", 1), ("same", 1)]).is_err());
+        assert!(validate_spaces(&[("a", 60), ("b", 60)]).is_err());
+    }
 }

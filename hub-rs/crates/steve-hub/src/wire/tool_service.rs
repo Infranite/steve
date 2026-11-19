@@ -4,6 +4,7 @@
 //! endpoint is one way to reach them (for harnesses the in-process runner starts); a Node's
 //! `tool.call` is the other. Both get the same definitions, checks and texts.
 
+use futures::FutureExt;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -533,7 +534,9 @@ impl steve_modules::context::PromptContext for CatalogContext {
             .collect();
         let mut shown = vec![];
         for x in &servers {
-            let names = match self.library.cached(x) {
+            let names = match // PromptContext is synchronous. Poll the O(1) async read once; under
+                // maintenance contention omit the optional summary and warm asynchronously.
+                self.library.cached(x).now_or_never().flatten() {
                 Some(Ok(t)) => Some(
                     t.iter()
                         .map(|t| tool_registry::mcp_name(&x.name, &t.name))

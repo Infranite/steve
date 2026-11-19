@@ -72,7 +72,7 @@ fn a_signed_in_harness_runs_for_everyone_and_one_that_is_not_is_refused_on_devic
         (k == "STEVE_HOME").then(|| home.path().display().to_string())
     })
     .unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg);
+    let hs = crate::harnesses::HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
     hs.update(vec![
         cap("codex", Ok(())),
         cap("claude-code", Err("Authentication required")),
@@ -132,7 +132,7 @@ fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
         (k == "STEVE_HOME").then(|| home.path().display().to_string())
     })
     .unwrap();
-    let hs = crate::harnesses::HubHarnesses::of(&cfg);
+    let hs = crate::harnesses::HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
     hs.update(vec![steve_node_api::HarnessCapability {
         name: "claude-code".into(),
         version: String::new(),

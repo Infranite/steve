@@ -96,9 +96,8 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
                 .generation(&steve_runtime::cache::Tag::of("state", &c.ws))
         && x.runtime_generation
             == st
-                .cfg
                 .caches
-                .generation(&steve_runtime::cache::Tag::global("runtime-evidence"))
+                .generation(&steve_runtime::cache::Tag::global("runtimes"))
         && x.at.elapsed() < STATE_TTL
     {
         return Ok(state_response(x.body.clone(), &x.cursor));
@@ -108,9 +107,8 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
         .caches()
         .generation(&steve_runtime::cache::Tag::of("state", &c.ws));
     let runtime_generation = st
-        .cfg
         .caches
-        .generation(&steve_runtime::cache::Tag::global("runtime-evidence"));
+        .generation(&steve_runtime::cache::Tag::global("runtimes"));
     let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
     let v = compute_state(&st, c).await?;

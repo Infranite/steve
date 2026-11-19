@@ -628,7 +628,6 @@ pub fn wire_assembly(
     vars: Vars,
     asm: &crate::extension::Assembly,
 ) -> Result<Wired, BackendError> {
-    bus.use_caches(cfg.caches.clone());
     let cx = install::hub::HubEnv {
         cfg,
         bus,
@@ -729,7 +728,14 @@ mod tests {
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            let w = wire_with(&cfg, &crate::bus::Bus::new(), get).unwrap();
+            let w = wire_with(
+                &cfg,
+                &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                    Default::default(),
+                ))),
+                get,
+            )
+            .unwrap();
             assert_eq!(
                 w.nodes.is_some(),
                 expected,
@@ -786,7 +792,14 @@ mod tests {
             for d in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(d).unwrap();
             }
-            let w = wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+            let w = wire_with(
+                &cfg,
+                &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                    Default::default(),
+                ))),
+                Arc::new(get),
+            )
+            .unwrap();
             assert_eq!(w.node.is_some(), mode != Some("off"));
             for job in w.jobs {
                 job.start(w.domain.background_tasks().unwrap().as_ref());
@@ -931,7 +944,14 @@ mod tests {
         // 2. Boot with STEVE_NODE_MODE=off, park a message BEFORE startup jobs reconcile (the exact
         //    Ubuntu CI window in node_e2e), then run startup jobs + a gateway think call.
         let off_vars = make_vars("steve", "off");
-        let mut w2 = wire_with(&cfg, &crate::bus::Bus::new(), off_vars).unwrap();
+        let mut w2 = wire_with(
+            &cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            off_vars,
+        )
+        .unwrap();
         assert!(w2.node.is_none(), "session Node is disabled");
         let prompted = w2
             .domain
@@ -1017,7 +1037,14 @@ mod tests {
             );
             held_locks.push(f);
         }
-        let off_locked = wire_with(&svc_cfg, &crate::bus::Bus::new(), svc_vars).unwrap();
+        let off_locked = wire_with(
+            &svc_cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            svc_vars,
+        )
+        .unwrap();
         off_locked.domain.shutdown().await;
         drop(held_locks);
 
@@ -1027,7 +1054,13 @@ mod tests {
         for d in [&bad_cfg.data_dir, &bad_cfg.worktrees, &bad_cfg.scratch] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let err = match wire_with(&bad_cfg, &crate::bus::Bus::new(), bad_vars) {
+        let err = match wire_with(
+            &bad_cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            bad_vars,
+        ) {
             Ok(_) => panic!("typo mode must fail"),
             Err(e) => e,
         };

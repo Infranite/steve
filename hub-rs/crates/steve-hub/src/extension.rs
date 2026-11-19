@@ -722,7 +722,8 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         });
     }
     crate::upgrades::startup_gate(&cfg).await?;
-    let bus = Bus::new();
+    let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
+    let bus = Bus::new(caches);
     let w =
         crate::wire::wire_assembly(&cfg, &bus, Arc::new(|k: &str| std::env::var(k).ok()), &asm)?;
     let st = crate::api::AppState::new(cfg.clone(), w.backend, w.domain, bus)
@@ -831,7 +832,9 @@ mod tests {
 
     #[tokio::test]
     async fn plugin_boundary_encodes_one_bounded_tap_in_domain_live_order() {
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut events = BusTap(bus.clone()).tap(&["project", "steve.thinking"]);
         assert_eq!(events.inner.max_capacity(), Bus::TAP_CAPACITY);
         bus.publish_batch(vec![
@@ -862,7 +865,9 @@ mod tests {
     async fn plugin_transcript_reads_match_sse_slimming_and_keep_internal_taps_full() {
         use steve_types::{RawJson, Seq, WorkLiveEvent};
 
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let mut plugin = BusTap(bus.clone()).tap(&["event"]);
         let mut typed = bus.tap(|event| event.wire_type() == "event");
         let mut sse = bus.subscribe();

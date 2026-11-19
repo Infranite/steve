@@ -173,6 +173,7 @@ async fn setup() -> H {
             git_base: git_root,
             ..Default::default()
         },
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     let flow = setup
         .action(Arc::new(steve_github::automation::Analyze::new(&gh)))

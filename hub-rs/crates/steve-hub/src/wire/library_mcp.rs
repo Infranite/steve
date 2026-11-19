@@ -47,20 +47,27 @@ pub struct RemoteTool {
 
 #[derive(Clone)]
 struct ToolList {
-    updated: i64,
     tools: Vec<RemoteTool>,
 }
-static LIST_SPACE: steve_runtime::cache::CacheSpace<String, ToolList> =
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ListingKey {
+    id: String,
+    updated: i64,
+}
+impl ListingKey {
+    fn of(server: &Server) -> Self {
+        Self {
+            id: server.id.clone(),
+            updated: server.updated,
+        }
+    }
+}
+static LIST_SPACE: steve_runtime::cache::CacheSpace<ListingKey, ToolList> =
     steve_runtime::cache::CacheSpace {
         name: "library-mcp",
         ttl: FRESH,
-        share_pct: 10,
-        tags: |id| {
-            vec![
-                steve_runtime::cache::Tag::global("hub"),
-                steve_runtime::cache::Tag::of("mcp-server", id),
-            ]
-        },
+        share_pct: 9,
+        tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
         weigh: |list| {
             list.tools
                 .iter()
@@ -71,12 +78,14 @@ static LIST_SPACE: steve_runtime::cache::CacheSpace<String, ToolList> =
                 .min(u32::MAX as usize) as u32
         },
     };
-struct RetryListing {
-    updated: i64,
-    version: Vec<u64>,
-    until: Instant,
-    error: String,
-}
+static FAILURE_SPACE: steve_runtime::cache::CacheSpace<ListingKey, String> =
+    steve_runtime::cache::CacheSpace {
+        name: "library-mcp-failures",
+        ttl: RETRY,
+        share_pct: 1,
+        tags: |key| vec![steve_runtime::cache::Tag::of("mcp-server", &key.id)],
+        weigh: |error| error.len().min(u32::MAX as usize) as u32,
+    };
 
 /// The Hub's connections to the library's servers. One per Hub.
 pub struct LibraryMcp {
@@ -84,14 +93,18 @@ pub struct LibraryMcp {
     sandbox: Option<steve_node::Sandbox>,
     http: reqwest::Client,
     conns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>>>,
-    lists: steve_runtime::cache::Cached<String, ToolList>,
-    /// Retry deadlines belong to the connection's failure policy, not successful list freshness.
-    retries: Mutex<HashMap<String, RetryListing>>,
+    lists: steve_runtime::cache::Cached<ListingKey, ToolList>,
+    failures: steve_runtime::cache::Cached<ListingKey, String>,
+    caches: Arc<steve_runtime::cache::Caches>,
 }
 
 impl LibraryMcp {
     /// `sandbox`: what stdio servers start in (`None`: as they are, for tests).
-    pub fn new(caps: Capabilities, sandbox: Option<steve_node::Sandbox>) -> Arc<LibraryMcp> {
+    pub fn new(
+        caps: Capabilities,
+        sandbox: Option<steve_node::Sandbox>,
+        caches: Arc<steve_runtime::cache::Caches>,
+    ) -> Arc<LibraryMcp> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // Custom credential headers must not follow a redirect to a different origin.
@@ -104,40 +117,36 @@ impl LibraryMcp {
             sandbox,
             http,
             conns: Mutex::default(),
-            lists: steve_runtime::cache::Caches::process().space(&LIST_SPACE),
-            retries: Mutex::default(),
+            lists: caches.space(&LIST_SPACE),
+            failures: caches.space(&FAILURE_SPACE),
+            caches,
         })
     }
 
     /// The tools `server` has, as last listed; `None`: not listed yet (or the server changed since).
-    pub fn cached(&self, server: &Server) -> Option<Result<Vec<RemoteTool>, String>> {
-        let key = server.id.clone();
-        self.lists
-            .stale(&key)
-            .filter(|v| v.updated == server.updated)
-            .map(|v| Ok(v.tools.clone()))
-            .or_else(|| self.retry(server).map(Err))
+    pub async fn cached(&self, server: &Server) -> Option<Result<Vec<RemoteTool>, String>> {
+        let key = ListingKey::of(server);
+        if let Some((list, _)) = self.lists.peek(&key).await {
+            return Some(Ok(list.tools.clone()));
+        }
+        self.retry(server).await.map(Err)
     }
-    fn retry(&self, server: &Server) -> Option<String> {
-        self.retries
-            .lock()
-            .unwrap()
-            .get(&server.id)
-            .filter(|r| {
-                r.updated == server.updated
-                    && r.until > Instant::now()
-                    && r.version == self.lists.version(&server.id)
-            })
-            .map(|r| r.error.clone())
+    async fn retry(&self, server: &Server) -> Option<String> {
+        self.failures
+            .peek(&ListingKey::of(server))
+            .await
+            .filter(|(_, fresh)| *fresh)
+            .map(|(error, _)| error.as_ref().clone())
     }
-    fn lookup(&self, server: &Server) -> Option<(Result<Vec<RemoteTool>, String>, bool)> {
-        let key = server.id.clone();
-        self.cached(server).map(|v| {
-            (
-                v,
-                self.lists.peek(&key).is_none() && self.retry(server).is_none(),
-            )
-        })
+    async fn lookup(&self, server: &Server) -> Option<(Result<Vec<RemoteTool>, String>, bool)> {
+        let key = ListingKey::of(server);
+        if let Some((list, fresh)) = self.lists.peek(&key).await {
+            return Some((
+                Ok(list.tools.clone()),
+                !fresh && self.retry(server).await.is_none(),
+            ));
+        }
+        self.retry(server).await.map(|error| (Err(error), false))
     }
 
     /// The tools `server` has: as listed before (listed again in the background once that is old),
@@ -149,7 +158,7 @@ impl LibraryMcp {
         who: &str,
         wait: Duration,
     ) -> Result<Vec<RemoteTool>, String> {
-        if let Some((tools, stale)) = self.lookup(server) {
+        if let Some((tools, stale)) = self.lookup(server).await {
             if stale {
                 self.warm(server, who);
             }
@@ -172,9 +181,6 @@ impl LibraryMcp {
     /// Lists `server`'s tools in the background unless that is under way; a failed listing keeps the
     /// list an earlier one got for the same version of the server.
     pub fn warm(self: &Arc<Self>, server: &Server, who: &str) {
-        if !self.lists.enabled() {
-            return;
-        }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -184,76 +190,39 @@ impl LibraryMcp {
         });
     }
     async fn cached_list(&self, server: &Server, who: &str) -> Result<Vec<RemoteTool>, String> {
-        let key = server.id.clone();
-        // Capture the prior display before Cached removes an expired entry for replacement.
-        let version = self.lists.version(&key);
-        let old = self
+        let key = ListingKey::of(server);
+        let old = self.lists.peek(&key).await.map(|(list, _)| list);
+        let result = self
             .lists
-            .stale(&key)
-            .filter(|v| v.updated == server.updated);
-        let list = self
-            .lists
-            .get_or_load_if(
-                key.clone(),
-                || async {
-                    match self.discover(server, who, OPEN_WAIT).await {
-                        Ok(tools) => Ok(ToolList {
-                            updated: server.updated,
-                            tools,
-                        }),
-                        Err(error) => {
-                            if version == self.lists.version(&key)
-                                && let Some(old) = old
-                            {
-                                return Ok(old.as_ref().clone());
-                            }
-                            Err(error)
-                        }
+            .get_or_load(key.clone(), || async {
+                if let Some(error) = self.retry(server).await {
+                    return Err(error);
+                }
+                match tokio::time::timeout(OPEN_WAIT, self.list_now(server, who)).await {
+                    Ok(Ok(tools)) => Ok(ToolList { tools }),
+                    result => {
+                        let error = match result {
+                            Ok(Err(error)) => error,
+                            _ => format!(
+                                "MCP server {} did not list its tools within {} s",
+                                server.name,
+                                OPEN_WAIT.as_secs()
+                            ),
+                        };
+                        let _ = self
+                            .failures
+                            .get_or_load(key, || async { Ok::<_, ()>(error.clone()) })
+                            .await;
+                        Err(error)
                     }
-                },
-                |v| v.updated == server.updated,
-            )
-            .await?;
-        Ok(list.tools.clone())
-    }
-
-    async fn discover(
-        &self,
-        server: &Server,
-        who: &str,
-        wait: Duration,
-    ) -> Result<Vec<RemoteTool>, String> {
-        if let Some(error) = self.retry(server) {
-            return Err(error);
+                }
+            })
+            .await;
+        match result {
+            Ok(list) => Ok(list.tools.clone()),
+            Err(_) if old.is_some() => Ok(old.unwrap().tools.clone()),
+            Err(error) => Err(error),
         }
-        let version = self.lists.version(&server.id);
-        let result = tokio::time::timeout(wait, self.list_now(server, who))
-            .await
-            .unwrap_or_else(|_| {
-                Err(format!(
-                    "MCP server {} did not list its tools within {} s",
-                    server.name,
-                    wait.as_secs()
-                ))
-            });
-        match &result {
-            Ok(_) => {
-                self.retries.lock().unwrap().remove(&server.id);
-            }
-            Err(error) => {
-                tracing::warn!(server=%server.name,"MCP server listing failed: {error}");
-                self.retries.lock().unwrap().insert(
-                    server.id.clone(),
-                    RetryListing {
-                        updated: server.updated,
-                        version: version.clone(),
-                        until: Instant::now() + RETRY,
-                        error: error.clone(),
-                    },
-                );
-            }
-        }
-        result
     }
 
     async fn list_now(&self, server: &Server, who: &str) -> Result<Vec<RemoteTool>, String> {
@@ -364,17 +333,8 @@ impl LibraryMcp {
             true
         });
         for (id, updated) in &current {
-            if self
-                .retries
-                .lock()
-                .unwrap()
-                .get(id)
-                .is_some_and(|r| Some(r.updated) != *updated)
-            {
-                self.retries.lock().unwrap().remove(id);
-            }
             if updated.is_none() {
-                steve_runtime::cache::Caches::process()
+                self.caches
                     .invalidate(&[steve_runtime::cache::Tag::of("mcp-server", id)]);
             }
         }
@@ -1002,17 +962,22 @@ mod tests {
     async fn changed_library_metadata_invalidates_its_list_immediately() {
         let caches = steve_runtime::cache::Caches::new(Default::default());
         let cache = caches.space(&LIST_SPACE);
-        let key = "server".to_string();
+        let key = ListingKey {
+            id: "server".into(),
+            updated: 1,
+        };
         cache
             .get_or_load(key.clone(), || async {
-                Ok::<_, ()>(ToolList {
-                    updated: 1,
-                    tools: vec![],
-                })
+                Ok::<_, ()>(ToolList { tools: vec![] })
             })
             .await
             .unwrap();
         caches.invalidate(&[steve_runtime::cache::Tag::global("hub")]);
+        assert!(
+            cache.peek(&key).await.is_some(),
+            "unrelated configuration is not a dependency"
+        );
+        caches.invalidate(&[steve_runtime::cache::Tag::of("mcp-server", "server")]);
         let tool = RemoteTool {
             name: "new".into(),
             description: String::new(),
@@ -1021,15 +986,11 @@ mod tests {
         };
         let tools = cache
             .get_or_load(key, || async {
-                Ok::<_, ()>(ToolList {
-                    updated: 1,
-                    tools: vec![tool],
-                })
+                Ok::<_, ()>(ToolList { tools: vec![tool] })
             })
             .await
             .unwrap();
         assert_eq!(tools.tools[0].name, "new");
-        assert_eq!(cache.len(), 1);
     }
 
     use super::*;
@@ -1065,3 +1026,8 @@ mod tests {
         );
     }
 }
+
+pub(crate) const CACHE_SPECS: [(&str, u8); 2] = [
+    (LIST_SPACE.name, LIST_SPACE.share_pct),
+    (FAILURE_SPACE.name, FAILURE_SPACE.share_pct),
+];

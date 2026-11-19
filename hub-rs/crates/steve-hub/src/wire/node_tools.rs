@@ -1475,7 +1475,14 @@ pub(crate) mod tests {
         }
         // The Hub now owns its default local job host. Exercise a separate test bridge with
         // the real ToolService without opening that host's exclusive ledger a second time.
-        let w = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get)).unwrap();
+        let w = super::super::wire_with(
+            &cfg,
+            &crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
+            Arc::new(get),
+        )
+        .unwrap();
         let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
         let home = cfg.data_dir.join("test-tool-bridge");
         let host = fixture_on(dir, store.clone(), vec![]).await;

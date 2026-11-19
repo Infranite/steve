@@ -86,7 +86,7 @@ impl NodeReport {
 pub struct HubHarnesses {
     /// The adapters the Hub can start locally, by id.
     ids: Vec<String>,
-    caches: steve_runtime::cache::Caches,
+    caches: Arc<steve_runtime::cache::Caches>,
     declared: BTreeMap<String, steve_acp::Declaration>,
     /// What the local Node reported last (none yet, or no Node).
     probed: RwLock<Probed>,
@@ -95,10 +95,13 @@ pub struct HubHarnesses {
 }
 
 impl HubHarnesses {
-    pub fn of(cfg: &crate::config::Config) -> Arc<HubHarnesses> {
+    pub fn of(
+        cfg: &crate::config::Config,
+        caches: Arc<steve_runtime::cache::Caches>,
+    ) -> Arc<HubHarnesses> {
         Arc::new(HubHarnesses {
             ids: cfg.harness_ids(),
-            caches: cfg.caches.clone(),
+            caches,
             declared: cfg.declared_adapters.clone(),
             probed: RwLock::new(Probed::default()),
             updated: std::sync::OnceLock::new(),
@@ -152,16 +155,12 @@ impl HubHarnesses {
             .collect()
     }
 
-    pub(crate) fn caches(&self) -> &steve_runtime::cache::Caches {
-        &self.caches
-    }
-
     /// The local Node's answer.
     pub fn update(&self, caps: Vec<HarnessCapability>) {
         let generation = self
             .caches
             .generation(&steve_runtime::cache::Tag::global("harness-evidence"));
-        self.update_if_current(generation, Some(caps));
+        self.update_if_current(generation, Some(caps), true);
     }
 
     /// Installation revokes earlier readiness evidence, including any in-flight follow probe.
@@ -180,6 +179,7 @@ impl HubHarnesses {
         &self,
         generation: u64,
         caps: Option<Vec<HarnessCapability>>,
+        invalidate_runtime: bool,
     ) -> bool {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
         if self
@@ -194,6 +194,10 @@ impl HubHarnesses {
         // replacement; otherwise a held ready follower can resurrect models after disconnect.
         self.caches
             .invalidate(&[steve_runtime::cache::Tag::global("harness-evidence")]);
+        if invalidate_runtime {
+            self.caches
+                .invalidate(&[steve_runtime::cache::Tag::global("runtimes")]);
+        }
         probed.local_unknown = caps.is_none();
         probed.by_node.remove("local");
         if let Some(caps) = &caps {
@@ -331,7 +335,7 @@ impl HubHarnesses {
                 None
             }
         };
-        self.update_if_current(generation, caps);
+        self.update_if_current(generation, caps, true);
     }
 
     /// Asks the local `node` (when present) and every linked remote Node in `svc` concurrently,
@@ -413,6 +417,8 @@ impl HubHarnesses {
         }
         self.caches
             .invalidate(&[steve_runtime::cache::Tag::global("harness-evidence")]);
+        self.caches
+            .invalidate(&[steve_runtime::cache::Tag::global("runtimes")]);
         probed.caps = combined;
         probed.remote = remote_caps;
         probed.local_unknown = local_unknown;
@@ -769,7 +775,7 @@ mod tests {
             (k == "STEVE_HOME").then(|| home.path().display().to_string())
         })
         .unwrap();
-        let hs = HubHarnesses::of(&cfg);
+        let hs = HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
         let node = steve_node_api::testkit::FakeNode::new("probe-test");
         node.refuse_next(
             "probe",
@@ -819,7 +825,7 @@ mod tests {
             (k == "STEVE_HOME").then(|| home.path().display().to_string())
         })
         .unwrap();
-        let hs = HubHarnesses::of(&cfg);
+        let hs = HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
         let ready_of = |linked: &[String], id: &str| {
             hs.readiness(linked)
                 .into_iter()
@@ -873,7 +879,7 @@ mod tests {
             (k == "STEVE_HOME").then(|| home.path().display().to_string())
         })
         .unwrap();
-        let hs = HubHarnesses::of(&cfg);
+        let hs = HubHarnesses::of(&cfg, Arc::new(steve_runtime::cache::Caches::new(cfg.cache)));
         let offer = |model: &str| AdapterOffer {
             modes: vec![PermissionMode::Ask],
             models: vec![AdapterModel {
@@ -933,7 +939,7 @@ mod tests {
     fn every_answer_of_the_node_is_told() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let hs = HubHarnesses {
-            caches: steve_runtime::cache::Caches::new(Default::default()),
+            caches: Arc::new(steve_runtime::cache::Caches::new(Default::default())),
             ids: vec!["claude-code".into()],
             declared: BTreeMap::new(),
             probed: RwLock::new(Probed::default()),

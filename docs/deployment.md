@@ -1240,7 +1240,7 @@ Devices lists the harnesses reported by each Node, including remote Nodes. Open 
 
 `GET /api/node-harnesses` returns `{ "nodes": { "<node-id>": <report> } }` for the local Node and the caller's active or paused paired Nodes. Reports contain `state` (`reported`, `unreported`, `unsupported`, `failed`, `offline`), `checked_at` (last success), `attempted_at`, `stale`, `refreshing`, `error` and `harnesses`. Each harness has `id`, `name`, `available` (true, false, or null when unproven), `version`, `adapter_version`, `models`, `error` and optional `setup` component evidence. This is device evidence, separate from the Hub's merged model catalogue and dispatch admission.
 
-The list returns cached observations immediately and starts per-Node discovery in the background, at most once a minute while read. `GET /api/node-harnesses/<node-id>?fresh=1` waits for a fresh probe of that Node; concurrent refreshes join the in-flight result. Probes have a 45-second deadline, and a new remote connection invalidates prior freshness. Failed probes retain the last successful report with an error and a stale marker; offline data is also marked stale. The cache is in memory: after a Hub restart an offline Node has no report until it reconnects. These APIs use existing Node discovery and require no Node protocol upgrade; an older Node without probe or readiness evidence is shown as unsupported or unknown.
+The list returns cached observations immediately and starts per-Node discovery in the background, at most once a minute while read. `GET /api/node-harnesses/<node-id>?fresh=1` waits for a fresh probe of that Node; ordinary reads join in-flight discovery; an explicit fresh request revokes the previous inventory entry. Probes have a 45-second deadline, and a new remote connection invalidates prior freshness. A failed probe can carry the last successful payload while that entry remains in the cache, with an error and a stale marker. Expiry or eviction may remove that payload; offline data is marked stale when still available. The cache is in memory: after a Hub restart an offline Node has no report until it reconnects. These APIs use existing Node discovery and require no Node protocol upgrade; an older Node without probe or readiness evidence is shown as unsupported or unknown.
 
 ### Harness component updates
 
@@ -1857,7 +1857,7 @@ While enabled, a task on the existing Tokio runtime folds histogram samples into
 ## Process-local caches
 
 `STEVE_CACHE=memory` (the default) enables the Hub's process-local caches.
-`STEVE_CACHE=off` bypasses these registered spaces for diagnosis; it does not disable readiness observations,
+`STEVE_CACHE=off` allocates no shared caches and probes on demand for diagnosis; it does not disable readiness observations,
 connection management or authoritative in-memory projections. There is no remote cache in
 this version: `redis://`, `rediss://`, `plugin:` and other backend values fail configuration
 validation. Both startup and `--check-config` validate the options.
@@ -1874,12 +1874,14 @@ budget is reserved for future spaces. TTLs and shares are defined in code in thi
 
 Committed changes invalidate dependency generations synchronously. A cache entry retains
 its dependency generations in its value; a later read rejects obsolete values without
-creating another key. Concurrent reads share loading, and errors are not retained as cache
-values. A last observation may remain visible while a refresh runs; it is not admission
-evidence. Failed MCP connections keep their existing retry deadlines. Changing cache mode
+creating another key. Concurrent reads share loading, and loader errors are not retained as
+values. MCP listing failures use a separate 60-second failure space. A last observation is available only while moka still returns that entry; its normal TTL
+expiry or eviction produces a cold read. Failed Node probes can carry a prior payload if
+it was available when the probe began; that payload is not admission evidence. There is
+no separate retained display copy. Changing cache mode
 or budget requires a restart; caches never persist across a process restart.
 
 Prometheus reports `steve_cache_requests_total{space,result}`,
 `steve_cache_load_seconds{space}`, `steve_cache_entries{space}`, `steve_cache_bytes{space}`,
 and `steve_cache_invalidations_total{kind}`. Entry counts and bytes describe the cache's
-weighted allocation, including observations awaiting replacement or eviction.
+weighted allocation sampled every 15 seconds. Startup and `--check-config` reject duplicate space names, zero shares and total shares above 100 percent.

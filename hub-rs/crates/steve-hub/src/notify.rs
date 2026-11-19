@@ -391,7 +391,9 @@ mod tests {
     #[test]
     fn a_dismissed_failure_stays_closed() {
         let r = Fake::default();
-        let bus = Bus::new();
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         notify(&r, "w", "release", "fail", "没有发布", Some("ST-1")).expect("notify");
         /* closed from its line in the conversation: the id is that of the line, the notice is what gets remembered */
         let line = r.messages_in("w", "steve", 10).expect("rows")[0]["id"]

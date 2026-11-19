@@ -1,22 +1,19 @@
-//! Process-local, weighted caches. Values carry their dependency generations, never keys.
-//! Invalidation is synchronous. Loading uses moka's per-key compute operation, so a reader
-//! arriving after a write cannot join and accept an earlier generation's result.
-use crate::Clock;
-use moka::{
-    future::Cache,
-    ops::compute::{CompResult, Op},
-};
+//! Typed process-local caches with synchronous, bounded dependency invalidation.
+use moka::{future::Cache, ops::compute::Op};
 use std::{
-    any::Any,
     collections::HashMap,
     future::Future,
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
-
+use tokio::time::Instant;
 const GENERATIONS_MAX: usize = 10_000;
 const TAG_ID_MAX: usize = 128;
+const LOAD_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Tag {
@@ -31,13 +28,13 @@ impl Tag {
         let id = if id.len() <= TAG_ID_MAX {
             id.to_owned()
         } else {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            id.hash(&mut h);
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hash);
             let mut end = TAG_ID_MAX - 17;
             while !id.is_char_boundary(end) {
                 end -= 1;
             }
-            format!("{}~{:016x}", &id[..end], h.finish())
+            format!("{}~{:016x}", &id[..end], hash.finish())
         };
         Self {
             kind,
@@ -46,7 +43,6 @@ impl Tag {
     }
 }
 pub type Tags = Vec<Tag>;
-
 pub struct CacheSpace<K, V> {
     pub name: &'static str,
     pub ttl: Duration,
@@ -73,180 +69,207 @@ impl Default for CacheConfig {
     }
 }
 #[derive(Default)]
-struct Generations {
-    global: u64,
-    entities: HashMap<Box<str>, u64>,
+struct Kind {
+    global: Arc<AtomicU64>,
+    entities: RwLock<HashMap<Box<str>, Arc<AtomicU64>>>,
 }
-impl Generations {
-    fn generation(&self, id: Option<&str>) -> u64 {
-        self.global.wrapping_add(
-            id.and_then(|id| self.entities.get(id))
-                .copied()
-                .unwrap_or(0),
-        )
-    }
-    fn invalidate(&mut self, id: Option<&str>) {
-        if let Some(id) = id {
-            if !self.entities.contains_key(id) && self.entities.len() >= GENERATIONS_MAX {
-                self.global = self
-                    .global
-                    .wrapping_add(self.entities.values().copied().max().unwrap_or(0));
-                self.entities.clear();
-            }
-            let n = self.entities.entry(id.into()).or_default();
-            *n = n.wrapping_add(1);
-        } else {
-            self.global = self.global.wrapping_add(1);
+impl Kind {
+    fn entity(&self, id: &str) -> Arc<AtomicU64> {
+        if let Some(cell) = self.entities.read().unwrap().get(id) {
+            return cell.clone();
         }
+        let mut entities = self.entities.write().unwrap();
+        if !entities.contains_key(id) && entities.len() >= GENERATIONS_MAX {
+            let max = entities
+                .values()
+                .map(|v| v.load(Ordering::Acquire))
+                .max()
+                .unwrap_or(0);
+            self.global.fetch_add(max.max(1), Ordering::AcqRel);
+            entities.clear();
+        }
+        entities.entry(id.into()).or_default().clone()
     }
-}
-struct Registered {
-    share: u8,
-    cache: Box<dyn Any + Send + Sync>,
-}
-struct State {
-    cfg: CacheConfig,
-    generations: Mutex<HashMap<&'static str, Generations>>,
-    now: Arc<dyn Fn() -> i64 + Send + Sync>,
-}
-struct Inner {
-    state: Arc<State>,
-    spaces: Mutex<HashMap<&'static str, Registered>>,
 }
 #[derive(Clone)]
-pub struct Caches(Arc<Inner>);
-impl std::fmt::Debug for Caches {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Caches").field(&self.0.state.cfg).finish()
+struct Stamp {
+    cell: Arc<AtomicU64>,
+    value: u64,
+}
+impl Stamp {
+    fn new(cell: Arc<AtomicU64>) -> Self {
+        Self {
+            value: cell.load(Ordering::Acquire),
+            cell,
+        }
+    }
+    fn current(&self) -> bool {
+        self.cell.load(Ordering::Acquire) == self.value
     }
 }
-static PROCESS: OnceLock<Caches> = OnceLock::new();
+/// Opaque dependency snapshot for a conditional response started outside a cache loader.
+#[derive(Clone)]
+pub struct Version(Vec<Stamp>);
+impl Version {
+    fn current(&self) -> bool {
+        self.0.iter().all(Stamp::current)
+    }
+}
+
+/// Administrative sampling never downcasts or exposes stored values.
+pub trait SpaceAdmin: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn share(&self) -> u8;
+    fn usage(&self) -> (u64, u64);
+    fn clear(&self);
+}
+struct Inner {
+    cfg: CacheConfig,
+    kinds: RwLock<HashMap<&'static str, Arc<Kind>>>,
+    spaces: RwLock<Vec<Box<dyn SpaceAdmin>>>,
+}
+pub struct Caches(Arc<Inner>);
 impl Caches {
+    /// The composition root validates its space catalogue and positive budget first.
+    /// Off (and a zero budget) allocates no moka cache.
     pub fn new(cfg: CacheConfig) -> Self {
-        let start = tokio::time::Instant::now();
-        Self::with_now(
+        let inner = Arc::new(Inner {
             cfg,
-            Arc::new(move || start.elapsed().as_millis().min(i64::MAX as u128) as i64),
-        )
-    }
-    /// Deterministic TTL tests without changing the process's clock or sleeping.
-    pub fn with_clock(cfg: CacheConfig, clock: Arc<dyn Clock>) -> Self {
-        Self::with_now(cfg, Arc::new(move || clock.now()))
-    }
-    fn with_now(cfg: CacheConfig, now: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
-        assert!(cfg.memory_mb > 0);
-        Self(Arc::new(Inner {
-            state: Arc::new(State {
-                cfg,
-                now,
-                generations: Mutex::default(),
-            }),
-            spaces: Mutex::default(),
-        }))
-    }
-    /// Install once at startup, before constructing services. Tests can use new for isolation.
-    pub fn configure_process(cfg: CacheConfig) -> Self {
-        let caches = PROCESS.get_or_init(|| Self::new(cfg));
-        assert_eq!(caches.0.state.cfg, cfg, "process caches already configured");
-        caches.clone()
-    }
-    pub fn process() -> Self {
-        PROCESS
-            .get_or_init(|| Self::new(CacheConfig::default()))
-            .clone()
-    }
-    pub fn invalidate(&self, tags: &[Tag]) {
-        self.0.state.invalidate(tags);
-    }
-    pub fn generation(&self, tag: &Tag) -> u64 {
-        self.0.state.generation(tag)
-    }
-    pub fn snapshot(&self, tags: &[Tag]) -> Vec<u64> {
-        self.0.state.snapshot(tags)
+            kinds: RwLock::default(),
+            spaces: RwLock::default(),
+        });
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&inner);
+            rt.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(15));
+                loop {
+                    tick.tick().await;
+                    let Some(inner) = weak.upgrade() else { break };
+                    for space in inner.spaces.read().unwrap().iter() {
+                        let (entries, bytes) = space.usage();
+                        metrics::gauge!("steve_cache_entries", "space" => space.name())
+                            .set(entries as f64);
+                        metrics::gauge!("steve_cache_bytes", "space" => space.name())
+                            .set(bytes as f64);
+                    }
+                }
+            });
+        }
+        Self(inner)
     }
     pub fn space<K, V>(&self, space: &'static CacheSpace<K, V>) -> Cached<K, V>
     where
         K: Hash + Eq + Clone + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let mut spaces = self.0.spaces.lock().unwrap();
-        if let Some(r) = spaces.get(space.name) {
-            let cached = r
-                .cache
-                .downcast_ref::<Cached<K, V>>()
-                .expect("cache space type changed");
-            assert!(
-                std::ptr::eq(cached.space, space),
-                "cache space definition changed"
-            );
-            return cached.clone();
-        }
-        assert!(
-            space.share_pct > 0
-                && spaces.values().map(|r| u16::from(r.share)).sum::<u16>()
-                    + u16::from(space.share_pct)
-                    <= 100
-        );
-        let capacity =
-            u64::from(self.0.state.cfg.memory_mb) * 1024 * 1024 * u64::from(space.share_pct) / 100;
-        let cache = Cache::builder()
-            .max_capacity(capacity)
-            .weigher(|_: &K, v: &Arc<Stamped<V>>| v.weight)
-            .build();
-        let result = Cached {
-            cache,
-            owner: self.0.state.clone(),
-            space,
-            capacity,
-        };
-        spaces.insert(
-            space.name,
-            Registered {
-                share: space.share_pct,
-                cache: Box::new(result.clone()),
-            },
-        );
-        result
-    }
-}
-impl State {
-    pub fn invalidate(&self, tags: &[Tag]) {
-        let mut all = self.generations.lock().unwrap();
-        for (i, tag) in tags.iter().enumerate() {
-            if tags[..i].contains(tag) {
-                continue;
+        let cache = if self.0.cfg.mode == CacheMode::Off || self.0.cfg.memory_mb == 0 {
+            None
+        } else {
+            let capacity =
+                u64::from(self.0.cfg.memory_mb) * 1024 * 1024 * u64::from(space.share_pct) / 100;
+            let mut builder = Cache::builder()
+                .max_capacity(capacity)
+                .weigher(|_: &K, value: &Arc<Stamped<V>>| value.weight);
+            if space.ttl != Duration::MAX {
+                builder = builder.time_to_live(space.ttl);
             }
-            all.entry(tag.kind)
-                .or_default()
-                .invalidate(tag.id.as_deref());
+            Some(builder.build())
+        };
+        let cached = Cached {
+            cache,
+            owner: self.0.clone(),
+            space,
+            epoch: Arc::default(),
+        };
+        self.0.spaces.write().unwrap().push(Box::new(Admin {
+            cache: cached.cache.clone(),
+            name: space.name,
+            share: space.share_pct,
+            epoch: cached.epoch.clone(),
+        }));
+        cached
+    }
+    pub fn invalidate(&self, tags: &[Tag]) {
+        for tag in tags {
+            let kind = self.0.kind(tag.kind);
+            let cell = tag
+                .id
+                .as_deref()
+                .map_or_else(|| kind.global.clone(), |id| kind.entity(id));
+            cell.fetch_add(1, Ordering::AcqRel);
             metrics::counter!("steve_cache_invalidations_total", "kind" => tag.kind).increment(1);
         }
     }
     pub fn generation(&self, tag: &Tag) -> u64 {
-        self.generations
-            .lock()
-            .unwrap()
-            .get(tag.kind)
-            .map_or(0, |g| g.generation(tag.id.as_deref()))
+        let kind = self.0.kind(tag.kind);
+        let local = tag
+            .id
+            .as_deref()
+            .and_then(|id| kind.entities.read().unwrap().get(id).cloned());
+        kind.global
+            .load(Ordering::Acquire)
+            .wrapping_add(local.map_or(0, |v| v.load(Ordering::Acquire)))
     }
-    pub fn snapshot(&self, tags: &[Tag]) -> Vec<u64> {
-        let all = self.generations.lock().unwrap();
-        tags.iter()
-            .map(|t| all.get(t.kind).map_or(0, |g| g.generation(t.id.as_deref())))
-            .collect()
+}
+impl Inner {
+    fn kind(&self, name: &'static str) -> Arc<Kind> {
+        if let Some(kind) = self.kinds.read().unwrap().get(name) {
+            return kind.clone();
+        }
+        self.kinds.write().unwrap().entry(name).or_default().clone()
+    }
+    fn version(&self, tags: Tags) -> Version {
+        let mut stamps = Vec::with_capacity(tags.len() * 2);
+        for tag in tags {
+            let kind = self.kind(tag.kind);
+            // Allocate the entity first: a bounded-table rollover changes the global stamp.
+            let entity = tag.id.as_deref().map(|id| kind.entity(id));
+            stamps.push(Stamp::new(kind.global.clone()));
+            if let Some(cell) = entity {
+                stamps.push(Stamp::new(cell));
+            }
+        }
+        Version(stamps)
     }
 }
 struct Stamped<V> {
     value: Arc<V>,
-    at: i64,
-    generations: Vec<u64>,
+    at: Instant,
+    version: Version,
     weight: u32,
 }
+struct Admin<K, V> {
+    cache: Option<Cache<K, Arc<Stamped<V>>>>,
+    name: &'static str,
+    share: u8,
+    epoch: Arc<AtomicU64>,
+}
+impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> SpaceAdmin
+    for Admin<K, V>
+{
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn share(&self) -> u8 {
+        self.share
+    }
+    fn usage(&self) -> (u64, u64) {
+        self.cache
+            .as_ref()
+            .map_or((0, 0), |c| (c.entry_count(), c.weighted_size()))
+    }
+    fn clear(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        if let Some(c) = &self.cache {
+            c.invalidate_all();
+        }
+    }
+}
 pub struct Cached<K: 'static, V: 'static> {
-    cache: Cache<K, Arc<Stamped<V>>>,
-    owner: Arc<State>,
+    cache: Option<Cache<K, Arc<Stamped<V>>>>,
+    owner: Arc<Inner>,
     space: &'static CacheSpace<K, V>,
-    capacity: u64,
+    epoch: Arc<AtomicU64>,
 }
 impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clone
     for Cached<K, V>
@@ -256,186 +279,108 @@ impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Clo
             cache: self.cache.clone(),
             owner: self.owner.clone(),
             space: self.space,
-            capacity: self.capacity,
+            epoch: self.epoch.clone(),
         }
     }
 }
 impl<K: Hash + Eq + Clone + Send + Sync + 'static, V: Send + Sync + 'static> Cached<K, V> {
-    fn owner(&self) -> &State {
-        &self.owner
+    fn valid(&self, value: &Stamped<V>) -> bool {
+        value.version.current() && value.at.elapsed() < self.space.ttl
     }
-    fn tags(&self, key: &K) -> Tags {
-        let mut tags = (self.space.tags)(key);
-        tags.push(Tag::of("cache-space", self.space.name));
-        tags
-    }
-    fn valid(&self, value: &Stamped<V>, tags: &[Tag]) -> bool {
-        let owner = self.owner();
-        value.generations == owner.snapshot(tags)
-            && (owner.now)().saturating_sub(value.at)
-                < self.space.ttl.as_millis().min(i64::MAX as u128) as i64
-    }
-    /// Nonblocking observation for synchronous catalogue callers; no second cache or executor.
-    /// Iteration observes the same moka entries and is reserved for small metadata spaces.
-    pub fn peek(&self, key: &K) -> Option<Arc<V>> {
-        if self.owner().cfg.mode == CacheMode::Off {
-            return None;
-        }
-        let tags = self.tags(key);
-        self.cache.iter().find_map(|(k, v)| {
-            (k.as_ref() == key && self.valid(&v, &tags)).then(|| v.value.clone())
-        })
-    }
-    /// Async hot-path lookup records moka's access history; synchronous peek is only for small catalogues.
-    pub async fn read(&self, key: &K) -> Option<Arc<V>> {
-        if !self.enabled() {
-            return None;
-        }
-        let tags = self.tags(key);
-        let value = self
-            .cache
+    /// O(1) observation: value plus TTL freshness; invalid dependencies are never exposed.
+    /// Moka's TTL can make an entry unreadable before physical reclamation;
+    /// there is no independent stale-value store.
+    pub async fn peek(&self, key: &K) -> Option<(Arc<V>, bool)> {
+        self.cache
+            .as_ref()?
             .get(key)
             .await
-            .filter(|v| self.valid(v, &tags))
-            .map(|v| v.value.clone());
-        metrics::counter!("steve_cache_requests_total","space"=>self.space.name,"result"=>if value.is_some(){"hit"}else{"miss"}).increment(1);
-        value
+            .filter(|v| v.version.current())
+            .map(|v| (v.value.clone(), self.valid(&v)))
     }
-    /// Last display observation, including expired evidence. Never use for admission or auth.
-    pub fn stale(&self, key: &K) -> Option<Arc<V>> {
-        if self.owner().cfg.mode == CacheMode::Off {
-            return None;
-        }
-        let tags = self.tags(key);
-        self.cache.iter().find_map(|(k, v)| {
-            (k.as_ref() == key && v.generations == self.owner().snapshot(&tags))
-                .then(|| v.value.clone())
-        })
+    pub fn version(&self, key: &K) -> Version {
+        let mut version = self.owner.version((self.space.tags)(key));
+        version.0.push(Stamp::new(self.epoch.clone()));
+        version
     }
-    pub fn invalidate(&self, key: &K) {
-        self.owner().invalidate(&(self.space.tags)(key));
-    }
-    /// Discard an allocation without declaring that its underlying data changed.
-    pub async fn evict(&self, key: &K) {
-        self.cache.invalidate(key).await;
-    }
-    pub fn clear(&self) {
-        self.owner()
-            .invalidate(&[Tag::of("cache-space", self.space.name)]);
-        self.cache.invalidate_all();
-    }
-    pub fn version(&self, key: &K) -> Vec<u64> {
-        self.owner().snapshot(&self.tags(key))
-    }
-    pub async fn put_if_current(&self, key: K, value: V, version: Vec<u64>) -> bool {
-        if self.owner().cfg.mode == CacheMode::Off || self.version(&key) != version {
+    /// The sole exceptional write path, for network conditional responses. A revoked
+    /// dependency snapshot can neither be written nor exposed by a later reader.
+    pub async fn put_if_current(&self, key: K, value: V, version: Version) -> bool {
+        let Some(cache) = &self.cache else {
+            return false;
+        };
+        if !version.current() {
             return false;
         }
-        let weight = (self.space.weigh)(&value).max(1);
-        self.cache
+        cache
             .insert(
                 key,
                 Arc::new(Stamped {
+                    weight: (self.space.weigh)(&value).max(1),
                     value: Arc::new(value),
-                    generations: version,
-                    weight,
-                    at: (self.owner().now)(),
+                    at: Instant::now(),
+                    version,
                 }),
             )
             .await;
-        self.usage().await;
         true
-    }
-    pub fn len(&self) -> usize {
-        self.cache
-            .iter()
-            .filter(|(k, v)| self.valid(v, &self.tags(k.as_ref())))
-            .count()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn enabled(&self) -> bool {
-        self.owner().cfg.mode == CacheMode::Memory
-    }
-    pub fn capacity(&self) -> u64 {
-        self.capacity
-    }
-    pub async fn usage(&self) -> (u64, u64) {
-        self.cache.run_pending_tasks().await;
-        let entries = self.cache.entry_count();
-        let bytes = self.cache.weighted_size();
-        metrics::gauge!("steve_cache_entries", "space" => self.space.name).set(entries as f64);
-        metrics::gauge!("steve_cache_bytes", "space" => self.space.name).set(bytes as f64);
-        (entries, bytes)
     }
     pub async fn get_or_load<E, F>(&self, key: K, load: impl FnOnce() -> F) -> Result<Arc<V>, E>
     where
         E: Clone + Send + Sync + 'static,
         F: Future<Output = Result<V, E>>,
     {
-        self.get_or_load_if(key, load, |_| true).await
-    }
-    pub async fn get_or_load_if<E, F>(
-        &self,
-        key: K,
-        load: impl FnOnce() -> F,
-        accept: impl Fn(&V) -> bool + Send + Sync,
-    ) -> Result<Arc<V>, E>
-    where
-        E: Clone + Send + Sync + 'static,
-        F: Future<Output = Result<V, E>>,
-    {
-        let owner = self.owner();
-        let mut load = Some(load);
-        if owner.cfg.mode == CacheMode::Off {
-            metrics::counter!("steve_cache_requests_total","space"=>self.space.name,"result"=>"off").increment(1);
-            let started = tokio::time::Instant::now();
-            let value = load.take().unwrap()().await;
-            metrics::histogram!("steve_cache_load_seconds","space"=>self.space.name)
-                .record(started.elapsed().as_secs_f64());
-            return value.map(Arc::new);
+        let Some(cache) = &self.cache else {
+            metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "off").increment(1);
+            return self.load(load()).await.map(Arc::new);
+        };
+        if let Some(value) = cache.get(&key).await
+            && self.valid(&value)
+        {
+            metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "hit").increment(1);
+            return Ok(value.value.clone());
         }
-        let tags = self.tags(&key);
-        loop {
-            // Conditional removal is serialized with other entry computations; it cannot
-            // blindly delete a fresher value that another reader has just published.
-            let current = self
-                .cache
+        metrics::counter!("steve_cache_requests_total", "space" => self.space.name, "result" => "miss").increment(1);
+        let mut load = Some(load);
+        for attempt in 0..LOAD_ATTEMPTS {
+            cache
                 .entry(key.clone())
                 .and_compute_with(|entry| async {
                     match entry {
-                        Some(e) if self.valid(e.value(), &tags) && accept(&e.value().value) => {
-                            Op::Nop
-                        }
-                        Some(_) => Op::Remove,
-                        None => Op::Nop,
+                        Some(e) if !self.valid(e.value()) => Op::Remove,
+                        _ => Op::Nop,
                     }
                 })
                 .await;
-            if let CompResult::Unchanged(entry) = current {
-                metrics::counter!("steve_cache_requests_total","space"=>self.space.name,"result"=>"hit").increment(1);
-                return Ok(entry.into_value().value.clone());
-            }
-            let value=self.cache.try_get_with(key.clone(),async {
-                let generations=owner.snapshot(&tags);
-                let started=tokio::time::Instant::now();
-                let value=load.take().expect("loader invoked only once")().await;
-                metrics::histogram!("steve_cache_load_seconds","space"=>self.space.name).record(started.elapsed().as_secs_f64());
-                let value=value?;
-                let weight=(self.space.weigh)(&value).max(1);
-                Ok::<_,E>(Arc::new(Stamped{value:Arc::new(value),at:(owner.now)(),generations,weight}))
-            }).await.map_err(|e| {
-                metrics::counter!("steve_cache_requests_total","space"=>self.space.name,"result"=>"error").increment(1);
-                e.as_ref().clone()
-            })?;
-            metrics::counter!("steve_cache_requests_total","space"=>self.space.name,"result"=>"miss").increment(1);
-            if (self.valid(&value, &tags) && accept(&value.value)) || load.is_none() {
-                // A reader already loading when invalidation happened may finish its old
-                // read. A newer waiter still owns its unused loader and retries instead.
-                self.usage().await;
+            let value = cache
+                .try_get_with(key.clone(), async {
+                    let version = self.version(&key);
+                    let value = self
+                        .load(load.take().expect("single initializer")())
+                        .await?;
+                    Ok::<_, E>(Arc::new(Stamped {
+                        weight: (self.space.weigh)(&value).max(1),
+                        value: Arc::new(value),
+                        at: Instant::now(),
+                        version,
+                    }))
+                })
+                .await
+                .map_err(|e| e.as_ref().clone())?;
+            if self.valid(&value) || load.is_none() || attempt + 1 == LOAD_ATTEMPTS {
                 return Ok(value.value.clone());
             }
         }
+        unreachable!("bounded attempts always return")
+    }
+    async fn load<E, F: Future<Output = Result<V, E>>>(&self, future: F) -> Result<V, E> {
+        let start = Instant::now();
+        let value = future.await;
+        metrics::histogram!("steve_cache_load_seconds", "space" => self.space.name)
+            .record(start.elapsed().as_secs_f64());
+        value
     }
 }
+#[cfg(test)]
+#[path = "cache/tests.rs"]
+mod tests;

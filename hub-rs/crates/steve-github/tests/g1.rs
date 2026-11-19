@@ -50,7 +50,11 @@ async fn setup() -> H {
         b = b.provider(p);
     }
     let conns = b.build();
-    let gh = GitHub::new(conns.clone(), gh_env);
+    let gh = GitHub::new(
+        conns.clone(),
+        gh_env,
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+    );
     let api = manifest::routes(gh.clone())
         .merge(connections::routes(conns.clone()))
         .with_state(env.modules.clone());
@@ -571,6 +575,14 @@ async fn etags_and_rate_limits() {
     assert_eq!(calls[0].if_none_match, None);
     assert!(calls[1].if_none_match.is_some());
     assert_eq!(calls[1].status, 304, "unchanged: a 304, not counted");
+    // Refreshing the repository list must not revoke this path's conditional body.
+    h.gh.available(WS, &con, true).await.expect("fresh list");
+    conn.get(path)
+        .await
+        .expect("conditional body after list refresh");
+    let after = h.fake.calls_to("GET", path);
+    assert!(after.last().unwrap().if_none_match.is_some());
+    assert_eq!(after.last().unwrap().status, 304);
     // the caller's own etag (polling state)
     let r = conn
         .get_if_changed(path, calls[1].if_none_match.as_deref())

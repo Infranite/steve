@@ -127,7 +127,9 @@ async fn start() -> Env {
         std::fs::create_dir_all(d).expect("dirs");
     }
     let db = cfg.data_dir.join("steve.sqlite3");
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let fake = Arc::new(steve_channels::fake::channel::FakeChannel::new());
     let assembly = steve_hub::Assembly::builtin().with(NotificationFake(fake.clone()));
     let w =

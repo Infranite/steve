@@ -91,7 +91,9 @@ impl Env {
             cfg,
             Arc::new(StoreBackend::new(store.clone()).unwrap()),
             catalogue.clone(),
-            Bus::new(),
+            Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+                Default::default(),
+            ))),
         );
         let ctx = Ctx {
             user: Obj::new(),

@@ -8,7 +8,7 @@ install! { prepare(reg, _cx) [mut registry] => [gh_slot, registry] {
 
 install! { install(reg, cx) [conns, gh_env, gh_slot] => [conns, gh] {
     let Env { core, git_nodes, .. } = cx.clone();
-    let gh = steve_github::GitHub::new(conns.clone(), gh_env);
+    let gh = steve_github::GitHub::new(conns.clone(), gh_env, cx.bus.caches().clone());
     gh_slot.bind(&gh);
     if let Some(n) = git_nodes {
         gh.set_git_nodes(n);

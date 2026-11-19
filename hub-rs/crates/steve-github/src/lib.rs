@@ -14,7 +14,8 @@
 //! 1. register the adapters on the connections builder:
 //!    `let env = GitHubEnv::from_env(|k| std::env::var(k).ok());`
 //!    `for p in steve_github::providers_for(&env) { builder = builder.provider(p) }`;
-//! 2. after `build()`: `let gh = GitHub::new(conns.clone(), env);`
+//! 2. after `build()`: `let gh = GitHub::new(conns.clone(), env, caches);` (the composition root
+//!    passes the same `Arc<steve_runtime::cache::Caches>` as its other services)
 //! 3. `.merge(steve_github::manifest::routes(gh.clone()))` and
 //!    `.merge(steve_github::repos::routes(gh.clone()))` under `/api` (the `Caller` layer; the two
 //!    manifest GETs are browser navigations, the session cookie is enough);
@@ -198,6 +199,7 @@ struct Inner {
     limiter: hooks::Limiter,
     secrets: hooks::Secrets,
     available: repos::AvailableCache,
+    caches: Arc<steve_runtime::cache::Caches>,
     core: RwLock<Arc<dyn ItemCore>>,
     flow: RwLock<Option<Arc<steve_flow::FlowCx>>>,
     /// Wakes the effect runner ([`effects`]) after an answer queued a write.
@@ -208,19 +210,20 @@ struct Inner {
 }
 
 impl GitHub {
-    pub fn new(conns: Connections, env: GitHubEnv) -> Self {
+    pub fn new(conns: Connections, env: GitHubEnv, caches: Arc<steve_runtime::cache::Caches>) -> Self {
         let limiter = hooks::Limiter::new(conns.modules().clock.clone());
         Self(Arc::new(Inner {
             conns,
             env,
             flows: PendingStates::default(),
-            etags: EtagCache::default(),
+            etags: EtagCache::new(caches.clone()),
             sink: RwLock::new(Arc::new(NoSink)),
             notifier: RwLock::new(Arc::new(NoSink)),
             queue: Default::default(),
             limiter,
             secrets: Default::default(),
-            available: repos::available_cache(),
+            available: repos::available_cache(&caches),
+            caches,
             core: RwLock::new(Arc::new(NoCore)),
             flow: RwLock::new(None),
             effect_wake: Default::default(),
@@ -357,3 +360,6 @@ impl GitHub {
         Ok(GhConn::on(cx, self.0.etags.clone(), &base))
     }
 }
+
+/// The registered GitHub cache budgets, included in the Hub startup catalogue.
+pub const CACHE_SPACES: [(&str, u8); 2] = [api::ETAG_SPEC, repos::AVAILABLE_SPEC];

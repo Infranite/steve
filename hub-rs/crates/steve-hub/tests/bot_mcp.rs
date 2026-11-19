@@ -266,7 +266,11 @@ for line in sys.stdin:
             .unwrap()
             .unwrap()
     };
-    let library = LibraryMcp::new(caps.clone(), None);
+    let library = LibraryMcp::new(
+        caps.clone(),
+        None,
+        Arc::new(steve_runtime::cache::Caches::new(Default::default())),
+    );
     let current = get();
     let (a, b) = tokio::join!(
         library.tools_within(&current, "one", Duration::from_secs(5)),
@@ -300,7 +304,7 @@ for line in sys.stdin:
     assert!(changed.updated > current.updated);
     library.sweep();
     assert!(
-        library.cached(&changed).is_none(),
+        library.cached(&changed).await.is_none(),
         "the previous revision's list is not reused"
     );
     library
@@ -319,7 +323,7 @@ for line in sys.stdin:
     caps.mcp_delete("default", "u1", id).unwrap();
     library.sweep();
     assert!(
-        library.cached(&changed).is_none(),
+        library.cached(&changed).await.is_none(),
         "deletion drops the cache too"
     );
 }

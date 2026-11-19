@@ -52,6 +52,8 @@ pub struct AppState(pub Arc<Inner>);
 
 pub struct Inner {
     pub cfg: Arc<Config>,
+    pub caches: Arc<steve_runtime::cache::Caches>,
+    pub origins: steve_runtime::cache::Cached<String, bool>,
     pub deliveries: Option<crate::deliveries::Service>,
     pub backend: Arc<dyn Backend>,
     pub domain: Arc<dyn Domain>,
@@ -95,7 +97,10 @@ impl AppState {
         domain: Arc<dyn Domain>,
         bus: Bus,
     ) -> Self {
-        let runtimes = Runtimes::new(cfg.clone());
+        let caches = bus.caches().clone();
+        let origins = caches.space(&crate::access::ORIGIN_SPACE);
+        let runtimes = Runtimes::new(cfg.clone(), caches.clone());
+        let node_harnesses = node_harnesses::Inventory::new(caches.clone());
         let catalog = crate::catalog::Catalog::of(&cfg);
         AppState(Arc::new(Inner {
             catalog,
@@ -106,7 +111,9 @@ impl AppState {
             domain,
             bus,
             runtimes,
-            node_harnesses: Default::default(),
+            node_harnesses,
+            caches,
+            origins,
             state_cache: Default::default(),
             dedupe: Default::default(),
             modules: None,
@@ -976,3 +983,5 @@ mod tests {
         assert_eq!(now(steve_i18n::EN, "正在改 README"), json!("正在改 README"));
     }
 }
+
+pub(crate) use node_harnesses::CACHE_SPEC as NODE_CACHE_SPEC;

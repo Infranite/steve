@@ -79,7 +79,9 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())
     })
     .unwrap();
-    let bus = Bus::new();
+    let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
     let state = AppState::new(
         Arc::new(cfg),
         Arc::new(NoStorage),

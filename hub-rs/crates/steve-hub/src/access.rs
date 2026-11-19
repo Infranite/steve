@@ -351,7 +351,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 }
             }
             if let Some(o) = &origin_seen {
-                forget_origin(o);
+                forget_origin(&st, o);
             }
             res
         }
@@ -711,13 +711,14 @@ pub(crate) fn usage() -> anyhow::Error {
 mod tests {
     #[tokio::test]
     async fn changed_client_origin_is_visible_without_waiting_for_ttl() {
-        let cache = origins();
+        let caches = Arc::new(steve_runtime::cache::Caches::new(Default::default()));
+        let cache = caches.space(&ORIGIN_SPACE);
         let key = "https://origin-cache.example.test".to_string();
         cache
             .get_or_load(key.clone(), || async { Ok::<_, ()>(false) })
             .await
             .unwrap();
-        forget_origin(&key);
+        caches.invalidate(&[steve_runtime::cache::Tag::of("origin", &key)]);
         assert!(
             *cache
                 .get_or_load(key, || async { Ok::<_, ()>(true) })
@@ -1016,18 +1017,14 @@ fn open_path(path: &str) -> bool {
 
 /// How long whether an origin may call is remembered.
 const ORIGIN_TTL: Duration = Duration::from_secs(30);
-static ORIGIN_SPACE: steve_runtime::cache::CacheSpace<String, bool> =
+pub(crate) static ORIGIN_SPACE: steve_runtime::cache::CacheSpace<String, bool> =
     steve_runtime::cache::CacheSpace {
         name: "origins",
         ttl: ORIGIN_TTL,
         share_pct: 2,
-        tags: |_| vec![steve_runtime::cache::Tag::global("hub")],
+        tags: |origin| vec![steve_runtime::cache::Tag::of("origin", origin)],
         weigh: |_| 1,
     };
-fn origins() -> steve_runtime::cache::Cached<String, bool> {
-    steve_runtime::cache::Caches::process().space(&ORIGIN_SPACE)
-}
-
 /// Whether a page on `origin` may call this Hub with its credentials: one of `STEVE_CLIENT_ORIGINS`,
 /// or the origin a live web client signed in from.
 async fn origin_allowed(st: &AppState, origin: &str) -> bool {
@@ -1038,7 +1035,8 @@ async fn origin_allowed(st: &AppState, origin: &str) -> bool {
         return false;
     };
     let o = origin.to_string();
-    *origins()
+    *st.caches
+        .space(&ORIGIN_SPACE)
         .get_or_load(o.clone(), || async move {
             tokio::task::spawn_blocking(move || {
                 store
@@ -1054,8 +1052,9 @@ async fn origin_allowed(st: &AppState, origin: &str) -> bool {
 }
 
 /// A successful login/logout is visible before the next CORS decision, including in-flight reads.
-fn forget_origin(_origin: &str) {
-    steve_runtime::cache::Caches::process().invalidate(&[steve_runtime::cache::Tag::global("hub")]);
+fn forget_origin(st: &AppState, origin: &str) {
+    st.caches
+        .invalidate(&[steve_runtime::cache::Tag::of("origin", origin)]);
 }
 
 /// Cross-origin calls (A3): a web client served apart from the Hub calls it with its credentials.
@@ -1302,12 +1301,12 @@ pub async fn token_revoke(
         let ok = store.access().token_revoke(&t.id)?;
         store.audit(&me, "token.revoke", &t.id, &json!({}), steve_store::WS)?;
         // the clients it signed in are signed out with it: their open streams end too
-        let signed_in: Vec<String> = store
+        let signed_in: Vec<_> = store
             .access()
             .clients(Some(&me))?
             .into_iter()
             .filter(|c| c.token_id.as_deref() == Some(t.id.as_str()))
-            .map(|c| c.id)
+            .map(|c| (c.id, c.origin))
             .collect();
         Ok(ok.then_some(signed_in))
     })
@@ -1318,12 +1317,14 @@ pub async fn token_revoke(
         return Err(crate::error::ApiError::not_found("token"));
     };
     let store = store_of(&st)?;
-    for cid in &signed_in {
+    for (cid, origin) in &signed_in {
         st.presence.kick(Some(&store), cid);
+        if let Some(origin) = origin {
+            forget_origin(&st, origin);
+        }
     }
     let uid = c.me.clone();
     drop_pending_pairings(|p| p.user_id == uid && p.token_id.as_deref() == Some(id.as_str()));
-    forget_origin("");
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
@@ -1353,12 +1354,12 @@ pub async fn client_revoke(
             &json!({"user": cl.user_id}),
             steve_store::WS,
         )?;
-        Ok(ok.then_some(cl.user_id))
+        Ok(ok.then_some((cl.user_id, cl.origin)))
     })
     .await
     .map_err(internal)?
     .map_err(internal)?;
-    let Some(uid) = done else {
+    let Some((uid, origin)) = done else {
         return Err(crate::error::ApiError::not_found("client"));
     };
     // signed out now, not at its next request: its open streams end (G11)
@@ -1366,7 +1367,9 @@ pub async fn client_revoke(
     drop_pending_pairings(|p| {
         p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
     });
-    forget_origin("");
+    if let Some(origin) = origin {
+        forget_origin(&st, &origin);
+    }
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
@@ -2057,7 +2060,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
                 }
             }
             if let Some(o) = &origin_seen {
-                forget_origin(o);
+                forget_origin(&st, o);
             }
             res
         }
@@ -2377,3 +2380,5 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
             .ok();
     });
 }
+
+pub(crate) const CACHE_SPEC: (&str, u8) = (ORIGIN_SPACE.name, ORIGIN_SPACE.share_pct);

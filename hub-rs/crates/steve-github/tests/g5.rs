@@ -115,6 +115,7 @@ async fn setup() -> H {
             api_base: fake.url(),
             ..Default::default()
         },
+        std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     slot.expect("slot").bind(&gh);
     gh.set_core(RecordingCore::new(env.store().clone()));
