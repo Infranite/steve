@@ -155,7 +155,13 @@ pub async fn run(cx: Arc<FlowCx>) {
         let now = cx.now();
         let pass = {
             let cx = cx.clone();
-            cx.clone().blocking(move |_| sweep(&cx, now)).await
+            cx.clone()
+                .blocking(move |_| {
+                    // Schedule-run retention formerly lived in the scheduler's polling loop.
+                    cx.store().transaction(|tx| crate::runs::prune(tx, now))?;
+                    sweep(&cx, now)
+                })
+                .await
         };
         match pass {
             Ok(s) if s.payloads + s.events_deleted > 0 => tracing::info!(?s, "flow.retention"),

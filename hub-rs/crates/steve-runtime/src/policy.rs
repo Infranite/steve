@@ -42,6 +42,12 @@ pub enum Retry {
     Backoff,
 }
 impl Backoff {
+    /// Samples a delay with the thread-local RNG, without keeping that RNG across an await.
+    /// Call `delay` with an injected RNG when testing jitter distributions.
+    pub fn sample_delay(&self, attempt: u32) -> Duration {
+        self.delay(attempt, &mut rand::rng())
+    }
+
     /// Zero-based retry index. attempts does not restrict pure delay calculation.
     pub fn delay(&self, attempt: u32, rng: &mut impl rand::Rng) -> Duration {
         let ns = self

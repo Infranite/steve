@@ -67,13 +67,13 @@ pub async fn due_loop<S: DueSource>(
             Ok(Some(ms)) => {
                 failures = 0;
                 let sleep = clock.sleep(Duration::from_millis(ms as u64));
-                let woken = wake.notified();
+                let woken = wake.clone().notified_owned();
                 futures::pin_mut!(sleep, woken);
                 futures::future::select(sleep, woken).await;
             }
             Err(e) => {
                 tracing::warn!("{name}: {e}; trying again");
-                let d = backoff.delay(failures, &mut rand::rng());
+                let d = backoff.sample_delay(failures);
                 failures = failures.saturating_add(1);
                 clock.sleep(d).await;
             }
@@ -98,6 +98,11 @@ pub mod contract {
         fn done(&self) -> Vec<String>;
         /// Ids of rows that became dead letters.
         fn dead(&self) -> Vec<String>;
+        /// Expected next deadline of successful recurring rows; one-shot sources have none.
+        /// The fixture computes this from healthy rows, never including the poison row.
+        fn remaining_due(&self) -> Option<i64> {
+            None
+        }
     }
 
     /// Runs the three checks on fresh fixtures from `new`, starting at `now`. `rounds` bounds how many
@@ -145,7 +150,7 @@ pub mod contract {
         );
         assert_eq!(
             f.source().next_due().await.expect("next_due"),
-            None,
+            f.remaining_due(),
             "{name}: dead letters are not due"
         );
         f.source().run_due(at + DAY).await.expect("run_due");

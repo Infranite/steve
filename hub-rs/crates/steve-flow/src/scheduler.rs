@@ -20,12 +20,8 @@ use crate::runs::{self, NewRun, NewStep};
 use crate::{FlowCx, FlowResult};
 use steve_runtime::schedule::CronExpr;
 
-/// Longest sleep between two rounds.
-pub const IDLE_MS: i64 = 15_000;
-/// Triggers due this soon are claimed in the current round.
-pub const EARLY_MS: i64 = 1_000;
-/// How often old schedule runs are pruned.
-pub const RETENTION_EVERY_MS: i64 = 3_600_000;
+/// Due rows claimed per pass.
+pub const BATCH: usize = 200;
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
 
@@ -60,7 +56,8 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
         id,
         ws,
         version,
-        graph: serde_json::from_str(&graph)?,
+        graph: serde_json::from_str(&graph)
+            .map_err(|e| ApiError::rule(format!("Invalid stored flow graph: {e}")))?,
         overlap: OverlapPolicy::from_db(schedule["overlap"].as_str()),
         budget_usd: schedule["budget_usd"].as_f64().unwrap_or(0.0),
         tz: schedule["tz"].as_str().map(String::from),
@@ -216,10 +213,10 @@ struct Due {
 
 fn due(c: &Connection, now: i64) -> FlowResult<Vec<Due>> {
     let mut st = c.prepare_cached(
-        "SELECT t.id, t.flow_id, t.node_id, t.cron, t.tz, t.next_at, t.missed FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0 AND t.next_at IS NOT NULL AND t.next_at <= ? ORDER BY t.next_at",
+        "SELECT t.id, t.flow_id, t.node_id, t.cron, t.tz, t.next_at, t.missed FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0 AND t.next_at IS NOT NULL AND t.next_at <= ? ORDER BY t.next_at, t.id LIMIT ?",
     )?;
     let rows = st
-        .query_map([now + EARLY_MS], |r| {
+        .query_map([now, BATCH as i64], |r| {
             Ok(Due {
                 id: r.get(0)?,
                 flow_id: r.get(1)?,
@@ -242,6 +239,16 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
         return Ok(None);
     };
     let plan = plan_claim(&expr, tz, d.next_at, now, d.missed);
+    let f = match flow_info(tx, &d.flow_id) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Ok(None),
+        Err(e) if e.status() < 500 => {
+            tracing::error!(trigger = %d.id, error = %e, "invalid flow; time trigger disabled");
+            tx.execute("UPDATE flow_triggers SET enabled = 0 WHERE id = ?", [&d.id])?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
     let n = tx.execute(
         "UPDATE flow_triggers SET next_at = ? WHERE id = ? AND next_at = ?",
         params![plan.next_at_ms, d.id, d.next_at],
@@ -249,9 +256,6 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
     if n != 1 {
         return Ok(None);
     }
-    let Some(f) = flow_info(tx, &d.flow_id)? else {
-        return Ok(None);
-    };
     let started = match plan.action {
         ClaimAction::Skip { missed } => {
             let label = plan.action.label().unwrap_or_default();
@@ -298,40 +302,59 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
     Ok(Some(started))
 }
 
-/// One round: claims every due trigger, every wait whose time came, and every due retry. Returns
-/// the runs to drive. Each claim commits on its own, so a claim that fails is logged and skipped:
-/// the runs already claimed are still returned (nothing else would drive them before a restart),
-/// and one broken row does not hold up the others. Never fails; the `Result` is the callers'.
+/// Committed claims survive an error in another row; the source drives them before backing off.
+#[derive(Default)]
+pub(crate) struct Claims {
+    pub ids: Vec<String>,
+    pub error: Option<crate::FlowError>,
+}
+impl Claims {
+    pub fn failed(&mut self, error: crate::FlowError) {
+        tracing::error!(%error, "due row claim failed");
+        self.error.get_or_insert(error);
+    }
+}
+
+fn claim_triggers(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+    let mut out = Claims::default();
+    for d in cx.store().reader(|c| due(c, now))? {
+        match cx.store().transaction(|tx| claim(tx, &d, now)) {
+            Ok(Some((id, true))) => out.ids.push(id),
+            Ok(_) => {}
+            Err(e) => out.failed(e),
+        }
+    }
+    Ok(out)
+}
+
+fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
+    let mut out = Claims::default();
+    for (id, retry_at) in cx.store().reader(|c| runs::due_retries(c, now))? {
+        match cx
+            .store()
+            .transaction(|tx| runs::claim_retry(tx, &id, retry_at, now))
+        {
+            Ok(true) => out.ids.push(id),
+            Ok(false) => {}
+            Err(e) => out.failed(e),
+        }
+    }
+    Ok(out)
+}
+
+/// One best-effort pass for explicit callers and boot; all claims use the same source functions.
+/// Background timing belongs to the three independent due_loop tasks below.
 pub fn claim_due(cx: &FlowCx) -> FlowResult<Vec<String>> {
     let now = cx.now();
     let mut out = Vec::new();
-    let triggers = cx.store().reader(|c| due(c, now)).unwrap_or_else(|e| {
-        tracing::error!("due triggers: {e}");
-        Vec::new()
-    });
-    for d in triggers {
-        match cx.store().transaction(|tx| claim(tx, &d, now)) {
-            Ok(Some((id, true))) => out.push(id),
-            Ok(_) => {}
-            Err(e) => tracing::error!(trigger = %d.id, flow = %d.flow_id, "claim failed: {e}"),
-        }
-    }
-    out.extend(crate::engine::claim_due_waits(cx));
-    let retries = cx
-        .store()
-        .reader(|c| runs::due_retries(c, now))
-        .unwrap_or_else(|e| {
-            tracing::error!("due retries: {e}");
-            Vec::new()
-        });
-    for (id, retry_at) in retries {
-        match cx
-            .store()
-            .transaction(|tx| runs::claim_retry(tx, &id, retry_at))
-        {
-            Ok(true) => out.push(id),
-            Ok(false) => {}
-            Err(e) => tracing::error!(run = %id, "retry claim failed: {e}"),
+    for claims in [
+        claim_triggers(cx, now),
+        crate::engine::claim_waits_at(cx, now),
+        claim_retries(cx, now),
+    ] {
+        match claims {
+            Ok(claims) => out.extend(claims.ids),
+            Err(e) => tracing::error!(%e, "due source failed"),
         }
     }
     Ok(out)
@@ -410,18 +433,6 @@ pub fn recover(cx: &FlowCx) -> FlowResult<usize> {
     })
 }
 
-/// The earliest `next_at` of an enabled time trigger.
-fn earliest(c: &Connection) -> FlowResult<Option<i64>> {
-    Ok(c.query_row(
-        "SELECT min(t.next_at) FROM flow_triggers t JOIN flows f ON f.id = t.flow_id WHERE t.kind = 'time' AND t.enabled = 1 AND f.enabled = 1 AND f.deleted = 0",
-        [],
-        |r| r.get(0),
-    )?)
-}
-
-/// The longest wait between two failed boots.
-pub const BOOT_RETRY_MAX: Duration = Duration::from_secs(60);
-
 /// The `flow.scheduler` task.
 pub struct Scheduler {
     cx: Arc<FlowCx>,
@@ -475,46 +486,140 @@ impl Scheduler {
             })
             .await
     }
+}
 
-    /// Runs forever: sleeps until `min(earliest next_at, now + 15 s)` or a wake-up.
-    pub async fn run(self) {
-        // a failed boot (the store busy, a broken row) is tried again with a back-off; nothing runs
-        // on its own before it went through
-        let mut wait = Duration::from_secs(1);
-        while let Err(e) = self.boot().await {
-            tracing::error!("scheduler boot failed, again in {}s: {e}", wait.as_secs());
-            tokio::time::sleep(wait).await;
-            wait = (wait * 2).min(BOOT_RETRY_MAX);
+/// Source-local retry policy, including the one-time recovery phase.
+pub(crate) fn backoff() -> steve_runtime::policy::Backoff {
+    steve_runtime::policy::Backoff {
+        base: Duration::from_secs(1),
+        max: Duration::from_secs(60),
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Triggers,
+    Waits,
+    Retries,
+}
+
+/// One table of runnable flow work. Each instance owns its own due_loop and wake permit.
+pub struct RunSource {
+    cx: Arc<FlowCx>,
+    kind: Kind,
+}
+impl RunSource {
+    pub fn triggers(cx: Arc<FlowCx>) -> Self {
+        Self {
+            cx,
+            kind: Kind::Triggers,
         }
-        let mut pruned_at = i64::MIN;
-        loop {
-            let now = self.cx.now();
-            if now.saturating_sub(pruned_at) >= RETENTION_EVERY_MS {
-                pruned_at = now;
-                let pruned = self
-                    .cx
-                    .blocking(move |s| s.transaction(|tx| runs::prune(tx, now)))
-                    .await;
-                match pruned {
-                    Ok(n) if n > 0 => tracing::info!("pruned {n} old schedule runs"),
-                    Ok(_) => {}
-                    Err(e) => tracing::error!("schedule run retention: {e}"),
+    }
+    pub fn waits(cx: Arc<FlowCx>) -> Self {
+        Self {
+            cx,
+            kind: Kind::Waits,
+        }
+    }
+    pub fn retries(cx: Arc<FlowCx>) -> Self {
+        Self {
+            cx,
+            kind: Kind::Retries,
+        }
+    }
+    pub fn run(self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        async move {
+            let clock = self.cx.modules.clock.clone();
+            if matches!(self.kind, Kind::Triggers) {
+                let scheduler = Scheduler::new(self.cx.clone());
+                let policy = backoff();
+                let mut attempt = 0u32;
+                // This is the one-time recovery gate, not another due-work polling loop.
+                while let Err(error) = scheduler.boot().await {
+                    tracing::error!(%error, "flow recovery failed; retrying");
+                    clock.sleep(policy.sample_delay(attempt)).await;
+                    attempt = attempt.saturating_add(1);
                 }
+            } else {
+                self.cx.recovered().await;
             }
-            let next = self
-                .cx
+            let wake = match self.kind {
+                Kind::Triggers => self.cx.trigger_wake(),
+                Kind::Waits => self.cx.wait_wake.clone(),
+                Kind::Retries => self.cx.retry_wake.clone(),
+            };
+            steve_runtime::due::due_loop(Arc::new(self), clock, wake, backoff()).await;
+        }
+    }
+}
+impl steve_runtime::due::DueSource for RunSource {
+    fn name(&self) -> &'static str {
+        match self.kind {
+            Kind::Triggers => "flow.triggers",
+            Kind::Waits => "flow.waits",
+            Kind::Retries => "flow.retries",
+        }
+    }
+    fn next_due(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Option<i64>, steve_runtime::due::DueError>> + Send
+    {
+        let (cx, kind) = (self.cx.clone(), self.kind);
+        async move {
+            if matches!(kind, Kind::Triggers) && cx.has_followups().await {
+                return Ok(Some(cx.now()));
+            }
+            let sql = match kind {
+                Kind::Triggers => {
+                    "SELECT min(t.next_at) FROM flow_triggers t JOIN flows f ON f.id=t.flow_id WHERE t.kind='time' AND t.enabled=1 AND f.enabled=1 AND f.deleted=0"
+                }
+                Kind::Waits => {
+                    "SELECT min(w.until) FROM flow_waits w JOIN flow_runs r ON r.id=w.run_id WHERE r.status='waiting' AND w.mode IN ('delay','until','event')"
+                }
+                Kind::Retries => "SELECT min(retry_at) FROM flow_runs WHERE status='waiting'",
+            };
+            cx.blocking(move |s| s.reader(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)))
+                .await
+                .map_err(|e| steve_runtime::due::DueError(e.to_string()))
+        }
+    }
+    fn run_due(
+        &self,
+        now: i64,
+    ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
+        // Own the context: the public loop future can cross crate and Tokio task boundaries.
+        let (cx, kind, name) = (self.cx.clone(), self.kind, self.name());
+        async move {
+            let _activity = cx
                 .store()
-                .reader(earliest)
-                .unwrap_or(None)
-                .unwrap_or(i64::MAX);
-            let wait = next.min(now + IDLE_MS).saturating_sub(now).max(0);
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(wait as u64)) => {}
-                _ = self.cx.notified().notified() => {}
-            }
-            if let Err(e) = self.round().await {
-                tracing::error!("scheduler round: {e}");
-            }
+                .try_activity(name)
+                .ok_or_else(|| steve_runtime::due::DueError("store is in maintenance".into()))?;
+            cx.store()
+                .admitted(async {
+                    if matches!(kind, Kind::Triggers) {
+                        cx.spawn_followups().await;
+                    }
+                    let work = cx.clone();
+                    let claims = cx
+                        .blocking(move |_| match kind {
+                            Kind::Triggers => claim_triggers(&work, now),
+                            Kind::Waits => crate::engine::claim_waits_at(&work, now),
+                            Kind::Retries => claim_retries(&work, now),
+                        })
+                        .await
+                        .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+                    for id in claims.ids {
+                        spawn_drive(cx.clone(), id);
+                    }
+                    claims
+                        .error
+                        .map_or(Ok(()), |e| Err(steve_runtime::due::DueError(e.to_string())))
+                })
+                .await
         }
     }
 }

@@ -28,7 +28,9 @@
 //! let flow = setup.build(modules, Arc::new(steve_flow::GraphEngine));
 //! // steve-core's `Core` port: implement `supplement` too (item.link); the default refuses
 //! api_router.merge(steve_flow::routes(flow.clone()));              // /schedules…, behind the Caller layer
-//! tokio::spawn(steve_flow::Scheduler::new(flow.clone()).run());    // `flow.scheduler` (recover + missed runs first)
+//! tokio::spawn(steve_flow::scheduler::RunSource::triggers(flow.clone()).run()); // recovery first
+//! tokio::spawn(steve_flow::scheduler::RunSource::waits(flow.clone()).run());
+//! tokio::spawn(steve_flow::scheduler::RunSource::retries(flow.clone()).run());
 //! tokio::spawn(steve_flow::Poller::new(flow.clone()).run());       // `flow.poll`
 //! tokio::spawn(steve_flow::retention::run(flow.clone()));          // `flow.retention`
 //! // other modules (mail E1, GitHub G2, channels F1) get the entry point as a trait object:
@@ -166,7 +168,10 @@ pub struct FlowCx {
     /// Registered alarm sources ([`alarms::AlarmSource`]).
     pub alarms: alarms::AlarmSources,
     wake: Arc<Notify>,
-    alarm_wake: Notify,
+    pub(crate) alarm_wake: Arc<Notify>,
+    pub(crate) wait_wake: Arc<Notify>,
+    pub(crate) retry_wake: Arc<Notify>,
+    pub(crate) alarm_recheck: std::sync::atomic::AtomicBool,
     followups: Mutex<mpsc::UnboundedReceiver<Followup>>,
     /// `true` once the scheduler's boot recovered the interrupted runs ([`Self::recovered`]).
     recovered: tokio::sync::watch::Sender<bool>,
@@ -184,15 +189,22 @@ impl FlowCx {
     /// Makes the scheduler look at its triggers now (a schedule was created or changed).
     pub fn wake(&self) {
         self.wake.notify_one();
+        self.wait_wake.notify_one();
+        self.retry_wake.notify_one();
     }
 
     /// Makes the alarm clock plan and claim now (a subject changed and should not wait for its round).
     pub fn wake_alarms(&self) {
+        self.alarm_recheck
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.alarm_wake.notify_one();
     }
 
-    pub(crate) fn notified(&self) -> &Notify {
-        &self.wake
+    pub(crate) fn trigger_wake(&self) -> Arc<Notify> {
+        self.wake.clone()
+    }
+    pub(crate) async fn has_followups(&self) -> bool {
+        !self.followups.lock().await.is_empty()
     }
 
     /// Resolves once [`Scheduler::boot`] has recovered the runs a restart interrupted (or at once
@@ -404,7 +416,10 @@ impl FlowSetup {
             signals: signals::SignalDebounce::default(),
             alarms: self.alarms,
             wake: self.wake,
-            alarm_wake: Notify::new(),
+            alarm_wake: Arc::new(Notify::new()),
+            wait_wake: Arc::new(Notify::new()),
+            retry_wake: Arc::new(Notify::new()),
+            alarm_recheck: std::sync::atomic::AtomicBool::new(false),
             followups: Mutex::new(self.rx),
             recovered: tokio::sync::watch::Sender::new(false),
         });

@@ -33,6 +33,7 @@ fn existing_backoff_sequences_and_jitter_bounds() {
         (99, 600),
     ] {
         assert_eq!(policy(sec(1), sec(600)).delay(n, &mut rng), sec(s));
+        assert_eq!(policy(sec(1), sec(600)).sample_delay(n), sec(s));
     }
     // hub/plugins/run.rs:165; settled for >=60s resets BEFORE this delay.
     let p = Backoff {

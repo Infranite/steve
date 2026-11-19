@@ -358,20 +358,55 @@ pub fn page_of(
 /// Runs of `waiting` status whose retry is due.
 pub fn due_retries(c: &Connection, now: i64) -> FlowResult<Vec<(String, i64)>> {
     let mut st = c.prepare_cached(
-        "SELECT id, retry_at FROM flow_runs WHERE status = 'waiting' AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at",
+        "SELECT id, retry_at FROM flow_runs WHERE status = 'waiting' AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at, id LIMIT ?",
     )?;
     let rows = st
-        .query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([now, crate::scheduler::BATCH as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// Claims a due retry: `waiting` → `running` only if nobody else did. Returns whether it was ours.
-pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64) -> FlowResult<bool> {
+/// Claims a retry or ends unusable stored state. A true result needs completion bookkeeping.
+pub fn claim_retry(tx: &Tx, id: &str, retry_at: i64, now: i64) -> FlowResult<bool> {
+    let invalid: Option<bool> = tx.query_row("SELECT cursor IS NULL OR attempts > ?2 OR CASE WHEN json_valid(context) THEN json_type(context)<>'object' ELSE 1 END FROM flow_runs WHERE id=?1 AND status='waiting' AND retry_at=?3", params![id, crate::exec::MAX_RETRIES, retry_at], |r| r.get(0)).optional()?;
+    let Some(invalid) = invalid else {
+        return Ok(false);
+    };
+    if invalid {
+        return fail_due(tx, id, now, "Invalid stored retry state");
+    }
     Ok(tx.execute(
         "UPDATE flow_runs SET status = 'running', retry_at = NULL WHERE id = ? AND status = 'waiting' AND retry_at = ?",
         params![id, retry_at],
     )? == 1)
+}
+
+/// An unusable persisted wait/retry is terminal, using the run's existing failed state.
+pub(crate) fn fail_due(tx: &Tx, id: &str, now: i64, reason: &str) -> FlowResult<bool> {
+    let meta: Option<(String,String,Option<String>,bool)> = tx.query_row(
+        "SELECT workspace_id,flow_id,event_id,dry_run FROM flow_runs WHERE id=? AND status='waiting'", [id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional()?;
+    let Some((ws, flow, event, dry)) = meta else {
+        return Ok(false);
+    };
+    tx.execute("UPDATE flow_runs SET status='failed', retry_at=NULL, error=?2, outcome_label=?2, ended=?3 WHERE id=?1 AND status='waiting'", params![id, reason, now])?;
+    tx.execute("DELETE FROM flow_waits WHERE run_id=?", [id])?;
+    publish(tx, &ws, &flow, id);
+    if !dry && let Some(event) = event {
+        if let Some(ws) = crate::signals::settle(tx, &event)? {
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::AutomationEvent::Signal {
+                    id: event.into(),
+                    ws: ws.into(),
+                },
+            ));
+        }
+    }
+    // Dispatching an already failed run performs the engine's normal parent/event completion.
+    Ok(true)
 }
 
 /// Schedule runs past retention: older than 90 days and beyond the latest 200 of their

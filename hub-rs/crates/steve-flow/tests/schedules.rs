@@ -299,8 +299,19 @@ async fn a_broken_trigger_does_not_lose_the_others_claims() {
         (rs[0].id.as_str(), rs[0].status.as_str()),
         (ids[0].as_str(), "running")
     );
-    // `a`'s claim rolled back: no run, still due
+    // `a` has no run; the invalid trigger is disabled with its last deadline retained.
     assert!(runs_of(&e, &a).is_empty());
+    assert_eq!(
+        e.env
+            .store()
+            .reader(|c| Ok::<_, steve_store::StoreError>(c.query_row(
+                "SELECT enabled FROM flow_triggers WHERE flow_id=?",
+                [&a],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap(),
+        0
+    );
     assert_eq!(next_at(&e, &a), Some(monday_8am() + 30 * MIN));
     assert!(claim_due(&e.flow).unwrap().is_empty());
 }

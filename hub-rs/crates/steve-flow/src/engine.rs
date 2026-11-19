@@ -1009,16 +1009,15 @@ pub fn cancel(tx: &Tx, run: &RunRow, now: i64) -> FlowResult<bool> {
 /// Waits due by the clock (`delay`, `until`, event timeouts): resumes them and returns the runs to
 /// drive. Called by every scheduler round. A wait that cannot be resumed is logged and skipped, so
 /// the ones resumed before it are still driven.
-pub fn claim_due_waits(cx: &FlowCx) -> Vec<String> {
-    let now = cx.now();
+pub(crate) fn claim_waits_at(cx: &FlowCx, now: i64) -> FlowResult<crate::scheduler::Claims> {
     let due = cx.store().reader(|c| -> FlowResult<Vec<(String, String, String, Value)>> {
         let mut st = c.prepare_cached(
             "SELECT w.run_id, w.node_id, w.mode, w.match FROM flow_waits w JOIN flow_runs r ON r.id = w.run_id
               WHERE w.until IS NOT NULL AND w.until <= ? AND w.mode IN ('delay', 'until', 'event') AND r.status = 'waiting'
-              ORDER BY w.until",
+              ORDER BY w.until, w.run_id, w.node_id LIMIT ?",
         )?;
         let rows = st
-            .query_map([now], |r| {
+            .query_map([now, crate::scheduler::BATCH as i64], |r| {
                 let m: Option<String> = r.get(3)?;
                 Ok((
                     r.get(0)?,
@@ -1030,13 +1029,15 @@ pub fn claim_due_waits(cx: &FlowCx) -> Vec<String> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     });
-    let due = due.unwrap_or_else(|e| {
-        tracing::error!("due waits: {e}");
-        Vec::new()
-    });
-    let mut out = Vec::new();
+    let due = due?;
+    let mut out = crate::scheduler::Claims::default();
     for (run_id, node, mode, matcher) in due {
         let ok = cx.store().transaction(|tx| -> FlowResult<bool> {
+            let valid = tx.query_row("SELECT r.cursor = ?2 AND CASE WHEN json_valid(r.context) THEN json_type(r.context)='object' ELSE 0 END FROM flow_runs r JOIN flow_waits w ON w.run_id=r.id WHERE r.id=?1 AND r.status='waiting' AND w.node_id=?2 AND w.until<=?3", params![run_id, node, now], |r| r.get::<_, Option<bool>>(0)).optional()?;
+            let Some(valid) = valid else { return Ok(false); };
+            if !valid.unwrap_or(false) {
+                return runs::fail_due(tx, &run_id, now, "Invalid stored wait state");
+            }
             let Some(run) = runs::get(tx, &run_id)? else {
                 return Ok(false);
             };
@@ -1048,12 +1049,12 @@ pub fn claim_due_waits(cx: &FlowCx) -> Vec<String> {
             resume_in(tx, run, &node, res)
         });
         match ok {
-            Ok(true) => out.push(run_id),
+            Ok(true) => out.ids.push(run_id),
             Ok(false) => {}
-            Err(e) => tracing::error!(run = %run_id, node = %node, "wait not resumed: {e}"),
+            Err(e) => out.failed(e),
         }
     }
-    out
+    Ok(out)
 }
 
 /// `flow.recover` for flows (schedule runs are [`crate::scheduler::recover`]'s): a run left
