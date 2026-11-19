@@ -112,6 +112,62 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
     )))
 }
 
+/// Keep one history entry per uninterrupted sequence of Bot startup rejections. Other runs
+/// (including manual/cron runs) or a schedule version change begin a new sequence.
+fn record_start_failure(
+    tx: &steve_store::Tx,
+    schedule: &schedules::Schedule,
+    now: i64,
+    reason: &str,
+) -> ApiResult<()> {
+    let (ws, id) = (&schedule.workspace_id, &schedule.id);
+    let previous = runs::page(tx, ws, id, None, 1)?.pop().filter(|r| {
+        r.status == "failed"
+            && r.flow_version == schedule.version
+            && r.context["source"] == "digest.bot"
+            && r.work_item_id.is_none()
+            && r.cursor.is_none()
+            && !r.dry_run
+    });
+    // The first R4c marker already represents one failure even without an explicit count.
+    // This is separate from attempts, which belongs to the flow engine's action retries.
+    let failures = previous.as_ref().map_or(1, |r| {
+        r.context["start_failures"]
+            .as_i64()
+            .unwrap_or(1)
+            .max(1)
+            .saturating_add(1)
+    });
+    let context =
+        json!({"at":now,"trigger":"manual","source":"digest.bot","start_failures":failures});
+    let reused = previous.is_some();
+    let run = match previous {
+        Some(r) => r.id,
+        None => runs::insert(
+            tx,
+            &runs::NewRun {
+                ws,
+                flow_id: id,
+                flow_version: schedule.version,
+                trigger_kind: "manual",
+                status: "failed",
+                outcome_label: reason,
+                cursor: None,
+                context: &context,
+                now,
+            },
+        )?,
+    };
+    tx.execute(
+        "UPDATE flow_runs SET error = ?1, outcome_label = ?1, context = ?2, started = ?3, ended = ?3 WHERE id = ?4",
+        params![reason, context.to_string(), now, run],
+    )?;
+    if reused {
+        runs::publish(tx, ws, id, &run);
+    }
+    Ok(())
+}
+
 impl Runner {
     fn failed_start(
         &self,
@@ -132,25 +188,7 @@ impl Runner {
                 let Some(schedule) = schedules::get(tx, ws, id)? else {
                     return Ok(());
                 };
-                let run = runs::insert(
-                    tx,
-                    &runs::NewRun {
-                        ws,
-                        flow_id: id,
-                        flow_version: schedule.version,
-                        trigger_kind: "manual",
-                        status: "failed",
-                        outcome_label: &reason,
-                        cursor: None,
-                        context: &json!({"at":now,"trigger":"manual","source":"digest.bot"}),
-                        now,
-                    },
-                )?;
-                tx.execute(
-                    "UPDATE flow_runs SET error = ? WHERE id = ?",
-                    params![reason, run],
-                )?;
-                Ok(())
+                record_start_failure(tx, &schedule, now, &reason)
             })
             .map_err(|e| steve_store::StoreError::Hook(e.to_string()))?;
         tracing::warn!(
@@ -376,12 +414,179 @@ mod tests {
         assert_eq!(source.next_due().await.unwrap(), Some(now + 60_000));
         e.env.clock.advance(60_000 - 17_123);
         source.run_due(now + 60_000).await.unwrap();
+        let repeated = history();
         assert_eq!(
-            history().len(),
-            2,
-            "the still-broken graph gets one new attempt per minute"
+            repeated.len(),
+            1,
+            "consecutive failures share one history entry"
         );
+        assert_eq!(repeated[0].id, rows[0].id);
+        assert_eq!(repeated[0].context["start_failures"], 2);
+        assert_eq!(repeated[0].started, now + 60_000);
+        assert_eq!(repeated[0].view().at, now + 60_000);
         assert_eq!(source.next_due().await.unwrap(), Some(now + 120_000));
+    }
+
+    #[tokio::test]
+    async fn a_day_of_broken_schedule_starts_keeps_one_counted_history_entry() {
+        use steve_runtime::{Clock, due::DueSource};
+        let (e, id) = bound().await;
+        let now = e.env.clock.now();
+        packet(&e, WS, now);
+        e.env
+            .store()
+            .with_conn(|c| {
+                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
+                Ok(())
+            })
+            .unwrap();
+        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        source.run_due(now).await.unwrap();
+        let history = || {
+            e.env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap()
+        };
+        let first = history().pop().unwrap();
+        for minute in 1..1440 {
+            e.env.clock.advance(60_000);
+            source.run_due(now + minute * 60_000).await.unwrap();
+        }
+        let rows = history();
+        assert_eq!(
+            rows.len(),
+            1,
+            "1440 failed starts must not fill the run list"
+        );
+        let last = &rows[0];
+        assert_eq!(last.id, first.id);
+        assert_eq!(last.context["start_failures"], 1440);
+        assert_eq!(
+            last.attempts, 0,
+            "flow action retry attempts are independent"
+        );
+        assert_eq!(last.started, now + 1439 * 60_000);
+        assert_eq!(last.ended, Some(last.started));
+        assert_eq!(
+            last.view().at,
+            last.started,
+            "the run list shows the latest failure time"
+        );
+        assert_eq!(source.next_due().await.unwrap(), Some(now + 1440 * 60_000));
+        source.run_due(e.env.clock.now()).await.unwrap();
+        assert_eq!(
+            history(),
+            rows,
+            "an own commit at the same wall time cannot add a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_runs_or_a_new_schedule_version_begin_a_new_failure_sequence() {
+        use steve_runtime::Clock;
+        for barrier in ["version", "done", "failed", "skipped"] {
+            let (e, id) = bound().await;
+            let now = e.env.clock.now();
+            let runner = Runner(e.flow.clone());
+            runner
+                .failed_start(WS, &id, now, ApiError::rule("first failure"))
+                .unwrap();
+            let first = e
+                .env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap()
+                .pop()
+                .unwrap();
+            e.env.clock.advance(60_000);
+            e.env
+                .store()
+                .transaction(|tx| -> ApiResult<()> {
+                    if barrier == "version" {
+                        tx.execute("UPDATE flows SET version = version + 1 WHERE id = ?", [&id])?;
+                    } else {
+                        runs::insert(
+                            tx,
+                            &runs::NewRun {
+                                ws: WS,
+                                flow_id: &id,
+                                flow_version: first.flow_version,
+                                trigger_kind: "manual",
+                                status: barrier,
+                                outcome_label: "other run",
+                                cursor: None,
+                                context: &json!({"at":now + 60_000}),
+                                now: now + 60_000,
+                            },
+                        )?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            runner
+                .failed_start(WS, &id, now + 60_000, ApiError::rule("new failure"))
+                .unwrap();
+            let rows = e
+                .env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                if barrier == "version" { 2 } else { 3 },
+                "{barrier}"
+            );
+            assert_ne!(rows[0].id, first.id, "{barrier}");
+            assert_eq!(rows[0].context["start_failures"], 1);
+            assert_eq!(rows[0].error.as_deref(), Some("new failure"));
+            assert_eq!(
+                rows[0].flow_version,
+                first.flow_version + i64::from(barrier == "version")
+            );
+            assert_eq!(
+                e.env.store().reader(|c| runs::get(c, &first.id)).unwrap(),
+                Some(first),
+                "{barrier}: never rewrite an earlier sequence"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_to_update_a_coalesced_start_remains_a_source_error_and_rolls_back() {
+        use steve_runtime::{Clock, due::DueSource};
+        let (e, id) = bound().await;
+        let now = e.env.clock.now();
+        packet(&e, WS, now);
+        e.env
+            .store()
+            .with_conn(|c| {
+                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
+                Ok(())
+            })
+            .unwrap();
+        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        source.run_due(now).await.unwrap();
+        let before = e
+            .env
+            .store()
+            .reader(|c| runs::page(c, WS, &id, None, 50))
+            .unwrap();
+        e.env.store().with_conn(|c| {
+            c.execute_batch("CREATE TRIGGER reject_failed_update BEFORE UPDATE ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot update failed start'); END")?;
+            Ok(())
+        }).unwrap();
+        e.env.clock.advance(60_000);
+        let error = source.run_due(now + 60_000).await.unwrap_err();
+        assert!(error.0.contains("cannot update failed start"));
+        assert_eq!(
+            e.env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap(),
+            before,
+            "failed updates cannot partly change the count, timestamp or history"
+        );
     }
 
     #[tokio::test]
