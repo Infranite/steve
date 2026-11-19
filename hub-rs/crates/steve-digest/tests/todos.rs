@@ -1,5 +1,7 @@
 //! Todos and goals: fields, per-member access, goal progress, recurrence, undo and the agent's tools.
 //! Synthetic data only; no network, harness or model.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_digest::{changes, todo, todo_tools};
@@ -85,6 +87,7 @@ fn state(e: &TestEnv, id: &str, s: &str, item: Option<&str>) -> Option<String> {
 #[test]
 fn fields_are_checked_as_a_whole() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     let goal = add(&e, ME, "Ship the Q4 review", |t| {
         t.kind = "goal";
         t.target_date = Some("2027-03-01");
@@ -185,6 +188,7 @@ fn fields_are_checked_as_a_whole() {
 #[test]
 fn goal_progress_counts_children_and_linked_items_once() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     let goal = add(&e, ME, "Launch", |t| t.kind = "goal");
     // nothing under it yet: not 0%, not split
     let p = progress(&e, &goal);
@@ -299,6 +303,7 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
     );
     // the person's notification time zone, else the workspace's
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     e.store()
         .with_conn(|c| {
             c.execute(
@@ -325,6 +330,7 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
 #[test]
 fn completing_a_recurring_todo_makes_the_next_and_undo_takes_it_back() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     let id = add(&e, ME, "water the plants", |t| {
         t.due_date = Some("2027-01-30");
         t.recur = Some("FREQ=DAILY;INTERVAL=3");
@@ -374,6 +380,7 @@ fn completing_a_recurring_todo_makes_the_next_and_undo_takes_it_back() {
 #[tokio::test]
 async fn every_member_has_their_own_todos_and_nobody_elses() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     let app = steve_digest::routes().with_state(e.modules.clone());
     let (me, other) = (caller(WS, ME), caller(WS, OTHER));
     // a member (not the owner) uses todos, but still not the owner-only digest data
@@ -564,6 +571,7 @@ fn tool(e: &TestEnv, who: &str, name: &str, args: Value) -> Result<Value, String
 #[test]
 fn agent_tools_act_for_the_sessions_person_only_and_are_undoable() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     // a session for the workspace, not a person: no todos to read or write
     let svc = format!("svc:{WS}");
     for name in [todo_tools::LIST, todo_tools::ADD] {
@@ -684,6 +692,7 @@ fn agent_tools_act_for_the_sessions_person_only_and_are_undoable() {
 #[test]
 fn a_goal_with_todos_under_it_is_not_deleted_by_undo() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     let g = tool(
         &e,
         ME,
@@ -711,9 +720,10 @@ fn a_goal_with_todos_under_it_is_not_deleted_by_undo() {
 #[tokio::test]
 async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     let e = env();
+    let _digest_audit = digest_audit::Audit(e.store().clone());
     // the owner's digest: a matter, a message in a space, a person
     e.store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             c.execute_batch(
                 "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
                     VALUES ('s1', 'default', 'test', 'group', 'g1', 'Board room', 1, 1);
@@ -725,6 +735,7 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
                  INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, created)
                     VALUES ('m1', 'default', 's1', 'm1', 'in', 'alice', 'the merger closes in March', '[]', 1);",
             )?;
+            steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, "m1")?;
             Ok(())
         })
         .unwrap();

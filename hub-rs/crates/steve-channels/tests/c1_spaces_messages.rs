@@ -2,6 +2,8 @@
 //! space, identifies the sender and reaches `ext_events`; a new group opens a decision; the bot's
 //! own messages are not processed; purged text is NULL; the message is on the contact timeline.
 //! Plus the `/spaces` routes, duplicates, `im.*` types, other bots, and the loop guard.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 
 use std::sync::Arc;
 
@@ -394,12 +396,13 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         let at = steve_store::now();
         h.env
             .store()
-            .with_conn(|c| {
+            .transaction(|c| -> Result<(), steve_store::StoreError> {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?1, 'default', ?2, ?3, 'out', '好的', ?4, ?5, ?5)",
                     params![id, other.space_id, format!("fm_{id}"), status, at],
                 )?;
+                steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, id)?;
                 Ok(())
             })
             .unwrap();
@@ -497,12 +500,13 @@ async fn types_mention_reply_and_mentions_column() {
     // a reply to a message Steve sent
     h.env
         .store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             c.execute(
                 "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, status, created, sent)
                  VALUES ('cm_out1', 'default', ?, 'fm_1', 'out', ?, 'persona', '已处理', 'sent', 1, 1)",
                 params![r.space_id, h.bot_acc],
             )?;
+                steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, "cm_out1")?;
             Ok(())
         })
         .unwrap();
@@ -526,13 +530,14 @@ async fn many_replies_do_not_silence_the_space() {
     let now = h.ch.now();
     h.env
         .store()
-        .with_conn(|c| {
+        .transaction(|c| -> Result<(), steve_store::StoreError> {
             for i in 0..50 {
                 c.execute(
                     "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, created, sent)
                      VALUES (?, 'default', ?, ?, 'out', 'x', 'sent', ?, ?)",
                     params![format!("cm_o{i}"), r.space_id, format!("fm_{i}"), now, now],
                 )?;
+                steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, &format!("cm_o{i}"))?;
             }
             Ok(())
         })
@@ -1054,4 +1059,12 @@ async fn a_sender_in_a_declared_system_lands_on_the_contact_holding_its_alias() 
         ),
         vec![json!(format!("{} probe_internal", alice.party_id))]
     );
+}
+
+impl Drop for H {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

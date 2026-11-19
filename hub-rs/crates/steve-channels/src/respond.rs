@@ -273,6 +273,11 @@ pub(crate) fn open_draft_as(
             now
         ],
     )?;
+    steve_store_sqlite::digest::enqueue_digestible(
+        tx,
+        steve_store_sqlite::digest::Source::ChanMessage,
+        &id,
+    )?;
     let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),

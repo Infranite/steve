@@ -191,7 +191,7 @@ fn legacy_migration_replays_without_a_support_window() {
     let head: i64 = fresh
         .query_row("SELECT v FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    for version in [1, 27, 107, 108, 109, 110, 111, head] {
+    for version in [1, 27, 107, 108, 109, 110, 111, 112, 113, head] {
         let c = archived_at(version);
         c.pragma_update(None, "foreign_keys", true).unwrap();
         steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();

@@ -78,6 +78,11 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     if added == 0 {
         return Ok(None);
     }
+    steve_store_sqlite::digest::enqueue_digestible(
+        tx,
+        steve_store_sqlite::digest::Source::ChanMessage,
+        &id,
+    )?;
     event(tx, n.ws, n.space_id, &id);
     Ok(Some(id))
 }

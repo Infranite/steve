@@ -235,6 +235,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../legacy/migrations/112.sql"),
     // 113: external-channel messages that can never be accepted keep their input (dead letters).
     include_str!("../legacy/migrations/113.sql"),
+    include_str!("../legacy/migrations/114.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -11,6 +11,7 @@ fake = ["dep:rcgen"]
 
 [dependencies]
 steve-types = { path = "../steve-types" }
+steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-runtime = { path = "../steve-runtime" }
 steve-modules = { path = "../steve-modules" }
 steve-store = { path = "../steve-store" }

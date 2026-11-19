@@ -7,6 +7,7 @@ description = "The digest base: conversation profiles, windows, digest packets, 
 
 [dependencies]
 steve-runtime = { path = "../steve-runtime" }
+steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-types = { path = "../steve-types" }
 steve-store = { path = "../steve-store" }
 # Source adapter reuses channel visibility rather than widening personal-account access.

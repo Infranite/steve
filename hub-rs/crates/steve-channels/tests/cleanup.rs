@@ -1,6 +1,8 @@
 //! Cleaning up what an identity brought in (`steve_channels::cleanup`): the dry run, the text
 //! purge, the full cleanup with everything referenced kept, a disconnected identity by its
 //! account, the backup taken first, the leftovers list, and the confirmation.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 
 use std::sync::Arc;
 
@@ -200,6 +202,19 @@ impl H {
              INSERT INTO ext_events (id, workspace_id, connection_id, source, type, dedupe_key, space_id, message_id, occurred, received, summary, payload) VALUES
                ('{p}ev1', 'default', {conn}, 'im', 'im.message', '{p}d1', '{p}sp_a', '{p}m1', 1, 1, 'Ann：合同下周签', '{{\"text\":\"合同下周签\"}}');"
         ));
+        self.env
+            .store()
+            .transaction(|tx| {
+                for n in 1..=4 {
+                    steve_store_sqlite::digest::enqueue_digestible(
+                        tx,
+                        steve_store_sqlite::digest::Source::ChanMessage,
+                        &format!("{p}m{n}"),
+                    )?;
+                }
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
     }
 }
 
@@ -796,4 +811,12 @@ async fn output_foreign_keys_follow_full_cleanup_and_rollback() {
     );
     assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='bob' AND manual_space_id='sp_b' AND learned_space_id IS NULL"), 1);
     assert_eq!(h.n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+impl Drop for H {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

@@ -3,6 +3,8 @@
 //! line with the reason, no operation) and `reply`, the channel target (persona, rules, duty,
 //! trigger words / where), names that are not recognized, and the `global` candidates. The model is
 //! always the scripted gateway; nothing real is called.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 
 use std::sync::Arc;
 
@@ -938,4 +940,12 @@ async fn english_request_zh_cn_card_and_prompt() {
         err.to_string(),
         "An account connected as you can't reply directly, only draft"
     );
+}
+
+impl Drop for H {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

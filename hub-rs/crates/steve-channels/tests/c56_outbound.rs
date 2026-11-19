@@ -7,6 +7,8 @@
 //! thread as a draft; a failed send opens retry / discard; one approval for a flow step, not two).
 //! Safety: no path reaches the adapter without a valid approval, grant, rule or trigger — each is
 //! checked against the store again right before sending.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 
 use std::sync::Arc;
 
@@ -1940,6 +1942,18 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
         &h,
         &format!("UPDATE chan_messages SET status = 'pending' WHERE id = '{message_id}'"),
     );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store_sqlite::digest::sync_message(
+                tx,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                &message_id,
+                None,
+            )
+            .map_err(steve_store::StoreError::from)
+        })
+        .unwrap();
     let o = h
         .outbox
         .send(
@@ -2146,6 +2160,18 @@ async fn what_went_out_as_you_is_recalled_as_you_whatever_the_voice_is_now() {
         &h,
         &format!("UPDATE chan_messages SET status = 'sent', sent_via = NULL WHERE id = '{m}'"),
     );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store_sqlite::digest::sync_message(
+                tx,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                &m,
+                None,
+            )
+            .map_err(steve_store::StoreError::from)
+        })
+        .unwrap();
     h.outbox.recall(&h.ch, WS, ME, &m).await.expect("recalled");
     assert_eq!(*h.fake.recalled.lock().unwrap(), vec!["om_u2".to_string()]);
     assert_eq!(u.1.lock().unwrap().len(), 1);
@@ -3991,6 +4017,18 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
             "UPDATE chan_messages SET status = 'pending', sent = NULL, created = 0 WHERE id = '{m}'"
         ),
     );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store_sqlite::digest::sync_message(
+                tx,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                &m,
+                None,
+            )
+            .map_err(steve_store::StoreError::from)
+        })
+        .unwrap();
     h.outbox.send_due(&h.ch).await;
     h.outbox.send_due(&h.ch).await;
     let sends = h.fake.sent.lock().unwrap().len();
@@ -5856,6 +5894,18 @@ async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rec
             result
         ),
     );
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store_sqlite::digest::sync_message(
+                tx,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                &message,
+                None,
+            )
+            .map_err(steve_store::StoreError::from)
+        })
+        .unwrap();
     let queue = cold_outbox(&h);
     queue.send_due(&h.ch).await;
     assert_eq!(status(&h, &message), "draft");
@@ -7571,4 +7621,12 @@ async fn send_claim_commits_do_not_self_wake_into_a_busy_loop() {
         ),
     );
     due_wakes::assert_no_self_wake_loop(f.source, &f.h.ch, &["chan_messages"]).await;
+}
+
+impl Drop for H {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

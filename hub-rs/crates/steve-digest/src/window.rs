@@ -52,10 +52,10 @@ pub fn cursor(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Cursor>
         .optional()?)
 }
 
-// The retired NOT NULL column is no longer read as a time floor.
+// The retired NOT NULL column retains the initial exclusion for audits, never live intake.
 fn save_cursor(tx: &Tx, ws: &str, conv: &ConvRef, k: &Cursor, now: i64) -> Result<()> {
     tx.execute(
-        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, coalesce((SELECT since FROM digest_cursors WHERE workspace_id=?1 AND conv=?2),0))",
         params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now],
     )?;
     Ok(())
@@ -64,6 +64,7 @@ fn save_cursor(tx: &Tx, ws: &str, conv: &ConvRef, k: &Cursor, now: i64) -> Resul
 fn receipt(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg], seq: i64, now: i64) -> Result<()> {
     for m in msgs {
         tx.execute("INSERT INTO digest_receipts (workspace_id, conv, message_id, seq, created) VALUES (?, ?, ?, ?, ?)", params![ws, conv.key(), m.id, seq, now])?;
+        steve_store_sqlite::digest::dequeue_on_receipt(tx, ws, &conv.key(), &m.id)?;
     }
     Ok(())
 }
@@ -148,16 +149,15 @@ fn run_conv_step(
         return Ok(());
     };
     let p = profile::profile(tx, ws, &info)?;
+    let mut initial_floor = None;
     let mut k = if let Some(k) = cursor(tx, ws, conv)? {
         k
     } else {
         // Apply lookback once. Later insertions are eligible even with older provider timestamps.
         if b.backlog_days > 0 {
             let floor = now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS));
-            tx.execute(
-                "DELETE FROM digest_pending WHERE workspace_id = ? AND conv = ? AND at < ?",
-                params![ws, conv.key(), floor],
-            )?;
+            steve_store_sqlite::digest::remove_before(tx, ws, &conv.key(), floor)?;
+            initial_floor = Some(floor);
         }
         Cursor {
             at: i64::MIN,
@@ -172,6 +172,13 @@ fn run_conv_step(
     }
     // Persist initialization even when paused or budget-deferred.
     save_cursor(tx, ws, conv, &k, now)?;
+    if let Some(floor) = initial_floor {
+        // Audit metadata only: intake still accepts later backfill at any provider time.
+        tx.execute(
+            "UPDATE digest_cursors SET since=? WHERE workspace_id=? AND conv=?",
+            params![floor, ws, conv.key()],
+        )?;
+    }
     rep.conversations += 1;
     match p.settings.depth.as_str() {
         "paused" => return Ok(()),
@@ -372,11 +379,12 @@ mod tests {
     fn panic_before_or_after_acknowledgement_replays_once_after_reopen() {
         for fail_at in 1..=2 {
             let e = TestEnv::new(|_| {});
-            e.store().with_conn(|c| {
+            e.store().transaction(|c| {
             c.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
                 VALUES ('s1', 'default', 'test', 'group', 's1', 'Group', 1, 1);
                 INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created)
                 VALUES ('m1', 'default', 's1', 'in', 'backfilled message', 1);")?;
+            steve_store_sqlite::digest::enqueue_digestible(c, steve_store_sqlite::digest::Source::ChanMessage, "m1")?;
             Ok::<_, StoreError>(())
         }).unwrap();
             let conv = ConvRef::new("space", "s1");
@@ -443,6 +451,7 @@ mod tests {
                         1
                     );
                     assert_eq!(conv::unread_stats(c, WS, &conv)?, (0, 0, 0));
+                    assert!(steve_store_sqlite::digest::verify_pending(c, WS)?.is_empty());
                     Ok::<_, StoreError>(())
                 })
                 .unwrap();

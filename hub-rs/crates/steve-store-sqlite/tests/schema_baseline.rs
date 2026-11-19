@@ -169,6 +169,10 @@ fn generated_baselines_and_inventories_are_current() {
             .count(),
         "duplicate trigger metadata"
     );
+    assert!(
+        triggers.len() <= replacements.len() && replacements.len() <= 33,
+        "trigger count increased"
+    );
     let mut expected = String::from("# name\ttable\tdomain\treplacement_operation\n");
     for (name, o) in triggers {
         let f = &replacements[name];

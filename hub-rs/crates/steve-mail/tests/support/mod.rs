@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+#[path = "../../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -337,4 +339,12 @@ impl H {
 /// Unix seconds, `days` ago.
 pub fn days_ago(days: i64) -> i64 {
     steve_store::now() / 1000 - days * 86_400
+}
+
+impl Drop for H {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
 }

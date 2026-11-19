@@ -626,6 +626,13 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
         "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
         [&msgs],
     )?;
+    for id in &p.messages {
+        steve_store_sqlite::digest::remove_message(
+            tx,
+            steve_store_sqlite::digest::Source::ChanMessage,
+            id,
+        )?;
+    }
     for table in SPACE_OWNED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE space_id IN (SELECT value FROM json_each(?1))"),
