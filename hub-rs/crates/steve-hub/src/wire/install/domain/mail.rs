@@ -41,11 +41,11 @@ install! { install(reg, cx) [conns, declared, draft_link, kb, mail_cfg, mail_hoo
 install! { start(reg, _cx) [mut jobs, mail] => [jobs, mail] {
     {
         let mail = mail.clone();
-        jobs.push(Job::spawned("mail.sync", move || vec![mail.spawn_jobs()]));
+        jobs.push(Job::new("mail.sync", mail.run_jobs()));
     }
     {
         let mail = mail.clone();
-        jobs.push(Job::spawned("mail.send", move || vec![mail.spawn_send_queue()]));
+        jobs.push(Job::new("mail.send", mail.run_send_queue()));
     }
 }}
 

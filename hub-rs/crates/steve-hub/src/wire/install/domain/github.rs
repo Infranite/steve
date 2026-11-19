@@ -26,12 +26,12 @@ install! { start(reg, _cx) [flow, gh, mut jobs, notices, sink] => [flow, gh, gh_
     gh.set_notifier(Arc::new(notices));
     {
         let gh = gh.clone();
-        jobs.push(Job::spawned("github.poll", move || vec![gh.spawn_jobs()]));
+        jobs.push(Job::new("github.poll", gh.run_jobs()));
     }
     // approved GitHub writes: running ones a restart cut off become unknown first
     {
         let gh = gh.clone();
-        jobs.push(Job::spawned("github.effects", move || vec![gh.spawn_effects()]));
+        jobs.push(Job::new("github.effects", gh.run_effects_job()));
     }
 }}
 

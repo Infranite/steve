@@ -40,26 +40,6 @@ impl Job {
     pub fn start(self, owner: &crate::jobs::Tasks) {
         owner.start(self.name, self.start);
     }
-    /// Adopts existing self-spawning domain entry points, including their child handles.
-    pub fn spawned(
-        name: &'static str,
-        start: impl FnOnce() -> Vec<tokio::task::JoinHandle<()>> + Send + 'static,
-    ) -> Self {
-        Self::task(name, move || {
-            struct Children(Vec<tokio::task::JoinHandle<()>>);
-            impl Drop for Children {
-                fn drop(&mut self) {
-                    for child in &self.0 {
-                        child.abort();
-                    }
-                }
-            }
-            let mut children = Children(start());
-            steve_runtime::spawn(name, async move {
-                futures::future::join_all(&mut children.0).await;
-            })
-        })
-    }
 }
 
 /// What schedules need from steve-core.
@@ -206,6 +186,7 @@ impl steve_flow::Core for FlowCore {
 
 /// The modules, their `/api` routes (still needing the `Caller` layer) and their background jobs.
 pub struct Built {
+    pub plugins: crate::plugins::Plugins,
     pub modules: Modules,
     pub flow: Arc<steve_flow::FlowCx>,
     /// The knowledge module's state, for its MCP tools.

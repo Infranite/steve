@@ -18,15 +18,13 @@ install! { install(reg, cx) [conns, mut jobs, modules] => [conns, directory, job
         steve_modules::contacts::sync::DirectorySync::new(modules.clone(), Arc::new(directory));
     {
         let directory = directory.clone();
-        jobs.push(Job::spawned("contacts.sync", move || directory.spawn()));
+        jobs.push(Job::new("contacts.sync", directory.run()));
     }
     // connected, re-verified, a permission granted: sync the address book again soon
     let events = bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. }))));
     {
         let directory = directory.clone();
-        jobs.push(Job::spawned("contacts.watch", move || {
-            vec![directory.spawn_watch(events)]
-        }));
+        jobs.push(Job::new("contacts.watch", directory.watch(events)));
     }
 }}
 

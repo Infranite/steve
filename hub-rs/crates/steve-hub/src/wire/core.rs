@@ -1317,6 +1317,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
 // ── the HTTP layer's Domain ──
 
 pub struct CoreDomain {
+    pub plugins: crate::plugins::Plugins,
     pub jobs: Arc<crate::jobs::Tasks>,
     pub core: Core,
     /// The harness adapters the Hub knows, kept fresh from the local Node.
@@ -1428,6 +1429,7 @@ impl Domain for CoreDomain {
     }
     async fn shutdown(&self) {
         self.jobs.stop().await;
+        self.plugins.stop_all().await;
         let node = async {
             match &self.node {
                 Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())

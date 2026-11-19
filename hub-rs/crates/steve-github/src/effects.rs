@@ -324,23 +324,22 @@ impl GitHub {
 
     /// The runner: recovers once, then runs due effects when woken and every [`EVERY`]. Holds the
     /// service weakly; stops when it is dropped.
-    pub fn spawn_effects(&self) -> tokio::task::JoinHandle<()> {
+    pub async fn run_effects_job(self) {
         let weak = std::sync::Arc::downgrade(&self.0);
         self.recover_effects();
-        tokio::spawn(async move {
-            loop {
-                let wake = {
-                    let Some(inner) = weak.upgrade() else { break };
-                    let gh = GitHub(inner);
-                    while gh.run_effects().await > 0 {}
-                    gh.0.effect_wake.clone()
-                };
-                tokio::select! {
-                    _ = wake.notified() => {}
-                    _ = tokio::time::sleep(EVERY) => {}
-                }
+
+        loop {
+            let wake = {
+                let Some(inner) = weak.upgrade() else { break };
+                let gh = GitHub(inner);
+                while gh.run_effects().await > 0 {}
+                gh.0.effect_wake.clone()
+            };
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(EVERY) => {}
             }
-        })
+        }
     }
 }
 

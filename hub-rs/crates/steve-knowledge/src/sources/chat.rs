@@ -268,22 +268,20 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
 }
 
 /// Starts the `kb.chat` job (today hourly; yesterday at 03:30 and its extraction at 03:40).
-pub fn spawn_job(m: Modules, kb: Knowledge) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last_today = i64::MIN;
-        let mut every = tokio::time::interval(TICK);
-        loop {
-            every.tick().await;
-            let now = m.clock.now();
-            let today = now.saturating_sub(last_today) >= TODAY_EVERY;
-            if today {
-                last_today = now;
-            }
-            if let Err(e) = tick(&m, &kb, now, today).await {
-                tracing::warn!("kb.chat: {e}");
-            }
+pub async fn run(m: Modules, kb: Knowledge) {
+    let mut last_today = i64::MIN;
+    let mut every = tokio::time::interval(TICK);
+    loop {
+        every.tick().await;
+        let now = m.clock.now();
+        let today = now.saturating_sub(last_today) >= TODAY_EVERY;
+        if today {
+            last_today = now;
         }
-    })
+        if let Err(e) = tick(&m, &kb, now, today).await {
+            tracing::warn!("kb.chat: {e}");
+        }
+    }
 }
 
 /// Re-reads a day document for the index queue.

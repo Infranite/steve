@@ -62,7 +62,7 @@
 //!     .responder(replies.clone())       // C4 + C6
 //!     .build();
 //! late.set(&channels);                                                 // C4 flow actions, C6 hook
-//! outbox.clone().spawn_queue(&channels);                               // C6 approvals, retries
+//! tokio::spawn(outbox.clone().queue(channels.clone()));                               // C6 approvals, retries
 //! api_router.merge(steve_channels::api::routes(channels.clone()));      // behind the Caller layer
 //! contacts_ports.timelines.push(steve_channels::messages::MessageTimeline::arc());
 //! contacts_ports.spaces = Some(Arc::new(steve_channels::spaces::Spaces));

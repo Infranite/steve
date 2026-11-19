@@ -259,17 +259,15 @@ pub fn sweep(m: &Modules) -> Result<usize> {
 }
 
 /// The `kb.sync_mems` job: a sweep now, then every [`SWEEP_EVERY`].
-pub fn spawn_sweeper(m: Modules) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(SWEEP_EVERY);
-        loop {
-            tick.tick().await;
-            let mm = m.clone();
-            match tokio::task::spawn_blocking(move || sweep(&mm)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!("kb.sync_mems: {e}"),
-                Err(e) => tracing::warn!("kb.sync_mems: task failed: {e}"),
-            }
+pub async fn sweep_job(m: Modules) {
+    let mut tick = tokio::time::interval(SWEEP_EVERY);
+    loop {
+        tick.tick().await;
+        let mm = m.clone();
+        match tokio::task::spawn_blocking(move || sweep(&mm)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("kb.sync_mems: {e}"),
+            Err(e) => tracing::warn!("kb.sync_mems: task failed: {e}"),
         }
-    })
+    }
 }

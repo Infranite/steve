@@ -12,7 +12,7 @@ install! { routes(reg, _cx) [conns, mut module_routes, plugins] => [conns, modul
     module_routes = module_routes.merge(crate::plugins::api::routes(plugins.clone(), conns.clone()));
 }}
 
-install! { jobs(reg, cx) [mut jobs, modules, plugins] => [jobs, modules] {
+install! { jobs(reg, cx) [mut jobs, modules, plugins] => [jobs, modules, plugins] {
     let Env { bus, .. } = cx.clone();
-    jobs.push(Job::new("plugins.supervise", plugins.supervise(modules.clone(), bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))))));
+    jobs.push(Job::new("plugins.supervise", plugins.clone().supervise(modules.clone(), bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Connection { .. })))))));
 }}

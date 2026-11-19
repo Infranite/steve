@@ -275,16 +275,14 @@ mod tests {
         );
         let dropped = Arc::new(AtomicUsize::new(0));
         let d = dropped.clone();
-        let job = Job::spawned("children", move || {
-            (0..2)
-                .map(|_| {
-                    let dropped = Dropped(d.clone());
-                    tokio::spawn(async move {
-                        let _dropped = dropped;
-                        std::future::pending::<()>().await;
-                    })
-                })
-                .collect()
+        let job = Job::new("children", async move {
+            let a = Dropped(d.clone());
+            let b = Dropped(d.clone());
+            let run = |guard| async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            };
+            tokio::join!(run(a), run(b));
         });
         job.start(&jobs);
         settle().await;

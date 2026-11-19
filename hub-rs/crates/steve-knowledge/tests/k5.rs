@@ -256,7 +256,10 @@ async fn wait_docs(e: &Env, source: &str, n: i64) {
 #[tokio::test]
 async fn add_wiki_folder_private() {
     let e = setup();
-    let scans = steve_knowledge::spawn_scans(e.env.modules.clone(), e.kb.clone());
+    let scans = tokio::spawn(steve_knowledge::scan_job(
+        e.env.modules.clone(),
+        e.kb.clone(),
+    ));
     let wiki = e.home.join("wiki");
     let p = e
         .draft(

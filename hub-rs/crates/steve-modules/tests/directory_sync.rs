@@ -193,7 +193,7 @@ fn pair(n: &str, r: &str) -> (String, String) {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_snapshots_dissolve_a_department_and_move_a_person() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["msg.receive","directory.read"]"#)
         .await;
 
@@ -339,7 +339,7 @@ async fn two_snapshots_dissolve_a_department_and_move_a_person() {
 #[tokio::test(flavor = "multi_thread")]
 async fn renames_departures_and_returns() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["directory.read"]"#).await;
     fx.sync_now().await;
     let plat = fx.team_id("od-plat");
@@ -411,7 +411,7 @@ async fn people_join_contacts_you_already_have() {
     snap.users[0].emails = vec!["Dev@Corp.example.com".into()]; // 李雷 is “我”
     snap.users[1].emails = vec!["wang.fang@corp.example.com".into()];
     let fx = fixture(snap);
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     fx.connect(WS, CONN, r#"["directory.read"]"#).await;
     let (_, me_c) = fx.req("GET", "/me/contact", None).await;
     let me_id = me_c["id"].as_str().unwrap().to_string();
@@ -476,7 +476,7 @@ async fn people_join_contacts_you_already_have() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failures_change_nothing() {
     let fx = fixture(first());
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
 
     // no directory connection yet
     let (s, b) = fx.req("POST", "/teams/sync", None).await;
@@ -592,7 +592,7 @@ async fn daily_run_and_debounced_events() {
     );
 
     // the worker runs what was queued
-    fx.sync.spawn();
+    tokio::spawn(fx.sync.clone().run());
     for id in &jobs {
         assert_eq!(fx.wait(id).await.state, JobState::Done);
     }

@@ -13,6 +13,7 @@ install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, job
         domain: Arc::new(crate::wire::core::CoreDomain {
             core,
             jobs: tasks,
+            plugins: built.plugins.clone(),
             routed,
             harnesses: harnesses.clone(),
             node: local_node,

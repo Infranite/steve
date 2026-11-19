@@ -2696,32 +2696,31 @@ impl Connections {
     }
 
     /// Starts both jobs (every 5 and 15 minutes). The integrator calls this once the runtime is up.
-    pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
+    pub async fn run_jobs(self) {
         let c = self.clone();
-        tokio::spawn(async move {
-            // two loops side by side: a long health pass must not delay a token refresh. A pass
-            // that overruns its period starts the next one a full period later, not in a burst.
-            let every = |mins: u64| {
-                let mut i = tokio::time::interval(Duration::from_secs(mins * 60));
-                i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                i
-            };
-            let (mut refresh, mut health) = (every(5), every(15));
-            tokio::join!(
-                async {
-                    loop {
-                        refresh.tick().await;
-                        c.refresh_due().await;
-                    }
-                },
-                async {
-                    loop {
-                        health.tick().await;
-                        c.check_health().await;
-                    }
-                },
-            );
-        })
+
+        // two loops side by side: a long health pass must not delay a token refresh. A pass
+        // that overruns its period starts the next one a full period later, not in a burst.
+        let every = |mins: u64| {
+            let mut i = tokio::time::interval(Duration::from_secs(mins * 60));
+            i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            i
+        };
+        let (mut refresh, mut health) = (every(5), every(15));
+        tokio::join!(
+            async {
+                loop {
+                    refresh.tick().await;
+                    c.refresh_due().await;
+                }
+            },
+            async {
+                loop {
+                    health.tick().await;
+                    c.check_health().await;
+                }
+            },
+        );
     }
 }
 

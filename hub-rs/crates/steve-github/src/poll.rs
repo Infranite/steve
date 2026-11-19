@@ -105,12 +105,15 @@ impl GitHub {
     pub fn spawn_poll(&self, repo_id: String) {
         self.0.queue_pending_add();
         let gh = self.clone();
-        tokio::spawn(async move {
+        let started = self.0.queue.spawn(async move {
             if let Err(e) = gh.poll_repo(&repo_id).await {
                 tracing::warn!(repo = %repo_id, error = %e, "github sync failed");
             }
             gh.settled_one();
         });
+        if !started {
+            self.settled_one();
+        }
     }
 
     /// One poll of one repo, now (whether due or not).
@@ -385,25 +388,31 @@ impl GitHub {
     /// The background job: queues deliveries left `received` (on start: the first tick is at once),
     /// polls what is due every 30 seconds, prunes deliveries hourly. Holds
     /// only a weak reference; stops when the service is dropped.
-    pub fn spawn_jobs(&self) -> tokio::task::JoinHandle<()> {
-        let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(TICK);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut n: u64 = 0;
-            loop {
-                tick.tick().await;
-                let Some(inner) = weak.upgrade() else { break };
-                let gh = GitHub(inner);
-                // first what a restart left accepted but unprocessed, then the poll
-                gh.recover_deliveries();
-                gh.poll_due().await;
-                if n.is_multiple_of(120) {
-                    gh.prune_deliveries();
-                }
-                n += 1;
+    pub async fn run_jobs(self) {
+        struct Scope(GitHub);
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                self.0.0.queue.close();
             }
-        })
+        }
+        let _scope = Scope(self.clone());
+        let weak: Weak<Inner> = std::sync::Arc::downgrade(&self.0);
+
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u64 = 0;
+        loop {
+            tick.tick().await;
+            let Some(inner) = weak.upgrade() else { break };
+            let gh = GitHub(inner);
+            // first what a restart left accepted but unprocessed, then the poll
+            gh.recover_deliveries();
+            gh.poll_due().await;
+            if n.is_multiple_of(120) {
+                gh.prune_deliveries();
+            }
+            n += 1;
+        }
     }
 }
 

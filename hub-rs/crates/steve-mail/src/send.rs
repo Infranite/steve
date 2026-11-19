@@ -27,7 +27,6 @@ use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::base;
 use steve_store::{Decision, NewDecision, Tx, uid};
-use tokio::task::JoinHandle;
 
 use crate::adapter::SendMeta;
 use crate::drafts::{self, FAIL_OPTIONS, SUBJECT_TYPE, content_hash};
@@ -1128,15 +1127,14 @@ impl Mail {
     }
 
     /// The send queue: every 2 seconds.
-    pub fn spawn_send_queue(&self) -> JoinHandle<()> {
+    pub async fn run_send_queue(self) {
         let m = self.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = m.send_due().await {
-                    tracing::warn!(error = %e, "mail send queue");
-                }
-                tokio::time::sleep(QUEUE_EVERY).await;
+
+        loop {
+            if let Err(e) = m.send_due().await {
+                tracing::warn!(error = %e, "mail send queue");
             }
-        })
+            tokio::time::sleep(QUEUE_EVERY).await;
+        }
     }
 }

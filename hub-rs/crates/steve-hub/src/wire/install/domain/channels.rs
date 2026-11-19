@@ -73,7 +73,7 @@ install! { install(reg, cx) [conns, declared, directory, flow, kstore, late, mod
     core.set_conv_host(Arc::new(crate::wire::chan::ChanConvHost(channels.downgrade())));
     {
         let (outbox, channels) = (outbox.clone(), channels.clone());
-        jobs.push(Job::spawned("channels.send", move || vec![outbox.clone().spawn_queue(&channels)]));
+        jobs.push(Job::new("channels.send", outbox.queue(channels)));
     }
 }}
 

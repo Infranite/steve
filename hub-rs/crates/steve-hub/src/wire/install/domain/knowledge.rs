@@ -44,27 +44,19 @@ install! { start(reg, _cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     }));
     {
         let modules = modules.clone();
-        jobs.push(Job::spawned("kb.sweep", move || {
-            vec![steve_knowledge::sync::spawn_sweeper(modules)]
-        }));
+        jobs.push(Job::new("kb.sweep", steve_knowledge::sync::sweep_job(modules)));
     }
     {
         let (modules, kb) = (modules.clone(), kb.clone());
-        jobs.push(Job::spawned("kb.scans", move || {
-            vec![steve_knowledge::spawn_scans(modules, kb)]
-        }));
+        jobs.push(Job::new("kb.scans", steve_knowledge::scan_job(modules,kb)));
     }
     {
         let modules = modules.clone();
-        jobs.push(Job::spawned("kb.expire", move || {
-            vec![steve_knowledge::candidates::spawn_expirer(modules)]
-        }));
+        jobs.push(Job::new("kb.expire", steve_knowledge::candidates::expire_job(modules)));
     }
     {
         let (modules, kb) = (modules.clone(), kb.clone());
-        jobs.push(Job::spawned("kb.chat", move || {
-            vec![steve_knowledge::sources::chat::spawn_job(modules, kb)]
-        }));
+        jobs.push(Job::new("kb.chat", steve_knowledge::sources::chat::run(modules,kb)));
     }
 }}
 

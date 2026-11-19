@@ -37,7 +37,7 @@ pub use retrieve::{
     retrieve_all,
 };
 pub use sources::files::FilesLoader;
-pub use sources::folder::{FolderLoader, FolderPolicy, spawn_scans};
+pub use sources::folder::{FolderLoader, FolderPolicy, scan_job};
 pub use state::{KbEvent, Knowledge};
 
 // K4: prompts, citations, MCP tools, uses.

@@ -690,6 +690,13 @@ impl Plugins {
         modules: Modules,
         mut events: tokio::sync::mpsc::Receiver<steve_types::Notification>,
     ) {
+        struct Scope(run::Runner);
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                self.0.cancel_all();
+            }
+        }
+        let _scope = Scope(self.0.runner.clone());
         let mut open = true;
         loop {
             self.reconcile(&modules).await;

@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use axum::body::{Body, Bytes};
@@ -134,6 +134,8 @@ struct Job {
 /// reference so dropping the service stops it.
 #[derive(Default)]
 pub(crate) struct Queue {
+    tasks: Mutex<tokio::task::JoinSet<()>>,
+    closed: AtomicBool,
     tx: Mutex<Option<mpsc::UnboundedSender<Job>>>,
     pub(crate) pending: AtomicUsize,
     idle: Notify,
@@ -167,6 +169,30 @@ pub fn hook_limiter(
         Arc::new(DomainClock(clock)),
     )
 }
+
+impl Queue {
+    pub(crate) fn spawn(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        let mut tasks = lock(&self.tasks);
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
+        true
+    }
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        lock(&self.tx).take();
+        lock(&self.tasks).abort_all();
+        lock(&self.queued).clear();
+        self.pending.store(0, Ordering::SeqCst);
+        self.idle.notify_waiters();
+    }
+}
+
 
 pub(crate) struct Limiter(steve_runtime::policy::Limiter<String>);
 impl Limiter {
@@ -420,11 +446,15 @@ impl GitHub {
 
     fn enqueue_claimed(&self, job: Job) {
         let q = &self.0.queue;
-        q.pending.fetch_add(1, Ordering::SeqCst);
         let mut tx = q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if q.closed.load(Ordering::SeqCst) {
+            lock(&q.queued).remove(&job.delivery_id);
+            return;
+        }
+        q.pending.fetch_add(1, Ordering::SeqCst);
         if tx.as_ref().is_none_or(|t| t.is_closed()) {
             let (t, rx) = mpsc::unbounded_channel();
-            tokio::spawn(worker(Arc::downgrade(&self.0), rx));
+            q.spawn(worker(Arc::downgrade(&self.0), rx));
             *tx = Some(t);
         }
         if let Some(t) = tx.as_ref()
@@ -454,7 +484,10 @@ impl GitHub {
     /// One piece of work counted by [`GitHub::settle`] is over.
     pub(crate) fn settled_one(&self) {
         let q = &self.0.queue;
-        if q.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if q.pending
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            == Ok(1)
+        {
             q.idle.notify_waiters();
         }
     }
@@ -735,7 +768,9 @@ async fn worker(inner: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>) {
         let key = lane_of(&job);
         let tx = lanes.entry(key).or_insert_with(|| {
             let (t, r) = mpsc::unbounded_channel();
-            tokio::spawn(lane(inner.clone(), r, permits.clone()));
+            if let Some(service) = inner.upgrade() {
+                service.queue.spawn(lane(inner.clone(), r, permits.clone()));
+            }
             t
         });
         if let Err(e) = tx.send(job) {
@@ -842,5 +877,28 @@ mod tests {
         assert!(!token_ok("a b", 64));
         assert!(!token_ok("a:b", 64));
         assert!(!token_ok(&"a".repeat(65), 64));
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[tokio::test]
+    async fn closing_the_delivery_owner_cancels_worker_lanes_and_rejects_new_work() {
+        let q = Queue::default();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        assert!(q.spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        }));
+        q.close();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(!q.spawn(async { panic!("closed queue must not spawn") }));
+        assert_eq!(q.pending.load(Ordering::SeqCst), 0);
     }
 }

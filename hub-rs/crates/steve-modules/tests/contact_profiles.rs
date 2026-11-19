@@ -107,7 +107,7 @@ impl Fx {
     }
 
     async fn connect(&self) {
-        self.sync.spawn();
+        tokio::spawn(self.sync.clone().run());
         let (s, _) = self.req("GET", "/me/contact", None).await;
         assert_eq!(s, 200);
         self.exec(&format!(

@@ -172,7 +172,7 @@ async fn feishu_departments_and_users_become_the_org_chart() {
         ),
     );
     let sync = DirectorySync::new(t.modules.clone(), Arc::new(conns));
-    sync.spawn();
+    tokio::spawn(sync.clone().run());
     let mut ports: Ports = accounts::ports();
     ports.sync = Some(sync.clone());
     let r = contacts::routes(ports).with_state(t.modules.clone());

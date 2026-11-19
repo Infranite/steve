@@ -33,7 +33,7 @@
 //! let replies = Arc::new(steve_channels::Replies::new().outbound(outbox.clone()));
 //! // … Channels::builder(…).responder(replies.clone()).build(); late.set(&channels);
 //! link.bind_clock(modules.clock.clone());
-//! outbox.clone().spawn_queue(&channels);
+//! tokio::spawn(outbox.clone().queue(channels.clone()));
 //! ```
 
 use std::collections::BTreeMap;
@@ -1925,6 +1925,8 @@ type Unknown = (String, Option<Duration>, Option<i64>);
 /// C6's outbound. Share one `Arc<Outbox>` between [`crate::Replies::outbound`], the queue and the
 /// item hook.
 pub struct Outbox {
+    background: Mutex<tokio::task::JoinSet<()>>,
+    stopped: std::sync::atomic::AtomicBool,
     link: OutLink,
     as_user: BTreeMap<String, Arc<dyn ActAsUser>>,
     pinned: Option<Arc<dyn PinnedModel>>,
@@ -1942,6 +1944,8 @@ pub struct Outbox {
 impl Outbox {
     pub fn new(link: OutLink) -> Self {
         Self {
+            background: Mutex::new(tokio::task::JoinSet::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
             link,
             as_user: BTreeMap::new(),
             pinned: None,
@@ -1951,6 +1955,21 @@ impl Outbox {
             #[cfg(feature = "fake")]
             before_attempt: Mutex::new(None),
         }
+    }
+
+    fn spawn_background(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut tasks = lock(&self.background);
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
+    }
+    fn stop_background(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        lock(&self.background).abort_all();
+        lock(&self.rewriting).clear();
     }
 
     /// Test-only barrier after claim, before the final authorization/attempt transaction.
@@ -3090,7 +3109,7 @@ impl Outbox {
                         continue;
                     }
                     let (ch, busy) = (ch.clone(), self.rewriting.clone());
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = compose_instructed(&ch, &ws, &d, &m, &words).await {
                             tracing::warn!(decision = d, "drafting with your words failed: {e}");
                         }
@@ -3115,7 +3134,7 @@ impl Outbox {
                         continue;
                     }
                     let (ch, busy) = (ch.clone(), self.rewriting.clone());
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = send_chosen(&ch, &ws, &d, &m, &draft, &by).await {
                             tracing::warn!(decision = d, "sending a card's draft failed: {e}");
                         }
@@ -3140,7 +3159,7 @@ impl Outbox {
                         self.pinned.clone(),
                         self.rewriting.clone(),
                     );
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = check_later(&ch, &link, pinned.as_ref(), &m).await {
                             tracing::warn!(message = m, "checking a draft failed: {e}");
                         }
@@ -3163,7 +3182,7 @@ impl Outbox {
                         self.pinned.clone(),
                         self.rewriting.clone(),
                     );
-                    tokio::spawn(async move {
+                    self.spawn_background(async move {
                         if let Err(e) = rewrite_draft(&ch, &link, pinned.as_ref(), &m, &d).await {
                             tracing::warn!(message = m, "rewriting a draft failed: {e}");
                             if let Err(e) = rewrite_failed(&ch, &m, &d) {
@@ -3449,18 +3468,24 @@ impl Outbox {
     }
 
     /// Runs [`Outbox::send_due`] every [`QUEUE_EVERY`] until the channel module is gone.
-    pub fn spawn_queue(self: Arc<Self>, ch: &Channels) -> tokio::task::JoinHandle<()> {
-        let weak = ch.downgrade();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(QUEUE_EVERY);
-            // A slow round of sends is not followed by a burst of catch-up rounds.
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                let Some(ch) = weak.upgrade() else { break };
-                self.send_due(&ch).await;
+    pub async fn queue(self: Arc<Self>, ch: Channels) {
+        struct Scope(Arc<Outbox>);
+        impl Drop for Scope {
+            fn drop(&mut self) {
+                self.0.stop_background();
             }
-        })
+        }
+        let _scope = Scope(self.clone());
+        let weak = ch.downgrade();
+
+        let mut tick = tokio::time::interval(QUEUE_EVERY);
+        // A slow round of sends is not followed by a burst of catch-up rounds.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let Some(ch) = weak.upgrade() else { break };
+            self.send_due(&ch).await;
+        }
     }
 
     /// Back to the source: an item made from a chat message finished → “<编号> 已完成：<结果>”

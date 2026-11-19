@@ -277,31 +277,25 @@ impl DirectorySync {
         })
     }
 
-    /// Starts the worker and the timer (once; later calls return no handles).
-    pub fn spawn(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+    /// Runs the worker and timer once. Dropping this future drops both loops.
+    pub async fn run(self: Arc<Self>) {
         let Some(mut rx) = lock(&self.rx).take() else {
-            return Vec::new();
+            return;
         };
-        let worker = {
-            let me = self.clone();
-            tokio::spawn(async move {
-                while let Some(id) = rx.recv().await {
-                    me.run_job(&id).await;
+        let worker = async {
+            while let Some(id) = rx.recv().await {
+                self.run_job(&id).await;
+            }
+        };
+        let timer = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if let Err(e) = self.tick(self.m.clock.now()) {
+                    tracing::warn!(error=%e,"directory sync timer");
                 }
-            })
+            }
         };
-        let timer = {
-            let me = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    if let Err(e) = me.tick(me.m.clock.now()) {
-                        tracing::warn!(error = %e, "directory sync timer");
-                    }
-                }
-            })
-        };
-        vec![worker, timer]
+        tokio::join!(worker, timer);
     }
 
     /// A job's state (the last [`KEEP_JOBS`] jobs).
@@ -393,21 +387,15 @@ impl DirectorySync {
 
     /// Follows `{type:"connection", id, ws}` events (the Hub's typed connection tap) with
     /// [`DirectorySync::connection_changed`] until the sender goes away.
-    pub fn spawn_watch(
-        self: &Arc<Self>,
-        mut rx: mpsc::Receiver<steve_types::Notification>,
-    ) -> tokio::task::JoinHandle<()> {
-        let me = self.clone();
-        tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                if let Some(steve_types::DomainEvent::Channels(
-                    steve_types::ChannelsEvent::Connection { id, ws },
-                )) = ev.event.as_domain()
-                {
-                    me.connection_changed(ws.as_str(), id.as_str());
-                }
+    pub async fn watch(self: Arc<Self>, mut rx: mpsc::Receiver<steve_types::Notification>) {
+        while let Some(ev) = rx.recv().await {
+            if let Some(steve_types::DomainEvent::Channels(
+                steve_types::ChannelsEvent::Connection { id, ws },
+            )) = ev.event.as_domain()
+            {
+                self.connection_changed(ws.as_str(), id.as_str());
             }
-        })
+        }
     }
 
     /// A directory reported a change: one sync of that connection after [`DEBOUNCE_MS`] of quiet.
