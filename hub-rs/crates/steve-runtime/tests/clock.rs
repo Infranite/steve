@@ -68,3 +68,16 @@ async fn retry_waits_observe_any_wall_clock_change_without_waiting_for_the_perio
         "periodic waits retain their deadline"
     );
 }
+
+#[tokio::test]
+async fn a_sleep_uses_elapsed_time_when_the_wall_clock_is_rewound() {
+    let c = FakeClock::new(100);
+    let mut wait = c.sleep(Duration::from_millis(10));
+    assert!(poll!(&mut wait).is_pending());
+    c.set(-1_000);
+    c.advance(9);
+    assert!(poll!(&mut wait).is_pending());
+    c.advance(1);
+    assert!(poll!(&mut wait).is_ready());
+    assert_eq!(c.now(), -990);
+}

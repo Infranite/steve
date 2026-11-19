@@ -87,26 +87,22 @@ where
     Fut: Future<Output = ()> + Send,
 {
     assert!(!period.is_zero(), "job period must be positive");
-    let ms = i64::try_from(period.as_millis()).unwrap_or(i64::MAX).max(1);
-    let mut next = clock.now();
-    if matches!(first, FirstRun::AfterPeriod) {
-        next = next.saturating_add(ms);
-    }
-    // Do not use spawn here: each callback, rather than the entire loop, is a measured run.
+    let period =
+        Duration::from_millis(u64::try_from(period.as_millis()).unwrap_or(u64::MAX).max(1));
+    // The sleep starts with the callback. Waiting for both preserves Delay semantics when a run
+    // overruns its period, without anchoring monotonic waits to a mutable wall-clock timestamp.
     Task {
         name,
         handle: tokio::spawn(async move {
+            if matches!(first, FirstRun::AfterPeriod) {
+                clock.sleep(period).await;
+            }
             loop {
-                let now = clock.now();
-                if next > now {
-                    clock
-                        .sleep(Duration::from_millis(next.saturating_sub(now) as u64))
-                        .await;
-                    continue;
-                }
-                next = now.saturating_add(ms);
-                let _run = Run::new(name);
-                f().await;
+                let run = async {
+                    let _run = Run::new(name);
+                    f().await;
+                };
+                futures::future::join(clock.sleep(period), run).await;
             }
         }),
     }

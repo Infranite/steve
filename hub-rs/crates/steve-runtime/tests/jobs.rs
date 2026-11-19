@@ -187,3 +187,38 @@ async fn spawn_and_each_period_record_runs_and_duration_including_cancellation()
     assert_eq!(durations.len(), 4);
     assert!(durations.iter().all(|d| d.is_finite() && *d >= 0.0));
 }
+
+#[tokio::test]
+async fn rewinding_wall_time_does_not_extend_a_periodic_wait() {
+    let clock = Arc::new(FakeClock::new(10_000));
+    let runs = Arc::new(AtomicUsize::new(0));
+    let n = runs.clone();
+    let task = every(
+        "rewind",
+        clock.clone(),
+        Duration::from_secs(1),
+        FirstRun::Immediate,
+        move || {
+            n.fetch_add(1, Ordering::SeqCst);
+            async {}
+        },
+    );
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    clock.set(-86_400_000);
+    clock.advance(999);
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    clock.advance(1);
+    settle().await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "one elapsed period, despite a one-day wall rewind"
+    );
+    clock.advance(1_000);
+    settle().await;
+    assert_eq!(runs.load(Ordering::SeqCst), 3);
+    task.stop();
+    task.await;
+}
