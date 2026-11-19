@@ -241,8 +241,8 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
     }
 
-    /// Beside a Hub that keeps writing: a copy taken in pieces starts over at every commit of
-    /// another connection and never ends.
+    /// A pinned read transaction lets bounded backup steps finish while another connection
+    /// keeps committing to WAL.
     #[test]
     fn the_copy_finishes_while_the_database_is_written() {
         use std::sync::{
