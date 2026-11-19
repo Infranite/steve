@@ -1,7 +1,7 @@
 # Existing test sleep calls; only shrinks.
 # file under hub-rs/crates<TAB>count
 # Use steve-runtime testkit eventual conditions or virtual time.
-# STEVE_RUNTIME_BLESS=1 rewrites after removals; the empty inventory and guard remain.
+# STEVE_GUARD_BLESS=1 rewrites after removals; the empty inventory and guard remain.
 steve-acp/src/oneshot.rs	1
 steve-acp/src/rpc.rs	3
 steve-acp/src/usage.rs	5

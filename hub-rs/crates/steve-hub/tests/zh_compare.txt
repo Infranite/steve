@@ -1,6 +1,6 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.
-# Rewrite: STEVE_ZH_BLESS=1 cargo test -p steve-hub --test zh_compare
+# Rewrite: STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test zh_compare
 steve-acp/src/capacity.rs	"(?i)(?:expected to be available at|预计恢复时间[:：])\\s*<?"	1
 steve-acp/src/capacity.rs	"预计恢复时间："	1
 steve-calendar/src/query.rs	"我"	1

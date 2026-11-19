@@ -1,6 +1,9 @@
 //! Chinese text must not become a code value. This ratchet lists existing comparisons, not
 //! display text, prompts or logs. Replace each entry with a code value in the owning domain.
-//! STEVE_ZH_BLESS=1 cargo test -p steve-hub --test zh_compare rewrites the sorted baseline.
+//! STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test zh_compare rewrites the sorted baseline.
+#[path = "support/ratchet.rs"]
+mod ratchet;
+
 #[path = "node_boundary/scan.rs"]
 #[allow(dead_code)]
 mod scan;
@@ -563,48 +566,14 @@ fn found() -> Counts {
 fn chinese_comparisons_only_shrink() {
     let now = found();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/zh_compare.txt");
-    if std::env::var("STEVE_ZH_BLESS").as_deref() == Ok("1") {
-        let mut text = String::from(
-            "# Existing Chinese comparisons; replace display text with domain code values. Only shrinks.\n# file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.\n# Rewrite: STEVE_ZH_BLESS=1 cargo test -p steve-hub --test zh_compare\n",
-        );
-        for ((file, literal), n) in now {
-            text.push_str(&format!("{file}\t{literal}\t{n}\n"));
-        }
-        std::fs::write(path, text).unwrap();
-        return;
-    }
-    let listed: Counts = std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-        .map(|l| {
-            let parts: Vec<_> = l.split('\t').collect();
-            assert_eq!(parts.len(), 3, "bad baseline row: {l}");
-            (
-                (parts[0].to_owned(), parts[1].to_owned()),
-                parts[2].parse().unwrap(),
-            )
-        })
-        .collect();
-    let mut problems = vec![];
-    for (k, n) in &now {
-        let was = listed.get(k).copied().unwrap_or(0);
-        if *n != was {
-            problems.push(format!("{} {}: {n}, listed {was}", k.0, k.1));
-        }
-    }
-    for (k, n) in &listed {
-        if !now.contains_key(k) {
-            problems.push(format!(
-                "{} {}: gone, listed {n}; shorten the list",
-                k.0, k.1
-            ));
-        }
-    }
-    assert!(
-        problems.is_empty(),
-        "中文比较守卫：改成代码值，或在第 4 波前确有必要时用 STEVE_ZH_BLESS=1 重写并在 PR 里说明。已消失或减少的条目必须缩短清单。\n{}",
-        problems.join("\n")
+    ratchet::check(
+        now.into_iter()
+            .map(|((file, literal), n)| (vec![file, literal], n))
+            .collect(),
+        &path,
+        2,
+        "# Existing Chinese comparisons; replace display text with domain code values. Only shrinks.\n# file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.\n# Rewrite after removals: STEVE_GUARD_BLESS=1\n",
+        "replace display text with domain code values",
     );
 }
 

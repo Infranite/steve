@@ -5,6 +5,23 @@ use std::{
 };
 pub type Counts = BTreeMap<Vec<String>, usize>;
 
+pub fn bless() -> bool {
+    std::env::var("STEVE_GUARD_BLESS").as_deref() == Ok("1")
+}
+
+pub fn growth(now: &Counts, listed: &Counts) -> Vec<String> {
+    now.iter()
+        .filter(|(k, n)| **n > listed.get(*k).copied().unwrap_or(0))
+        .map(|(k, n)| {
+            format!(
+                "{}: {n} (listed {})",
+                k.join(" "),
+                listed.get(k).copied().unwrap_or(0)
+            )
+        })
+        .collect()
+}
+
 pub fn differences(now: &Counts, listed: &Counts, help: &str) -> Vec<String> {
     let keys: BTreeSet<_> = now.keys().chain(listed.keys()).collect();
     keys.into_iter()
@@ -35,6 +52,10 @@ pub fn read(file: &Path, columns: usize) -> Counts {
     {
         let fields: Vec<_> = line.split('\t').collect();
         assert_eq!(fields.len(), columns + 1, "bad count row: {line}");
+        assert!(
+            fields[..columns].iter().all(|s| !s.is_empty()),
+            "empty key: {line}"
+        );
         let count: usize = fields[columns].parse().expect("count");
         let key = fields[..columns].iter().map(|s| (*s).to_owned()).collect();
         assert!(
@@ -46,7 +67,18 @@ pub fn read(file: &Path, columns: usize) -> Counts {
 }
 
 pub fn check(now: Counts, file: &Path, columns: usize, header: &str, help: &str) {
-    let bless = std::env::var("STEVE_RUNTIME_BLESS").as_deref() == Ok("1");
+    check_at(now, file, columns, header, help, bless());
+}
+
+pub fn check_at(now: Counts, file: &Path, columns: usize, header: &str, help: &str, bless: bool) {
+    assert!(
+        now.iter().all(|(k, n)| k.len() == columns
+            && *n > 0
+            && !k[0].starts_with('#')
+            && k.iter()
+                .all(|s| !s.is_empty() && !s.contains(['\t', '\n', '\r']))),
+        "invalid inventory"
+    );
     let listed = if file.exists() {
         read(file, columns)
     } else {
@@ -55,11 +87,7 @@ pub fn check(now: Counts, file: &Path, columns: usize, header: &str, help: &str)
     };
     if bless {
         if file.exists() {
-            let additions: Vec<_> = now
-                .iter()
-                .filter(|(k, n)| **n > listed.get(*k).copied().unwrap_or(0))
-                .map(|(k, n)| format!("{}: {n}", k.join(" ")))
-                .collect();
+            let additions = growth(&now, &listed);
             assert!(
                 additions.is_empty(),
                 "inventory can only shrink, even with BLESS:\n{}",

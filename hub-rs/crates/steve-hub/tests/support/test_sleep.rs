@@ -8,9 +8,9 @@ use syn::{
     parse::{ParseStream, Parser},
     visit::{self, Visit},
 };
-const HELP: &str = "use steve_runtime::testkit for condition waiting, or virtual time for timing assertions; shorten with STEVE_RUNTIME_BLESS=1";
+const HELP: &str = "use steve_runtime::testkit for condition waiting, or virtual time for timing assertions; shorten with STEVE_GUARD_BLESS=1";
 const LIST: &str = "tests/test_sleep.txt";
-const HEADER: &str = "# Existing test sleep calls; only shrinks.\n# file under hub-rs/crates<TAB>count\n# Use steve-runtime testkit eventual conditions or virtual time.\n# STEVE_RUNTIME_BLESS=1 rewrites after removals; the empty inventory and guard remain.\n";
+const HEADER: &str = "# Existing test sleep calls; only shrinks.\n# file under hub-rs/crates<TAB>count\n# Use steve-runtime testkit eventual conditions or virtual time.\n# STEVE_GUARD_BLESS=1 rewrites after removals; the empty inventory and guard remain.\n";
 
 // Rust tokenization discards comments and treats strings as one token. Macro bodies still count,
 // including select!/assert! arguments, without mistaking a quoted counterexample for a sleep.

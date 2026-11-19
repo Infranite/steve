@@ -1,0 +1,181 @@
+# Existing schema inventory; only shrinks.
+# stable debt id or trigger name<TAB>count. Metadata remains in schema/.
+# STEVE_GUARD_BLESS=1 rewrites after removals.
+comms/fk/accounts.(workspace_id) -> workspaces.(id)	1
+comms/fk/attr_values.(party_id) -> parties.(id)	1
+comms/fk/briefings.(workspace_id) -> workspaces.(id)	1
+comms/fk/chan_write_blocks.(workspace_id) -> workspaces.(id)	1
+comms/fk/connector_refs.(workspace_id) -> workspaces.(id)	1
+comms/fk/conversation_preferences.(user_id) -> users.(id)	1
+comms/fk/conversation_preferences.(workspace_id) -> workspaces.(id)	1
+comms/fk/feed_entries.(notification_id) -> personal_notifications.(id)	1
+comms/fk/gh_repos.(project_id) -> projects.(id)	1
+comms/fk/kb_sources.(workspace_id) -> workspaces.(id)	1
+comms/fk/output_channel_preferences.(user_id) -> users.(id)	1
+comms/fk/output_channel_preferences.(workspace_id) -> workspaces.(id)	1
+comms/fk/output_deliveries.(requester) -> users.(id)	1
+comms/fk/output_deliveries.(workspace_id) -> workspaces.(id)	1
+comms/fk/parties.(user_id) -> users.(id)	1
+comms/fk/parties.(workspace_id) -> workspaces.(id)	1
+comms/fk/personal_notifications.(user_id) -> users.(id)	1
+comms/fk/personal_notifications.(workspace_id) -> workspaces.(id)	1
+comms/fk/personas.(bot_id) -> bots.(id)	1
+comms/fk/source_settings.(triage_bot) -> bots.(id)	1
+comms/fk/stewards.(person_id) -> parties.(id)	1
+comms/fk/time_alarms.(workspace_id) -> workspaces.(id)	1
+comms/fk/vault_items.(account_id) -> accounts.(id)	1
+comms/trigger/notification_feed_insert	1
+comms/trigger/todo_alarms_delete	1
+comms/trigger/todo_alarms_insert	1
+comms/trigger/todo_alarms_update	1
+comms/write/T0033	1
+comms/write/T0034	1
+comms/write/T0035	1
+comms/write/T0048	1
+comms/write/T0056	1
+comms/write/T0057	1
+comms/write/T0058	1
+comms/write/T0061	1
+comms/write/T0066	1
+comms/write/T0079	1
+comms/write/T0081	1
+comms/write/T0082	1
+comms/write/T0087	1
+comms/write/T0091	1
+comms/write/T0095	1
+comms/write/T0096	1
+comms/write/T0097	1
+comms/write/T0101	1
+comms/write/T0114	1
+comms/write/T0136	1
+comms/write/T0137	1
+comms/write/T0138	1
+comms/write/T0140	1
+comms/write/T0143	1
+comms/write/T0145	1
+comms/write/T0146	1
+comms/write/T0147	1
+comms/write/T0152	1
+comms/write/T0153	1
+comms/write/T0156	1
+comms/write/T0157	1
+comms/write/T0172	1
+comms/write/T0173	1
+comms/write/T0175	1
+comms/write/T0191	1
+comms/write/T0192	1
+comms/write/T0193	1
+comms/write/T0194	1
+comms/write/T0200	1
+comms/write/T0201	1
+comms/write/T0202	1
+comms/write/T0234	1
+comms/write/T0271	1
+comms/write/T0321	1
+comms/write/T0322	1
+comms/write/T0323	1
+comms/write/T0324	1
+comms/write/T0326	1
+comms/write/T0327	1
+comms/write/T0332	1
+comms/write/T0365	1
+comms/write/T0366	1
+comms/write/T0367	1
+comms/write/T0368	1
+comms/write/T0369	1
+comms/write/T0381	1
+comms/write/T0383	1
+comms/write/T0399	1
+comms/write/T0422	1
+comms/write/T0431	1
+comms/write/T0448	1
+comms/write/T0452	1
+comms/write/T0459	1
+comms/write/T0466	1
+comms/write/T0494	1
+comms/write/T0497	1
+comms/write/T0498	1
+comms/write/T0525	1
+comms/write/T0528	1
+comms/write/T0541	1
+comms/write/T0544	1
+comms/write/T0759	1
+comms/write/T0762	1
+comms/write/T0775	1
+comms/write/T0784	1
+comms/write/T0810	1
+comms/write/T0811	1
+comms/write/T0812	1
+comms/write/T0813	1
+comms/write/T0814	1
+comms/write/T0815	1
+comms/write/T0823	1
+comms/write/T0829	1
+comms/write/T0831	1
+comms/write/T0833	1
+comms/write/T0839	1
+comms/write/T0844	1
+comms/write/T0845	1
+comms/write/T0849	1
+comms/write/T0850	1
+comms/write/T0851	1
+comms/write/T0862	1
+comms/write/T0863	1
+comms/write/T0864	1
+comms/write/T0865	1
+comms/write/T0866	1
+comms/write/T0868	1
+comms/write/T0869	1
+comms/write/T0871	1
+comms/write/T0914	1
+comms/write/T0917	1
+comms/write/T0918	1
+comms/write/T0919	1
+comms/write/T0920	1
+comms/write/T0921	1
+comms/write/T0928	1
+comms/write/T0934	1
+comms/write/T0939	1
+comms/write/T0946	1
+comms/write/T0949	1
+comms/write/T0950	1
+comms/write/T0952	1
+comms/write/T0954	1
+comms/write/T0955	1
+comms/write/T0987	1
+comms/write/T0991	1
+comms/write/T0993	1
+comms/write/T0995	1
+comms/write/T0996	1
+comms/write/T0997	1
+comms/write/T0998	1
+comms/write/T1003	1
+comms/write/T1004	1
+comms/write/T1009	1
+comms/write/T1010	1
+comms/write/T1014	1
+comms/write/T1057	1
+comms/write/T1058	1
+comms/write/T1089	1
+comms/write/T1094	1
+comms/write/T1095	1
+comms/write/T1096	1
+comms/write/T1097	1
+comms/write/T1098	1
+comms/write/T1099	1
+comms/write/T1100	1
+comms/write/T1102	1
+comms/write/T1103	1
+comms/write/T1104	1
+comms/write/T1106	1
+comms/write/T1107	1
+comms/write/T1113	1
+comms/write/T1114	1
+comms/write/T1144	1
+comms/write/T1151	1
+comms/write/T1160	1
+comms/write/T1161	1
+comms/write/T1162	1
+comms/write/T1305	1
+comms/write/T1317	1
+comms/write/T1435	1

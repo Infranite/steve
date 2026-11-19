@@ -9,8 +9,8 @@ use syn::{Expr, Item, Meta, Token};
 
 type Counts = BTreeMap<(String, String, String), usize>;
 const LIST: &str = "tests/runtime_guard.txt";
-const LIST_HEADER: &str = "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock, TTL maps to Cached and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_RUNTIME_BLESS=1 cargo test -p steve-hub --test runtime_guard\n# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its\n# private sleep_until wrapper; this guard does not follow helper calls.\n# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does\n# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and\n# same-function interval construction plus unknown loop tick receivers are recognized.\n";
-const HELP: &str = "use steve-runtime due_loop / every / clock / tz / Cached, or explain in the task card before rewriting with STEVE_RUNTIME_BLESS=1";
+const LIST_HEADER: &str = "# Existing runtime policy outside steve-runtime; only shrinks.\n# Move timers to due_loop / every / clock, TTL maps to Cached and wall-time policy to tz.\n# Syntax scan of earliest() calls; timer loops count once per function.\n# file under hub-rs/crates<TAB>category<TAB>function (module/impl qualified)<TAB>count\n# Rewrite after explaining in the task card: STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test runtime_guard\n# Known coverage boundary: steve-channels/src/lifecycle.rs supervise waits through its\n# private sleep_until wrapper; this guard does not follow helper calls.\n# wire/node_runtime uses its own Clock::sleep (implemented in clock.rs); this guard does\n# not resolve trait/custom-clock calls. Direct Tokio timers, explicit Interval types and\n# same-function interval construction plus unknown loop tick receivers are recognized.\n";
+const HELP: &str = "use steve-runtime due_loop / every / clock / tz / Cached, or explain in the task card before rewriting with STEVE_GUARD_BLESS=1";
 
 fn test_meta(meta: &Meta) -> bool {
     match meta {
@@ -1142,6 +1142,8 @@ fn found() -> Counts {
 }
 #[path = "support/ratchet.rs"]
 mod ratchet;
+#[path = "support/ratchet_tests.rs"]
+mod ratchet_tests;
 #[path = "support/test_sleep.rs"]
 mod test_sleep;
 

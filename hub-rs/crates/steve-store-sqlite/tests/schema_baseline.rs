@@ -1,4 +1,6 @@
 mod common;
+#[path = "../../steve-hub/tests/support/ratchet.rs"]
+mod ratchet;
 
 use common::*;
 use sha2::{Digest, Sha256};
@@ -13,14 +15,28 @@ fn digest(bytes: &[u8]) -> String {
 
 fn check_file(path: &str, expected: &str) {
     let path = root().join(path);
-    if std::env::var("STEVE_BASELINE_BLESS").as_deref() == Ok("1") {
+    if ratchet::bless() {
         std::fs::write(&path, expected).unwrap();
     }
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         expected,
-        "{} differs; regenerate with STEVE_BASELINE_BLESS=1",
+        "{} differs; regenerate with STEVE_GUARD_BLESS=1",
         path.display()
+    );
+}
+
+fn inventory_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/inventory_{name}.txt"))
+}
+
+fn inventory(name: &str, now: ratchet::Counts) {
+    ratchet::check(
+        now,
+        &inventory_path(name),
+        1,
+        "# Existing schema inventory; only shrinks.\n# stable debt id or trigger name<TAB>count. Metadata remains in schema/.\n# STEVE_GUARD_BLESS=1 rewrites after removals.\n",
+        "remove cross-file debt / triggers instead of adding them",
     );
 }
 
@@ -36,14 +52,57 @@ fn generated_baselines_and_inventories_are_current() {
             "unhandled object: {o:?}"
         );
     }
+    // Preflight every inventory before BLESS can rewrite any generated schema fixture.
+    let mut inventories = Vec::new();
+    for cut in ["stream", "comms"] {
+        let mut counts: ratchet::Counts = debts(&c, &map, cut)
+            .into_iter()
+            .map(|d| (vec![d.id], 1))
+            .collect();
+        let text = std::fs::read_to_string(root().join(format!("debt_{cut}.txt"))).unwrap();
+        for line in text.lines().filter(|line| line.starts_with("write\t")) {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 3);
+            assert!(
+                counts.insert(vec![fields[1].into()], 1).is_none(),
+                "duplicate debt id: {line}"
+            );
+        }
+        inventories.push((format!("debt_{cut}"), counts));
+    }
+    inventories.push((
+        "triggers".into(),
+        objects
+            .iter()
+            .filter(|o| o.kind == "trigger")
+            .map(|o| (vec![o.name.clone()], 1))
+            .collect(),
+    ));
+    if ratchet::bless() {
+        for (name, now) in &inventories {
+            let growth = ratchet::growth(now, &ratchet::read(&inventory_path(name), 1));
+            assert!(
+                growth.is_empty(),
+                "schema inventory can only shrink:\n{}",
+                growth.join("\n")
+            );
+        }
+    }
+    for (name, now) in inventories {
+        inventory(&name, now);
+    }
     let all_debts: Vec<_> = ["stream", "comms"]
         .into_iter()
         .flat_map(|cut| debts(&c, &map, cut))
         .collect();
     for domain in DOMAINS {
-        let mut sql = String::from(
-            "-- Generated from the frozen legacy opening flow; STEVE_BASELINE_BLESS=1 regenerates.\n",
-        );
+        // The banner is frozen fixture metadata, not SQL. Preserve it and its LOCK hash while
+        // the generator and inventories use the shared BLESS switch.
+        let fixture =
+            std::fs::read_to_string(root().join(format!("{domain}/0001_baseline.sql"))).unwrap();
+        let banner = fixture.lines().next().expect("frozen schema banner");
+        assert!(banner.starts_with("-- Generated from the frozen legacy opening flow;"));
+        let mut sql = format!("{banner}\n");
         for o in objects.iter().filter(|o| map[&o.table] == domain) {
             for d in all_debts.iter().filter(|d| d.object == o.name) {
                 sql.push_str(&format!("-- debt:{}\n", d.id));
@@ -63,11 +122,10 @@ fn generated_baselines_and_inventories_are_current() {
         "contract/LOCK",
         &format!("0001.sql {}\n", digest(&contract)),
     );
-    for (cut, write_cap) in [("stream", 39), ("comms", 151)] {
+    for cut in ["stream", "comms"] {
         let path = format!("debt_{cut}.txt");
         let old = std::fs::read_to_string(root().join(&path)).unwrap();
         let writes: BTreeSet<_> = old.lines().filter(|s| s.starts_with("write\t")).collect();
-        assert!(writes.len() <= write_cap, "{cut} write debt increased");
         assert_eq!(
             writes.len(),
             old.lines().filter(|s| s.starts_with("write\t")).count(),
@@ -103,9 +161,13 @@ fn generated_baselines_and_inventories_are_current() {
         .filter(|o| o.kind == "trigger")
         .map(|o| (o.name.as_str(), o))
         .collect();
-    assert!(
-        triggers.len() <= replacements.len() && replacements.len() <= 42,
-        "trigger count increased"
+    assert_eq!(
+        replacements.len(),
+        inventory
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .count(),
+        "duplicate trigger metadata"
     );
     let mut expected = String::from("# name\ttable\tdomain\treplacement_operation\n");
     for (name, o) in triggers {

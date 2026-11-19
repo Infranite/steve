@@ -5,10 +5,12 @@
 //! the update status, the model catalog and price sync, the channel wire), drops comments, test modules, `t!()`
 //! calls and log lines, and lists every remaining literal with a Han character. Many of them stay Chinese on
 //! purpose (stored values such as priority or status, timeline entries, text for a model; see steve-i18n's doc
-//! comment), so the list is a ratchet: the test fails on a literal that isn't listed (move it to `t!()`, or add
-//! it to the list if it must stay Chinese) and on a listed one that is gone (drop it from the list).
+//! comment), so the list is a ratchet: the test fails on a literal that isn't listed (move it to `t!()`) and on a listed one that is gone (drop it from the list).
 //!
-//! `STEVE_I18N_BLESS=1 cargo test -p steve-hub --test i18n_remaining` rewrites the list from the code.
+//! `STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test i18n_remaining` rewrites the list from the code.
+
+#[path = "support/ratchet.rs"]
+mod ratchet;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -111,46 +113,18 @@ fn remaining() -> BTreeSet<String> {
     out
 }
 
-fn listed(text: &str) -> BTreeSet<String> {
-    text.lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect()
-}
-
 #[test]
 fn chinese_literals_in_api_display_paths_are_listed() {
-    let now = remaining();
-    let path = crate_dir().join(LIST);
-    if std::env::var_os("STEVE_I18N_BLESS").is_some() {
-        let mut body = String::from(
-            "# Chinese literals still in steve-hub's API display paths (see tests/i18n_remaining.rs).\n\
-             # One `path<TAB>literal` per line. Rewrite with STEVE_I18N_BLESS=1.\n",
-        );
-        for l in &now {
-            body.push_str(l);
-            body.push('\n');
-        }
-        std::fs::write(&path, body).expect("write list");
-        return;
-    }
-    let was = listed(&std::fs::read_to_string(&path).unwrap_or_default());
-    let new: Vec<_> = now.difference(&was).cloned().collect();
-    let gone: Vec<_> = was.difference(&now).cloned().collect();
-    eprintln!(
-        "{} Chinese literals remain in API display paths:",
-        now.len()
-    );
-    for l in &now {
-        eprintln!("  {l}");
-    }
-    assert!(
-        new.is_empty() && gone.is_empty(),
-        "tests/i18n_remaining.txt is out of date (STEVE_I18N_BLESS=1 rewrites it).\n\
-         Not listed (use t!() or list it if it must stay Chinese):\n  {}\n\
-         Listed but gone:\n  {}",
-        new.join("\n  "),
-        gone.join("\n  ")
+    let now = remaining()
+        .into_iter()
+        .map(|line| (line.split('\t').map(str::to_owned).collect(), 1))
+        .collect();
+    ratchet::check(
+        now,
+        &crate_dir().join(LIST),
+        2,
+        "# Chinese literals still in steve-hub API display paths; only shrinks.\n# path<TAB>literal<TAB>count (distinct literal per file). STEVE_GUARD_BLESS=1 rewrites after removals.\n",
+        "move API display text to t!()",
     );
 }
 
