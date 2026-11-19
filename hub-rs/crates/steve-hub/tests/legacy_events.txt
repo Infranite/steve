@@ -10,13 +10,6 @@ steve-channels/src/outbound.rs	ChangeEvent::	3
 steve-channels/src/personas.rs	ChangeEvent::	1
 steve-channels/src/recovery.rs	ChangeEvent::	2
 steve-channels/src/spaces.rs	ChangeEvent::	2
-steve-core/src/modules.rs	ChangeEvent::	1
-steve-core/src/orchestrator.rs	ChangeEvent::	1
-steve-core/src/release.rs	HubEvent::	1
-steve-core/src/thread/handle.rs	HubEvent::	2
-steve-core/src/thread/mod.rs	ChangeEvent::	3
-steve-core/src/thread/mod.rs	HubEvent::	2
-steve-core/src/thread/research.rs	HubEvent::	9
 steve-github/src/accept.rs	ChangeEvent::	2
 steve-github/src/link.rs	ChangeEvent::	2
 steve-github/src/sync.rs	ChangeEvent::	3

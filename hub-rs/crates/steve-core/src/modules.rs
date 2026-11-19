@@ -142,9 +142,15 @@ impl Core {
                 rusqlite::params![text, meta, message_id],
             )
             .map_err(steve_store::StoreError::from)?;
-            tx.publish(steve_store::ChangeEvent::Message {
-                id: message_id.into(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Message {
+                    ws: ws.into(),
+                    id: {
+                        let value: String = message_id.into();
+                        steve_types::MessageId::from(value)
+                    },
+                },
+            ));
             Ok::<_, steve_store::StoreError>(())
         })?;
         Ok(())

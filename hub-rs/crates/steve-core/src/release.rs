@@ -745,8 +745,19 @@ impl Tx<'_> {
         let hold = self
             .hold_status()
             .and_then(|h| serde_json::to_value(h).ok());
-        self.db()
-            .publish(crate::repo::HubEvent::ReleaseHold { hold });
+        self.db().store().publish(steve_types::DomainEvent::from(
+            steve_types::DevicesEvent::ReleaseHold {
+                hold: {
+                    let value: Option<serde_json::Value> = hold;
+                    value.map(|value| {
+                        steve_types::RawJson::from_str(
+                            &serde_json::to_string(&value).expect("JSON value"),
+                        )
+                        .expect("validated JSON")
+                    })
+                },
+            },
+        ));
     }
 
     pub(crate) fn end_hold(&mut self) -> Result<()> {

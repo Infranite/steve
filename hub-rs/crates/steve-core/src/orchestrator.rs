@@ -331,14 +331,14 @@ impl Core {
         let mut changed = Vec::new();
         store.with_conn(|c| {
             for id in ["steve", "dev"] {
-                let row: Option<(String, Option<String>, Option<String>, i64)> = c
+                let row: Option<(String, Option<String>, Option<String>, i64, String)> = c
                     .query_row(
-                        "SELECT harness, model, reasoning_effort, revision FROM bots WHERE id = ?1 AND deleted = 0",
+                        "SELECT harness, model, reasoning_effort, revision, workspace_id FROM bots WHERE id = ?1 AND deleted = 0",
                         [id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
                     .ok();
-                let Some((cur_h, model, effort, rev)) = row else {
+                let Some((cur_h, model, effort, rev, ws)) = row else {
                     continue;
                 };
                 if rev != 1 || model.is_some() || effort.is_some() {
@@ -362,13 +362,18 @@ impl Core {
                     rusqlite::params![target.id, perm, steve_store::now(), id],
                 )?;
                 if n > 0 {
-                    changed.push(id);
+                    changed.push((id, ws));
                 }
             }
             Ok(())
         })?;
-        for id in &changed {
-            store.publish(steve_store::ChangeEvent::Bot { id: (*id).into() });
+        for (id, ws) in &changed {
+            store.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: ws.clone().into(),
+                    id: (*id).into(),
+                },
+            ));
         }
         Ok(!changed.is_empty())
     }

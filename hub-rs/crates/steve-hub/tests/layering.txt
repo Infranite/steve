@@ -24,6 +24,7 @@ edge	steve-core	steve-stats
 edge	steve-core	steve-store
 edge	steve-core	steve-toolchains
 edge	steve-core	steve-transcript
+edge	steve-core	steve-types
 edge	steve-core	steve-work-api
 edge	steve-digest	steve-channels
 edge	steve-digest	steve-flow
