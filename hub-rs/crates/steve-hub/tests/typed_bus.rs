@@ -85,47 +85,7 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
 
 #[tokio::test]
 async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() {
-    let tags = [
-        "item",
-        "decision",
-        "session",
-        "event",
-        "message",
-        "steve.thinking",
-        "steve.draft",
-        "steve.tool",
-        "thread.run",
-        "release.hold",
-        "bot",
-        "project",
-        "tag",
-        "workspace",
-        "settings",
-        "device",
-        "node",
-        "client",
-        "party",
-        "mm",
-        "changeset",
-        "account",
-        "connection",
-        "vault",
-        "signal",
-        "flow",
-        "run",
-        "space",
-        "chan_message",
-        "persona",
-        "digest",
-        "calendar",
-        "channel",
-        "yolo",
-        "yolo_action",
-        "stats",
-        "kb",
-        "gh",
-        "mail",
-    ];
+    let tags = steve_types::WIRE_TYPES;
     let bus = Bus::new();
     let mut rx = bus.subscribe();
     let mut tap = bus.tap(|_| true);
@@ -225,4 +185,60 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
     );
     assert_eq!(typed["data"]["tool"], "Read");
     assert_eq!(typed["data"]["content"], json!({"type":"image"}));
+}
+
+/// Privacy: a workspace event that lost its workspace, or a personal event that lost its user, must not
+/// fall through to everyone. Workspace events reach no viewer at all (not even one without a workspace);
+/// personal events reach only the Hub's owners.
+#[tokio::test]
+async fn events_without_a_workspace_or_user_reach_nobody_beyond_the_owners() {
+    let bus = Bus::new();
+    let mut rx = bus.subscribe();
+    let viewers = [
+        ("", "", false),
+        ("a", "user", false),
+        ("", "user", false),
+        ("b", "owner", true),
+    ];
+    for tag in [
+        "item",
+        "steve.tool",
+        "steve.draft",
+        "steve.thinking",
+        "event",
+        "kb",
+        "mail",
+    ] {
+        bus.publish(bus_cases::typed(tag, ""));
+        let (frame, _) = next(&mut rx).await;
+        for (ws, user, owner) in viewers {
+            let viewer = Viewer {
+                ws: ws.into(),
+                user: user.into(),
+                owner,
+            };
+            assert!(!frame.visible(&viewer), "{tag}: {viewer:?}");
+        }
+    }
+    for event in [
+        steve_types::DevicesEvent::Node {
+            id: "n".into(),
+            user: "".into(),
+        },
+        steve_types::DevicesEvent::Client {
+            id: "c".into(),
+            user: "".into(),
+        },
+    ] {
+        bus.publish(steve_types::DomainEvent::from(event));
+        let (frame, _) = next(&mut rx).await;
+        for (ws, user, owner) in viewers {
+            let viewer = Viewer {
+                ws: ws.into(),
+                user: user.into(),
+                owner,
+            };
+            assert_eq!(frame.visible(&viewer), owner, "{viewer:?}");
+        }
+    }
 }

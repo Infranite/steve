@@ -52,7 +52,8 @@ impl Delivery {
     pub fn visible(&self, v: &Viewer) -> bool {
         match self.envelope.scope() {
             Scope::Hub => true,
-            Scope::Ws(w) => w.as_str() == v.ws,
+            // An event without a workspace reaches nobody, not the viewers who lack one too.
+            Scope::Ws(w) => !w.as_str().is_empty() && w.as_str() == v.ws,
             Scope::User(u) => v.owner || (!u.as_str().is_empty() && u.as_str() == v.user),
         }
     }
@@ -385,6 +386,8 @@ impl Bus {
             if !stateless {
                 self.0.generation.fetch_add(1, Ordering::SeqCst);
                 match event.scope() {
+                    // No workspace: no state cache can hold it, so none is invalidated.
+                    Scope::Ws(ws) if ws.as_str().is_empty() => {}
                     Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
                     Scope::Hub | Scope::User(_) => {
                         self.0.global_generation.fetch_add(1, Ordering::SeqCst);

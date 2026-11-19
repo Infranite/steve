@@ -73,7 +73,11 @@ fn expected(counter: Counter) -> (u64, u64, u64, u64) {
 
 #[test]
 fn typed_wire_type_generation_table() {
-    assert_eq!(CURRENT.len(), 39);
+    assert_eq!(
+        CURRENT.iter().map(|(ty, _, _)| *ty).collect::<Vec<_>>(),
+        steve_types::WIRE_TYPES,
+        "the table covers exactly the shared wire type list"
+    );
     let mut unique = std::collections::BTreeSet::new();
     for &(ty, _, counter) in CURRENT {
         assert!(unique.insert(ty));
@@ -139,5 +143,15 @@ fn s1_stateless_events_never_invalidate_state() {
         assert_eq!(bus.generation_for("a"), 0, "{ty}");
         assert_eq!(bus.generation_for("b"), 0, "{ty}");
         assert_eq!(bus.stats_generation(), u64::from(ty == "stats"), "{ty}");
+    }
+}
+
+#[test]
+fn an_event_without_a_workspace_never_invalidates_a_state_cache() {
+    for ty in ["item", "party", "steve.thinking"] {
+        let bus = Bus::new();
+        bus.publish(typed(ty, ""));
+        assert_eq!(counts(&bus), (1, 0, 0, 0), "{ty}");
+        assert_eq!(bus.generation_for(""), 0, "{ty}");
     }
 }

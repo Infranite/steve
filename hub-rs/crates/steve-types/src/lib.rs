@@ -27,7 +27,9 @@ pub mod vault;
 pub mod work;
 
 pub use error::{Code, Error, HttpErrorBody, NOW_MAX_ATTEMPTS, Param, Params, Reason, Retry};
-pub use event::{BusEvent, DomainEvent, Envelope, LiveEvent, Notification, Scope, Scoped};
+pub use event::{
+    BusEvent, DomainEvent, Envelope, LiveEvent, Notification, Scope, Scoped, WIRE_TYPES,
+};
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
 pub use raw::RawJson;
