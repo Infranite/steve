@@ -2,7 +2,7 @@
 //! and the upgrade supervisor read, on a throwaway STEVE_HOME. It must not start a Hub: no database
 //! appears and nothing listens on the configured port.
 
-use std::process::Command;
+use steve_runtime::testkit::process::Command;
 
 fn check(env: &[(&str, &str)]) -> (i32, serde_json::Value, std::path::PathBuf) {
     let tmp = tempfile::tempdir().expect("tmp").keep();

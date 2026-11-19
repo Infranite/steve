@@ -2,8 +2,8 @@
 //! the workspace, the `tz` setting, and module config drafts dispatched to steve-modules. Runs the real
 //! binary on a temp STEVE_HOME (file keystore, fake claude CLI, no agents).
 
-use std::process::Child;
 use std::time::Duration;
+use steve_runtime::testkit::process::Child;
 
 use futures::StreamExt;
 

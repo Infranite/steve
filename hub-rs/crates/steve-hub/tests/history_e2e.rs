@@ -6,10 +6,10 @@
 //! No real host, no real agent, never production data or ports.
 
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
+use steve_runtime::testkit::process::Child;
 
 use serde_json::{Value, json};
 

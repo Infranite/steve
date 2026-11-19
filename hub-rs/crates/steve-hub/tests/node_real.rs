@@ -37,12 +37,12 @@
 //! project is a Node root from the first turn, case 5's configure path, and a Bot in `auto` mode.
 
 use std::io::Write as _;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 
@@ -1487,7 +1487,7 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
 
     // not the harness's: left to the user
     /// Killed with the case, even when it fails.
-    struct Reap(std::process::Child);
+    struct Reap(Child);
     impl Drop for Reap {
         fn drop(&mut self) {
             let _ = self.0.kill();

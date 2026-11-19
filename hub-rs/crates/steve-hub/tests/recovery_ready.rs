@@ -11,11 +11,11 @@
 //!
 //! No real host, no real agent.
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 

@@ -2,6 +2,9 @@
 use super::*;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(test)]
+use steve_runtime::testkit::process::{AsyncChild as Child, AsyncCommand as Command};
+#[cfg(not(test))]
 use tokio::process::{Child, Command};
 struct HubChild {
     process: Child,

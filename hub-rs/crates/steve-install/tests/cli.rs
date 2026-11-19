@@ -2,7 +2,8 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
+use steve_runtime::testkit::process::Command;
 
 fn invoke(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_steve"))

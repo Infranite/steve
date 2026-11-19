@@ -17,13 +17,13 @@
 mod handed;
 mod node_harness;
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 use steve_node_api::testkit::FakeNode;

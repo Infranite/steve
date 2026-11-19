@@ -20,12 +20,11 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command};
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::process::{Child, Command};
 
 use serde_json::{Value, json};
 

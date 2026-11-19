@@ -1,5 +1,5 @@
 //! Identity queries must not load/create a Node home or require pairing.
-use std::process::Command;
+use steve_runtime::testkit::process::Command;
 
 #[test]
 fn binary_identity_is_compile_time_release_data_without_a_home() {

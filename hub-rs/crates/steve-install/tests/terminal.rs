@@ -8,10 +8,10 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::process::{Child, Command};
 
 struct Pty {
     master: File,

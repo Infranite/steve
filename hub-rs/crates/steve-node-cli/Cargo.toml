@@ -33,4 +33,5 @@ tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit"] }
 tempfile = "=3.27.0"
