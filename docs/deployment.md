@@ -38,7 +38,7 @@ The Hub and authentication share one secret-file reader. Supported secret forms 
 | OpenViking root key | None | `STEVE_OPENVIKING_KEY_FILE` |
 
 For OIDC, set either the direct variable or its file source. Setting both is an error, even
-if one is empty. OpenViking keys are file-only; the Hub rejects `STEVE_OPENVIKING_KEY` because
+if one is empty. OpenViking keys are file-only; the Hub rejects a direct `STEVE_OPENVIKING_KEY` because
 that direct name is not removed from harness environments. Public addresses and origins
 (`STEVE_PUBLIC_URL`, `STEVE_PUBLIC_URLS`, `STEVE_CLIENT_ORIGINS`, `STEVE_OIDC_ISSUER` and
 `STEVE_OPENVIKING_URL`) use direct values, with no file-source variants.

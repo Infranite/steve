@@ -39,7 +39,7 @@ use axum::{
 use openidconnect::CsrfToken;
 use serde_json::json;
 
-pub use config::{AuthConfig, OidcConfig, flag};
+pub use config::{AuthConfig, OidcConfig, SecretSource, flag};
 
 /// Cookie holding the browser's session token.
 pub const SESSION: &str = "steve_session";

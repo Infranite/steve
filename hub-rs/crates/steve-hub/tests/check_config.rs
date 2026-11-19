@@ -116,11 +116,6 @@ fn removed_and_malformed_variables_fail_the_preflight() {
     for (name, value) in [
         ("STEVE_ITEM_PREFIX", "ST"),
         ("STEVE_OPENVIKING_KEY", "private-test-sentinel"),
-        ("STEVE_PUBLIC_URL_FILE", ""),
-        ("STEVE_PUBLIC_URLS_FILE", ""),
-        ("STEVE_CLIENT_ORIGINS_FILE", ""),
-        ("STEVE_OIDC_ISSUER_FILE", ""),
-        ("STEVE_OPENVIKING_URL_FILE", ""),
         ("STEVE_PORT", ""),
         ("STEVE_PORT", "0x10"),
         ("STEVE_PORT", "65536"),

@@ -39,6 +39,15 @@ pub fn flag(vars: impl Fn(&str) -> Option<String>, name: &str) -> io::Result<boo
     }
 }
 
+/// Where [`AuthConfig::secret`] may read a secret from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretSource {
+    /// Only `<name>_FILE`.
+    FileOnly,
+    /// `<name>_FILE` or the variable itself (not both).
+    FileOrDirect,
+}
+
 impl AuthConfig {
     /// Builds the config the way config.ts does from raw env values.
     pub fn new(
@@ -69,7 +78,8 @@ impl AuthConfig {
 
     /// [`AuthConfig::from_env`] over any variable source (tests pass a map).
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> io::Result<Self> {
-        let client_secret = Self::secret(&var, "STEVE_OIDC_CLIENT_SECRET")?;
+        let client_secret =
+            Self::secret(&var, "STEVE_OIDC_CLIENT_SECRET", SecretSource::FileOrDirect)?;
         let public_url = var("STEVE_PUBLIC_URL");
         let public_urls = var("STEVE_PUBLIC_URLS");
         let oidc = OidcConfig {
@@ -85,21 +95,19 @@ impl AuthConfig {
         ))
     }
 
-    /// Read a supported secret, preserving spaces and removing only final CR/LF.
-    /// Direct forms are allowed only for names scrubbed from harness environments;
-    /// OIDC's secret is scrubbed, while the OpenViking key must remain file-only.
-    pub fn secret(vars: impl Fn(&str) -> Option<String>, name: &str) -> io::Result<Option<String>> {
+    /// Read a secret, preserving spaces and removing only final CR/LF. `source` says whether the
+    /// direct variable may be used besides `<name>_FILE`: only for names that harness environments
+    /// scrub (steve-vault `hub_private_env`), so a directly set secret never reaches an agent.
+    pub fn secret(
+        vars: impl Fn(&str) -> Option<String>,
+        name: &str,
+        source: SecretSource,
+    ) -> io::Result<Option<String>> {
         let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message);
-        let direct = match name {
-            "STEVE_OIDC_CLIENT_SECRET" => vars(name),
-            "STEVE_OPENVIKING_KEY" if vars(name).is_none() => None,
-            "STEVE_OPENVIKING_KEY" => {
-                return Err(invalid(&format!(
-                    "{name}: only the file source is supported"
-                )));
-            }
-            _ => return Err(invalid(&format!("{name}: unsupported secret variable"))),
-        };
+        let direct = vars(name);
+        if source == SecretSource::FileOnly && direct.is_some() {
+            return Err(invalid(&format!("{name}: only {name}_FILE is supported")));
+        }
         let file_name = format!("{name}_FILE");
         let Some(path) = vars(&file_name) else {
             return Ok(direct);

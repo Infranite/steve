@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 
-use steve_auth::AuthConfig;
+use steve_auth::{AuthConfig, SecretSource};
 use steve_hub::config::Config;
 
 fn config(vars: &[(&str, &str)]) -> Result<Config, steve_hub::config::ConfigError> {
@@ -33,6 +33,7 @@ fn secrets_preserve_spaces_remove_only_final_newlines_and_reject_conflicts() {
                         .map(|(_, v)| v.to_string())
                 },
                 name,
+                SecretSource::FileOrDirect,
             )
         };
         assert_eq!(read(&[]).unwrap(), None);
@@ -126,7 +127,8 @@ fn openviking_requires_a_safe_file_even_when_disabled() {
         assert!(
             AuthConfig::secret(
                 |k| (k == "STEVE_OPENVIKING_KEY").then(|| direct.into()),
-                "STEVE_OPENVIKING_KEY"
+                "STEVE_OPENVIKING_KEY",
+                SecretSource::FileOnly,
             )
             .is_err()
         );
@@ -138,7 +140,7 @@ fn openviking_requires_a_safe_file_even_when_disabled() {
 }
 
 #[test]
-fn public_addresses_use_direct_values_and_reject_file_sources() {
+fn public_addresses_use_direct_values() {
     let vars = [
         ("STEVE_PUBLIC_URL", "https://service.example.test/"),
         ("STEVE_PUBLIC_URLS", "https://service.example.test/"),
@@ -159,21 +161,6 @@ fn public_addresses_use_direct_values_and_reject_file_sources() {
     assert_eq!(auth.public_url, c.public_url);
     assert_eq!(auth.public_urls, c.public_urls);
     assert_eq!(auth.oidc.issuer, c.oidc.issuer);
-    for name in [
-        "STEVE_PUBLIC_URL_FILE",
-        "STEVE_PUBLIC_URLS_FILE",
-        "STEVE_CLIENT_ORIGINS_FILE",
-        "STEVE_OIDC_ISSUER_FILE",
-        "STEVE_OPENVIKING_URL_FILE",
-    ] {
-        for value in ["", "/nonexistent/config-test-url"] {
-            let error = config(&[(name, value)]).unwrap_err().to_string();
-            assert!(
-                error.starts_with(name) && error.contains("unknown variable"),
-                "{error}"
-            );
-        }
-    }
 }
 
 #[test]
@@ -189,6 +176,7 @@ fn fifo_secret_sources_are_rejected_before_open() {
         let result = AuthConfig::secret(
             |k| (k == "STEVE_OIDC_CLIENT_SECRET_FILE").then(|| path.to_str().unwrap().into()),
             "STEVE_OIDC_CLIENT_SECRET",
+            SecretSource::FileOrDirect,
         );
         tx.send(result).unwrap();
     });
@@ -298,6 +286,7 @@ fn secret_files_require_utf8_regular_files_and_preserve_embedded_newlines() {
         AuthConfig::secret(
             |k| (k == "STEVE_OIDC_CLIENT_SECRET_FILE").then(|| path.to_str().unwrap().into()),
             "STEVE_OIDC_CLIENT_SECRET",
+            SecretSource::FileOrDirect,
         )
     };
     assert!(read(dir.path()).is_err());

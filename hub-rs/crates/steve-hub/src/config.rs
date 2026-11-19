@@ -466,15 +466,7 @@ fn strip_slash(s: &str) -> String {
 }
 
 // Removed inputs are rejected even when set to an empty value.
-const REMOVED: &[&str] = &[
-    "STEVE_ITEM_PREFIX",
-    "STEVE_OPENVIKING_KEY",
-    "STEVE_PUBLIC_URL_FILE",
-    "STEVE_PUBLIC_URLS_FILE",
-    "STEVE_CLIENT_ORIGINS_FILE",
-    "STEVE_OIDC_ISSUER_FILE",
-    "STEVE_OPENVIKING_URL_FILE",
-];
+const REMOVED: &[&str] = &["STEVE_ITEM_PREFIX"];
 
 fn count(
     get: &impl Fn(&str) -> Option<String>,
@@ -581,13 +573,21 @@ impl Config {
         for url in &client_origins {
             validate_url("STEVE_CLIENT_ORIGINS", url)?;
         }
-        let client_secret = steve_auth::AuthConfig::secret(&get, "STEVE_OIDC_CLIENT_SECRET")?;
+        let client_secret = steve_auth::AuthConfig::secret(
+            &get,
+            "STEVE_OIDC_CLIENT_SECRET",
+            steve_auth::SecretSource::FileOrDirect,
+        )?;
         let issuer = get("STEVE_OIDC_ISSUER");
         if let Some(url) = &issuer {
             validate_url("STEVE_OIDC_ISSUER", url)?;
         }
         // Validate sources even when the optional backend is disabled.
-        let openviking_key = steve_auth::AuthConfig::secret(&get, "STEVE_OPENVIKING_KEY")?;
+        let openviking_key = steve_auth::AuthConfig::secret(
+            &get,
+            "STEVE_OPENVIKING_KEY",
+            steve_auth::SecretSource::FileOnly,
+        )?;
         let openviking_url = get("STEVE_OPENVIKING_URL");
         if let Some(url) = &openviking_url {
             validate_url("STEVE_OPENVIKING_URL", url)?;
