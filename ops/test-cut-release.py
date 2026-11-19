@@ -379,8 +379,12 @@ def main():
         subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
         git(b, "push", "-q", "origin", "main")
         real_run, seen = m.ci_run, []
+        waited = git(origin, "rev-parse", "main")
 
         def finishes(repo, sha, branch):
+            # only the head has a push run; the older commits since the last release have none
+            if sha != waited:
+                return None
             seen.append(sha)
             states = [None, {"id": 9, "status": "queued"}, {"id": 9, "status": "in_progress"},
                       {"id": 9, "status": "completed", "conclusion": "success"}]
@@ -644,8 +648,7 @@ def latest_tested_checks():
     with tempfile.TemporaryDirectory(prefix="steve-cut-tested-") as tmp:
         fake_gh(tmp)
         origin, a = setup(tmp)
-        policy = "env:\n  RELEASE_BASE_POLICY: latest-tested-push\n"
-        commit(a, {".github/workflows/ci.yml": policy, "src/tested.txt": "tested\n",
+        commit(a, {"src/tested.txt": "tested\n",
                    "docs/releases/unreleased/.gitkeep": "",
                    "docs/releases/unreleased/tested.md": "- Tested change.\n"}, "tested")
         tested = git(a, "rev-parse", "HEAD")

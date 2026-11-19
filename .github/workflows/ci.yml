@@ -19,8 +19,6 @@ on:
 permissions:
   contents: read
 env:
-  # Opt in only once this workflow is on main; older workflows still require CI on the current head.
-  RELEASE_BASE_POLICY: latest-tested-push
   # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
   # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
   RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 2}'

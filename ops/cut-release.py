@@ -42,13 +42,10 @@ checks); fragments that arrived since wait for the release after it.
 
 Only a tested commit is released: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in
 /opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run
-(`.github/workflows/ci.yml`) pushed to the branch at `base`. When main's workflow declares
-`RELEASE_BASE_POLICY: latest-tested-push`, it picks the newest first-parent commit since the last release
-whose own latest full push run completed successfully. Newer pending, cancelled or failed commits wait for
-the next release; cancellation never counts as success. With no eligible successful commit it checks the
-head as before. Older workflows and other branches always require the head's run, preserving their release
-policy without relying on a workflow change that has not reached main. It waits while that run is queued or
-running (up to
+(`.github/workflows/ci.yml`) pushed to the branch: it picks the newest first-parent commit since the last
+release whose own latest full push run completed successfully. Newer pending, cancelled or failed commits wait
+for the next release; cancellation never counts as success. With no eligible successful commit it checks the
+head: it waits while that run is queued or running (up to
 `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
 run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. The notes commit then needs
 its release pull request's run to pass: that run checks the notes (ci.yml skips its Rust and Apple jobs when the
@@ -242,17 +239,15 @@ def ci_gate(repo, sha, branch, wait):
 
 
 def release_base(repo, head, branch, wait):
-    """Select a tested first-parent commit when the branch's workflow opts in; older workflows keep
-    requiring the current head. A cancelled run is never success, nor is a pull-request run."""
-    workflow = git("show", f"{head}:.github/workflows/{CI_WORKFLOW}", cwd=repo, check=False)
-    if branch != "main" or not re.search(r"^  RELEASE_BASE_POLICY: latest-tested-push$", workflow.stdout, re.M):
-        return head
+    """The newest first-parent commit since the last release whose own push run passed, else the head once
+    its run passes. A cancelled run is never success, nor is a pull-request run."""
     # Do not go back to code already released. Walk branch order, not run completion order: slow runs
     # and reruns can finish out of order. First-parent excludes a feature branch's pre-merge SHA.
     commits = git("rev-list", "--first-parent", head, "--not", "--glob=refs/tags/v[0-9]*", cwd=repo).stdout.split()
     for sha in commits:
         run = ci_run(repo, sha, branch)
         if run and run.get("status") == "completed" and run.get("conclusion") == "success":
+            print(f"CI passed on {sha[:7]}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
             if sha != head:
                 print(f"releasing tested commit {sha[:7]}; newer commits on {branch} wait for the next release",
                       file=sys.stderr)
@@ -322,20 +317,20 @@ def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
                     notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
                 tag(repo, wt, left, version, branch)
                 return fetched(repo, version)
+            if not fragments(wt, version):
+                raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
             if not dry and ci_wait is not None:
                 base = release_base(repo, base, branch, ci_wait)
                 git("checkout", "--quiet", "--detach", base, cwd=wt)
             parts = fragments(wt, version)
             if not parts:
-                raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
+                raise Refused(f"no release notes at the newest tested commit {base[:7]}: its fragments are still untested")
             # notes of this untagged version written ahead the old way, alone: `base` is tagged as it is
             ready = [p for p, _ in parts] == [notes_rel]
             text = parts[0][1] if ready else assemble(version, parts)
             if dry:
                 print(text, end="")
                 return version
-            if ci_wait is not None:
-                ci_gate(repo, base, branch, ci_wait)
             if ready:
                 target = base
             else:
