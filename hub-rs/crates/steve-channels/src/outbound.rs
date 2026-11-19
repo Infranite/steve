@@ -3238,22 +3238,27 @@ impl Outbox {
     async fn send_ready(&self, ch: &Channels, now: i64) -> usize {
         // B3: only due messages are selected before the LIMIT, so approved ones still inside their
         // delay can't fill the batch and starve those that are due
-        let due = ch.store().reader(|c| -> ChannelResult<Vec<(String, String)>> {
-            let mut st = c.prepare_cached(
-                "SELECT m.id, d.id FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
-                  WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?1)
-                    AND d.status = 'resolved' AND d.subject_type = ?2 AND d.subject_id = m.id
-                    AND json_extract(d.result, '$.send_at') <= ?3
-                    AND coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)<=?3
-                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
-                    JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
-            )?;
-            Ok(st
-                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE, now, self.retry_deadlines(now)], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?)
-        });
+        let due = ch
+            .store()
+            .reader(|c| -> ChannelResult<Vec<(String, String)>> {
+                let mut st = c.prepare_cached(&format!(
+                    "{QUEUE_CANDIDATES}
+                SELECT id, decision FROM candidates WHERE decision IS NOT NULL AND at<=?5
+                ORDER BY at,created,id LIMIT 50"
+                ))?;
+                Ok(st
+                    .query_map(
+                        params![
+                            CLAIM_STALE_MS,
+                            SUBJECT_MESSAGE,
+                            UNCLAIMED_MS,
+                            self.retry_deadlines(now),
+                            now
+                        ],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            });
         let due = match due {
             Ok(d) => d,
             Err(e) => {
@@ -3331,26 +3336,27 @@ impl Outbox {
     /// it began, or that waited for their connection: sent under the authorization they were stored
     /// with (checked again by [`Outbox::send`]). One older than [`LATE_MS`] is asked about instead.
     async fn resume_direct(&self, ch: &Channels, now: i64) -> usize {
-        let rows = ch.store().reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
-            let mut st = c.prepare_cached(
-                "SELECT m.id, m.created, s.first_at FROM chan_messages m JOIN chan_send_state s ON s.message_id = m.id
-                  WHERE m.direction = 'out' AND m.status = 'pending' AND m.decision_id IS NULL
-                    AND ((m.sent IS NULL AND m.created < ?1) OR m.sent < ?2)
-                    AND coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)<=?3
-                    AND (s.first_at IS NOT NULL OR NOT EXISTS (
-                      SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
-                      JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
-                      WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?3 OR p.mode='log'
-                        OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
-                  ORDER BY m.created LIMIT 50",
-            )?;
-            let v = st
-                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS, now, self.retry_deadlines(now)], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(v)
-        });
+        let rows = ch
+            .store()
+            .reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
+                let mut st = c.prepare_cached(&format!(
+                    "{QUEUE_CANDIDATES}
+                SELECT id,created,first_at FROM candidates WHERE decision IS NULL AND at<=?5
+                ORDER BY at,created,id LIMIT 50"
+                ))?;
+                Ok(st
+                    .query_map(
+                        params![
+                            CLAIM_STALE_MS,
+                            SUBJECT_MESSAGE,
+                            UNCLAIMED_MS,
+                            self.retry_deadlines(now),
+                            now
+                        ],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            });
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -4535,6 +4541,34 @@ mod permission_tests {
     }
 }
 
+// One candidate relation drives discovery and both batch consumers. Strict claim boundaries
+// become inclusive deadlines (+1ms); notification deferrals are filters before LIMIT, not ordering hints.
+const QUEUE_CANDIDATES: &str = "WITH candidates AS (
+    SELECT m.id, d.id AS decision, m.created, NULL AS first_at,
+      max(json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
+        coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+          JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),
+        coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)) AS at
+    FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
+    WHERE m.direction='out' AND m.status='pending' AND d.status='resolved'
+      AND d.subject_type=?2 AND d.subject_id=m.id AND json_extract(d.result,'$.send_at') IS NOT NULL
+    UNION ALL
+    SELECT m.id, NULL, m.created, s.first_at,
+      max(CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END,
+        CASE WHEN s.first_at IS NOT NULL THEN 0 ELSE coalesce((
+          SELECT n.next_attempt_at FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+          JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+          WHERE od.message_id=m.id AND p.enabled=1),0) END,
+        coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0))
+    FROM chan_messages m JOIN chan_send_state s ON s.message_id=m.id
+    WHERE m.direction='out' AND m.status='pending' AND m.decision_id IS NULL
+      AND (s.first_at IS NOT NULL OR NOT EXISTS (
+        SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+        JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+        WHERE od.message_id=m.id AND p.enabled=1 AND (p.mode='log'
+          OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
+) ";
+
 /// Approved sends and abandoned direct claims: the earliest executable durable deadline.
 /// A refused send already enters the existing failed/manual-review state; no migration is needed.
 pub struct QueueDue {
@@ -4549,26 +4583,21 @@ impl steve_runtime::due::DueSource for QueueDue {
         QUEUE_EVERY
     }
     async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
-        self.channels.store().reader(|c| -> ChannelResult<_> {
-            Ok(c.query_row(
-                "SELECT min(at) FROM (
-                   SELECT max(coalesce((SELECT value FROM json_each(?5) WHERE key=m.id),0),json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
-                      coalesce((SELECT n.next_attempt_at FROM personal_notifications n
-                        JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0)) AS at
-                   FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
-                   WHERE m.direction='out' AND m.status='pending' AND d.status='resolved'
-                     AND d.subject_type=?2 AND d.subject_id=m.id AND json_extract(d.result,'$.send_at') IS NOT NULL
-                   UNION ALL
-                   SELECT max(coalesce((SELECT value FROM json_each(?5) WHERE key=m.id),0),CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END)
-                   FROM chan_messages m JOIN chan_send_state s ON s.message_id=m.id
-                   WHERE m.direction='out' AND m.status='pending' AND m.decision_id IS NULL
-                     AND (s.first_at IS NOT NULL OR NOT EXISTS (
-                       SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
-                       JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
-                       WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?4 OR p.mode='log'
-                         OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
-                )", params![CLAIM_STALE_MS, SUBJECT_MESSAGE, UNCLAIMED_MS, self.channels.now(), self.outbox.retry_deadlines(self.channels.now())], |r|r.get(0))?)
-        }).map_err(|e| steve_runtime::due::DueError(e.to_string()))
+        self.channels
+            .store()
+            .reader(|c| -> ChannelResult<_> {
+                Ok(c.query_row(
+                    &format!("{QUEUE_CANDIDATES} SELECT min(at) FROM candidates"),
+                    params![
+                        CLAIM_STALE_MS,
+                        SUBJECT_MESSAGE,
+                        UNCLAIMED_MS,
+                        self.outbox.retry_deadlines(self.channels.now())
+                    ],
+                    |r| r.get(0),
+                )?)
+            })
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
     async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
         self.outbox.bind(&self.channels);

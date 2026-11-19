@@ -7473,3 +7473,26 @@ async fn deferred_rows_advance_without_failing_the_source_or_blocking_other_rows
     f.source.run_due(now + 2_000).await.unwrap();
     assert!(f.done().contains(&pending));
 }
+
+#[tokio::test]
+async fn notification_deadlines_filter_approved_batches_before_the_limit() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    for _ in 0..60 {
+        let id = f.add(now, false);
+        f.h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute("INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,created)
+                SELECT ?1,workspace_id,?2,?1,'test','{}','test',space_id,id,?3 FROM chan_messages WHERE id=?1", rusqlite::params![id,ME,now])?;
+            tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,delivery_id)
+                VALUES (?1,?2,?3,?1,?1,'now','body','submitted',?4,?5,?1)", rusqlite::params![id,WS,ME,now+10_000,now])?;
+            Ok(())
+        }).unwrap();
+    }
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 10_000));
+    let due = f.add(now, false);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now));
+    f.source.run_due(now).await.unwrap();
+    assert_eq!(f.done(), vec![due]);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 10_000));
+}
