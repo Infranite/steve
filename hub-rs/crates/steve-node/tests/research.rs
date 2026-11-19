@@ -421,10 +421,11 @@ async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
         let n = t.acp_node();
         let mut spec = acp_job("a_acp", name);
         research(&mut spec).budget.max_tools = Some(1);
-        research(&mut spec).budget.idle_ms = if matches!(name, "idle" | "thought") {
-            800
-        } else {
-            600_000
+        research(&mut spec).budget.idle_ms = match name {
+            "idle" => 800,
+            // the script's thoughts span twice this, 100 ms apart (see research-acp.mjs)
+            "thought" => 1_500,
+            _ => 600_000,
         };
         n.start_job(now_cmd("acp_limit", spec)).await.unwrap();
         let c = t.end_of(&n, "acp_limit").await;

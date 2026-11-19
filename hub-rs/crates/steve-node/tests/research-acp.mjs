@@ -20,15 +20,17 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     const prompt = req.params.prompt.filter(p => p.type === "text").map(p => p.text).join("\n");
     if (prompt === "idle") continue;
     if (prompt === "thought") {
+      // 30 thoughts 100 ms apart: together twice the job's idle limit, each gap a fifteenth of it,
+      // so only "thoughts are activity" can finish the job, even on a heavily loaded machine.
       let count = 0;
       const timer = setInterval(() => {
         update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "private-thought" } });
-        if (++count === 6) {
+        if (++count === 30) {
           clearInterval(timer);
           text("完成");
           reply(req.id, { stopReason: "end_turn" });
         }
-      }, 200);
+      }, 100);
       continue;
     }
     text("我先");
