@@ -71,8 +71,13 @@ fn save_cursor(
 fn receipt(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg], seq: i64, now: i64) -> Result<()> {
     for m in msgs {
         tx.execute("INSERT INTO digest_receipts (workspace_id, conv, message_id, seq, created) VALUES (?, ?, ?, ?, ?)", params![ws, conv.key(), m.id, seq, now])?;
-        steve_store_sqlite::digest::dequeue_on_receipt(tx, ws, &conv.key(), &m.id)?;
     }
+    steve_store_sqlite::digest::dequeue_on_receipt(
+        tx,
+        ws,
+        &conv.key(),
+        msgs.iter().map(|m| m.id.as_str()),
+    )?;
     Ok(())
 }
 
@@ -181,7 +186,6 @@ fn run_conv_step(
     }
     // Persist initialization even when paused or budget-deferred.
     save_cursor(tx, ws, conv, &k, now, initial_since)?;
-
     rep.conversations += 1;
     match p.settings.depth.as_str() {
         "paused" => return Ok(()),
@@ -374,6 +378,37 @@ pub fn cut_now(store: &Store, ws: &str, conv: &ConvRef, now: i64) -> Result<Repo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn five_hundred_receipts_aggregate_the_conversation_once() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use steve_store_sqlite::digest::{self, Source};
+        let env = steve_modules::testkit::TestEnv::new(|_| {});
+        let count = Arc::new(AtomicUsize::new(0));
+        env.store().transaction(|tx| -> Result<()> {
+            tx.execute("INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES('receipt-batch','default','test','group','receipt-batch','Batch',1,1)",[])?;
+            for n in 0..500 {
+                let id=format!("batch-{n}");
+                tx.execute("INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created) VALUES(?1,'default','receipt-batch','in','received','body',?2)",rusqlite::params![id,n])?;
+                digest::sync_message(tx,Source::ChanMessage,&id,None)?;
+            }
+            let conv=ConvRef::new("space","receipt-batch");
+            let msgs=conv::unread(tx,"default",&conv,500)?;
+            assert_eq!(msgs.len(),500);
+            let writes=count.clone();
+            tx.update_hook(Some(move |_:rusqlite::hooks::Action,_:&str,table:&str,_:i64|{
+                if table=="digest_pending_convs" { writes.fetch_add(1,Ordering::SeqCst); }
+            }))?;
+            receipt(tx,"default",&conv,&msgs,1,1)?;
+            assert_eq!(count.load(Ordering::SeqCst),1,"one empty-conversation deletion, not 500 aggregates");
+            assert!(digest::verify_pending(tx,"default")?.is_empty());
+            assert_eq!(tx.query_row("SELECT count(*) FROM digest_receipts WHERE conv='space:receipt-batch'",[],|r|r.get::<_,i64>(0))?,500);
+            Ok(())
+        }).unwrap();
+    }
+
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use steve_modules::testkit::{TestEnv, WS};

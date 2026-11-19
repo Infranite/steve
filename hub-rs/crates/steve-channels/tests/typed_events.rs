@@ -1,4 +1,6 @@
 //! Producer regression: nudge has no workspace argument; scope must come from the written row.
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
 use std::sync::{Arc, Mutex};
 use steve_channels::decide;
 use steve_modules::ApiError;
@@ -21,6 +23,7 @@ fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     let dir = tempfile::tempdir().unwrap();
     let capture = Capture::default();
     let store = Store::open(dir.path().join("store.db"), capture.clone()).unwrap();
+    let _audit = digest_audit::Audit(store.clone());
     store.ensure_workspace().unwrap();
     store.transaction(|tx| {
         tx.execute("INSERT INTO workspaces (id, name, created) VALUES ('scope-a', 'A', 1), ('scope-b', 'B', 1)", [])?;

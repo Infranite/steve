@@ -14,19 +14,41 @@ struct MessageShape {
     prefix: &'static str,
 }
 impl Source {
+    /// Read source rows using the shared message shape. The filter is trusted caller SQL.
+    pub fn messages(
+        self,
+        c: &Connection,
+        filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<Message>> {
+        c.prepare_cached(&format!("{} WHERE {filter}", self.select_sql()))?
+            .query_map(params, |r| {
+                Ok(Message {
+                    scope: scope_row(r)?,
+                    id: r.get(2)?,
+                    at: r.get(3)?,
+                    status: r.get(4)?,
+                })
+            })?
+            .collect()
+    }
     pub fn scope(self, c: &Connection, id: &str) -> Result<Option<Scope>> {
+        Ok(self
+            .messages(c, "id=?1", [id])?
+            .into_iter()
+            .next()
+            .map(|m| m.scope))
+    }
+    fn select_sql(self) -> String {
         let MessageShape {
             table,
             conv_column,
+            time_column,
             prefix,
-            ..
         } = self.shape();
-        c.query_row(
-            &format!("SELECT workspace_id,?1 || {conv_column} FROM {table} WHERE id=?2"),
-            params![prefix, id],
-            scope_row,
+        format!(
+            "SELECT workspace_id,'{prefix}' || {conv_column} AS conv,id AS message_id,{time_column} AS at,status FROM {table}"
         )
-        .optional()
     }
     fn shape(self) -> MessageShape {
         match self {
@@ -49,6 +71,13 @@ impl Source {
 pub struct Scope {
     pub workspace: String,
     pub conv: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub id: String,
+    pub scope: Scope,
+    pub status: String,
+    pub at: i64,
 }
 fn transaction(c: &Connection) -> Result<()> {
     if c.is_autocommit() {
@@ -102,22 +131,20 @@ pub fn sync_message(
     old_scope: Option<&Scope>,
 ) -> Result<()> {
     transaction(c)?;
-    let MessageShape {
-        table,
-        conv_column,
-        time_column,
-        prefix,
-    } = source.shape();
-    let added = c.query_row(
-        &format!("WITH source AS (
-        SELECT workspace_id,?1 || {conv_column} AS conv,id AS message_id,{time_column} AS at,status FROM {table} WHERE id=?2)
+    let source_sql = source.select_sql();
+    let added = c
+        .query_row(
+            &format!(
+                "WITH source AS ({source_sql} WHERE id=?1)
         INSERT INTO digest_pending(workspace_id,conv,message_id,at)
         SELECT m.workspace_id,m.conv,m.message_id,m.at FROM source m WHERE {ELIGIBLE}
         ON CONFLICT(workspace_id,conv,message_id) DO UPDATE SET at=excluded.at
-        RETURNING workspace_id,conv"),
-        params![prefix, id],
-        scope_row,
-    ).optional()?;
+        RETURNING workspace_id,conv"
+            ),
+            [id],
+            scope_row,
+        )
+        .optional()?;
     let mut affected = BTreeSet::new();
     // No intermediate projection cleanup: a same-scope update of the only queued message
     // must preserve retry/dead-letter state added by later migrations.
@@ -140,17 +167,17 @@ pub fn dequeue_on_receipt(
     c: &Connection,
     workspace: &str,
     conv: &str,
-    message_id: &str,
+    message_ids: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<()> {
+    let scope = Scope {
+        workspace: workspace.into(),
+        conv: conv.into(),
+    };
     remove_message(
         c,
-        [(
-            Scope {
-                workspace: workspace.into(),
-                conv: conv.into(),
-            },
-            message_id.to_owned(),
-        )],
+        message_ids
+            .into_iter()
+            .map(|id| (scope.clone(), id.as_ref().to_owned())),
     )
 }
 /// Capture source scopes before DELETE, then remove in one batch. Each affected conversation
@@ -207,15 +234,14 @@ fn membership_mismatches(c: &Connection, workspace: &str) -> Result<Vec<Mismatch
     let expected: BTreeMap<Key, i64> = c
         .prepare_cached(&format!(
             "WITH source AS (
-           SELECT workspace_id,'space:' || space_id AS conv,id AS message_id,created AS at,status
-           FROM chan_messages WHERE workspace_id=?1
-           UNION ALL SELECT workspace_id,'mail_thread:' || thread_id,id,date,status
-           FROM mail_messages WHERE workspace_id=?1)
+           {} WHERE workspace_id=?1 UNION ALL {} WHERE workspace_id=?1)
          SELECT m.conv,m.message_id,m.at FROM source m WHERE {ELIGIBLE}
            AND (EXISTS(SELECT 1 FROM digest_pending p
                   WHERE p.workspace_id=?1 AND p.conv=m.conv AND p.message_id=m.message_id)
              OR NOT EXISTS(SELECT 1 FROM digest_cursors k
-                  WHERE k.workspace_id=?1 AND k.conv=m.conv AND m.at<k.since))"
+                  WHERE k.workspace_id=?1 AND k.conv=m.conv AND m.at<k.since))",
+            Source::ChanMessage.select_sql(),
+            Source::MailMessage.select_sql()
         ))?
         .query_map([workspace], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
         .collect::<Result<_>>()?;

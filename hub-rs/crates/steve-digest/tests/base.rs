@@ -620,11 +620,14 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
             .len(),
         1
     );
+    #[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+    mod reopened_audit;
     let reopened = steve_store::Store::open(
         e.dir.path().join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap();
+    let _reopened_audit = reopened_audit::Audit(reopened.clone());
     assert_eq!(
         reopened
             .reader(|c| queue::list(c, WS, None, None, 50))

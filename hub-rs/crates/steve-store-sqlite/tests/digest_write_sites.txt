@@ -1,40 +1,148 @@
-# Workspace Rust SQL sites (production and fixtures); file counts may only shrink.
-crates/steve-channels/src/cleanup.rs	1
-crates/steve-channels/src/messages.rs	1
-crates/steve-channels/src/outbound.rs	19
-crates/steve-channels/src/presence.rs	1
-crates/steve-channels/src/respond.rs	1
-crates/steve-channels/tests/attention.rs	3
-crates/steve-channels/tests/c1_spaces_messages.rs	3
-crates/steve-channels/tests/c3_rules.rs	1
-crates/steve-channels/tests/c4_compose.rs	6
-crates/steve-channels/tests/c56_outbound.rs	5
-crates/steve-channels/tests/capi_channels.rs	1
-crates/steve-channels/tests/cleanup.rs	1
-crates/steve-channels/tests/conversation_preferences.rs	2
-crates/steve-channels/tests/digest_status.rs	5
-crates/steve-channels/tests/im_conversations.rs	2
-crates/steve-channels/tests/lifecycle.rs	1
-crates/steve-channels/tests/media.rs	2
-crates/steve-channels/tests/owner_decisions.rs	1
-crates/steve-channels/tests/owner_presence.rs	2
-crates/steve-core/src/yolo/engine_tests.rs	1
-crates/steve-core/src/yolo/facts.rs	2
-crates/steve-digest/src/window.rs	2
-crates/steve-digest/tests/base.rs	8
-crates/steve-digest/tests/bot.rs	2
-crates/steve-digest/tests/intake_migration.rs	11
-crates/steve-digest/tests/todos.rs	1
-crates/steve-hub/tests/modules.rs	1
-crates/steve-hub/tests/outbox_wired.rs	2
-crates/steve-hub/tests/wired/connectors.rs	1
-crates/steve-mail/src/repo.rs	2
-crates/steve-stats/tests/workflow.rs	1
-crates/steve-store-sqlite/tests/digest_explicit.rs	30
-crates/steve-store-sqlite/tests/digest_write_sites.rs	4
-crates/steve-store/tests/migration_012.rs	2
-crates/steve-store/tests/migration_019.rs	1
-crates/steve-store/tests/migration_088.rs	1
-crates/steve-store/tests/migration_103.rs	2
-crates/steve-store/tests/migration_trigger_receipts.rs	1
-crates/steve-store/tests/schema_new.rs	2
+# Conservative workspace digest inventory: write/table; exact equality, only shrink.
+table	crates/steve-channels/examples/external_write_gates_fixture.rs	1
+table	crates/steve-channels/examples/personal_trigger_fixture.rs	1
+table	crates/steve-channels/examples/st162_recovery_fixture.rs	1
+table	crates/steve-channels/src/adapters/feishu/self_poll.rs	1
+table	crates/steve-channels/src/api.rs	3
+table	crates/steve-channels/src/arbiter.rs	2
+table	crates/steve-channels/src/basis.rs	2
+table	crates/steve-channels/src/cleanup.rs	6
+table	crates/steve-channels/src/compose.rs	1
+table	crates/steve-channels/src/connector.rs	2
+table	crates/steve-channels/src/context.rs	4
+table	crates/steve-channels/src/conv_record.rs	4
+table	crates/steve-channels/src/conversations.rs	6
+table	crates/steve-channels/src/decide.rs	7
+table	crates/steve-channels/src/deliver.rs	1
+table	crates/steve-channels/src/fallback.rs	5
+table	crates/steve-channels/src/flow_actions.rs	1
+table	crates/steve-channels/src/history.rs	2
+table	crates/steve-channels/src/im_context.rs	2
+table	crates/steve-channels/src/im_conv_mcp.rs	2
+table	crates/steve-channels/src/inbound.rs	4
+table	crates/steve-channels/src/media.rs	1
+table	crates/steve-channels/src/media_agent.rs	1
+table	crates/steve-channels/src/messages.rs	13
+table	crates/steve-channels/src/names.rs	5
+table	crates/steve-channels/src/notifications.rs	3
+table	crates/steve-channels/src/open_link.rs	2
+table	crates/steve-channels/src/outbound.rs	19
+table	crates/steve-channels/src/pipeline.rs	4
+table	crates/steve-channels/src/presence.rs	12
+table	crates/steve-channels/src/queries.rs	3
+table	crates/steve-channels/src/reactions.rs	2
+table	crates/steve-channels/src/recovery.rs	1
+table	crates/steve-channels/src/respond.rs	2
+table	crates/steve-channels/src/seen.rs	4
+table	crates/steve-channels/src/spaces.rs	2
+table	crates/steve-channels/src/starred.rs	4
+table	crates/steve-channels/src/unsendable.rs	1
+table	crates/steve-channels/src/voice.rs	2
+table	crates/steve-channels/src/write_blocks.rs	1
+table	crates/steve-channels/tests/c1_feishu_ws.rs	5
+table	crates/steve-channels/tests/c1_spaces_messages.rs	6
+table	crates/steve-channels/tests/c3_rules.rs	15
+table	crates/steve-channels/tests/c4_compose.rs	23
+table	crates/steve-channels/tests/c56_outbound.rs	42
+table	crates/steve-channels/tests/capi_channels.rs	1
+table	crates/steve-channels/tests/cleanup.rs	10
+table	crates/steve-channels/tests/ext_media.rs	2
+table	crates/steve-channels/tests/ext_ws.rs	12
+table	crates/steve-channels/tests/feishu_f8.rs	8
+table	crates/steve-channels/tests/im_conversations.rs	17
+table	crates/steve-channels/tests/inbound_guards.rs	5
+table	crates/steve-channels/tests/media.rs	7
+table	crates/steve-channels/tests/no_platform_ids.rs	1
+table	crates/steve-channels/tests/one_space_per_chat.rs	1
+table	crates/steve-channels/tests/owner_decisions.rs	6
+table	crates/steve-channels/tests/owner_presence.rs	8
+table	crates/steve-channels/tests/personal_triggers.rs	1
+table	crates/steve-channels/tests/starred_alerts.rs	6
+table	crates/steve-channels/tests/support/digest_env.rs	1
+table	crates/steve-channels/tests/support/reply_http.rs	1
+table	crates/steve-core/src/yolo/facts.rs	1
+table	crates/steve-digest/src/candidates.rs	2
+table	crates/steve-digest/src/conv.rs	10
+table	crates/steve-digest/src/todo.rs	2
+table	crates/steve-digest/src/window.rs	3
+table	crates/steve-digest/tests/base.rs	1
+table	crates/steve-hub/src/wire/chan.rs	1
+table	crates/steve-hub/src/wire/chan_tests.rs	1
+table	crates/steve-hub/tests/outbox_wired.rs	3
+table	crates/steve-hub/tests/wired/connectors.rs	1
+table	crates/steve-hub/tests/wired/mod.rs	2
+table	crates/steve-mail/src/repo.rs	13
+table	crates/steve-mail/src/threads.rs	3
+table	crates/steve-mail/src/timeline.rs	1
+table	crates/steve-mail/tests/e1_sync.rs	1
+table	crates/steve-mail/tests/e2_durable_events.rs	1
+table	crates/steve-mail/tests/e3_send.rs	1
+table	crates/steve-mail/tests/e4_triage.rs	2
+table	crates/steve-mail/tests/e5_mcp.rs	2
+table	crates/steve-mail/tests/support/mod.rs	1
+table	crates/steve-stats/src/workflow.rs	1
+table	crates/steve-store-sqlite/src/digest.rs	3
+table	crates/steve-store-sqlite/tests/digest_audit.rs	1
+table	crates/steve-store-sqlite/tests/digest_explicit.rs	3
+table	crates/steve-store-sqlite/tests/digest_write_sites.rs	5
+table	crates/steve-store/tests/digest_triggers.rs	1
+table	crates/steve-store/tests/indexes.rs	28
+table	crates/steve-store/tests/migration_012.rs	4
+table	crates/steve-store/tests/migration_019.rs	1
+table	crates/steve-store/tests/migration_088.rs	1
+table	crates/steve-store/tests/migration_103.rs	2
+table	crates/steve-store/tests/migration_trigger_receipts.rs	1
+table	crates/steve-store/tests/schema_new.rs	7
+write	crates/steve-channels/src/arbiter.rs	1
+write	crates/steve-channels/src/basis.rs	2
+write	crates/steve-channels/src/cleanup.rs	3
+write	crates/steve-channels/src/context.rs	1
+write	crates/steve-channels/src/conversations.rs	1
+write	crates/steve-channels/src/decide.rs	2
+write	crates/steve-channels/src/fallback.rs	4
+write	crates/steve-channels/src/inbound.rs	1
+write	crates/steve-channels/src/messages.rs	6
+write	crates/steve-channels/src/outbound.rs	23
+write	crates/steve-channels/src/presence.rs	3
+write	crates/steve-channels/src/replies.rs	1
+write	crates/steve-channels/src/respond.rs	3
+write	crates/steve-channels/src/spaces.rs	1
+write	crates/steve-channels/tests/attention.rs	3
+write	crates/steve-channels/tests/c1_spaces_messages.rs	3
+write	crates/steve-channels/tests/c3_rules.rs	1
+write	crates/steve-channels/tests/c4_compose.rs	8
+write	crates/steve-channels/tests/c56_outbound.rs	14
+write	crates/steve-channels/tests/capi_channels.rs	1
+write	crates/steve-channels/tests/cleanup.rs	5
+write	crates/steve-channels/tests/conversation_preferences.rs	4
+write	crates/steve-channels/tests/digest_status.rs	6
+write	crates/steve-channels/tests/ext_media.rs	1
+write	crates/steve-channels/tests/im_conversations.rs	6
+write	crates/steve-channels/tests/lifecycle.rs	1
+write	crates/steve-channels/tests/media.rs	9
+write	crates/steve-channels/tests/owner_decisions.rs	1
+write	crates/steve-channels/tests/owner_presence.rs	2
+write	crates/steve-channels/tests/starred_alerts.rs	1
+write	crates/steve-core/src/yolo/engine_tests.rs	1
+write	crates/steve-core/src/yolo/facts.rs	2
+write	crates/steve-digest/src/window.rs	3
+write	crates/steve-digest/tests/base.rs	10
+write	crates/steve-digest/tests/bot.rs	2
+write	crates/steve-digest/tests/intake_migration.rs	9
+write	crates/steve-digest/tests/todos.rs	1
+write	crates/steve-hub/tests/modules.rs	1
+write	crates/steve-hub/tests/outbox_wired.rs	2
+write	crates/steve-hub/tests/wired/connectors.rs	1
+write	crates/steve-mail/src/repo.rs	8
+write	crates/steve-mail/tests/e3_send.rs	1
+write	crates/steve-mail/tests/e4_triage.rs	1
+write	crates/steve-mail/tests/integration_cursors.rs	1
+write	crates/steve-stats/tests/workflow.rs	1
+write	crates/steve-store-sqlite/tests/digest_explicit.rs	30
+write	crates/steve-store-sqlite/tests/digest_write_sites.rs	9
+write	crates/steve-store/tests/migration_012.rs	2
+write	crates/steve-store/tests/migration_019.rs	1
+write	crates/steve-store/tests/migration_088.rs	1
+write	crates/steve-store/tests/migration_103.rs	3
+write	crates/steve-store/tests/migration_trigger_receipts.rs	1
+write	crates/steve-store/tests/schema_new.rs	1

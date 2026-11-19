@@ -114,7 +114,7 @@ fn explicit_membership_and_projection_match_all_nine_triggers() {
                     )
                     .unwrap();
                     if explicit {
-                        digest::dequeue_on_receipt(&tx, "other", "space:two", "a").unwrap();
+                        digest::dequeue_on_receipt(&tx, "other", "space:two", ["a"]).unwrap();
                     }
                 }
                 7 => {
@@ -178,7 +178,7 @@ fn explicit_membership_and_projection_match_all_nine_triggers() {
                     )
                     .unwrap();
                     if explicit {
-                        digest::dequeue_on_receipt(&tx, "w", "mail_thread:t2", "b").unwrap();
+                        digest::dequeue_on_receipt(&tx, "w", "mail_thread:t2", ["b"]).unwrap();
                     }
                 }
                 _ => unreachable!(),
@@ -219,7 +219,7 @@ fn duplicate_intake_receipt_and_conversation_sync_do_not_reuse_fifo_or_acknowled
     assert_eq!(before, state(&tx));
     tx.execute("INSERT INTO digest_receipts VALUES('w','space:s','a')", [])
         .unwrap();
-    digest::dequeue_on_receipt(&tx, "w", "space:s", "a").unwrap();
+    digest::dequeue_on_receipt(&tx, "w", "space:s", ["a"]).unwrap();
     digest::sync_message(&tx, Source::ChanMessage, "a", None).unwrap();
     digest::sync_message(&tx, Source::ChanMessage, "a", None).unwrap();
     assert!(state(&tx).0.is_empty());
@@ -363,7 +363,7 @@ fn projection_updates_preserve_additive_columns_while_the_row_exists() {
         [],
     )
     .unwrap();
-    digest::dequeue_on_receipt(&tx, "w", "space:one", "receipt").unwrap();
+    digest::dequeue_on_receipt(&tx, "w", "space:one", ["receipt"]).unwrap();
     assert_preserved(&tx, "receipt dequeue");
 
     tx.execute(

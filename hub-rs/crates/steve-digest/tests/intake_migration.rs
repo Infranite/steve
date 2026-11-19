@@ -75,7 +75,7 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         [],
     )
     .unwrap();
-    digest::dequeue_on_receipt(&tx, "ws", "space:s", "late").unwrap();
+    digest::dequeue_on_receipt(&tx, "ws", "space:s", ["late"]).unwrap();
     let old = Source::MailMessage.scope(&tx, "mail").unwrap();
     tx.execute(
         "UPDATE mail_messages SET status='pending' WHERE id='mail'",
@@ -114,7 +114,7 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         [],
     )
     .unwrap();
-    digest::dequeue_on_receipt(&tx, "ws", "mail_thread:t", "mail-late").unwrap();
+    digest::dequeue_on_receipt(&tx, "ws", "mail_thread:t", ["mail-late"]).unwrap();
     assert_eq!(
         tx.query_row(
             "SELECT count(*) FROM digest_pending_convs WHERE conv='mail_thread:t'",

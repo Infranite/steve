@@ -738,12 +738,11 @@ pub fn raw_paths(c: &Connection, conn: &str) -> MailResult<Vec<String>> {
 
 /// Deletes everything of a connection (disconnect), children first.
 pub fn delete_connection(tx: &Tx, conn: &str) -> MailResult<()> {
-    let digest_messages = tx
-        .prepare_cached("SELECT workspace_id,'mail_thread:' || thread_id,id FROM mail_messages WHERE connection_id=?")?
-        .query_map([conn], |r| Ok((steve_store_sqlite::digest::Scope {
-            workspace: r.get(0)?, conv: r.get(1)?,
-        }, r.get::<_, String>(2)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let digest_messages = steve_store_sqlite::digest::Source::MailMessage
+        .messages(tx, "connection_id=?1", [conn])?
+        .into_iter()
+        .map(|m| (m.scope, m.id))
+        .collect::<Vec<_>>();
     for sql in [
         "DELETE FROM mail_drafts WHERE connection_id = ?1",
         "DELETE FROM mail_attachments WHERE message_id IN (SELECT id FROM mail_messages WHERE connection_id = ?1)",

@@ -38,8 +38,13 @@ pub fn write<T>(
     use steve_store_sqlite::digest::{self, Scope, Source};
     type Rows = BTreeMap<(u8, String), (Scope, String, i64)>;
     fn rows(c: &rusqlite::Connection) -> rusqlite::Result<Rows> {
-        c.prepare("SELECT 0,id,workspace_id,'space:' || space_id,status,created FROM chan_messages UNION ALL SELECT 1,id,workspace_id,'mail_thread:' || thread_id,status,date FROM mail_messages")?
-            .query_map([],|r|Ok(((r.get(0)?,r.get(1)?),(Scope { workspace:r.get(2)?,conv:r.get(3)? },r.get(4)?,r.get(5)?))))?.collect()
+        let mut rows = Rows::new();
+        for (kind, source) in [(0, Source::ChanMessage), (1, Source::MailMessage)] {
+            for m in source.messages(c, "1", [])? {
+                rows.insert((kind, m.id), (m.scope, m.status, m.at));
+            }
+        }
+        Ok(rows)
     }
     fn receipts(c: &rusqlite::Connection) -> rusqlite::Result<BTreeSet<(String, String, String)>> {
         c.prepare("SELECT workspace_id,conv,message_id FROM digest_receipts")?
@@ -71,8 +76,15 @@ pub fn write<T>(
                 )?;
             }
         }
+        let mut acknowledgements: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         for (ws, conv, id) in receipts(tx)?.difference(&old_receipts) {
-            digest::dequeue_on_receipt(tx, ws, conv, id)?;
+            acknowledgements
+                .entry((ws.clone(), conv.clone()))
+                .or_default()
+                .push(id.clone());
+        }
+        for ((ws, conv), ids) in acknowledgements {
+            digest::dequeue_on_receipt(tx, &ws, &conv, ids)?;
         }
         Ok(result)
     })

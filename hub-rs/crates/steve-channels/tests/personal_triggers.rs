@@ -360,3 +360,13 @@ async fn legacy_generation_without_an_outbound_receipt_is_unconfirmed() {
     assert_ne!(handling(&f, &a)["state"], "answered");
     assert_eq!(f.sends(), 0);
 }
+
+#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+mod digest_audit;
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            digest_audit::check(self.env.store());
+        }
+    }
+}
