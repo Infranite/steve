@@ -16,7 +16,24 @@ pub trait Query: Serialize + DeserializeOwned + Send + 'static {
     const NAME: &'static str;
     const DOMAIN: Domain;
     type Output: Serialize + DeserializeOwned + Send + 'static;
+    /// Validate semantic bounds before encoding; implementations also validate incoming DTOs.
+    fn validate(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Preserve a concrete local type for the built-in backend's optional downcast path.
+    fn into_local(self) -> Result<AnyQuery, Error>
+    where
+        Self: Sized,
+    {
+        self.validate()?;
+        Ok(AnyQuery {
+            name: Self::NAME.into(),
+            domain: Self::DOMAIN,
+            body: Payload::Local(Box::new(self)),
+        })
+    }
     fn to_wire(&self) -> Result<AnyQuery, Error> {
+        self.validate()?;
         Ok(AnyQuery {
             name: Self::NAME.into(),
             domain: Self::DOMAIN,
@@ -92,7 +109,9 @@ impl AnyQuery {
     /// Reject mismatched names/domains instead of guessing a payload's type.
     pub fn decode<Q: Query>(&self) -> Result<Q, Error> {
         check_name(&self.name, self.domain, Q::NAME, Q::DOMAIN)?;
-        self.body.decode()
+        let query: Q = self.body.decode()?;
+        query.validate()?;
+        Ok(query)
     }
 }
 impl AnyOutput {
@@ -265,25 +284,116 @@ impl<E: StoredEntity> Query for Get<E> {
     const NAME: &'static str = "get";
     const DOMAIN: Domain = E::ENTITY.domain;
     type Output = Option<(E, Rev)>;
+    fn validate(&self) -> Result<(), Error> {
+        self.key.validate()
+    }
 }
 impl<E: StoredEntity> Query for Scan<E> {
     const NAME: &'static str = "scan";
     const DOMAIN: Domain = E::ENTITY.domain;
     type Output = Page<E>;
+    fn validate(&self) -> Result<(), Error> {
+        if self.limit == 0 || self.limit > 500 || self.budget.0 == 0 {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "scan requires limit 1..=500 and positive budget",
+            ));
+        }
+        if let Some(resume) = &self.resume {
+            for cell in &resume.key {
+                cell.validate()?;
+            }
+        }
+        validate_cells(&self.range, &self.filter)?;
+        validate_index::<E>(&self.index)
+    }
 }
 impl<E: StoredEntity> Query for Count<E> {
     const NAME: &'static str = "count";
     const DOMAIN: Domain = E::ENTITY.domain;
     type Output = CountResult;
+    fn validate(&self) -> Result<(), Error> {
+        if self.budget.0 == 0 {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "count requires positive budget",
+            ));
+        }
+        validate_cells(&self.range, &self.filter)?;
+        validate_index::<E>(&self.index)
+    }
 }
 impl<E: StoredEntity> Query for Exists<E> {
     const NAME: &'static str = "exists";
     const DOMAIN: Domain = E::ENTITY.domain;
     type Output = bool;
+    fn validate(&self) -> Result<(), Error> {
+        self.key.validate()
+    }
 }
 /// Consumer cursor lookup is domain-local and participates in snapshot reads.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CursorGet {
     pub domain: Domain,
     pub name: crate::cursor::CursorName,
+}
+
+fn validate_index<E: StoredEntity>(index: &IndexName) -> Result<(), Error> {
+    if index.entity != E::ENTITY.name
+        || (!index.name.is_empty() && !E::ENTITY.indexes.iter().any(|i| i.name == index.name))
+    {
+        return Err(crate::error(
+            steve_types::Code::Unsupported,
+            "unknown storage entity or index",
+        ));
+    }
+    Ok(())
+}
+impl<E: StoredEntity> Key<E> {
+    /// Validate identity and key arity; backends additionally validate cell types.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.entity != E::ENTITY.name {
+            return Err(crate::error(
+                steve_types::Code::Unsupported,
+                "unknown storage entity",
+            ));
+        }
+        if self.values.len() != E::ENTITY.key.len() {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "invalid key arity",
+            ));
+        }
+        for cell in &self.values {
+            cell.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_cells(range: &KeyRange, predicates: &[Pred]) -> Result<(), Error> {
+    for bound in [&range.start, &range.end] {
+        if let KeyBound::Included(key) | KeyBound::Excluded(key) = bound {
+            for cell in key {
+                cell.validate()?;
+            }
+        }
+    }
+    for pred in predicates {
+        match pred {
+            Pred::Eq { value, .. }
+            | Pred::Ne { value, .. }
+            | Pred::Lt { value, .. }
+            | Pred::Le { value, .. }
+            | Pred::Gt { value, .. }
+            | Pred::Ge { value, .. } => value.validate()?,
+            Pred::In { values, .. } => {
+                for value in values {
+                    value.validate()?;
+                }
+            }
+            Pred::IsNull { .. } => {}
+        }
+    }
+    Ok(())
 }
