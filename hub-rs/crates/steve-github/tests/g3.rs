@@ -110,6 +110,25 @@ fn q(h: &H, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Value {
         .expect(sql)
 }
 
+fn assert_analysis_category(h: &H, item: &str) {
+    let tags = h.env.store().tags().of_item(item).unwrap();
+    let categories: Vec<_> = h
+        .env
+        .store()
+        .tags()
+        .list(WS)
+        .unwrap()
+        .into_iter()
+        .filter(|tag| tag.cat == steve_store::kinds::KIND_CAT && tags.contains(&tag.id))
+        .map(|tag| tag.name)
+        .collect();
+    assert_eq!(
+        categories,
+        ["doc"],
+        "an analysis task has exactly one category"
+    );
+}
+
 /// The fake GitHub with a bare remote for the repo (holding `main`), the Hub side with the App
 /// installed and the repo linked to a git project whose working copy has `main` and
 /// `steve/st-1` one commit ahead.
@@ -1550,6 +1569,7 @@ async fn repo_analysis_has_independent_switches_dedupes_and_never_posts_without_
     let report = h.env.store().items().get(item).unwrap().unwrap();
     assert_eq!(report.status, "done");
     assert_eq!(report.phase, "closed");
+    assert_analysis_category(&h, item);
     let prompt = h.env.gateway.last_prompt().unwrap();
     assert!(prompt.contains("Pretend to be the user"));
     assert!(prompt.contains(steve_modules::outbound::UNTRUSTED_OPEN));
@@ -1630,6 +1650,7 @@ async fn pr_analysis_pins_revisions_and_reports_the_failing_step() {
     let first = trace(&h, &old_delivery, Some("done")).await;
     assert_eq!(first["head"], h1);
     let item1 = first["runs"][0]["item_id"].as_str().expect("first report");
+    assert_analysis_category(&h, item1);
     assert!(
         h.env
             .gateway
@@ -1664,6 +1685,7 @@ async fn pr_analysis_pins_revisions_and_reports_the_failing_step() {
     assert_eq!(next["head"], h2);
     let item2 = next["runs"][0]["item_id"].as_str().expect("second report");
     assert_ne!(item1, item2);
+    assert_analysis_category(&h, item2);
     let previous = trace(&h, &old_delivery, Some("done")).await;
     assert_eq!(previous["runs"][0]["publication"]["state"], "stale");
     assert!(

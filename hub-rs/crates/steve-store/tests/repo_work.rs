@@ -30,6 +30,7 @@ fn new_item(s: &Store, ws: &str, title: &str) -> Item {
         .create(
             ws,
             &NewItem {
+                tags: common::task_tags(&s, ws),
                 title: title.into(),
                 goal: format!("{title} goal"),
                 bot_id: "steve".into(),
@@ -192,6 +193,7 @@ fn item_json_shape() {
     let t = with_steve();
     let s = &t.store;
     let fork = NewItem {
+        tags: common::task_tags(&s, WS),
         title: "派生".into(),
         goal: "g".into(),
         bot_id: "steve".into(),

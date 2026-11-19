@@ -273,6 +273,15 @@ fn seed_item(s: &Store) -> String {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "Job accounting review".into(),
                 goal: "contract".into(),
                 bot_id: "review".into(),

@@ -37,6 +37,11 @@ fn create_and_each_status_change_leave_one_mark() {
             .create(
                 WS,
                 &NewItem {
+                    tags: if kind.unwrap_or("task") == "task" {
+                        common::task_tags(&t.store, WS)
+                    } else {
+                        vec![]
+                    },
                     title: "x".into(),
                     goal: "g".into(),
                     bot_id: "dev".into(),

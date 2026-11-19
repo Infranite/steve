@@ -344,6 +344,16 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "parent".into(),
                 goal: "fixture parent".into(),
                 bot_id: "steve".into(),
@@ -357,6 +367,16 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "legacy failed child".into(),
                 goal: "fixture attempt".into(),
                 bot_id: "steve".into(),

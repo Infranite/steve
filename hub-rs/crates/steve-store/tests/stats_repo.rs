@@ -35,6 +35,7 @@ fn item(s: &Store) -> String {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&s, WS),
                 title: "统计".into(),
                 goal: "g".into(),
                 bot_id: "steve".into(),

@@ -627,6 +627,7 @@ fn tags() {
             .create(
                 WS,
                 &NewItem {
+                    tags: common::task_tags(&s, WS),
                     title: title.into(),
                     goal: "g".into(),
                     bot_id: "steve".into(),

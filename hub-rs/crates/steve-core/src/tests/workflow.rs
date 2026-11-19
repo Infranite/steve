@@ -1695,6 +1695,7 @@ fn ordinary_fork(k: &Kit, parent: &str) -> String {
         .item_create(
             crate::repo::WS,
             &crate::repo::NewItem {
+                tags: k.task_tags(crate::repo::WS),
                 title: "普通派生事项".into(),
                 goal: "独立编排工作".into(),
                 bot_id: "dev".into(),

@@ -135,6 +135,7 @@ fn creation_rejects_an_invalid_prerequisite_batch_without_leaving_an_item_or_ses
         .item_create(
             "other",
             &crate::repo::NewItem {
+                tags: k.task_tags("other"),
                 title: "foreign".into(),
                 goal: "private".into(),
                 bot_id: "steve".into(),

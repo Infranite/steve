@@ -39,6 +39,20 @@ pub fn fresh() -> T {
     T { dir, store, events }
 }
 
+/// Explicit category for fixtures whose subject is unrelated to classification.
+pub fn task_tags(store: &Store, ws: &str) -> Vec<String> {
+    vec![
+        store
+            .tags()
+            .kinds(ws)
+            .unwrap()
+            .into_iter()
+            .find(|tag| tag.name == "feat")
+            .expect("fixture feat category")
+            .id,
+    ]
+}
+
 /// `sqlite_master` in the format of `sqlite3 db "select type, name, tbl_name, sql from sqlite_master order by type, name"`.
 pub fn schema(c: &Connection) -> String {
     let mut st = c

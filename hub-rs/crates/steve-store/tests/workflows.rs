@@ -27,6 +27,7 @@ fn setup() -> (T, String, Vec<UnitSpec>) {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&t.store, WS),
                 title: "协作事项".into(),
                 goal: "完成实现、独立评审和集成验收".into(),
                 bot_id: "writer".into(),

@@ -9,6 +9,7 @@ fn child(k: &Kit, parent: &str) -> String {
         .item_create(
             WS,
             &NewItem {
+                tags: k.task_tags(WS),
                 title: "child".into(),
                 goal: "unfinished".into(),
                 bot_id: "dev".into(),

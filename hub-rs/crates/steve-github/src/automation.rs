@@ -519,6 +519,14 @@ impl Action for Analyze {
                 answer.model,
                 quote_untrusted(&format!("\n{}\n", literal_report(&report)))
             );
+            // Each completed analysis task is a report. Its fixed category is independent
+            // of untrusted GitHub titles and model text.
+            let category = store
+                .tags()
+                .kinds(&ws)?
+                .into_iter()
+                .find(|tag| tag.name == "doc")
+                .ok_or_else(|| ApiError::Internal("missing seeded doc category".into()))?;
             let item = store
                 .items()
                 .create(
@@ -534,6 +542,7 @@ impl Action for Analyze {
                         status: Some("done".into()),
                         stage: Some("完成".into()),
                         source: Some(("GitHub".into(), "sig".into())),
+                        tags: vec![category.id],
                         ..Default::default()
                     },
                 )?

@@ -128,12 +128,19 @@ fn an_item_has_exactly_one_category() {
 
     // without one, with two, or after removing the only one: refused, nothing written
     let n = s.items().all(WS).unwrap().len();
+    assert!(conflict(item(s, vec![])).contains("必须有一个分类"));
     assert!(conflict(item(s, vec![web.clone()])).contains("必须有一个分类"));
     assert!(conflict(item(s, vec![bug.clone(), feat.clone()])).contains("只能有一个分类"));
     assert_eq!(
         s.items().all(WS).unwrap().len(),
         n,
         "a refused item leaves no row"
+    );
+    let next = item(s, vec![feat.clone()]).unwrap().unwrap();
+    assert_eq!(
+        next.no,
+        i.no + 1,
+        "refused creates do not consume item numbers"
     );
     assert!(conflict(s.tags().set_item(&i.id, std::slice::from_ref(&web))).contains("必须"));
     assert!(conflict(s.tags().set_item(&i.id, &[])).contains("必须"));
@@ -209,4 +216,25 @@ fn contacts_and_spaces_do_not_take_item_categories() {
         })
         .unwrap();
     assert_eq!(kept, [web]);
+}
+
+#[test]
+fn a_chat_does_not_require_a_task_category() {
+    let t = fresh();
+    let s = &t.store;
+    steve(s);
+    let chat = s
+        .items()
+        .create(
+            WS,
+            &NewItem {
+                kind: Some("chat".into()),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(chat.kind, "chat");
+    assert!(s.tags().of_item(&chat.id).unwrap().is_empty());
 }

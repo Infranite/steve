@@ -1163,6 +1163,15 @@ async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session(
         .create(
             "default",
             &steve_store::NewItem {
+                tags: vec![
+                    st.tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "prerequisite".into(),
                 goal: "fixture".into(),
                 bot_id: "steve".into(),

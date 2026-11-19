@@ -28,6 +28,7 @@ fn setup() -> (common::T, String, String) {
         .create(
             WS,
             &NewItem {
+                tags: common::task_tags(&t.store, WS),
                 title: "Diagnostic fixture".into(),
                 goal: "Observe a failure".into(),
                 bot_id: "worker".into(),

@@ -63,6 +63,15 @@ async fn live_accounting_is_the_same_on_session_item_and_summary_http_apis() {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "live accounting".into(),
                 goal: "g".into(),
                 bot_id: "steve".into(),
