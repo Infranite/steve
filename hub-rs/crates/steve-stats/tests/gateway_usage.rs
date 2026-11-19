@@ -11,6 +11,14 @@ fn setup() -> (tempfile::TempDir, Store, String) {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(dir.path().join("bill.sqlite"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
+    // AT is 2026-11-01 00:00 UTC and the queries ask for that day: say so, not the host's zone
+    s.settings()
+        .set(
+            WS,
+            &serde_json::Map::from_iter([("stats.tz".into(), json!("UTC"))]),
+            "test",
+        )
+        .unwrap();
     s.bots()
         .seed(
             "bill",
