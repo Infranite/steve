@@ -1,12 +1,13 @@
 //! In-place layout-1 to layout-2 conversion. The caller owns the storage lock;
 //! this module opens no files, selects no journal mode and starts no workers.
 use crate::{
+    compat::{LEGACY_INPUT, StorageCapabilities, StorageState},
     layout::{CORE_FILE, Layout},
     legacy, migrate,
     open::{db_error, incompatible},
     schema,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::Connection;
 use steve_types::{Code, Error};
 
 /// Preserve validation errors across the frozen runner's transaction boundary.
@@ -18,22 +19,23 @@ enum MigrationError {
     Validation(#[from] Error),
 }
 
-/// Newly revoked counts exclude credentials already carrying a revocation timestamp.
-/// Auth sessions have no revocation field: non-owner sessions are deleted and counted.
+/// Deleted counts include previously revoked/expired non-owner credentials.
+/// Independent clients referencing deleted tokens survive with token_id cleared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     AlreadyCurrent,
     Converted {
         from_legacy_version: i64,
-        revoked_tokens: usize,
-        revoked_clients: usize,
-        revoked_sessions: usize,
+        deleted_tokens: usize,
+        deleted_clients: usize,
+        deleted_sessions: usize,
     },
 }
 
 /// Blocking API for the sole storage owner, before engines/pools start. Requires
-/// autocommit and the caller's exclusive storage lock. The two committed phases are
-/// independently retryable; validation writes nothing and never replaces user data.
+/// autocommit and the caller's exclusive storage lock. Replay, validation, contract
+/// installation and credential cleanup commit together through the sole legacy
+/// runner. A crash cannot strand legacy 114 when only 113 is an accepted input.
 pub fn convert(conn: &mut Connection) -> Result<Outcome, Error> {
     convert_on(conn, None)
 }
@@ -80,20 +82,29 @@ fn convert_on(
     if is_current(conn)? {
         return Ok(Outcome::AlreadyCurrent);
     }
-    let from_legacy_version = migrate_legacy_with(conn, progress)?;
-    if let Some(p) = progress {
-        p.report(migrate::Phase::Validation, None, false);
-    }
-    verify_legacy(conn)?;
-    if let Some(p) = progress {
-        p.report(migrate::Phase::InstallContract, None, false);
-    }
-    let (revoked_tokens, revoked_clients, revoked_sessions) = install_layout(conn)?;
+    let from_legacy_version = legacy_input(conn)?;
+    let mut deleted = None;
+    // Reuse the frozen runner's transaction and validation callback, never a
+    // second runner. Its final version/fence stamps are in the same commit too.
+    legacy::migrate_to_head_with(conn, |tx| {
+        if let Some(p) = progress {
+            p.report(migrate::Phase::Validation, None, false);
+        }
+        verify_legacy(tx).map_err(MigrationError::Validation)?;
+        if let Some(p) = progress {
+            p.report(migrate::Phase::InstallContract, None, false);
+        }
+        deleted = Some(install_layout_on(tx).map_err(MigrationError::Validation)?);
+        Ok::<_, MigrationError>(())
+    })
+    .map_err(migration_error)?;
+    let (deleted_tokens, deleted_clients, deleted_sessions) =
+        deleted.expect("legacy runner invokes precommit validation");
     Ok(Outcome::Converted {
         from_legacy_version,
-        revoked_tokens,
-        revoked_clients,
-        revoked_sessions,
+        deleted_tokens,
+        deleted_clients,
+        deleted_sessions,
     })
 }
 
@@ -107,72 +118,15 @@ fn require_autocommit(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn object_kind(conn: &Connection, name: &str) -> Result<Option<String>, Error> {
-    conn.query_row(
-        "SELECT type FROM sqlite_schema WHERE name=?1 COLLATE NOCASE",
-        [name],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(db_error)
-}
-
 fn is_current(conn: &Connection) -> Result<bool, Error> {
-    if let Some(kind) = object_kind(conn, "meta")? {
-        if kind != "table" {
-            return Err(incompatible("unrecognized storage metadata"));
-        }
-        for table in schema::CONTRACT_TABLES {
-            if object_kind(conn, table)?.as_deref() != Some("table") {
-                return Err(incompatible("storage contract metadata is incomplete"));
-            }
-        }
-        for table in schema::LEGACY_TABLES {
-            if object_kind(conn, table)?.is_some() {
-                return Err(incompatible("mixed legacy and current storage metadata"));
-            }
-        }
-        Layout::read(conn)?;
-        migrate::check_versions(conn, false)?;
-        return Ok(true);
-    }
-    check_legacy_layout(conn)?;
-    Ok(false)
+    let state = crate::open::inspect(conn)?;
+    StorageCapabilities::compiled().can_open(&state, false)?;
+    Ok(matches!(state, StorageState::Current { .. }))
 }
 
-fn check_legacy_layout(conn: &Connection) -> Result<(), Error> {
-    for table in schema::CONTRACT_TABLES.into_iter().filter(|t| *t != "meta") {
-        if object_kind(conn, table)?.is_some() {
-            return Err(incompatible("storage contract metadata is incomplete"));
-        }
-    }
-    match object_kind(conn, "schema_version")?.as_deref() {
-        Some("table") => {}
-        None => {
-            let objects: u32 = conn
-                .query_row(
-                    "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(db_error)?;
-            if objects != 0 {
-                return Err(incompatible(
-                    "unversioned nonempty storage cannot be converted",
-                ));
-            }
-        }
-        _ => return Err(incompatible("invalid legacy version metadata")),
-    }
-    Ok(())
-}
-
-/// Phase 1, also exposed for callers testing a restart between the two transactions.
-/// The returned version is the input to this invocation (a resumed call sees the head).
-/// A head database needs only read-only verification, so rejected head schemas remain
-/// byte-for-byte unchanged instead of having their old version rows rewritten first.
-/// Older inputs validate structure and quick_check before the old runner commits;
-/// the separate read-only phase repeats both checks on the committed head.
+/// Standalone legacy replay/verification for diagnostic callers. Conversion
+/// itself never commits this intermediate phase: a head beyond 113 is not a new
+/// conversion input. Runtime callers must use convert or the observed combination.
 pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
     migrate_legacy_with(conn, None)
 }
@@ -187,8 +141,7 @@ fn migrate_legacy_with(
             "storage is already converted",
         ));
     }
-    let version = legacy::version(conn)
-        .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
+    let version = legacy_input(conn)?;
     if version != legacy::SCHEMA_VERSION {
         if let Some(p) = progress {
             p.report(migrate::Phase::LegacyReplay, None, false);
@@ -199,10 +152,7 @@ fn migrate_legacy_with(
             verify_legacy(tx).map_err(MigrationError::Validation)?;
             Ok::<_, MigrationError>(())
         })
-        .map_err(|e| match e {
-            MigrationError::Sqlite(e) => incompatible(&format!("legacy migration failed: {e}")),
-            MigrationError::Validation(e) => e,
-        })?;
+        .map_err(migration_error)?;
     }
     Ok(version)
 }
@@ -221,13 +171,27 @@ fn verify_legacy(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn install_layout(conn: &Connection) -> Result<(usize, usize, usize), Error> {
-    // convert_on requires autocommit and the caller exclusively owns storage.lock.
-    // The shared borrow also lets its progress tracker outlive this transaction;
-    // SQLite rejects nesting and RAII rolls back any uncommitted installation.
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
-        .map_err(db_error)?;
-    let has_owner: bool = tx
+fn install_layout_on(tx: &Connection) -> Result<(usize, usize, usize), Error> {
+    // The sole legacy runner owns the enclosing BEGIN IMMEDIATE and rollback.
+    // Its precommit hook installs everything before the runner's final stamps.
+    require_owner(tx)?;
+    tx.execute_batch(schema::CONTRACT).map_err(db_error)?;
+    // Retain schema_version until the real previous-release probe determines
+    // whether removal is safe. The fence is mandatory in both shapes.
+    Layout::single_file().write_file_meta(tx, CORE_FILE)?;
+    migrate::stamp_current(tx)?;
+    // FK inventory of the frozen baseline: only clients.token_id references
+    // these three credential tables. Clients are independent entities, including
+    // owner clients referencing a non-owner token: preserve them and clear the FK.
+    tx.execute("UPDATE clients SET token_id=NULL WHERE token_id IN (SELECT id FROM access_tokens WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=access_tokens.user_id AND users.role='owner'))", []).map_err(db_error)?;
+    let deleted_clients = tx.execute("DELETE FROM clients WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=clients.user_id AND users.role='owner')", []).map_err(db_error)?;
+    let deleted_tokens = tx.execute("DELETE FROM access_tokens WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=access_tokens.user_id AND users.role='owner')", []).map_err(db_error)?;
+    let deleted_sessions = tx.execute("DELETE FROM auth_sessions WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=auth_sessions.user_id AND users.role='owner')", []).map_err(db_error)?;
+    Ok((deleted_tokens, deleted_clients, deleted_sessions))
+}
+
+fn require_owner(conn: &Connection) -> Result<(), Error> {
+    let has_owner: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM users WHERE role='owner')",
             [],
@@ -239,31 +203,23 @@ fn install_layout(conn: &Connection) -> Result<(usize, usize, usize), Error> {
             "legacy storage has no instance owner; conversion refused",
         ));
     }
-    tx.execute_batch(schema::CONTRACT).map_err(db_error)?;
-    tx.execute_batch("DROP TABLE schema_version; DROP TABLE IF EXISTS schema_compat;")
-        .map_err(db_error)?;
-    Layout::single_file().write_file_meta(&tx, CORE_FILE)?;
-    migrate::stamp_current(&tx)?;
-    let now: i64 = tx
-        .query_row(
-            "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_error)?;
-    // Instance ownership is users.role, not workspace membership or token ancestry.
-    let mut revoked = [0; 2];
-    for (count, table) in revoked.iter_mut().zip(["access_tokens", "clients"]) {
-        *count = tx.execute(
-            &format!("UPDATE {table} SET revoked=?1 WHERE revoked IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE users.id={table}.user_id AND users.role='owner')"),
-            [now],
-        ).map_err(db_error)?;
+    Ok(())
+}
+
+fn migration_error(error: MigrationError) -> Error {
+    match error {
+        MigrationError::Sqlite(e) => incompatible(&format!("legacy migration failed: {e}")),
+        MigrationError::Validation(e) => e,
     }
-    // Match AuthSessions::drop: deleting the hash immediately invalidates the session.
-    let revoked_sessions = tx.execute(
-        "DELETE FROM auth_sessions WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=auth_sessions.user_id AND users.role='owner')",
-        [],
-    ).map_err(db_error)?;
-    tx.commit().map_err(db_error)?;
-    Ok((revoked[0], revoked[1], revoked_sessions))
+}
+fn legacy_input(conn: &Connection) -> Result<i64, Error> {
+    let version = legacy::version(conn)
+        .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
+    if version != LEGACY_INPUT {
+        return Err(incompatible(
+            "legacy conversion accepts only schema 113; first upgrade to the previous published release (先升级到上一个发布版)",
+        ));
+    }
+    require_owner(conn)?;
+    Ok(version)
 }
