@@ -2324,7 +2324,7 @@ async fn journal_budget_stops_running_work_and_reserves_terminal_space() {
     // Storage fault fixture: retained history reaches the data budget while an attempt runs.
     // Embedded NULs deliberately distinguish UTF-8 bytes from SQLite length(TEXT).
     db.execute(
-        "INSERT INTO command_specs VALUES ('quota_fixture', CAST(zeroblob(268435456) AS TEXT))",
+        "INSERT INTO command_specs (op, body) VALUES ('quota_fixture', CAST(zeroblob(268435456) AS TEXT))",
         [],
     )
     .unwrap();
@@ -5688,7 +5688,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
         )
         .unwrap();
         db.execute(
-            "INSERT INTO streams VALUES (?1,'epoch',1,1)",
+            "INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1,'epoch',1,1)",
             [derived_id("op", command.id.as_str())],
         )
         .unwrap();
@@ -5757,7 +5757,7 @@ async fn pruning_failure_does_not_prevent_opening_or_reading_the_node() {
     let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
     // Recovery does not read the retention cursor; only optional pruning will reject it.
     db.execute(
-        "INSERT OR REPLACE INTO meta VALUES ('prune_cursor','invalid')",
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('prune_cursor','invalid')",
         [],
     )
     .unwrap();

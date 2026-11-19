@@ -994,7 +994,7 @@ impl Tx<'_> {
         let body = json(body);
         self.c()
             .execute(
-                "INSERT INTO command_specs VALUES (?1, ?2)",
+                "INSERT INTO command_specs (op, body) VALUES (?1, ?2)",
                 params![op.as_str(), &body],
             )
             .map_err(internal)?;
@@ -2149,7 +2149,7 @@ mod retention_tests {
                 &OperationId::new("job_last").unwrap(),
             )?;
             t.c()
-                .execute("INSERT INTO reservations VALUES ('owned','old')", [])
+                .execute("INSERT INTO reservations (key, op) VALUES ('owned','old')", [])
                 .map_err(internal)?;
             t.set_installation("test", &OperationId::new("installation").unwrap())?;
             Ok(())
@@ -2247,7 +2247,7 @@ mod retention_tests {
             j.tx(|t| {
                 add(t, "commit_failure", now, true, None, true)?;
                 t.c()
-                    .execute("INSERT INTO child VALUES (1)", [])
+                    .execute("INSERT INTO child (id) VALUES (1)", [])
                     .map_err(internal)?;
                 Ok(())
             })
