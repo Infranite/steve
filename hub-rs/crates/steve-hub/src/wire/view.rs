@@ -98,20 +98,14 @@ pub fn of_session(c: &Connection, session: &str) -> Result<Option<View>, StoreEr
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    // what the principal may read: by the folder's visibility (its documents' default) as the
-    // knowledge module checks it; the service principal reads only what is the workspace's
-    let viewer = match p.user() {
-        Some(u) => Some(Viewer::load(c, &ws, u)?),
-        None => None,
-    };
+    // Personal and service principals use the same single-user read rule, while their
+    // identity, working directories and workspace boundary remain separate.
+    let viewer = Viewer::load(c, &ws, p.user().unwrap_or(""))?;
     let ro: Vec<String> = folders
         .into_iter()
         .filter(|(_, vis, by)| {
             let vis = Visibility::from_db(vis);
-            match &viewer {
-                Some(v) => v.sees(&vis, by),
-                None => vis == Visibility::Workspace,
-            }
+            viewer.sees(&vis, by)
         })
         .map(|(path, _, _)| path)
         .collect();
@@ -262,21 +256,27 @@ mod tests {
         assert_eq!(v.audience, ["workspace:team"]);
         // a git project's item works in its own worktree, not the project
         assert_eq!(v.rw, ["/h/worktrees/ST-1"]);
-        // the workspace's shared folder and u2's own private one; not u1's, not another workspace's
-        assert_eq!(v.ro, ["/docs/shared", "/docs/u2-private"]);
+        // Single-user reads include other creators' private/team folders, only in this workspace.
+        let folders = [
+            "/docs/shared",
+            "/docs/team-t1",
+            "/docs/u1-private",
+            "/docs/u2-private",
+        ];
+        assert_eq!(v.ro, folders);
         let v = of_session(&c, "s2").unwrap().unwrap();
         assert_eq!(v.principal, "svc:team");
         assert_eq!(v.rw, ["/w/dir-proj"], "a directory project's root, once");
         assert_eq!(
-            v.ro,
-            ["/docs/shared"],
-            "nobody's private folders, no team's"
+            v.ro, folders,
+            "service identity does not restrict single-user reads"
         );
-        // a member of team t1 reads its folder; nobody else does
+        // Changing the requester changes identity, not member read visibility.
         c.execute("UPDATE items SET requested_by='u1' WHERE id='i2'", [])
             .unwrap();
         let v = of_session(&c, "s2").unwrap().unwrap();
-        assert_eq!(v.ro, ["/docs/shared", "/docs/team-t1", "/docs/u1-private"]);
+        assert_eq!(v.principal, "u1");
+        assert_eq!(v.ro, folders);
         assert_ne!(v.digest(), of_session(&c, "s1").unwrap().unwrap().digest());
     }
 
@@ -306,8 +306,14 @@ mod tests {
             extra,
             r#"["/docs/elsewhere","/h/worktrees","/w/git-proj","/w/other-proj"]"#
         );
-        // u2's private folder is in the view but not a root today
-        assert_eq!((mn, missing.as_str()), (1, r#"["/docs/u2-private"]"#));
+        // All same-workspace private/team folders are readable but absent from today's roots.
+        assert_eq!(
+            (mn, missing.as_str()),
+            (
+                3,
+                r#"["/docs/team-t1","/docs/u1-private","/docs/u2-private"]"#
+            )
+        );
         let recorded: String = c
             .query_row(
                 "SELECT view_digest FROM runtime_sessions WHERE session_id='s1'",

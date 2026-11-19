@@ -515,9 +515,8 @@ async fn front_matter_level_never_takes_effect() {
         brief["inherited"],
         json!({"visibility": true, "level": false})
     );
-    // Front matter cannot widen a private source: the other member still does not see the page;
-    // its level applies.
-    assert!(e.search(OTHER, "底线").await.is_empty());
+    // Visibility metadata is retained, while single-user reads still enforce the level.
+    assert_eq!(e.search(OTHER, "底线").await.len(), 1);
     let hits = e.search(ME, "底线").await;
     assert_eq!(hits.len(), 1);
     assert_eq!(
@@ -559,8 +558,8 @@ async fn front_matter_visibility_only_narrows() {
         .await;
     let id = s["id"].as_str().unwrap().to_string();
     assert_eq!(e.search(OTHER, "周四").await.len(), 1);
-    // narrowed: only the source's owner sees the page
-    assert!(e.search(OTHER, "预算").await.is_empty());
+    // Narrowed metadata does not restrict single-user read access.
+    assert_eq!(e.search(OTHER, "预算").await.len(), 1);
     assert_eq!(e.search(ME, "预算").await.len(), 1);
     assert_eq!(
         e.doc_by_ref(&id, "closed.md").visibility.map(|v| v.code()),
@@ -676,10 +675,8 @@ async fn files_are_added_indexed_and_removed() {
     let hits = e.search(ME, "值班表").await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["label"], "文件 · 交接.md");
-    assert!(
-        e.search(OTHER, "值班表").await.is_empty(),
-        "private by default"
-    );
+    assert_eq!(e.search(OTHER, "值班表").await.len(), 1);
+    assert_eq!(doc["visibility"], "private", "metadata remains private");
 
     // Same attachment again: the existing document.
     let (st, again) = e
@@ -745,7 +742,7 @@ async fn source_writes() {
     assert_eq!(s["revision"], 1);
     assert!(s["last_sync"].as_i64().is_some());
     assert_eq!(e.search(ME, "部署").await.len(), 2);
-    assert!(e.search(OTHER, "部署").await.is_empty());
+    assert_eq!(e.search(OTHER, "部署").await.len(), 2);
 
     // Scope change reaches the index; a revision is written.
     let (st, v) = e
@@ -882,25 +879,6 @@ async fn source_writes() {
             &format!("/kb/sources/{id}"),
             Some(json!({"name": "x"})),
         )
-        .await;
-    assert_eq!(st, 404);
-}
-
-#[tokio::test]
-async fn private_folder_sources_are_hidden_from_others() {
-    let e = setup();
-    write(&e.wiki().join("a.md"), "私人笔记");
-    let s = e.add_folder(&e.wiki(), json!({})).await;
-    let id = s["id"].as_str().unwrap();
-    for (m, b) in [
-        ("PATCH", Some(json!({"visibility": "workspace"}))),
-        ("DELETE", None),
-    ] {
-        let (st, v) = e.req(OTHER, m, &format!("/kb/sources/{id}"), b).await;
-        assert_eq!((st, refusal(&v).as_str()), (404, "没有这个知识来源"));
-    }
-    let (st, _) = e
-        .req(OTHER, "POST", &format!("/kb/sources/{id}/sync"), None)
         .await;
     assert_eq!(st, 404);
 }

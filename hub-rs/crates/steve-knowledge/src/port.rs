@@ -18,16 +18,16 @@ use crate::repo;
 use crate::retrieve::{CANDIDATES, Purpose};
 use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 
-/// What may be read: the same rule as [`Viewer::sees`] (everything `workspace`, everything `user`
-/// created, and the `scopes` codes such as `team:<id>`), plus the purpose's and the sources' rules.
+/// Single-user reads follow [`Viewer::sees`], with no creator or team/space restriction.
+/// Purpose/audience, source and disclosure-level constraints still apply.
 /// `never` is never in it. Built only by [`Scope::for_viewer`] (and, for a conversation, by its
 /// card), so callers never write their own conditions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scope {
     pub ws: String,
-    /// What this user created is readable whatever its visibility.
+    /// Caller identity retained for shared scope DTOs and SQL bindings.
     pub user: String,
-    /// `team:<id>` / `space:<id>` codes readable beside `workspace`.
+    /// Legacy scope codes retained for the shared SQL bindings.
     pub scopes: Vec<String>,
     /// Only `workspace` objects (the main thread's chat in a shared workspace).
     pub workspace_only: bool,
@@ -76,20 +76,15 @@ impl Scope {
         if c.level == Level::Never {
             return false;
         }
-        let seen = match &c.visibility {
-            Visibility::Workspace => true,
-            _ if self.workspace_only => false,
-            _ if c.created_by == self.user => true,
-            Visibility::Private => false,
-            v => self.scopes.contains(&v.code()),
-        };
+        // This is a shared conversation's audience policy, not member read access.
+        let audience_ok = !self.workspace_only || c.visibility == Visibility::Workspace;
         let kind_ok = self
             .kinds
             .as_ref()
             .is_none_or(|k| k.contains(&c.source_kind));
         let paused = (self.paused_mems && c.obj_type == "mem")
             || (self.paused_bot_mems && c.obj_type == "bot_mem");
-        seen && kind_ok && !paused
+        audience_ok && kind_ok && !paused
     }
 
     /// The `WHERE` tail on `kb_chunks c` for [`SqliteStore`].
@@ -377,5 +372,26 @@ mod tests {
             "usr_me",
             Level::Public
         )));
+    }
+    #[test]
+    fn source_and_disclosure_constraints_are_independent_of_member_visibility() {
+        let mut s = scope("usr_me", &[], false);
+        let mut candidate = cand(Visibility::Private, "usr_other", Level::Reasoning);
+        assert!(s.admits(&candidate));
+        s.kinds = Some(vec!["folder".into()]);
+        assert!(!s.admits(&candidate));
+        candidate.source_kind = "folder".into();
+        assert!(s.admits(&candidate));
+        candidate.obj_type = "mem".into();
+        s.paused_mems = true;
+        assert!(!s.admits(&candidate));
+        candidate.obj_type = "bot_mem".into();
+        assert!(s.admits(&candidate));
+        s.paused_bot_mems = true;
+        assert!(!s.admits(&candidate));
+        candidate.obj_type = "chunk".into();
+        assert!(s.admits(&candidate));
+        candidate.level = Level::Never;
+        assert!(!s.admits(&candidate));
     }
 }

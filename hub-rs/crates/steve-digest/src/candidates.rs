@@ -12,10 +12,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use steve_store::StoreError;
+use steve_store::{StoreError, base::Viewer};
 
 use crate::conv::ConvRef;
 use crate::facts::Built;
@@ -279,14 +280,18 @@ pub fn find(
                 );
             }
         }
+        let viewer = crate::conv::owner_viewer(c, ws)?.unwrap_or_else(|| Viewer::bare(ws, ""));
+        let scope = viewer.sql("m");
+        let mut parameters = vec![Sql::Text(expr), Sql::Text(ws.into()), Sql::Integer(now)];
+        parameters.extend(scope.params);
         let rows: Vec<(String, String, String, f64)> = c
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT m.id, m.text, m.status, bm25(kb_fts) AS s FROM kb_fts JOIN kb_chunks k ON k.id = kb_fts.rowid
                    JOIN mems m ON m.id = k.obj_id
-                  WHERE kb_fts MATCH ? AND k.obj_type = 'mem' AND m.workspace_id = ? AND m.status IN ('confirmed', 'candidate') AND m.level <> 'never' AND (m.valid_until IS NULL OR m.valid_until > ?3) AND (m.visibility = 'workspace' OR m.created_by = ?4 OR m.visibility IN (SELECT value FROM json_each(?5)))
-                  ORDER BY s LIMIT 6",
-            )?
-            .query_map(params![expr, ws, now, crate::conv::owner(c, ws)?.unwrap_or_default(), serde_json::to_string(&crate::conv::owner_viewer(c, ws)?.map(|v| v.scopes).unwrap_or_default()).unwrap_or_default()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                  WHERE kb_fts MATCH ? AND k.obj_type = 'mem' AND m.workspace_id = ? AND m.status IN ('confirmed', 'candidate') AND m.level <> 'never' AND (m.valid_until IS NULL OR m.valid_until > ?) AND {}
+                  ORDER BY s LIMIT 6", scope.sql
+            ))?
+            .query_map(rusqlite::params_from_iter(parameters), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (id, text, status, s) in rows {
             acc.add(

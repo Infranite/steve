@@ -310,7 +310,7 @@ async fn a_session_reads_only_its_items_threads() {
         .unwrap_err();
     assert!(err.contains("no attachment"), "{err}");
 
-    // an item about no thread, no item at all, and an item of another user
+    // An item about no thread and no item at all cannot use this tool.
     new_item(e.h.env.store(), WS, "ST-7", ME);
     for c in [cx(Some("ST-7"), None), cx(None, Some("ses_a"))] {
         for t in [mcp::THREAD, mcp::DRAFT] {
@@ -341,10 +341,18 @@ async fn a_session_reads_only_its_items_threads() {
         user: OTHER.into(),
         ..cx(Some("ST-8"), None)
     };
+    // Another requester's item may read its linked thread, even from a private mailbox.
+    assert!(
+        e.tool(&other, mcp::THREAD, json!({}))
+            .await
+            .unwrap()
+            .contains(&e.chain)
+    );
+    // This still does not let the original session read an unrelated thread.
     assert_eq!(
-        e.tool(&other, mcp::THREAD, json!({})).await,
-        Err(NOT_ABOUT.to_string()),
-        "the thread is private to the mailbox owner"
+        e.tool(&scx, mcp::THREAD, json!({"thread": e.invoice}))
+            .await,
+        Err(NOT_ABOUT.to_string())
     );
     // another workspace with the same item id
     let foreign = McpCx {
@@ -647,10 +655,10 @@ async fn to_item_and_the_panel() {
             "{preds:?}"
         );
     }
-    // not visible / bad input
+    // Workspace isolation and bad input remain independent of member read visibility.
     let (s, _) = call(&r, Some(&caller(WS2, ME)), "POST", &path, Some(&json!({}))).await;
     assert_eq!(s, 404);
-    let (s, _) = call(
+    let (s, v) = call(
         &r,
         Some(&caller(WS, OTHER)),
         "POST",
@@ -658,7 +666,7 @@ async fn to_item_and_the_panel() {
         Some(&json!({})),
     )
     .await;
-    assert_eq!(s, 404);
+    assert_eq!((s, v["item_id"].as_str()), (200, Some(item.as_str())));
     let (s, _) = call(
         &r,
         Some(&me()),
@@ -709,13 +717,14 @@ async fn to_item_and_the_panel() {
     let badges = &panels[0].head.as_ref().unwrap().badges;
     assert!(badges.contains(&"草稿待批准".to_string()), "{badges:?}");
     assert!(badges.contains(&"待回复".to_string()), "{badges:?}");
-    // another user sees nothing of a private mailbox
-    assert!(
+    // Other identities read the same item panel without changing mailbox ownership.
+    assert_eq!(
         e.h.env
             .store()
             .reader(|c| MailPanel.panels(c, WS, OTHER, &item))
             .unwrap()
-            .is_empty()
+            .len(),
+        1
     );
 
     // landing over REST
@@ -742,9 +751,19 @@ async fn to_item_and_the_panel() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["mime"], "application/pdf");
     assert!(v["id"].as_str().unwrap().starts_with("fil_"));
-    let (s, _) = call(
+    let (s, landed) = call(
         &r,
         Some(&caller(WS, OTHER)),
+        "POST",
+        &format!("/mail/attachments/{mla}/file"),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{landed}");
+    assert_eq!(landed["mime"], "application/pdf");
+    let (s, _) = call(
+        &r,
+        Some(&caller(WS2, ME)),
         "POST",
         &format!("/mail/attachments/{mla}/file"),
         None,

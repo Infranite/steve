@@ -353,7 +353,7 @@ fn large_window_resumes_in_another_session_and_chain_reuses_module_matter_id() {
 }
 
 #[test]
-fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmation() {
+fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
     use steve_store::base::mems::{self, NewMem};
     let e = env();
     let seed = |owner: &str| {
@@ -394,10 +394,14 @@ fn memory_links_and_replacements_recheck_visibility_and_use_existing_confirmatio
         json!({"packet":l["packet"],"batch":l["batch"],"chunk":1}),
     )
     .unwrap();
-    assert!(read["candidates"].as_array().unwrap().is_empty());
+    assert!(
+        read["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == private)
+    );
     let mut write = chunk(&e, &l);
-    write["memories"] = json!([{"id": private, "first": 1, "last": 2}]);
-    assert!(call(&e, tools::CHUNK, write.clone()).is_err());
     write["memories"] = json!([{"id":visible, "first":1,"last":2}, {"text":"The source fact changed", "supersedes":visible, "first":2,"last":3}]);
     let out = call(&e, tools::CHUNK, write).unwrap();
     assert_eq!(out["memories"][0]["id"], visible);

@@ -14,9 +14,9 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use steve_knowledge::Knowledge;
 use steve_knowledge::openviking::{Hybrid, Mirror, OpenViking, OpenVikingConfig, TOPIC};
-use steve_knowledge::port::SqliteStore;
+use steve_knowledge::port::{KnowledgeStore, Pass, Scope, SqliteStore};
 use steve_knowledge::retrieve::{Purpose, Query, SEMANTIC_DOWN_NOTE, retrieve, retrieve_all};
-use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
+use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Viewer;
 use steve_store::outbox::Dispatcher;
 use tokio::sync::oneshot;
@@ -279,10 +279,7 @@ async fn the_index_is_mirrored_and_meaning_fills_in_under_the_scope() {
     };
     assert!(sqlite_only.is_empty(), "{sqlite_only:?}");
     assert!(h.search(ME, "关网州杭").contains(&mine));
-    assert!(
-        !h.search(OTHER, "杭州网关在哪").contains(&mine),
-        "another's private note stays out"
-    );
+    assert!(h.search(OTHER, "关网州杭").contains(&mine));
 
     // removed in the Hub's index → removed in the store
     let (s, v) = call(
@@ -302,6 +299,61 @@ async fn the_index_is_mirrored_and_meaning_fills_in_under_the_scope() {
             .count(),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_user_semantic_reads_keep_workspace_and_shared_chat_audience_boundaries() {
+    let h = setup().await;
+    let private = h
+        .note(
+            OTHER,
+            "网关",
+            "公网网关在杭州的轻量服务器上。",
+            json!({"visibility": "private"}),
+        )
+        .await;
+    let shared = h
+        .note(
+            ME,
+            "网关",
+            "公网网关在杭州的轻量服务器上。",
+            json!({"visibility": "workspace"}),
+        )
+        .await;
+    let (status, foreign) = call(
+        &h.app,
+        Some(&caller(WS2, ME)),
+        "POST",
+        "/kb/notes",
+        Some(&json!({
+            "title": "网关", "body": "公网网关在杭州的轻量服务器上。", "visibility": "private"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{foreign}");
+    let foreign = foreign["id"].as_str().unwrap();
+    h.mirror().await;
+    h.env
+        .store()
+        .reader(|c| {
+            let search = |ws, purpose| {
+                let scope = Scope::for_viewer(c, &Viewer::bare(ws, ME), purpose, None)?;
+                let mut ids: Vec<_> =
+                    h.ov.search(c, &scope, "关网州杭", Pass::Semantic, 20)?
+                        .into_iter()
+                        .map(|candidate| candidate.obj_id)
+                        .collect();
+                ids.sort();
+                Ok::<_, steve_store::StoreError>(ids)
+            };
+            let mut expected = vec![private.clone(), shared.clone()];
+            expected.sort();
+            assert_eq!(search(WS, Purpose::Search)?, expected);
+            assert_eq!(search(WS, Purpose::Chat)?, vec![shared]);
+            assert_eq!(search(WS2, Purpose::Search)?, vec![foreign.to_string()]);
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
 }
 
 /// A server whose searches fail (500), counting them.

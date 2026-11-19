@@ -209,20 +209,16 @@ pub struct Filter {
     pub outcome: Option<String>,
 }
 
-/// The visibility condition on `e` (events) joined with `c` (their connection): `private` events
-/// belong to the connection's creator; `space:`/`team:` to members of those scopes.
+/// Reuse the shared read rule. Events have no created_by column: project their
+/// connection creator into the Viewer field shape without changing event/rowid joins.
 fn visible(viewer: &Viewer, params: &mut Vec<Sql>) -> String {
-    params.push(Sql::Text(viewer.user.clone()));
-    let mut sql = "(e.visibility = 'workspace' OR coalesce(c.created_by, '') = ?".to_string();
-    if !viewer.scopes.is_empty() {
-        sql.push_str(&format!(
-            " OR e.visibility IN ({})",
-            vec!["?"; viewer.scopes.len()].join(", ")
-        ));
-        params.extend(viewer.scopes.iter().cloned().map(Sql::Text));
-    }
-    sql.push(')');
-    sql
+    let scope = viewer.sql("signal_visibility");
+    params.extend(scope.params);
+    format!(
+        "EXISTS (SELECT 1 FROM (SELECT e.visibility AS visibility,
+            coalesce(c.created_by, '') AS created_by) signal_visibility WHERE {})",
+        scope.sql
+    )
 }
 
 /// Every `ext_events` column but `payload` (the raw body is only read by [`raw`]).

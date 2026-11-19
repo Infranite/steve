@@ -174,14 +174,22 @@ async fn connect_backfill_then_live_mail() {
     assert!(lines.iter().all(|l| l.kind == "mail"));
     assert!(lines.iter().any(|l| l.text.starts_with("发出邮件：")));
     assert!(lines[0].href.starts_with("#/mail/t/mt_"));
-    // another user does not see my private mailbox
+    // Single-user reads include private mail from other account identities.
     let other = Viewer::bare(WS, steve_modules::testkit::OTHER);
-    let none = h
+    let other_lines = h
         .env
         .store()
         .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &other, &alice, None, 50))
         .unwrap();
-    assert!(none.is_empty());
+    assert_eq!(other_lines.len(), 3);
+    let foreign = Viewer::bare(steve_modules::testkit::WS2, ME);
+    assert!(
+        h.env
+            .store()
+            .reader(|c| steve_mail::timeline::MailTimeline.entries(c, &foreign, &alice, None, 50))
+            .unwrap()
+            .is_empty()
+    );
 
     // nothing new: no events, no duplicates
     let before = h.messages(&conn).len();

@@ -1,4 +1,4 @@
-//! K1 acceptance: notes searchable on save, private notes invisible to others,
+//! K1 acceptance: notes searchable on save with single-user read visibility,
 //! `never` memories never returned, source scope changes reach the index, deleted memories leave
 //! it, old Bot memories become searchable after a sync; plus the REST shapes and error codes.
 
@@ -181,7 +181,7 @@ async fn note_is_searchable_right_after_saving() {
 }
 
 #[tokio::test]
-async fn private_notes_are_invisible_to_others() {
+async fn single_user_reads_private_notes_with_workspace_and_chat_audience_boundaries() {
     let e = setup();
     let private = e
         .note("部署手册", "部署脚本放在 ops 仓库。", json!({}))
@@ -199,23 +199,14 @@ async fn private_notes_are_invisible_to_others() {
     );
 
     assert_eq!(e.search(ME, "部署").await.len(), 2);
-    assert_eq!(ids(&e.search(OTHER, "部署").await), vec![s.to_string()]);
-    let (st, v) = e.as_(OTHER, "GET", &format!("/kb/docs/{p}"), None).await;
-    assert_eq!((st, v["error"].as_str()), (404, Some("没有这个文档")));
-    let (st, _) = e
-        .as_(
-            OTHER,
-            "PUT",
-            &format!("/kb/notes/{p}"),
-            Some(json!({"body": "x"})),
-        )
-        .await;
-    assert_eq!(st, 404);
-    let (st, _) = e.as_(OTHER, "DELETE", &format!("/kb/docs/{p}"), None).await;
-    assert_eq!(st, 404);
+    let other_hits = ids(&e.search(OTHER, "部署").await);
+    assert_eq!(other_hits.len(), 2);
+    assert!(other_hits.contains(&p.to_string()) && other_hits.contains(&s.to_string()));
+    let (st, _) = e.as_(OTHER, "GET", &format!("/kb/docs/{p}"), None).await;
+    assert_eq!(st, 200);
     let (st, list) = e.as_(OTHER, "GET", "/kb/docs", None).await;
     assert_eq!(st, 200);
-    assert_eq!(ids(list.as_array().unwrap()), vec![s.to_string()]);
+    assert_eq!(ids(list.as_array().unwrap()).len(), 2);
     // Another workspace sees nothing at all.
     let (_, v) = call(
         &e.app,
@@ -459,14 +450,15 @@ async fn memories_name_what_they_are_about_and_anchors_rank_higher() {
         .unwrap();
     assert_eq!(am.len(), 1);
     assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());
-    // Another user sees neither (private memories).
+    // Single-user anchor retrieval includes private memories from other creators.
     let other = Viewer::bare(WS, OTHER);
     let am = e
         .env
         .store()
         .reader(|c| anchor_mems(c, &other, &anchors, 5, steve_store::now()))
         .unwrap();
-    assert!(am.is_empty());
+    assert_eq!(am.len(), 1);
+    assert_eq!(am[0].obj_id, a["id"].as_str().unwrap());
 }
 
 #[tokio::test]
@@ -875,7 +867,7 @@ impl steve_knowledge::port::KnowledgeStore for Leaky {
 }
 
 #[tokio::test]
-async fn what_a_store_returns_outside_the_scope_is_dropped() {
+async fn single_user_second_filter_admits_other_creators_but_drops_never() {
     let e = setup();
     let viewer = Viewer::bare(WS, ME);
     let hits = e
@@ -885,11 +877,11 @@ async fn what_a_store_returns_outside_the_scope_is_dropped() {
         .unwrap();
     let mut ids: Vec<_> = hits.iter().map(|h| h.obj_id.as_str()).collect();
     ids.sort();
-    assert_eq!(ids, ["mine", "ok_ws"]);
+    assert_eq!(ids, ["mine", "ok_ws", "theirs"]);
 }
 
 #[tokio::test]
-async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
+async fn single_user_mail_references_keep_workspace_and_viewer_free_index_boundaries() {
     let e = setup();
     e.env.store().with_conn(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
@@ -912,14 +904,14 @@ async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
             Some(json!({"text": "probe", "about": about})),
         )
         .await;
-    assert_eq!(status, 404, "{body}");
+    assert_eq!(status, 200, "{body}");
     let (status, body) = e.me("POST", "/kb/mems", Some(json!({"text": "foreign probe", "about": [{"type": "mail_thread", "id": "foreign_mail"}]}))).await;
     assert_eq!(status, 404, "{body}");
     let (status, shared) = e.me("POST", "/kb/mems", Some(json!({"text": "public fact", "about": [{"type": "mail_thread", "id": "shared_mail"}]}))).await;
     assert_eq!(status, 200, "{shared}");
     assert_eq!(shared["about"][0]["name"], "Shared mail subject");
 
-    // The writer can refer to their private thread, but sharing the memory must not share its subject.
+    // Viewer-bound reads may resolve private subjects; the viewer-free index remains separate.
     let (status, memory) = e
         .as_(
             OTHER,
@@ -942,9 +934,9 @@ async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
             .iter()
             .find(|m| m["id"] == id)
             .unwrap()["about"][0]["name"],
-        ""
+        "Secret mail subject"
     );
-    assert!(!listed.to_string().contains("Secret mail subject"));
+    assert!(listed.to_string().contains("Secret mail subject"));
     let tool = steve_knowledge::steward::call(
         &e.env.modules,
         &steve_modules::contacts::mcp::McpCx {
@@ -958,14 +950,14 @@ async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
         &json!({}),
     )
     .unwrap();
-    assert!(!tool.contains("Secret mail subject"));
+    assert!(tool.contains("Secret mail subject"));
     let (status, subjects) = e.me("GET", "/kb/subjects", None).await;
     assert_eq!(status, 200, "{subjects}");
-    assert!(!subjects.to_string().contains("Secret mail subject"));
+    assert!(subjects.to_string().contains("Secret mail subject"));
     let (status, body) = e
         .me("GET", "/kb/subjects/mail_thread/private_mail", None)
         .await;
-    assert_eq!(status, 404, "{body}");
+    assert_eq!(status, 200, "{body}");
     let hits = e.search(ME, "historical shared fact").await;
     assert!(!hits.is_empty());
     assert!(
@@ -987,11 +979,11 @@ async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
         )
         .await;
     assert_eq!(status, 200, "{read}");
-    assert_eq!(read["about"][0]["name"], "");
+    assert_eq!(read["about"][0]["name"], "Secret mail subject");
 }
 
 #[test]
-fn mail_about_visibility_reuses_team_and_registered_source_scopes() {
+fn single_user_mail_reference_reads_do_not_need_membership_scopes() {
     let e = setup();
     e.env.store().with_conn(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
@@ -1007,9 +999,9 @@ fn mail_about_visibility_reuses_team_and_registered_source_scopes() {
         let scoped = bare.clone().with_scopes(["team:team1".into(), "space:s1".into()]);
         for id in ["team_mail", "space_mail"] {
             let r = ObjRef::new("mail_thread", id);
-            assert!(!repo::ref_exists_for(c, &bare, &r)?);
+            assert!(repo::ref_exists_for(c, &bare, &r)?);
             assert!(repo::ref_exists_for(c, &scoped, &r)?);
-            assert!(repo::ref_name_for(c, &bare, &r)?.is_none());
+            assert!(repo::ref_name_for(c, &bare, &r)?.is_some());
             assert!(repo::ref_name_for(c, &scoped, &r)?.is_some());
             // A viewer-free persistent index must not copy source-private subjects.
             assert!(repo::ref_name(c, &r)?.is_none());

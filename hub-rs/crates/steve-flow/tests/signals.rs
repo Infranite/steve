@@ -322,9 +322,9 @@ async fn keep_raw_setting_is_read_per_workspace() {
 }
 
 #[tokio::test]
-async fn private_events_are_their_owners_only() {
+async fn single_user_reads_private_events_without_crossing_workspaces_or_connection_ownership() {
     let (e, _) = polling();
-    let mine = e.connection(WS, FakeEventAdapter::ID, Some(ME), ME);
+    let mine = e.connection(WS, FakeEventAdapter::ID, Some(OTHER), OTHER);
     let shared = e.connection(WS, FakeEventAdapter::ID, None, ME);
     let p = e
         .flow
@@ -346,10 +346,10 @@ async fn private_events_are_their_owners_only() {
         .unwrap();
     let (pid, sid) = (p.id().unwrap(), s.id().unwrap());
 
-    let (st, _) = get(&e, OTHER, &format!("/signals/{pid}")).await;
-    assert_eq!(st, 404);
-    let (st, v) = get(&e, OTHER, &format!("/signals/{pid}/raw")).await;
-    assert_eq!((st, v["error"].as_str()), (404, Some("没有这个信号")));
+    let (st, _) = get(&e, ME, &format!("/signals/{pid}")).await;
+    assert_eq!(st, 200);
+    let (st, _) = get(&e, ME, &format!("/signals/{pid}/raw")).await;
+    assert_eq!(st, 200);
     let (st, _) = get(&e, OTHER, &format!("/signals/{sid}")).await;
     assert_eq!(st, 200);
     let (st, v) = get(&e, ME, &format!("/signals/{pid}")).await;
@@ -357,8 +357,14 @@ async fn private_events_are_their_owners_only() {
     assert_eq!(v["connection"]["id"], mine.as_str());
 
     let (_, v) = get(&e, OTHER, "/signals").await;
-    assert_eq!(v["stats"]["total"], 1);
-    assert_eq!(v["items"][0]["id"], sid);
+    assert_eq!(v["stats"]["total"], 2);
+    assert!(
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == pid)
+    );
     let (_, v) = get(&e, ME, "/signals").await;
     assert_eq!(v["stats"]["total"], 2);
     // another workspace sees neither
@@ -371,9 +377,29 @@ async fn private_events_are_their_owners_only() {
     )
     .await;
     assert_eq!(st, 404);
-    // the personal connection is not on the other user's source page
-    let (_, v) = get(&e, OTHER, "/sources").await;
+    // Connection ownership remains independent of reading its stored signals.
+    let (_, v) = get(&e, ME, "/sources").await;
     assert_eq!(v[0]["connections"].as_array().unwrap().len(), 1);
+    // The shared rule still binds explicit scope parameters when a connection is missing.
+    e.env
+        .store()
+        .with_conn(|c| {
+            for visibility in ["private", "team:unjoined", "space:unjoined"] {
+                c.execute(
+                    "UPDATE ext_events SET connection_id = NULL, visibility = ? WHERE id = ?",
+                    params![visibility, pid],
+                )?;
+                let viewer = steve_store::base::Viewer::bare(WS, ME)
+                    .with_scopes(["team:extra".into(), "space:extra".into()]);
+                let found = signals::list(c, &viewer, &signals::Filter::default()).unwrap();
+                assert_eq!(found["stats"]["total"], 2);
+                assert_eq!(signals::own(c, &viewer, pid).unwrap()["id"], pid);
+                assert!(signals::raw(c, &viewer, pid).unwrap().is_some());
+                assert!(signals::own(c, &steve_store::base::Viewer::bare(WS2, ME), pid).is_err());
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[tokio::test]

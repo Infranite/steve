@@ -742,7 +742,7 @@ fn alert_rules_roll_up_resolved_messages_and_queue_only_anomalies() {
 }
 
 #[test]
-fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() {
+fn single_user_digest_reads_other_accounts_and_initial_floor_does_not_slide() {
     let e = env();
     e.store().with_conn(|c| {
         c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
@@ -765,13 +765,13 @@ fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() 
         window::cut_now(e.store(), WS, &cv("s2"), NOW)
             .unwrap()
             .windows,
-        0
+        1
     );
     assert!(
         e.store()
             .reader(|c| conv::info(c, WS, &cv("s2")))
             .unwrap()
-            .is_none()
+            .is_some()
     );
     msg(
         &e,
@@ -816,7 +816,14 @@ fn private_sources_do_not_enter_owner_digest_and_initial_floor_does_not_slide() 
         })
         .unwrap();
     assert_eq!(report.windows, 1);
-    assert_eq!(packets(&e)[0].first_id, "waiting");
+    assert_eq!(
+        packets(&e)
+            .iter()
+            .find(|packet| packet.conv == cv("s1").key())
+            .unwrap()
+            .first_id,
+        "waiting"
+    );
 }
 
 #[test]
@@ -926,7 +933,7 @@ fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
 }
 
 #[tokio::test]
-async fn matter_detail_never_exposes_other_members_private_memories() {
+async fn single_user_matter_detail_includes_other_creators_private_memories() {
     let e = env();
     let app = steve_digest::routes()
         .merge(steve_knowledge::routes(steve_knowledge::Knowledge::new(
@@ -976,7 +983,7 @@ async fn matter_detail_never_exposes_other_members_private_memories() {
     .await;
     assert_eq!(status, 200, "{detail}");
     let memories = detail["memories"].as_array().unwrap();
-    assert_eq!(memories.len(), 2, "{detail}");
+    assert_eq!(memories.len(), 3, "{detail}");
     assert!(memories.iter().any(|m| m["id"] == public_id));
     assert!(
         memories
@@ -984,7 +991,7 @@ async fn matter_detail_never_exposes_other_members_private_memories() {
             .any(|m| m["text"] == "Owner's private memory")
     );
     assert!(
-        !detail
+        detail
             .to_string()
             .contains("Another member's private memory")
     );
@@ -1390,4 +1397,71 @@ fn bounded_initial_lookback_does_not_exclude_later_backfill() {
     let ps = packets(&e);
     assert_eq!(ps.iter().map(|p| p.count).sum::<i64>(), 2);
     assert!(ps.iter().any(|p| p.first_id == "late-history"));
+}
+
+#[test]
+fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_and_lifetime() {
+    let e = env();
+    let ids = e
+        .store()
+        .transaction(|tx| {
+            let mut ids = Vec::new();
+            for (ws, level, status, expired) in [
+                (WS, steve_store::base::Level::Conclusion, "confirmed", false),
+                (
+                    WS2,
+                    steve_store::base::Level::Conclusion,
+                    "confirmed",
+                    false,
+                ),
+                (WS, steve_store::base::Level::Conclusion, "confirmed", true),
+                (WS, steve_store::base::Level::Conclusion, "stale", false),
+                (WS, steve_store::base::Level::Never, "confirmed", false),
+            ] {
+                let memory = mems::create(
+                    tx,
+                    ws,
+                    &NewMem {
+                        text: "deployment safeguards".into(),
+                        created_by: OTHER.into(),
+                        ..Default::default()
+                    },
+                )?;
+                steve_knowledge::sync::sync_mem(tx, &memory.id, NOW)?;
+                // Simulate an index that has not yet caught up with source-state changes.
+                tx.execute(
+                    "UPDATE mems SET level = ?, status = ?, valid_until = ? WHERE id = ?",
+                    params![level.code(), status, expired.then_some(NOW - 1), memory.id],
+                )?;
+                ids.push(memory.id);
+            }
+            Ok::<_, StoreError>(ids)
+        })
+        .unwrap();
+    msg(
+        &e,
+        "s1",
+        "candidate-window",
+        NOW,
+        None,
+        None,
+        "deployment deployment safeguards safeguards",
+    );
+    e.store()
+        .reader(|c| {
+            let info = conv::info(c, WS, &cv("s1"))?.unwrap();
+            let profile = profile::profile(c, WS, &info)?;
+            let messages = conv::read_after(c, WS, &cv("s1"), 0, "", 10)?;
+            let built = facts::build(c, WS, &info, &profile, 1, "manual", &[], &messages)?;
+            let found = candidates::find(c, WS, &cv("s1"), &built, NOW)?;
+            let memories: Vec<_> = found
+                .iter()
+                .filter(|candidate| candidate.kind == "mem")
+                .collect();
+            assert_eq!(memories.len(), 1, "{found:?}");
+            assert_eq!(memories[0].id, ids[0]);
+            assert!(memories[0].reasons.contains(&"fulltext"));
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
 }
