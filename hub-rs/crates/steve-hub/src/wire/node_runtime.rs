@@ -84,7 +84,6 @@ pub use workspace::WorkspaceFact;
 
 #[cfg(test)]
 use apply::role_lookup_in;
-use inbox::PRUNE_BATCH;
 use lifecycle::last_release_in;
 use plan::cancelled_start_in;
 #[cfg(test)]
@@ -678,7 +677,6 @@ impl NodeRuntime {
                     }
                     if !applied && prune {
                         me.prune_inbox(now());
-                        me.prune_jobs(now() - INBOX_KEEP_MS);
                     }
                     applied
                 })

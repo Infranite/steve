@@ -1319,8 +1319,14 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     };
     assert_eq!(
         store
-            .transaction(|tx| steve_store::jobs::prune_jobs_in(tx, steve_store::now() + 1000, 128))
-            .unwrap(),
+            .retention_slice(
+                steve_store::retention::Kind::Jobs,
+                steve_store::now() + 8 * 86_400_000,
+                steve_store::retention::DEFAULT_BUDGET,
+                None,
+            )
+            .unwrap()
+            .affected,
         1
     );
     assert_eq!(

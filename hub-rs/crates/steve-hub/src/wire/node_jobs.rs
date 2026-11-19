@@ -724,10 +724,6 @@ impl NodeRuntime {
             }
         }
     }
-
-    // The Node protocol loop (outside this card) still calls this hook. All job
-    // retention now belongs to storage.retention; remove the hook with that caller.
-    pub(super) fn prune_jobs(&self, _before: i64) {}
 }
 
 /// Core's [`OneModel`] on the local Node: one think job per try of one model. Core's fallback
