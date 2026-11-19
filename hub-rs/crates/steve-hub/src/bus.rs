@@ -1,6 +1,6 @@
 //! Typed, ordered in-process notifications. Encoding belongs to SSE and plugin boundaries.
 use bytes::Bytes;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -581,8 +581,8 @@ impl Sender {
 /// Latest statistics notice per workspace in each five-second window.
 #[derive(Default)]
 struct StatsThrottle {
-    last: HashMap<String, std::time::Instant>,
-    held: HashMap<String, Arc<Envelope<BusEvent>>>,
+    streams: HashMap<String, (std::time::Instant, steve_runtime::policy::Throttle<Arc<Envelope<BusEvent>>>)>,
+    pending: HashSet<String>,
 }
 impl StatsThrottle {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
@@ -595,44 +595,46 @@ impl StatsThrottle {
             unreachable!("statistics are workspace scoped")
         };
         let ws = ws.to_string();
-        match self.last.get(&ws) {
-            Some(at) if now.duration_since(*at) < Self::WINDOW => {
-                self.held.insert(ws, frame);
-                None
-            }
-            _ => {
-                if self.last.len() > 10_000 {
-                    self.last
-                        .retain(|_, at| now.duration_since(*at) < Self::WINDOW);
-                }
-                self.last.insert(ws, now);
-                Some(frame)
-            }
+        if self.streams.len() > 10_000
+            && self
+                .streams
+                .get(&ws)
+                .is_none_or(|(last, _)| now.duration_since(*last) >= Self::WINDOW)
+        {
+            self.streams.retain(|_, (last, throttle)| {
+                throttle.deadline().is_some() || now.duration_since(*last) < Self::WINDOW
+            });
         }
+        let (last, throttle) = self
+            .streams
+            .entry(ws.clone())
+            .or_insert_with(|| (now, steve_runtime::policy::Throttle::new(Self::WINDOW)));
+        let out = throttle.offer(frame, now.into());
+        if out.is_some() {
+            *last = now;
+            self.pending.remove(&ws);
+        } else {
+            self.pending.insert(ws);
+        }
+        out
     }
     fn deadline(&self) -> Option<std::time::Instant> {
-        self.held
-            .keys()
-            .filter_map(|ws| self.last.get(ws))
-            .map(|at| *at + Self::WINDOW)
+        self.pending
+            .iter()
+            .filter_map(|ws| self.streams.get(ws)?.1.deadline().map(|t| t.into_std()))
             .min()
     }
     fn due(&mut self, now: std::time::Instant) -> Vec<Arc<Envelope<BusEvent>>> {
-        let keys: Vec<_> = self
-            .held
-            .keys()
-            .filter(|ws| {
-                self.last
-                    .get(*ws)
-                    .is_none_or(|at| now.duration_since(*at) >= Self::WINDOW)
-            })
-            .cloned()
-            .collect();
+        let keys: Vec<_> = self.pending.iter().cloned().collect();
         keys.into_iter()
             .filter_map(|ws| {
-                let frame = self.held.remove(&ws)?;
-                self.last.insert(ws, now);
-                Some(frame)
+                let (last, t) = self.streams.get_mut(&ws)?;
+                let out = t.due(now.into());
+                if out.is_some() {
+                    *last = now;
+                    self.pending.remove(&ws);
+                }
+                out
             })
             .collect()
     }
@@ -715,7 +717,7 @@ mod tests {
         let at = std::time::Instant::now();
         for (ms, day, immediate) in [(0, "1", true), (1000, "2", false), (4999, "3", false)] {
             assert_eq!(
-                t.offer(encoded(stats("a", day)), at + Duration::from_millis(ms))
+                t.offer(enveloped(stats("a", day)), at + Duration::from_millis(ms))
                     .is_some(),
                 immediate
             );
@@ -723,18 +725,16 @@ mod tests {
         assert!(t.due(at + Duration::from_millis(4999)).is_empty());
         let due = t.due(at + Duration::from_secs(5));
         assert_eq!(due.len(), 1);
-        assert!(due[0].json.contains("\"day\":\"3\""));
+        assert_eq!(serde_json::to_value(&*due[0]).unwrap()["day"], "3");
         assert!(
-            t.offer(encoded(stats("a", "4")), at + Duration::from_millis(5001))
+            t.offer(enveloped(stats("a", "4")), at + Duration::from_millis(5001))
                 .is_none()
         );
         assert!(t.due(at + Duration::from_millis(9999)).is_empty());
         assert!(
-            t.offer(encoded(stats("a", "5")), at + Duration::from_secs(10))
+            t.offer(enveloped(stats("a", "5")), at + Duration::from_secs(10))
                 .is_some()
         );
-        // The old implementation still has a held frame at the exact offer boundary;
-        // dispatcher due-before-offer ordering normally drains it first.
     }
 
     #[test]

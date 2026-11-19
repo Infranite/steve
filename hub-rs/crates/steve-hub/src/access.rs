@@ -133,29 +133,20 @@ pub fn seen(store: &Store, c: &Client, route: &str, ip: Option<String>) {
 /// Failed sign-ins per address: after [`TRIES`] within [`TRIES_WINDOW`], 429 until it passes.
 const TRIES: u32 = 10;
 const TRIES_WINDOW: Duration = Duration::from_secs(600);
-static FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> = LazyLock::new(Default::default);
-static PAIR_FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> =
-    LazyLock::new(Default::default);
-
-fn too_many_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) -> bool {
-    too_many_at(map, ip, Instant::now())
+type FailureLimit = steve_runtime::policy::Limiter<String>;
+fn failure_limit() -> FailureLimit {
+    FailureLimit::new(steve_runtime::policy::RateLimit::Window {
+        len: TRIES_WINDOW,
+        max: TRIES,
+    })
 }
-fn too_many_at(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str, now: Instant) -> bool {
-    let m = map.lock().unwrap_or_else(|e| e.into_inner());
-    m.get(ip)
-        .is_some_and(|(at, n)| now.duration_since(*at) < TRIES_WINDOW && *n >= TRIES)
+static FAILED: LazyLock<FailureLimit> = LazyLock::new(failure_limit);
+static PAIR_FAILED: LazyLock<FailureLimit> = LazyLock::new(failure_limit);
+fn too_many_in(limit: &FailureLimit, ip: &str) -> bool {
+    limit.peek(&ip.to_owned()).is_err()
 }
-
-fn failed_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) {
-    failed_at(map, ip, Instant::now());
-}
-fn failed_at(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str, now: Instant) {
-    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
-    let e = m.entry(ip.to_string()).or_insert((now, 0));
-    if now.duration_since(e.0) >= TRIES_WINDOW {
-        *e = (now, 0);
-    }
-    e.1 += 1;
+fn failed_in(limit: &FailureLimit, ip: &str) {
+    limit.hit(&ip.to_owned());
 }
 
 fn too_many(ip: &str) -> bool {
@@ -790,26 +781,36 @@ mod tests {
 
     #[test]
     fn failure_window_table_queries_do_not_count_and_tables_are_independent() {
-        let at = Instant::now();
-        let (login, pair) = (Mutex::new(HashMap::new()), Mutex::new(HashMap::new()));
+        let clock = std::sync::Arc::new(steve_runtime::FakeClock::new(0));
+        let make = || {
+            FailureLimit::with_clock(
+                steve_runtime::policy::RateLimit::Window {
+                    len: TRIES_WINDOW,
+                    max: TRIES,
+                },
+                clock.clone(),
+            )
+        };
+        let (login, pair) = (make(), make());
         for table in [&login, &pair] {
+            clock.set(0);
             for _ in 0..20 {
-                assert!(!too_many_at(table, "ip", at));
+                assert!(!too_many_in(table, "ip"));
             }
+            assert!(table.is_empty());
             for n in 1..=TRIES {
-                failed_at(table, "ip", at);
-                assert_eq!(too_many_at(table, "ip", at), n == TRIES);
+                failed_in(table, "ip");
+                assert_eq!(too_many_in(table, "ip"), n == TRIES);
             }
             for (ms, blocked) in [(599_999, true), (600_000, false), (600_001, false)] {
-                assert_eq!(
-                    too_many_at(table, "ip", at + Duration::from_millis(ms)),
-                    blocked
-                );
+                clock.set(ms);
+                assert_eq!(too_many_in(table, "ip"), blocked);
             }
-            assert!(!too_many_at(table, "other", at));
+            assert!(table.is_empty(), "expired failures are now evicted");
+            assert!(!too_many_in(table, "other"));
         }
-        failed_at(&login, "new", at);
-        assert!(!pair.lock().unwrap().contains_key("new"));
+        failed_in(&login, "new");
+        assert!(pair.is_empty());
     }
 
     #[test]

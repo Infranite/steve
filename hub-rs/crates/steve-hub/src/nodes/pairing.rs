@@ -8,9 +8,9 @@
 //!   The Node is `pending` until its owner confirms the fingerprint the CLI printed.
 //! - `GET /api/nodes`, `POST /api/nodes/{id}/confirm|pause|resume|rename|revoke|limit|context`: the owner's only.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::Duration;
+use steve_runtime::policy::{Limiter as RateLimiter, RateLimit};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -33,59 +33,36 @@ pub const CODE_TTL_MS: i64 = 10 * 60 * 1000;
 /// concern; the per-code bucket stops hammering one code, and the global one, generous enough not
 /// to starve real claims, only bounds the work garbage claims cost.
 pub struct Limiter {
-    buckets: Mutex<HashMap<String, (f64, Instant)>>,
-    global: Mutex<(f64, Instant)>,
+    buckets: RateLimiter<String>,
+    global: RateLimiter<()>,
 }
-
-const PER_CODE: (f64, f64) = (5.0, 0.1);
-const GLOBAL: (f64, f64) = (200.0, 50.0);
-
+const PER_CODE: RateLimit = RateLimit::Gcra {
+    per: Duration::from_secs(10),
+    burst: 5,
+};
+const GLOBAL: RateLimit = RateLimit::Gcra {
+    per: Duration::from_millis(20),
+    burst: 200,
+};
 impl Default for Limiter {
     fn default() -> Self {
-        Limiter {
-            buckets: Mutex::new(HashMap::new()),
-            global: Mutex::new((GLOBAL.0, Instant::now())),
+        Self {
+            buckets: RateLimiter::new(PER_CODE),
+            global: RateLimiter::new(GLOBAL),
         }
     }
 }
-
-/// Refills `(tokens, at)` at `rate` up to `burst` and takes one if there is one.
-fn take_one(b: &mut (f64, Instant), (burst, rate): (f64, f64)) -> bool {
-    take_one_at(b, (burst, rate), Instant::now())
-}
-fn take_one_at(b: &mut (f64, Instant), (burst, rate): (f64, f64), now: Instant) -> bool {
-    b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * rate).min(burst);
-    b.1 = now;
-    if b.0 >= 1.0 {
-        b.0 -= 1.0;
-        true
-    } else {
-        false
-    }
-}
-
 impl Limiter {
-    /// One claim of the code whose hash is `code_hash`.
+    /// Global admission is consumed first, even when this particular code is exhausted.
     pub fn take(&self, code_hash: &str) -> bool {
-        if !take_one(&mut self.global.lock().unwrap(), GLOBAL) {
-            return false;
+        self.global.check(&()).is_ok() && self.buckets.check(&code_hash.to_owned()).is_ok()
+    }
+    #[cfg(test)]
+    fn with_clock(clock: Arc<dyn steve_runtime::Clock>) -> Self {
+        Self {
+            buckets: RateLimiter::with_clock(PER_CODE, clock.clone()),
+            global: RateLimiter::with_clock(GLOBAL, clock),
         }
-        let mut b = self.buckets.lock().unwrap();
-        if b.len() > 10_000 {
-            // a full bucket is the same as none: dropping those forgets nothing, while a code
-            // being hammered keeps its count (M5: clearing all reset it too)
-            let now = Instant::now();
-            b.retain(|_, (tokens, at)| {
-                *tokens + now.duration_since(*at).as_secs_f64() * PER_CODE.1 < PER_CODE.0
-            });
-            if b.len() > 10_000 {
-                b.clear();
-            }
-        }
-        let e = b
-            .entry(code_hash.to_string())
-            .or_insert((PER_CODE.0, Instant::now()));
-        take_one(e, PER_CODE)
     }
 }
 
@@ -590,11 +567,11 @@ mod tests {
 
     #[test]
     fn rate_table_preserves_burst_refill_and_atomic_rejection() {
-        for (quota, unit_ms) in [(PER_CODE, 10_000), (GLOBAL, 20)] {
-            let at = Instant::now();
-            let mut bucket = (quota.0, at);
-            for _ in 0..quota.0 as u32 {
-                assert!(take_one_at(&mut bucket, quota, at));
+        for (quota, burst, unit_ms) in [(PER_CODE, 5, 10_000), (GLOBAL, 200, 20)] {
+            let clock = Arc::new(steve_runtime::FakeClock::new(0));
+            let bucket = RateLimiter::with_clock(quota, clock.clone());
+            for _ in 0..burst {
+                assert!(bucket.check(&()).is_ok());
             }
             for (ms, allowed) in [
                 (0, false),
@@ -603,36 +580,39 @@ mod tests {
                 (unit_ms, false),
                 (unit_ms * 2, true),
             ] {
-                assert_eq!(
-                    take_one_at(
-                        &mut bucket,
-                        quota,
-                        at + std::time::Duration::from_millis(ms)
-                    ),
-                    allowed,
-                    "{quota:?} at {ms}"
-                );
+                clock.set(ms);
+                assert_eq!(bucket.check(&()).is_ok(), allowed, "{quota:?} at {ms}");
             }
+            clock.advance(unit_ms * burst);
+            assert!(bucket.is_empty());
         }
     }
-
-    /// M5: many garbage codes no longer reset the count of the one being hammered.
     #[test]
     fn garbage_codes_do_not_reset_a_hammered_one() {
-        let l = Limiter::default();
-        for _ in 0..PER_CODE.0 as usize {
+        let clock = Arc::new(steve_runtime::FakeClock::new(0));
+        let l = Limiter::with_clock(clock.clone());
+        for _ in 0..5 {
             assert!(l.take("target"));
         }
         assert!(!l.take("target"));
-        {
-            let mut b = l.buckets.lock().unwrap();
-            let now = Instant::now();
-            for i in 0..10_001 {
-                b.insert(format!("junk{i}"), (PER_CODE.0, now));
-            }
+        // Inactive keys are evicted, without clearing the still-exhausted target.
+        for i in 0..10_001 {
+            l.buckets.check(&format!("junk{i}")).unwrap();
         }
-        *l.global.lock().unwrap() = (GLOBAL.0, Instant::now());
         assert!(l.take("junk-new"));
-        assert!(!l.take("target"), "still out of tries");
+        assert!(!l.take("target"));
+        clock.advance(50_000);
+        assert!(l.buckets.is_empty());
+    }
+    #[test]
+    fn code_rejection_still_consumes_global_capacity() {
+        let clock = Arc::new(steve_runtime::FakeClock::new(0));
+        let l = Limiter::with_clock(clock.clone());
+        for n in 0..200 {
+            assert_eq!(l.take("code"), n < 5);
+        }
+        assert!(!l.take("fresh"));
+        clock.advance(20);
+        assert!(l.take("fresh"));
     }
 }

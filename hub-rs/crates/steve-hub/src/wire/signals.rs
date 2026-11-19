@@ -1,8 +1,7 @@
 //! GitHub as an S1 event source, the module SSE notices, the Feishu directory events, the watcher
 //! that follows connections coming and going, and the unauthenticated `POST /hooks/:connection_id`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -266,39 +265,25 @@ pub async fn watch_mailboxes(
 
 // ---------------------------------------------------------------- POST /hooks/:connection_id
 
-/// Deliveries per connection per minute (signals-automation.md §8).
-const HOOKS_PER_MINUTE: usize = 120;
-
 /// What the hooks route needs: S1, G2, and a per-connection rate limit.
 #[derive(Clone)]
 pub struct Hooks {
     pub flow: Arc<FlowCx>,
     pub gh: steve_github::GitHub,
-    recent: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+    recent: Arc<steve_runtime::policy::Limiter<String>>,
 }
 
 impl Hooks {
     pub fn new(flow: Arc<FlowCx>, gh: steve_github::GitHub) -> Self {
-        Self {
-            flow,
-            gh,
-            recent: Arc::default(),
-        }
+        let recent = Arc::new(steve_github::hooks::hook_limiter(
+            flow.modules.clock.clone(),
+        ));
+        Self { flow, gh, recent }
     }
 
-    fn allow(&self, conn: &str, now: i64) -> bool {
-        allow_recent(&self.recent, conn, now)
+    fn allow(&self, conn: &str) -> bool {
+        self.recent.check(&conn.to_owned()).is_ok()
     }
-}
-fn allow_recent(recent: &Mutex<HashMap<String, Vec<i64>>>, conn: &str, now: i64) -> bool {
-    let mut m = recent.lock().unwrap_or_else(|e| e.into_inner());
-    let v = m.entry(conn.to_string()).or_default();
-    v.retain(|t| now - t < 60_000);
-    if v.len() >= HOOKS_PER_MINUTE {
-        return false;
-    }
-    v.push(now);
-    true
 }
 
 fn empty(code: StatusCode) -> Response {
@@ -358,7 +343,7 @@ async fn hook(State(h): State<Hooks>, Path(id): Path<String>, req: Request) -> R
     };
     // S1's `push` verifies and ingests in one step, so the limit is counted before it: a flood is
     // cut off before any signature work or write
-    if !h.allow(&id, h.flow.now()) {
+    if !h.allow(&id) {
         return empty(StatusCode::TOO_MANY_REQUESTS);
     }
     match steve_flow::ingest::push(&h.flow, &ws, &id, &push).await {
@@ -450,7 +435,8 @@ mod rate_tables {
     #[test]
     fn hook_window_table_keeps_later_hits_and_rejections_do_not_count() {
         // Construct the same rate table without the unrelated flow/GitHub services.
-        let recent = Arc::new(Mutex::new(HashMap::new()));
+        let clock = Arc::new(steve_modules::FakeClock::new(0));
+        let recent = steve_github::hooks::hook_limiter(clock.clone());
         for (at, count, allowed) in [
             (0, 60, true),
             (30_000, 60, true),
@@ -460,10 +446,13 @@ mod rate_tables {
             (89_999, 1, false),
             (90_000, 60, true),
         ] {
+            clock.set(at);
             for _ in 0..count {
-                assert_eq!(allow_recent(&recent, "a", at), allowed, "at {at}");
+                assert_eq!(recent.check(&"a".to_owned()).is_ok(), allowed, "at {at}");
             }
         }
-        assert!(allow_recent(&recent, "b", 90_000));
+        assert!(recent.check(&"b".to_owned()).is_ok());
+        clock.advance(60_000);
+        assert!(recent.is_empty());
     }
 }
