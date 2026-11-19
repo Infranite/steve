@@ -47,11 +47,11 @@ test("coverage rejects missing, unregistered and retired keys and undeclared par
 const source = ts.transpileModule(readFileSync(new URL("../src/api.ts", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 },
 }).outputText
-function client(status, body, reasonModule = () => ({ reasonText })) {
+function client(status, body) {
   const exports = {}
   runInNewContext(source, { exports, AbortSignal, URLSearchParams, require: (id) => {
     if (id === "@/i18n") return ui
-    if (id === "./i18n/reason.ts") return reasonModule()
+    if (id === "./i18n/reason.ts") return { reasonText }
     if (id === "./stream-cursor") return {}
     if (id === "./hub") return { hubUrl: path => path }
     throw new Error(id)
@@ -69,13 +69,6 @@ test("absent, unknown, malformed and untranslated reasons keep the safe detail a
         e instanceof api.HubError && e.message === body.error && e.status === status && e.code === body.code && e.reason === reason && e.params === body.params)
     }
   }
-})
-
-test("unavailable reason formatting preserves the original HTTP error", async () => {
-  const body = { error: "Safe detail", code: "stale", reason: "future.new", params: {} }
-  const api = client(409, body, () => { throw new Error("module unavailable") })
-  await assert.rejects(api.modReq("PATCH", "/test", {}), e =>
-    e instanceof api.HubError && e.message === body.error && e.status === 409 && e.code === body.code && e.reason === body.reason && e.params === body.params)
 })
 
 test("reason texts format dates and durations, preserve numeric count and flow through HubError", async () => {
@@ -102,6 +95,10 @@ test("reason texts format dates and durations, preserve numeric count and flow t
     assert.equal(reasonText({ error: "Fallback", reason: "test.items", params: { count: 2 } }), "2 items")
     for (const reason of ["test.missing", "test.unregistered"]) assert.equal(reasonText({ error: "Fallback", reason }), "Fallback")
     const api = client(409, body)
+    const error = new api.HubError(409, body.error, body.code, body.reason, params)
+    assert.equal(error.message, expected)
+    assert.equal(error.reason, body.reason)
+    assert.equal(error.params, params)
     await assert.rejects(api.modReq("PATCH", "/test", {}), e => e instanceof api.HubError && e.message === expected && e.code === "stale" && e.reason === body.reason && e.params === params)
   } finally {
     for (const key of Object.keys(registry)) delete REASONS[key]

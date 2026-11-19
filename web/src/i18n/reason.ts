@@ -1,6 +1,6 @@
 import type { HttpErrorBody } from "../gen/HttpErrorBody.ts"
 import { REASONS } from "../gen/reasons.ts"
-import i18n from "./index.ts"
+import i18n from "i18next"
 import { date, msDur } from "./format.ts"
 
 type ReasonBody = Pick<HttpErrorBody, "error"> & Partial<Pick<HttpErrorBody, "reason" | "params">>
