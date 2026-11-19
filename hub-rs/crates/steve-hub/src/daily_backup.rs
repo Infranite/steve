@@ -176,11 +176,13 @@ fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
         .filter(|p| home.join(p).exists())
         .collect();
     if parts.is_empty() {
+        report_skipped(&[]);
         return Ok(None);
     }
     let dest = out.join(tar_name(day));
     let partial = out.join(format!("{}{PARTIAL}", tar_name(day)));
     let _ = fs::remove_file(&partial);
+    let mut skipped = vec![];
     let written = (|| {
         let file = fs::OpenOptions::new()
             .write(true)
@@ -190,26 +192,7 @@ fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
         let mut b = tar::Builder::new(file);
         b.follow_symlinks(false);
         for part in parts {
-            let path = home.join(part);
-            if !path.is_dir() {
-                b.append_path_with_name(&path, part)?;
-            } else if part == "signing" {
-                for entry in fs::read_dir(&path)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    if name == NOT_COPIED {
-                        continue;
-                    }
-                    let inside = Path::new(part).join(&name);
-                    if entry.file_type()?.is_dir() {
-                        b.append_dir_all(&inside, entry.path())?;
-                    } else {
-                        b.append_path_with_name(entry.path(), &inside)?;
-                    }
-                }
-            } else {
-                b.append_dir_all(part, &path)?;
-            }
+            append(&mut b, home, Path::new(part), &mut skipped, true)?;
         }
         let mut file = b.into_inner()?;
         file.flush()?;
@@ -220,7 +203,72 @@ fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
         return Err(e).with_context(|| format!("write {}", dest.display()));
     }
     fs::rename(&partial, &dest)?;
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    report_skipped(&skipped);
     Ok(Some(dest))
+}
+
+#[derive(Debug)]
+struct SkippedDir {
+    path: PathBuf,
+    bytes: u64,
+}
+fn report_skipped(skipped: &[SkippedDir]) {
+    let mut bytes = 0u64;
+    for entry in skipped {
+        bytes = bytes.saturating_add(entry.bytes);
+        tracing::info!(path = %entry.path.display(), bytes = entry.bytes,
+            "daily backup: skipped regenerable directory");
+    }
+    tracing::info!(
+        skipped_dirs = skipped.len(),
+        skipped_bytes = bytes,
+        "daily backup: regenerable directories skipped"
+    );
+}
+
+/// Visit every directory; the shared predicate has no backup-specific names or depth limit.
+fn append(
+    archive: &mut tar::Builder<fs::File>,
+    home: &Path,
+    relative: &Path,
+    skipped: &mut Vec<SkippedDir>,
+    write: bool,
+) -> std::io::Result<u64> {
+    let path = home.join(relative);
+    let metadata = fs::symlink_metadata(&path)?;
+    if write && relative == Path::new("signing").join(NOT_COPIED) {
+        return Ok(0);
+    }
+    if write && metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path) {
+        let bytes = append(archive, home, relative, skipped, false)?;
+        skipped.push(SkippedDir {
+            path: relative.to_owned(),
+            bytes,
+        });
+        return Ok(0);
+    }
+    // Keep the original archive's signing layout (its children, without a root entry).
+    if write && !(metadata.is_dir() && relative == Path::new("signing")) {
+        archive.append_path_with_name(&path, relative)?;
+    }
+    let mut bytes = if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    };
+    if metadata.is_dir() {
+        for entry in fs::read_dir(&path)? {
+            bytes = bytes.saturating_add(append(
+                archive,
+                home,
+                &relative.join(entry?.file_name()),
+                skipped,
+                write,
+            )?);
+        }
+    }
+    Ok(bytes)
 }
 
 /// Removes the daily copies in `out` last written more than [`KEEP_DAYS`] before `now`; nothing
@@ -261,7 +309,11 @@ pub fn status(home: &Path, db: &Path, on: bool) -> Value {
         .and_then(|(name, e)| {
             let m = e.metadata().ok()?;
             let at = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-            Some(json!({"name": name, "at": at.as_millis() as u64, "bytes": m.len()}))
+            let files_bytes =
+                fs::metadata(out.join(tar_name(day_of(&name)?))).map_or(0, |files| files.len());
+            Some(json!({"name": name, "at": at.as_millis() as u64,
+                "bytes": m.len().saturating_add(files_bytes),
+                "database_bytes": m.len(), "files_bytes": files_bytes}))
         });
     json!({
         "database": db.to_string_lossy(),
