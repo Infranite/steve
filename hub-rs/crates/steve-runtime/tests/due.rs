@@ -473,3 +473,20 @@ async fn a_slow_next_due_query_does_not_add_its_latency_to_the_deadline() {
     task.abort();
     let _ = task.await;
 }
+
+#[tokio::test]
+async fn bounded_contract_reuses_the_second_of_exactly_two_fixtures() {
+    let fixtures = std::cell::RefCell::new(vec![Table::default(), Table::default()]);
+    check(
+        || {
+            fixtures
+                .borrow_mut()
+                .pop()
+                .expect("only two bounded fixtures")
+        },
+        T0,
+        TRIES + 1,
+    )
+    .await;
+    assert!(fixtures.borrow().is_empty());
+}

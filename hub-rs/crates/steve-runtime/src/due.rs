@@ -130,7 +130,7 @@ pub mod contract {
         );
         // 2. a row that always fails does not hold back the rows due after it
         let f = new();
-        f.add(now - 1, true);
+        let poison = f.add(now - 1, true);
         let ok = f.add(now, false);
         f.source()
             .run_due(now)
@@ -141,33 +141,41 @@ pub mod contract {
             "{}: a failing row must not block later rows",
             f.source().name()
         );
-        // 3. Isolate a poison row: no healthy recurring deadline can hide a hot retry.
-        let f = new();
-        let poison = f.add(now, true);
+        // Continuing sources have no terminal row to exclude. Isolate their poison row so
+        // healthy recurring deadlines cannot mask a hot retry. Bounded sources keep the second
+        // fixture: factories may own exactly two setups, and healthy recurring rows must remain.
+        if !f.dead_letters() {
+            let f = new();
+            let poison = f.add(now, true);
+            let mut at = now;
+            for _ in 0..rounds {
+                f.source()
+                    .run_due(at)
+                    .await
+                    .expect("run_due with a failing row");
+                assert!(
+                    !f.done().contains(&poison),
+                    "{}: a failing row is not successful",
+                    f.source().name()
+                );
+                let next = f.source().next_due().await.expect("next_due");
+                assert!(
+                    next.is_some_and(|next| next > at),
+                    "{}: a failing row must get its own later due time",
+                    f.source().name()
+                );
+                at = next.unwrap();
+            }
+            return;
+        }
+        // 3. A bounded source retires the failing row without losing healthy recurring work.
         let mut at = now;
         for _ in 0..rounds {
-            f.source()
-                .run_due(at)
-                .await
-                .expect("run_due with a failing row");
-            assert!(
-                !f.done().contains(&poison),
-                "{}: a failing row is not successful",
-                f.source().name()
-            );
-            if f.dead_letters() && f.dead().contains(&poison) {
+            if f.dead().contains(&poison) {
                 break;
             }
-            let next = f.source().next_due().await.expect("next_due");
-            assert!(
-                next.is_some_and(|next| next > at),
-                "{}: a failing row must get its own later due time",
-                f.source().name()
-            );
-            at = next.unwrap();
-        }
-        if !f.dead_letters() {
-            return;
+            at += DAY;
+            f.source().run_due(at).await.expect("run_due");
         }
         let name = f.source().name();
         assert!(

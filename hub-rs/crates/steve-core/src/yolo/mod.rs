@@ -160,11 +160,12 @@ impl Yolo {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"));
+        let due_wake = db.store().commit_wake(&["yolo_actions"]);
         Yolo(Arc::new(Inner {
             db,
             forced,
             clock,
-            due_wake: Arc::default(),
+            due_wake,
             env: Env {
                 steve_home: steve_home.to_path_buf(),
                 home,

@@ -96,6 +96,7 @@ struct Claim<'a>(&'a Engine, String);
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
         lock(&self.0.0.inflight).remove(&self.1);
+        // Claim ownership lives only in memory; there is no database commit to observe.
         self.0.yolo().0.due_wake.notify_one();
     }
 }
@@ -624,14 +625,9 @@ impl Engine {
         let mut out = Vec::new();
         let now = self.yolo().now();
         loop {
-            let remaining = self.scheduled_rows(now, DUE_BATCH).map(|rows| rows.len());
-            let Ok(n) = remaining else { break };
-            if n == 0 {
-                break;
-            }
-            let (rows, error) = self.scheduled_pass(now, DUE_BATCH);
+            let (rows, error, selected) = self.scheduled_pass(now, DUE_BATCH);
             out.extend(rows);
-            if error.is_some() {
+            if error.is_some() || selected < DUE_BATCH {
                 break;
             }
         }
@@ -644,19 +640,29 @@ impl Engine {
         serde_json::json!(claimed).to_string()
     }
 
-    fn scheduled_rows(&self, now: i64, limit: usize) -> steve_store::Result<Vec<ActionRow>> {
+    /// The sole eligibility query for deadlines, batches and an unsettled row's retry.
+    /// Optional filters only narrow this set; every filter is applied before LIMIT.
+    fn scheduled_rows(
+        &self,
+        through: Option<i64>,
+        only: Option<&str>,
+        limit: usize,
+    ) -> steve_store::Result<Vec<ActionRow>> {
         let claimed = self.claimed_decisions();
         self.yolo().store().reader(|c| {
-            // Keep eligibility identical to Scheduled::next_due. Both filters precede LIMIT.
             let ids = c
                 .prepare_cached(
-                    "SELECT id FROM yolo_actions WHERE outcome='scheduled' AND due_at<=?1
-                 AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?2)))
-                 ORDER BY due_at, rowid LIMIT ?3",
+                    "SELECT id FROM yolo_actions
+                 WHERE outcome='scheduled' AND due_at IS NOT NULL
+                   AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?1)))
+                   AND (?2 IS NULL OR due_at<=?2) AND (?3 IS NULL OR id=?3)
+                 ORDER BY due_at, rowid LIMIT ?4",
                 )?
-                .query_map((now, &claimed, limit as i64), |r| r.get::<_, String>(0))?
+                .query_map(
+                    rusqlite::params![claimed, through, only, limit as i64],
+                    |r| r.get::<_, String>(0),
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            // Keep decoding in the store API; the batch bounds the per-row lookups.
             let mut rows = Vec::new();
             for id in ids {
                 if let Some(row) = repo::action_get(c, &id)? {
@@ -671,16 +677,17 @@ impl Engine {
         &self,
         now: i64,
         limit: usize,
-    ) -> (Vec<ActionRow>, Option<steve_runtime::due::DueError>) {
+    ) -> (Vec<ActionRow>, Option<steve_runtime::due::DueError>, usize) {
         let mut out = Vec::new();
-        let due = self.scheduled_rows(now, limit);
+        let due = self.scheduled_rows(Some(now), None, limit);
         let due = match due {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!("yolo due actions: {e}");
-                return (out, Some(steve_runtime::due::DueError(e.to_string())));
+                return (out, Some(steve_runtime::due::DueError(e.to_string())), 0);
             }
         };
+        let selected = due.len();
         for a in due {
             let row = a.id.clone();
             let id = a.decision_id.clone().unwrap_or_default();
@@ -690,30 +697,33 @@ impl Engine {
                 Ok(None) => {}
                 Err(e) => self.fail_workspace(&ws, &id, &e),
             }
-            // A claim acquired after selection is excluded until its owner releases it. Other
-            // unsettled row failures keep a persisted retry; never override a later postponement.
-            let unsettled = match self.reread(&row) {
-                Ok(a) => {
-                    a.outcome == "scheduled"
-                        && a.due_at.is_some_and(|at| at <= now)
-                        && !a
-                            .decision_id
-                            .as_ref()
-                            .is_some_and(|id| lock(&self.0.inflight).contains(id))
+            // Recheck through the same query: settled, already-postponed or claimed actions
+            // are not retried. Preserve the current business reason visible in the ledger.
+            let retry = match self.scheduled_rows(Some(now), Some(&row), 1) {
+                Ok(rows) => rows.into_iter().next(),
+                Err(e) => {
+                    return (
+                        out,
+                        Some(steve_runtime::due::DueError(e.to_string())),
+                        selected,
+                    );
                 }
-                Err(e) => return (out, Some(steve_runtime::due::DueError(e.to_string()))),
             };
-            if unsettled
+            if let Some(a) = retry
                 && let Err(e) = self.yolo().postpone(
                     &row,
                     now.saturating_add(TICK.as_millis() as i64),
-                    "executor retry",
+                    &a.reason,
                 )
             {
-                return (out, Some(steve_runtime::due::DueError(e.to_string())));
+                return (
+                    out,
+                    Some(steve_runtime::due::DueError(e.to_string())),
+                    selected,
+                );
             }
         }
-        (out, None)
+        (out, None, selected)
     }
 
     fn tick_waiting(&self) -> Vec<ActionRow> {
@@ -833,7 +843,7 @@ impl Engine {
     }
 }
 
-/// Persisted scheduled actions; terminal outcomes are naturally excluded by both queries.
+/// Persisted scheduled actions; every read shares Engine::scheduled_rows eligibility.
 struct Scheduled(Engine);
 const DUE_BATCH: usize = 64;
 impl steve_runtime::due::DueSource for Scheduled {
@@ -845,20 +855,11 @@ impl steve_runtime::due::DueSource for Scheduled {
         tokio::task::spawn_blocking(move || {
             let store = e.core().store().store();
             let Some(_permit) = store.try_activity("yolo_tick") else {
-                return Ok(None);
+                return Ok(Some(e.yolo().now().saturating_add(TICK.as_millis() as i64)));
             };
             store.admitted_sync(|| {
-                let claimed = e.claimed_decisions();
-                e.yolo()
-                    .store()
-                    .reader(|c| {
-                        Ok::<_, steve_store::StoreError>(c.query_row(
-                            "SELECT min(due_at) FROM yolo_actions WHERE outcome='scheduled'
-                 AND (decision_id IS NULL OR decision_id NOT IN (SELECT value FROM json_each(?1)))",
-                            [claimed],
-                            |r| r.get(0),
-                        )?)
-                    })
+                e.scheduled_rows(None, None, 1)
+                    .map(|rows| rows.first().and_then(|r| r.due_at))
                     .map_err(|e| steve_runtime::due::DueError(e.to_string()))
             })
         })
@@ -873,7 +874,7 @@ impl steve_runtime::due::DueSource for Scheduled {
                 return Ok(());
             };
             store.admitted_sync(|| {
-                let (_, error) = e.scheduled_pass(now, DUE_BATCH);
+                let (_, error, _) = e.scheduled_pass(now, DUE_BATCH);
                 error.map_or(Ok(()), Err)
             })
         })
@@ -887,6 +888,7 @@ mod due_contract_tests {
     use super::*;
     use crate::repo::WS;
     use crate::testkit::Kit;
+    use steve_runtime::Clock;
     use steve_runtime::due::{DueSource, contract};
 
     struct Fixture {
@@ -973,6 +975,7 @@ mod due_contract_tests {
                     kind: "approve".into(),
                     subject_type: "release".into(),
                     rule: "release.self".into(),
+                    reason: "原始裁决理由".into(),
                     outcome: "scheduled".into(),
                     due_at: Some(at),
                     decision_id,
@@ -1185,5 +1188,230 @@ mod due_contract_tests {
                 .await
                 .is_ok()
         );
+    }
+    fn take_wake(wake: &tokio::sync::Notify) -> bool {
+        use std::future::Future;
+        let mut notified = std::pin::pin!(wake.notified());
+        notified
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_ready()
+    }
+
+    #[tokio::test]
+    async fn r7c_action_wakes_follow_outer_commit_and_rollback() {
+        let f = Fixture::new();
+        let yolo = f.source.0.yolo();
+        let store = yolo.store();
+        let wake = &yolo.0.due_wake;
+        assert!(!take_wake(wake));
+        let id = store
+            .transaction(|_| -> ApiResult<_> {
+                let row = yolo.record(&repo::NewAction {
+                    workspace_id: WS.into(),
+                    outcome: "scheduled".into(),
+                    due_at: Some(1000),
+                    reason: "original reason".into(),
+                    ..Default::default()
+                })?;
+                assert!(
+                    !take_wake(wake),
+                    "record must wait for the outermost commit"
+                );
+                yolo.postpone(&row.id, 2000, &row.reason)?;
+                assert!(
+                    !take_wake(wake),
+                    "postpone must wait for the outermost commit"
+                );
+                Ok(row.id)
+            })
+            .unwrap();
+        assert!(take_wake(wake));
+        assert!(!take_wake(wake));
+        let rolled_back = store.transaction(|_| -> ApiResult<()> {
+            yolo.postpone(&id, 3000, "rolled back")?;
+            assert!(!take_wake(wake));
+            Err(ApiError::rule("rollback"))
+        });
+        assert!(rolled_back.is_err());
+        assert!(!take_wake(wake), "a root rollback must not wake the source");
+        assert_eq!(f.source.0.reread(&id).unwrap().due_at, Some(2000));
+        // A write that bypasses ledger helpers must use the very same commit subscription.
+        store
+            .transaction(|tx| {
+                tx.execute("UPDATE yolo_actions SET due_at=4000 WHERE id=?", [&id])?;
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
+        assert!(take_wake(wake));
+        assert_eq!(f.source.next_due().await.unwrap(), Some(4000));
+    }
+
+    #[tokio::test]
+    async fn r7c_retry_preserves_the_business_reason_through_finish() {
+        let f = Fixture::new();
+        let id = contract::Fixture::add(&f, 1000, true);
+        let reason = f.source.0.reread(&id).unwrap().reason;
+        assert!(!reason.is_empty());
+        f.source.run_due(1000).await.unwrap();
+        assert_eq!(f.source.0.reread(&id).unwrap().reason, reason);
+        f.source.0.yolo().finish(&id, "failed", None).unwrap();
+        let row = f.source.0.reread(&id).unwrap();
+        assert_eq!(row.reason, reason);
+        assert_eq!(
+            ledger::result_with_yolo(&serde_json::json!({}), &row)["yolo_reason"],
+            reason
+        );
+    }
+
+    #[tokio::test]
+    async fn r7c_maintenance_retries_within_the_original_tick() {
+        let f = Fixture::new();
+        let id = contract::Fixture::add(&f, 1000, false);
+        let store = f.source.0.yolo().store();
+        store.maintenance_set(true).unwrap();
+        assert_eq!(f.source.next_due().await.unwrap(), Some(16_000));
+        f.source.run_due(1000).await.unwrap();
+        assert!(contract::Fixture::done(&f).is_empty());
+        take_wake(&f.source.0.yolo().0.due_wake);
+        let task = steve_runtime::spawn(
+            "test.yolo.maintenance",
+            steve_runtime::due::due_loop(
+                Arc::new(Scheduled(f.source.0.clone())),
+                f.clock.clone(),
+                f.source.0.yolo().0.due_wake.clone(),
+                steve_runtime::policy::Backoff {
+                    base: TICK,
+                    max: TICK,
+                    factor: 1,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                },
+            ),
+        );
+        until(|| f.clock.observed(1000)).await;
+        store.maintenance_set(false).unwrap();
+        f.clock.advance(14_999);
+        until(|| f.clock.observed(15_999)).await;
+        assert!(!contract::Fixture::done(&f).contains(&id));
+        f.clock.advance(1);
+        until(|| contract::Fixture::done(&f).contains(&id)).await;
+        task.stop();
+        task.await;
+    }
+
+    #[tokio::test]
+    async fn r7c_scheduled_commits_do_not_self_wake_into_a_busy_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FixedWall {
+            elapsed: Arc<steve_runtime::FakeClock>,
+        }
+        impl steve_runtime::Clock for FixedWall {
+            fn now(&self) -> i64 {
+                1000
+            }
+            fn sleep(
+                &self,
+                d: Duration,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                self.elapsed.sleep(d)
+            }
+        }
+        struct Counted {
+            source: Scheduled,
+            runs: AtomicUsize,
+        }
+        impl DueSource for Counted {
+            fn name(&self) -> &'static str {
+                self.source.name()
+            }
+            async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+                self.source.next_due().await
+            }
+            async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                self.source.run_due(now).await
+            }
+        }
+        for poison in [false, true] {
+            let f = Fixture::new();
+            let id = contract::Fixture::add(&f, 1000, poison);
+            let elapsed = Arc::new(steve_runtime::FakeClock::new(0));
+            let source = Arc::new(Counted {
+                source: Scheduled(f.source.0.clone()),
+                runs: AtomicUsize::new(0),
+            });
+            let task = steve_runtime::spawn(
+                "test.yolo.self_wake",
+                steve_runtime::due::due_loop(
+                    source.clone(),
+                    Arc::new(FixedWall {
+                        elapsed: elapsed.clone(),
+                    }),
+                    f.source.0.yolo().0.due_wake.clone(),
+                    steve_runtime::policy::Backoff {
+                        base: TICK,
+                        max: TICK,
+                        factor: 1,
+                        jitter: steve_runtime::policy::Jitter::None,
+                        attempts: None,
+                        reset_after: None,
+                    },
+                ),
+            );
+            until(|| source.runs.load(Ordering::SeqCst) >= 1 && elapsed.observed(0)).await;
+            let row = f.source.0.reread(&id).unwrap();
+            assert_eq!(row.outcome, if poison { "scheduled" } else { "cancelled" });
+            if poison {
+                assert_eq!(row.due_at, Some(16_000));
+            }
+            for at in [60_000, 120_000, 180_000] {
+                elapsed.advance(60_000);
+                until(|| elapsed.observed(at)).await;
+                assert_eq!(f.clock.now(), 1000, "domain wall time stays frozen");
+                assert!(
+                    !task.is_finished(),
+                    "a dead loop cannot masquerade as bounded work"
+                );
+                assert_eq!(
+                    source.runs.load(Ordering::SeqCst),
+                    1,
+                    "self commits may recheck but never rerun work before its deadline"
+                );
+            }
+            task.stop();
+            task.await;
+        }
+    }
+    #[tokio::test]
+    async fn r7c_manual_tick_drains_batches_with_the_same_deadline_and_claim_filters() {
+        let f = Fixture::new();
+        let mut ids = Vec::new();
+        for _ in 0..2 * DUE_BATCH + 1 {
+            ids.push(contract::Fixture::add(&f, 1000, false));
+        }
+        let future = contract::Fixture::add(&f, 1001, false);
+        let busy = f
+            .source
+            .0
+            .yolo()
+            .record(&repo::NewAction {
+                workspace_id: WS.into(),
+                outcome: "scheduled".into(),
+                due_at: Some(999),
+                decision_id: Some("held".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let _claim = f.source.0.claim("held").unwrap();
+        let rows = f.source.0.tick();
+        assert_eq!(rows.len(), ids.len());
+        let done = contract::Fixture::done(&f);
+        assert!(ids.iter().all(|id| done.contains(id)));
+        assert!(!done.contains(&future) && !done.contains(&busy));
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1001));
     }
 }
