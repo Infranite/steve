@@ -30,18 +30,19 @@ fn assert_events(events: &[Progress], complete: bool) {
 fn prefix(c: &Connection) {
     c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);").unwrap();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("legacy/migrations");
-    for n in 1..=112 {
+    for n in 1..=113 {
         c.execute_batch(&std::fs::read_to_string(root.join(format!("{n:03}.sql"))).unwrap())
             .unwrap();
     }
-    c.execute_batch("INSERT INTO schema_version(v) VALUES(112); INSERT INTO schema_compat(min_reader) VALUES(112);").unwrap();
+    c.execute_batch("INSERT INTO schema_version(v) VALUES(113); INSERT INTO schema_compat(min_reader) VALUES(113);").unwrap();
+    legacy::migrate_to_head(c).unwrap();
     owner(c);
 }
 #[test]
 fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
     let mut c = Connection::open_in_memory().unwrap();
     prefix(&c);
-    // A long statement inside the frozen runner's own transaction; TEMP objects
+    // A long statement inside contract installation; TEMP objects
     // do not change the main schema under validation.
     c.execute_batch("CREATE TEMP TRIGGER progress_legacy BEFORE DELETE ON main.schema_compat BEGIN SELECT (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) SELECT sum(x) FROM n); END;").unwrap();
     let (events, observe) = observer();
@@ -58,7 +59,7 @@ fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
     assert_eq!(log.last().unwrap().phase, Phase::InstallContract);
     assert!(
         log.iter()
-            .filter(|p| p.phase == Phase::LegacyReplay && p.vm_steps > 0)
+            .filter(|p| p.phase == Phase::InstallContract && p.vm_steps > 0)
             .count()
             > 2
     );
@@ -78,7 +79,7 @@ fn failed_final_commit_never_reports_complete_and_handler_is_removed() {
     let mut c = Connection::open_in_memory().unwrap();
     legacy::final_structure(&c).unwrap();
     owner(&c);
-    // Deny the second commit: legacy is already at head, so only installation commits.
+    // Deny the sole atomic replay + installation commit.
     c.commit_hook(Some(|| true)).unwrap();
     let (events, observe) = observer();
     assert!(convert::convert_observed(&mut c, observe).is_err());
@@ -153,7 +154,7 @@ fn validation_failure_after_legacy_work_preserves_error_and_never_completes() {
     assert_eq!(error.code, steve_types::Code::Incompatible);
     assert!(error.safe_detail.contains("users"));
     assert_events(&events.lock().unwrap(), false);
-    assert_eq!(legacy::version(&c).unwrap(), 112);
+    assert_eq!(legacy::version(&c).unwrap(), 113);
     c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
 }

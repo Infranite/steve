@@ -36,6 +36,22 @@ fn fresh_database_has_all_domains_and_reopens_without_metadata_writes() {
             1
         );
     }
+    // Empty initialization uses baselines directly, never the old runner.
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='schema_version'",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert!(
+        c.query_row("SELECT min_reader FROM schema_compat", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 113
+    );
     let original = engine.layout().clone();
     assert_eq!(original.generation, 2);
     assert_ne!(original.store_generation, original.files[CORE_FILE]);
@@ -112,7 +128,7 @@ fn legacy_and_unknown_databases_require_conversion_but_readonly_can_inspect_them
     let bytes = std::fs::read(&path).unwrap();
     let error = open::open_runtime(dir.path()).err().unwrap();
     assert_eq!(error.code, Code::Incompatible);
-    assert!(error.safe_detail.contains("requires conversion"));
+    assert!(error.safe_detail.contains("先升级到上一个发布版"));
     let c = open::open_readonly(&path).unwrap();
     assert_eq!(
         c.query_row("SELECT v FROM schema_version", [], |r| r.get::<_, u32>(0))
@@ -178,4 +194,72 @@ fn admin_does_not_migrate_stamp_optimize_or_select_wal() {
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(!dir.path().join("steve.sqlite3-wal").exists());
+}
+
+#[test]
+fn runtime_converts_113_under_its_lifetime_lock_and_admin_refuses_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CORE_FILE);
+    let c = Connection::open(&path).unwrap();
+    steve_store_sqlite::legacy::final_structure(&c).unwrap();
+    c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','o','o','owner',0)").unwrap();
+    drop(c);
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        open::open_admin(dir.path())
+            .err()
+            .unwrap()
+            .safe_detail
+            .contains("Hub")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let e = open::open_runtime(dir.path()).unwrap();
+    assert!(matches!(
+        open::inspect(&e.read_conn().unwrap()).unwrap(),
+        steve_store_sqlite::compat::StorageState::Current { .. }
+    ));
+    assert_eq!(open::open_admin(dir.path()).err().unwrap().code, Code::Busy);
+    let c = e.read_conn().unwrap();
+    assert!(
+        c.query_row("SELECT min_reader FROM schema_compat", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 113
+    );
+    assert_eq!(
+        c.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    drop(c);
+    drop(e);
+    drop(open::open_admin(dir.path()).unwrap());
+}
+#[test]
+fn admin_last_close_preserves_existing_database_and_wal_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(open::open_runtime(dir.path()).unwrap());
+    let path = dir.path().join(CORE_FILE);
+    let wal = dir.path().join("steve.sqlite3-wal");
+    let c = Connection::open(&path).unwrap();
+    c.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )
+    .unwrap();
+    c.execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE engine_admin_wal(x); INSERT INTO engine_admin_wal VALUES(1)").unwrap();
+    drop(c); // Leave real committed WAL frames with no keeper writer.
+    let before = [std::fs::read(&path).unwrap(), std::fs::read(&wal).unwrap()];
+    assert!(!before[1].is_empty());
+    let e = open::open_admin(dir.path()).unwrap();
+    assert_eq!(
+        e.read_conn()
+            .unwrap()
+            .query_row("SELECT x FROM engine_admin_wal", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(e);
+    assert_eq!(std::fs::read(&path).unwrap(), before[0]);
+    assert_eq!(std::fs::read(&wal).unwrap(), before[1]);
 }

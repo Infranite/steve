@@ -3,7 +3,7 @@
 use crate::{
     domains::Registry,
     engine::Engine,
-    exec::{BatchRunner, Executor, Lane, SystemClock},
+    exec::{BatchRunner, Executor, Lane, RootGrant, SystemClock},
     publish::{Attached, Publisher},
     uow::{RootRevision, SqliteBatchRunner, WallClock},
 };
@@ -25,9 +25,15 @@ type Reply<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 // Jobs share the store's owning Tokio blocking pool, even when a caller polls
 // from a standard thread rather than a runtime worker.
 async fn blocking<T: Send + 'static>(
-    runtime: tokio::runtime::Handle,
+    runtime: Option<tokio::runtime::Handle>,
     run: impl FnOnce() -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
+    let runtime = runtime.ok_or_else(|| {
+        steve_storage_api::error(
+            steve_types::Code::Unavailable,
+            "SQLite async read runtime is not installed",
+        )
+    })?;
     let task = {
         let _context = runtime.enter();
         tokio::task::spawn_blocking(run)
@@ -132,7 +138,7 @@ pub struct SqliteStore<E: Send + 'static = ()> {
     reads: Arc<dyn ReadServices>,
     hello: Hello,
     clock: Arc<dyn WallClock>,
-    runtime: tokio::runtime::Handle,
+    runtime: Option<tokio::runtime::Handle>,
 }
 impl<E: Send + 'static> SqliteStore<E> {
     /// Engines must all come from the same validated layout. No new connection is opened here.
@@ -150,6 +156,29 @@ impl<E: Send + 'static> SqliteStore<E> {
                 "SQLite store requires a Tokio runtime",
             )
         })?;
+        Self::new_with_runtime(engines, registry, clock, publisher, runtime_probe, runtime)
+    }
+    /// Explicit read-service assembly. The caller owns the runtime and must keep
+    /// it alive. The synchronous core/executor is identical in both constructors.
+    pub fn new_with_runtime(
+        engines: Vec<Engine>,
+        registry: Arc<Registry>,
+        clock: Arc<dyn WallClock>,
+        publisher: Arc<dyn Publisher<E>>,
+        runtime_probe: fn() -> bool,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, Error> {
+        Self::new_sync(engines, registry, clock, publisher, runtime_probe)?.with_runtime(runtime)
+    }
+    /// Old facades, offline/admin tools and sync tests use this without entering
+    /// Tokio. No lease/export services or temporary runtime are created.
+    pub fn new_sync(
+        engines: Vec<Engine>,
+        registry: Arc<Registry>,
+        clock: Arc<dyn WallClock>,
+        publisher: Arc<dyn Publisher<E>>,
+        runtime_probe: fn() -> bool,
+    ) -> Result<Self, Error> {
         let mut writers = BTreeMap::new();
         let mut layout = None;
         for engine in engines {
@@ -206,7 +235,7 @@ impl<E: Send + 'static> SqliteStore<E> {
                 "all three domain writers are required",
             ));
         }
-        let mut hello = Hello {
+        let hello = Hello {
             implementation: "steve-sqlite".into(),
             domains: [Domain::Core, Domain::Stream, Domain::Comms]
                 .into_iter()
@@ -226,23 +255,26 @@ impl<E: Send + 'static> SqliteStore<E> {
                 })
                 .collect(),
         };
-        let reads: Arc<dyn ReadServices> = Arc::new(services::NativeReads::new(
-            writers.clone(),
-            registry.clone(),
-            clock.clone(),
-            Arc::new(crate::snapshot::SystemClock::default()),
-        )?);
-        for offer in &mut hello.domains {
-            offer.features.extend(reads.features(offer.domain));
-        }
+        let reads: Arc<dyn ReadServices> = Arc::new(NoReadServices);
         Ok(Self {
             registry,
             writers,
             reads,
             hello,
             clock,
-            runtime,
+            runtime: None,
         })
+    }
+    /// Add runtime-backed reads to an already constructed synchronous core.
+    pub fn with_runtime(mut self, runtime: tokio::runtime::Handle) -> Result<Self, Error> {
+        let reads = services::NativeReads::new(
+            self.writers.clone(),
+            self.registry.clone(),
+            self.clock.clone(),
+            Arc::new(crate::snapshot::SystemClock::default()),
+        )?;
+        self.runtime = Some(runtime);
+        Ok(self.with_reads(Arc::new(reads)))
     }
     pub fn with_reads(mut self, reads: Arc<dyn ReadServices>) -> Self {
         for offer in &mut self.hello.domains {
@@ -259,6 +291,12 @@ impl<E: Send + 'static> SqliteStore<E> {
         self,
         clock: Arc<dyn crate::snapshot::Clock>,
     ) -> Result<Self, Error> {
+        if self.runtime.is_none() {
+            return Err(steve_storage_api::error(
+                steve_types::Code::Invalid,
+                "install a read runtime before configuring snapshots",
+            ));
+        }
         let reads = services::NativeReads::new(
             self.writers.clone(),
             self.registry.clone(),
@@ -319,16 +357,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         ) -> Result<T, CommitError>,
     ) -> Result<T, CommitError> {
         let w = &self.writers[&domain];
-        let _grant = w
-            .executor
-            .grant(lane)
-            .map_err(|_| crate::domains::invalid("cannot acquire root grant"))?;
-        if _grant.is_nested() {
-            return Err(crate::domains::invalid(
-                "nested bridge must reuse the existing connection and root revision",
-            ));
-        }
-        let c = w.engine.writer_conn().map_err(CommitError::Fatal)?;
+        let c = self.root_guard(domain, lane)?;
         let rev = w.runner.reserve_root(&c)?;
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&c, &w.runner, &rev)));
@@ -339,7 +368,6 @@ impl<E: Send + 'static> SqliteStore<E> {
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);
-        drop(_grant);
         match outcome {
             Ok(Ok(_)) if leaked => Err(crate::domains::invalid(
                 "root callback left an open transaction; rolled back",
@@ -347,6 +375,28 @@ impl<E: Send + 'static> SqliteStore<E> {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+    /// Thread-bound root authorization for the legacy facade. This is the guard
+    /// extended by lane/carry integration, not a second synchronous executor.
+    /// Same-thread nested facade acquisitions reject before locking the mutex;
+    /// nested business scopes must carry the existing guard/connection.
+    #[track_caller]
+    pub fn root_guard(&self, domain: Domain, lane: Lane) -> Result<RootGuard<'_, E>, CommitError> {
+        let w = &self.writers[&domain];
+        let grant = w
+            .executor
+            .grant(lane)
+            .map_err(|_| crate::domains::invalid("cannot acquire root grant"))?;
+        if grant.is_nested() {
+            return Err(crate::domains::invalid(
+                "nested root acquisition must reuse the existing guard",
+            ));
+        }
+        let connection = w.engine.writer_conn().map_err(CommitError::Fatal)?;
+        Ok(RootGuard {
+            connection,
+            _grant: grant,
+        })
     }
     /// Explicit verification/bootstrap only. Existing production tables must already have their
     /// declared schema; registering descriptors never silently adds columns to legacy tables.
@@ -357,6 +407,32 @@ impl<E: Send + 'static> SqliteStore<E> {
             })?;
         }
         Ok(())
+    }
+}
+/// Opaque root writer authorization. Only the executor can create it; borrowing
+/// the connection never escapes its authorization lifetime. Drop rolls back a
+/// leaked transaction, releases the mutex, then returns the executor's lease.
+/// Kept thread-bound by RootGrant, and must never be held across await.
+pub struct RootGuard<'a, E: Send + 'static = ()> {
+    connection: std::sync::MutexGuard<'a, rusqlite::Connection>,
+    _grant: RootGrant<Arc<Engine>, EngineRunner<E>>,
+}
+impl<E: Send + 'static> RootGuard<'_, E> {
+    pub fn connection(&self) -> &rusqlite::Connection {
+        &self.connection
+    }
+}
+impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
+    type Target = rusqlite::Connection;
+    fn deref(&self) -> &Self::Target {
+        self.connection()
+    }
+}
+impl<E: Send + 'static> Drop for RootGuard<'_, E> {
+    fn drop(&mut self) {
+        if !self.connection.is_autocommit() {
+            let _ = self.connection.execute_batch("ROLLBACK");
+        }
     }
 }
 // Written as boxed futures to implement the async_trait ABI without another macro dependency.

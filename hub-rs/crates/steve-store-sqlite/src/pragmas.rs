@@ -80,3 +80,12 @@ pub(crate) fn optimize(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "analysis_limit", ANALYSIS_LIMIT)?;
     conn.execute_batch("PRAGMA optimize;")
 }
+
+/// Connection-local protection for administrative opens and their failure paths.
+pub(crate) fn no_checkpoint_on_close(conn: &Connection) -> rusqlite::Result<()> {
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
+    Ok(())
+}

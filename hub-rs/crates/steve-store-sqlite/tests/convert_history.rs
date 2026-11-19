@@ -50,9 +50,9 @@ fn historical_order_converts_without_rebuild_and_item_session_repositories_read_
     assert!(matches!(
         convert::convert(&mut c).unwrap(),
         Outcome::Converted {
-            revoked_tokens: 0,
-            revoked_clients: 0,
-            revoked_sessions: 0,
+            deleted_tokens: 0,
+            deleted_clients: 0,
+            deleted_sessions: 0,
             ..
         }
     ));
