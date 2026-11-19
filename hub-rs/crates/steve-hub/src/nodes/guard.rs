@@ -244,6 +244,9 @@ fn take_event_bytes(node: &str, bytes: usize) -> bool {
     let mut all = EVENT_BUDGET.lock().unwrap();
     let now = std::time::Instant::now();
     let b = all.entry(node.to_string()).or_insert((EVENT_BURST, now));
+    take_bytes_at(b, bytes, now)
+}
+fn take_bytes_at(b: &mut (f64, std::time::Instant), bytes: usize, now: std::time::Instant) -> bool {
     b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * EVENT_RATE).min(EVENT_BURST);
     b.1 = now;
     if b.0 >= bytes as f64 {
@@ -379,6 +382,29 @@ impl HubFiles for GuardedFiles {
 mod tests {
     use super::*;
 
+    #[test]
+    fn byte_budget_table_is_atomic_and_refills_one_mib_per_second() {
+        let at = std::time::Instant::now();
+        let mut b = (EVENT_BURST, at);
+        let mib = EVENT_RATE as usize;
+        for (ms, bytes, allowed) in [
+            (0, EVENT_BURST as usize + 1, false),
+            (0, EVENT_BURST as usize, true),
+            (0, 1, false),
+            (500, mib, false),
+            (1000, mib, true),
+            (1000, 1, false),
+            (1500, mib / 2, true),
+            (65000, EVENT_BURST as usize, false),
+            (65500, EVENT_BURST as usize, true),
+        ] {
+            assert_eq!(
+                take_bytes_at(&mut b, bytes, at + std::time::Duration::from_millis(ms)),
+                allowed,
+                "{ms} {bytes}"
+            );
+        }
+    }
     #[test]
     fn a_flooding_node_runs_out_and_another_does_not() {
         assert!(take_event_bytes("n_flood", EVENT_BURST as usize));

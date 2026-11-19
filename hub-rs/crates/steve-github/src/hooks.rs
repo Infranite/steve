@@ -778,6 +778,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hook_window_table_keeps_later_hits_and_rejections_do_not_count() {
+        let l = Limiter::default();
+        for (at, count) in [(0, 60), (30_000, 60)] {
+            for _ in 0..count {
+                assert!(l.allow("a", at));
+            }
+        }
+        for (at, count, allowed) in [
+            (59_999, 3, false),
+            (60_000, 60, true),
+            (60_000, 1, false),
+            (89_999, 1, false),
+            (90_000, 60, true),
+        ] {
+            for _ in 0..count {
+                assert_eq!(l.allow("a", at), allowed, "at {at}");
+            }
+        }
+        assert!(l.allow("b", 90_000));
+    }
+
+    #[test]
     fn limiter_allows_120_a_minute_per_key() {
         let l = Limiter::default();
         for i in 0..RATE_PER_MINUTE {

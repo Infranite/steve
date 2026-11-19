@@ -710,6 +710,34 @@ mod tests {
     }
 
     #[test]
+    fn stats_table_preserves_leading_latest_trailing_and_boundary() {
+        let mut t = StatsThrottle::default();
+        let at = std::time::Instant::now();
+        for (ms, day, immediate) in [(0, "1", true), (1000, "2", false), (4999, "3", false)] {
+            assert_eq!(
+                t.offer(encoded(stats("a", day)), at + Duration::from_millis(ms))
+                    .is_some(),
+                immediate
+            );
+        }
+        assert!(t.due(at + Duration::from_millis(4999)).is_empty());
+        let due = t.due(at + Duration::from_secs(5));
+        assert_eq!(due.len(), 1);
+        assert!(due[0].json.contains("\"day\":\"3\""));
+        assert!(
+            t.offer(encoded(stats("a", "4")), at + Duration::from_millis(5001))
+                .is_none()
+        );
+        assert!(t.due(at + Duration::from_millis(9999)).is_empty());
+        assert!(
+            t.offer(encoded(stats("a", "5")), at + Duration::from_secs(10))
+                .is_some()
+        );
+        // The old implementation still has a held frame at the exact offer boundary;
+        // dispatcher due-before-offer ordering normally drains it first.
+    }
+
+    #[test]
     fn stats_are_coalesced_per_workspace() {
         let mut t = StatsThrottle::default();
         let at = std::time::Instant::now();

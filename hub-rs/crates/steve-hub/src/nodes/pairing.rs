@@ -51,7 +51,9 @@ impl Default for Limiter {
 
 /// Refills `(tokens, at)` at `rate` up to `burst` and takes one if there is one.
 fn take_one(b: &mut (f64, Instant), (burst, rate): (f64, f64)) -> bool {
-    let now = Instant::now();
+    take_one_at(b, (burst, rate), Instant::now())
+}
+fn take_one_at(b: &mut (f64, Instant), (burst, rate): (f64, f64), now: Instant) -> bool {
     b.0 = (b.0 + now.duration_since(b.1).as_secs_f64() * rate).min(burst);
     b.1 = now;
     if b.0 >= 1.0 {
@@ -585,6 +587,34 @@ pub async fn act(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_table_preserves_burst_refill_and_atomic_rejection() {
+        for (quota, unit_ms) in [(PER_CODE, 10_000), (GLOBAL, 20)] {
+            let at = Instant::now();
+            let mut bucket = (quota.0, at);
+            for _ in 0..quota.0 as u32 {
+                assert!(take_one_at(&mut bucket, quota, at));
+            }
+            for (ms, allowed) in [
+                (0, false),
+                (unit_ms - 1, false),
+                (unit_ms, true),
+                (unit_ms, false),
+                (unit_ms * 2, true),
+            ] {
+                assert_eq!(
+                    take_one_at(
+                        &mut bucket,
+                        quota,
+                        at + std::time::Duration::from_millis(ms)
+                    ),
+                    allowed,
+                    "{quota:?} at {ms}"
+                );
+            }
+        }
+    }
 
     /// M5: many garbage codes no longer reset the count of the one being hammered.
     #[test]

@@ -138,16 +138,22 @@ static PAIR_FAILED: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> =
     LazyLock::new(Default::default);
 
 fn too_many_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) -> bool {
+    too_many_at(map, ip, Instant::now())
+}
+fn too_many_at(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str, now: Instant) -> bool {
     let m = map.lock().unwrap_or_else(|e| e.into_inner());
     m.get(ip)
-        .is_some_and(|(at, n)| at.elapsed() < TRIES_WINDOW && *n >= TRIES)
+        .is_some_and(|(at, n)| now.duration_since(*at) < TRIES_WINDOW && *n >= TRIES)
 }
 
 fn failed_in(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str) {
+    failed_at(map, ip, Instant::now());
+}
+fn failed_at(map: &Mutex<HashMap<String, (Instant, u32)>>, ip: &str, now: Instant) {
     let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
-    let e = m.entry(ip.to_string()).or_insert((Instant::now(), 0));
-    if e.0.elapsed() >= TRIES_WINDOW {
-        *e = (Instant::now(), 0);
+    let e = m.entry(ip.to_string()).or_insert((now, 0));
+    if now.duration_since(e.0) >= TRIES_WINDOW {
+        *e = (now, 0);
     }
     e.1 += 1;
 }
@@ -780,6 +786,30 @@ mod tests {
         // a stranger's forwarding header is not believed
         let (route, ip) = r("8.8.8.8", &[("x-forwarded-for", "127.0.0.1")]);
         assert_eq!((route.as_str(), ip.as_deref()), ("public", Some("8.8.8.8")));
+    }
+
+    #[test]
+    fn failure_window_table_queries_do_not_count_and_tables_are_independent() {
+        let at = Instant::now();
+        let (login, pair) = (Mutex::new(HashMap::new()), Mutex::new(HashMap::new()));
+        for table in [&login, &pair] {
+            for _ in 0..20 {
+                assert!(!too_many_at(table, "ip", at));
+            }
+            for n in 1..=TRIES {
+                failed_at(table, "ip", at);
+                assert_eq!(too_many_at(table, "ip", at), n == TRIES);
+            }
+            for (ms, blocked) in [(599_999, true), (600_000, false), (600_001, false)] {
+                assert_eq!(
+                    too_many_at(table, "ip", at + Duration::from_millis(ms)),
+                    blocked
+                );
+            }
+            assert!(!too_many_at(table, "other", at));
+        }
+        failed_at(&login, "new", at);
+        assert!(!pair.lock().unwrap().contains_key("new"));
     }
 
     #[test]

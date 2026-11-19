@@ -287,15 +287,18 @@ impl Hooks {
     }
 
     fn allow(&self, conn: &str, now: i64) -> bool {
-        let mut m = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        let v = m.entry(conn.to_string()).or_default();
-        v.retain(|t| now - t < 60_000);
-        if v.len() >= HOOKS_PER_MINUTE {
-            return false;
-        }
-        v.push(now);
-        true
+        allow_recent(&self.recent, conn, now)
     }
+}
+fn allow_recent(recent: &Mutex<HashMap<String, Vec<i64>>>, conn: &str, now: i64) -> bool {
+    let mut m = recent.lock().unwrap_or_else(|e| e.into_inner());
+    let v = m.entry(conn.to_string()).or_default();
+    v.retain(|t| now - t < 60_000);
+    if v.len() >= HOOKS_PER_MINUTE {
+        return false;
+    }
+    v.push(now);
+    true
 }
 
 fn empty(code: StatusCode) -> Response {
@@ -438,5 +441,29 @@ mod tests {
                 "仓库启用自动初筛并收到新 Issue",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod rate_tables {
+    use super::*;
+    #[test]
+    fn hook_window_table_keeps_later_hits_and_rejections_do_not_count() {
+        // Construct the same rate table without the unrelated flow/GitHub services.
+        let recent = Arc::new(Mutex::new(HashMap::new()));
+        for (at, count, allowed) in [
+            (0, 60, true),
+            (30_000, 60, true),
+            (59_999, 3, false),
+            (60_000, 60, true),
+            (60_000, 1, false),
+            (89_999, 1, false),
+            (90_000, 60, true),
+        ] {
+            for _ in 0..count {
+                assert_eq!(allow_recent(&recent, "a", at), allowed, "at {at}");
+            }
+        }
+        assert!(allow_recent(&recent, "b", 90_000));
     }
 }
