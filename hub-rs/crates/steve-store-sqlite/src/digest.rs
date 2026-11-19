@@ -15,11 +15,12 @@ pub enum MessageFilter<'a> {
     IdsJson(&'a str),
     Connection(&'a str),
 }
-struct MessageShape {
-    table: &'static str,
-    conv_column: &'static str,
-    time_column: &'static str,
-    prefix: &'static str,
+/// Closed schema identifiers for a message source, shared by reads and test fixtures.
+pub struct MessageShape {
+    pub table: &'static str,
+    pub conv_column: &'static str,
+    pub time_column: &'static str,
+    pub prefix: &'static str,
 }
 impl Source {
     /// Read source rows using the shared message shape and a fixed query predicate.
@@ -59,7 +60,7 @@ impl Source {
             "SELECT workspace_id,'{prefix}' || {conv_column} AS conv,id AS message_id,{time_column} AS at,status FROM {table}"
         )
     }
-    fn shape(self) -> MessageShape {
+    pub fn shape(self) -> MessageShape {
         match self {
             Self::ChanMessage => MessageShape {
                 table: "chan_messages",

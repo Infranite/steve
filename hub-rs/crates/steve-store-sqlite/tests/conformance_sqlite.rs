@@ -3,7 +3,7 @@
 //! The conformance feature remains test-only without changing the production manifest.
 #![allow(unexpected_cfgs)]
 #![cfg(sqlite_conformance)]
-#[path = "digest_fixture.rs"]
+#[path = "support/digest.rs"]
 mod digest_fixture;
 #[path = "uow_support.rs"]
 mod support;
@@ -101,7 +101,7 @@ impl Harness for Lifecycle {
             Arc::new(registry),
             self.time.clone(),
         ));
-        let fixture = digest_fixture::NativeFixture::new(store);
+        let fixture = digest_fixture::backend::NativeFixture::new(store);
         self.dirs.lock().unwrap().push(dir);
         Ok(Box::new(fixture))
     }
