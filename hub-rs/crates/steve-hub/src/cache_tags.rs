@@ -85,9 +85,9 @@ pub fn tags(event: &BusEvent) -> Tags {
     let mut tags = Vec::new();
     if state_event(event) {
         // An absent workspace has no state cache, even though it is still an event.
-        match event.scope() {
-            Scope::Ws(ws) if ws.as_str().is_empty() => {}
-            scope => tags.push(self::scope(&scope)),
+        let target = event.scope();
+        if !matches!(&target, Scope::Ws(ws) if ws.as_str().is_empty()) {
+            tags.push(scope(&target));
         }
         tags.push(Tag::global("state-events"));
     }
