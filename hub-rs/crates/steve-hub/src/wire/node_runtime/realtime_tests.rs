@@ -4,6 +4,7 @@ use super::*;
 use steve_node_api::testkit::FakeNode;
 
 #[path = "../../../tests/node_runtime/clock.rs"]
+#[allow(dead_code)]
 mod test_clock;
 use steve_stats::realtime::{Quality, Realtime, Scope};
 use test_clock::ManualClock;
