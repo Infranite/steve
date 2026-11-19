@@ -40,7 +40,16 @@ pub fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 
 /// The current month as `YYYY-MM` in local time (closing jobs “today”).
 pub fn this_month() -> String {
-    chrono::Local::now().format("%Y-%m").to_string()
+    month_at(
+        steve_runtime::tz::Zone::system(),
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+
+fn month_at(zone: steve_runtime::tz::Zone, now: i64) -> String {
+    zone.local(now)
+        .map(|d| d.format("%Y-%m").to_string())
+        .unwrap_or_default()
 }
 
 pub(crate) fn pref(id: &str) -> ObjRef {
@@ -1785,7 +1794,11 @@ pub fn delete_org(m: &Modules, who: &Caller, id: &str) -> ApiResult<()> {
                 "modules.contacts.self_org_delete"
             )));
         }
-        let month = this_month();
+        let zone = crate::zone::Zone::of(tx, &who.ws, &who.me)?;
+        let month = month_at(
+            steve_runtime::tz::Zone::parse(zone.name()).expect("policy IANA zone"),
+            m.clock.now(),
+        );
         let mut closed = 0;
         for l in links::to(tx, &who.ws, &pref(&o.id), Some("works_at"))? {
             if l.subject_type != PARTY || !l.props.get("to").is_none_or(Value::is_null) {

@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
@@ -15,7 +14,6 @@ use steve_store::base::Viewer;
 use steve_store::{Store, Tx};
 
 use crate::FlowResult;
-use crate::cron::{DEFAULT_TZ, parse_tz};
 
 /// `GET /signals` returns at most this many.
 pub const MAX_LIST: i64 = 500;
@@ -192,17 +190,9 @@ impl Range {
 
     /// The first `received` included.
     pub fn since(self, now: i64, tz: &str) -> i64 {
-        let tz = parse_tz(tz)
-            .or_else(|_| parse_tz(DEFAULT_TZ))
-            .unwrap_or(chrono_tz::UTC);
-        let local = DateTime::<Utc>::from_timestamp_millis(now)
-            .unwrap_or_default()
-            .with_timezone(&tz);
-        let midnight = local
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .and_then(|d| tz.from_local_datetime(&d).earliest())
-            .map_or(now - crate::sources::DAY_MS, |d| d.timestamp_millis());
+        let zone = steve_runtime::tz::Zone::parse(tz)
+            .unwrap_or_else(|_| steve_runtime::tz::Zone::system());
+        let midnight = zone.day(now).map_or(now - crate::sources::DAY_MS, |d| d.0);
         match self {
             Self::Today => midnight,
             Self::SevenDays => midnight - 6 * crate::sources::DAY_MS,
@@ -439,4 +429,31 @@ pub fn raw(c: &Connection, viewer: &Viewer, id: &str) -> FlowResult<Option<Value
             r.get(0)
         })?;
     Ok(p.map(|p| serde_json::from_str(&p).unwrap_or(Value::String(p))))
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::*;
+    use steve_runtime::tz::Zone;
+
+    #[test]
+    fn signal_midnight_uses_runtime_even_when_midnight_is_missing() {
+        for (name, text) in [
+            ("America/New_York", "2026-03-08 02:15"),
+            ("Europe/London", "2026-10-25 01:30"),
+            ("America/Sao_Paulo", "2018-11-04 00:15"),
+        ] {
+            let z = Zone::parse(name).unwrap();
+            let wall = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
+            let now = z.instant(wall).unwrap();
+            assert_eq!(Range::Today.since(now, name), z.day(now).unwrap().0);
+        }
+        let now = 1_800_000_000_000;
+        for name in ["", "system", "invalid"] {
+            assert_eq!(
+                Range::Today.since(now, name),
+                Zone::system().day(now).unwrap().0
+            );
+        }
+    }
 }

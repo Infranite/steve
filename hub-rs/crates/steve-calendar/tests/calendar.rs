@@ -457,6 +457,19 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     let conn = h.connect("cal_script", &[]).await;
     let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
     assert!(r.errors.is_empty(), "{r:?}");
+    let cached_zones: Vec<String> = h
+        .env
+        .store()
+        .reader(|c| -> Result<_, steve_store::StoreError> {
+            let mut q = c.prepare("SELECT tz FROM cal_calendars WHERE connection_id = ?")?;
+            Ok(q.query_map([&conn], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    assert_eq!(
+        cached_zones,
+        vec![steve_modules::zone::default_tz().name(); 2]
+    );
     let (_, v) = h
         .call(
             "GET",
@@ -748,5 +761,64 @@ async fn a_cursor_source_is_pulled_whole_again_each_day_so_new_days_come_in() {
         cached(180),
         1,
         "the delta after it keeps what the full pull brought"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_calendar_without_tz_reloads_cached_all_day_events() {
+    let h = setup().await;
+    h.env.clock.set(at("2026-03-07T12:00:00Z"));
+    h.env
+        .store()
+        .settings()
+        .set(
+            WS,
+            &serde_json::Map::from_iter([("tz".into(), "America/New_York".into())]),
+            ME,
+        )
+        .unwrap();
+    *h.script.calendars.lock().unwrap() = vec![RemoteCalendar {
+        id: "work".into(),
+        name: "Work".into(),
+        role: Some("owner".into()),
+        ..Default::default()
+    }];
+    let event = RemoteEvent {
+        id: "day".into(),
+        start: When::day("2026-03-08"),
+        end: When::day("2026-03-09"),
+        ..Default::default()
+    };
+    *h.script.changes.lock().unwrap() = (0..2)
+        .map(|_| Changes {
+            events: vec![event.clone()],
+            cursor: Some("v1".into()),
+            ..Default::default()
+        })
+        .collect();
+    let conn = h.connect("cal_script", &[]).await;
+    let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    // Simulate an old cache: no calendar zone and dates normalized as UTC, with a fresh cursor.
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "UPDATE cal_calendars SET tz = NULL;
+            UPDATE cal_events SET start_ms = start_ms - 18000000, fingerprint = 'legacy';",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!(*h.script.cursors.lock().unwrap(), vec![None, None]);
+    assert_eq!(
+        h.sql::<i64>("SELECT start_ms FROM cal_events WHERE ext_id = 'day'", &[]),
+        at("2026-03-08T00:00:00-05:00")
+    );
+    assert_eq!(
+        h.sql::<i64>("SELECT end_ms FROM cal_events WHERE ext_id = 'day'", &[]),
+        at("2026-03-09T00:00:00-04:00")
     );
 }

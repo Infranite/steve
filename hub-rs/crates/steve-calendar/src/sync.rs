@@ -20,13 +20,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{NaiveDate, NaiveTime};
-use chrono_tz::Tz;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use steve_modules::accounts::connections::{ConnCx, Health, repo as crepo};
 use steve_modules::vault::VaultError;
 use steve_modules::{ApiError, ApiResult};
+use steve_runtime::tz::Zone;
 
 use crate::profile::{
     Busy, Changes, RemoteCalendar, RemoteEvent, SourceError, When, Window, feature,
@@ -146,8 +146,12 @@ pub(crate) fn me_party(c: &Connection, ws: &str, user: &str) -> rusqlite::Result
 }
 
 /// The zone of a calendar's dates and floating times.
-pub(crate) fn tz_of(name: Option<&str>) -> Tz {
-    name.and_then(ics::zone).unwrap_or(Tz::UTC)
+fn tz_of(c: &Connection, ws: &str, user: &str, name: Option<&str>) -> rusqlite::Result<Zone> {
+    if let Some(zone) = name.and_then(|n| Zone::parse(n).ok()) {
+        return Ok(zone);
+    }
+    let policy = steve_modules::zone::Zone::of(c, ws, user)?;
+    Ok(Zone::parse(policy.name()).expect("policy IANA zone"))
 }
 
 fn day(d: &str) -> Option<NaiveDate> {
@@ -185,7 +189,14 @@ pub(crate) fn normalize(
     if id.is_empty() || id.len() > 1024 {
         return Err("event without a valid id".into());
     }
-    let tz = tz_of(cal.tz.as_deref());
+    // Old cache rows may have no zone; resolve them by the same policy as new calendars.
+    let zone = tz_of(
+        people.c,
+        &cal.workspace_id,
+        &cal.owner_user,
+        cal.tz.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let (all_day, start_ms, end_ms, start_date, end_date) = match (&e.start, &e.end) {
         (When { ms: Some(s), .. }, end) => {
             let end = end.ms.unwrap_or(*s).max(*s);
@@ -199,11 +210,14 @@ pub(crate) fn normalize(
                 .and_then(day)
                 .filter(|d| *d > s)
                 .unwrap_or(s + chrono::Duration::days(1));
-            let at = |d: NaiveDate| ics::local_ms(tz, d.and_time(NaiveTime::MIN));
+            let at = |d: NaiveDate| {
+                zone.instant(d.and_time(NaiveTime::MIN))
+                    .map_err(|e| e.to_string())
+            };
             (
                 true,
-                at(s),
-                at(end),
+                at(s)?,
+                at(end)?,
                 Some(s.format("%Y-%m-%d").to_string()),
                 Some(end.format("%Y-%m-%d").to_string()),
             )
@@ -618,11 +632,7 @@ impl Calendar {
                     party_id: party,
                     party_set: false,
                     enabled: true,
-                    tz: r
-                        .tz
-                        .as_deref()
-                        .and_then(ics::zone)
-                        .map(|z| z.name().to_string()),
+                    tz: Some(tz_of(tx, ws, &owner, r.tz.as_deref())?.name().to_string()),
                     sync_cursor: None,
                     synced_at: None,
                     full_at: None,
@@ -674,6 +684,10 @@ impl Calendar {
                         );
                         if differs {
                             repo::refresh_calendar(tx, &cal, now)?;
+                            if h.tz != cal.tz {
+                                // Re-normalize cached dates too; a delta may never resend them.
+                                tx.execute("UPDATE cal_calendars SET sync_cursor = NULL, full_at = NULL WHERE id = ?", [&cal.id])?;
+                            }
                         }
                         differs
                     }
@@ -886,6 +900,84 @@ fn health(e: &SourceError) -> Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_cached_calendar_zone_uses_owner_policy_then_workspace_then_system() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE notification_policies(workspace_id, user_id, timezone);
+            CREATE TABLE settings(workspace_id, key, value);
+            INSERT INTO settings VALUES ('w','tz','\"Europe/London\"');",
+        )
+        .unwrap();
+        let mut cal = CalRow {
+            id: "cal".into(),
+            workspace_id: "w".into(),
+            connection_id: "conn".into(),
+            owner_user: "me".into(),
+            ext_id: "cal".into(),
+            name: "Calendar".into(),
+            color: None,
+            kind: "primary".into(),
+            role: "owner".into(),
+            share: "private".into(),
+            party_id: None,
+            party_set: false,
+            detail: "full".into(),
+            enabled: true,
+            tz: None,
+            sync_cursor: None,
+            synced_at: None,
+            full_at: None,
+            sync_state: "ok".into(),
+            sync_error: None,
+            gone: false,
+        };
+        for (name, date) in [
+            ("America/New_York", "2026-03-08"),
+            ("Europe/London", "2026-10-25"),
+            ("America/Sao_Paulo", "2018-11-04"),
+        ] {
+            c.execute("DELETE FROM notification_policies", []).unwrap();
+            c.execute(
+                "INSERT INTO notification_policies VALUES ('w','me',?)",
+                [name],
+            )
+            .unwrap();
+            let event = RemoteEvent {
+                id: "event".into(),
+                start: When::day(date),
+                end: When::day(&day(date).unwrap().succ_opt().unwrap().to_string()),
+                ..Default::default()
+            };
+            let mut people = People {
+                c: &c,
+                ws: "w",
+                me: None,
+                cache: HashMap::new(),
+            };
+            let (row, _) = normalize(&cal, &event, false, &mut people).unwrap();
+            let zone = Zone::parse(name).unwrap();
+            assert_eq!(
+                row.start_ms,
+                zone.instant(day(date).unwrap().and_time(NaiveTime::MIN))
+                    .unwrap()
+            );
+            assert_eq!(row.end_ms, zone.day(row.start_ms).unwrap().1);
+        }
+        cal.tz = Some("Asia/Tokyo".into());
+        assert_eq!(
+            tz_of(&c, "w", "me", cal.tz.as_deref()).unwrap().name(),
+            "Asia/Tokyo"
+        );
+        c.execute("DELETE FROM notification_policies", []).unwrap();
+        assert_eq!(tz_of(&c, "w", "me", None).unwrap().name(), "Europe/London");
+        c.execute("DELETE FROM settings", []).unwrap();
+        assert_eq!(
+            tz_of(&c, "w", "me", None).unwrap().name(),
+            Zone::system().name()
+        );
+    }
 
     #[test]
     fn finds_meeting_links_in_text() {
