@@ -19,3 +19,12 @@ impl Scoped for VaultEvent {
         }
     }
 }
+
+impl VaultEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Vault { .. } => "vault",
+        }
+    }
+}

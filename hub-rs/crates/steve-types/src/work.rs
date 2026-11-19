@@ -105,3 +105,28 @@ impl Scoped for WorkLiveEvent {
         }
     }
 }
+
+impl WorkEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Item { .. } => "item",
+            Self::Decision { .. } => "decision",
+            Self::Session { .. } => "session",
+            Self::Message { .. } => "message",
+            Self::ThreadRun { .. } => "thread.run",
+        }
+    }
+}
+
+impl WorkLiveEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Event { .. } => "event",
+            Self::SteveThinking { .. } => "steve.thinking",
+            Self::SteveDraft { .. } => "steve.draft",
+            Self::SteveTool { .. } => "steve.tool",
+        }
+    }
+}

@@ -32,3 +32,15 @@ impl Scoped for AutomationEvent {
         }
     }
 }
+
+impl AutomationEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Signal { .. } => "signal",
+            Self::Flow { .. } => "flow",
+            Self::Run { .. } => "run",
+            Self::Calendar { .. } => "calendar",
+        }
+    }
+}

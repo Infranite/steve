@@ -22,3 +22,13 @@ impl Scoped for PeopleEvent {
         }
     }
 }
+
+impl PeopleEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Party { .. } => "party",
+            Self::Account { .. } => "account",
+        }
+    }
+}

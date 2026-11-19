@@ -877,13 +877,35 @@ fn dispatch(
                 }
                 continue;
             }
-            Queued::Live(e) => {
+            Queued::Live(mut e) => {
+                // Value taps retain the full stored transcript, while SSE keeps the existing slim
+                // payload contract. Only the boundary converts the opaque RawJson payload.
+                let original = if matches!(
+                    &e.event,
+                    LiveEvent::Work(steve_types::WorkLiveEvent::Event { .. })
+                ) {
+                    Some(serde_json::to_value(&e).expect("tap event JSON"))
+                } else {
+                    None
+                };
+                if let LiveEvent::Work(steve_types::WorkLiveEvent::Event { data, .. }) =
+                    &mut e.event
+                {
+                    let slim = crate::api::slim::ev_out(
+                        serde_json::to_value(&*data).expect("transcript JSON"),
+                    );
+                    *data = steve_types::RawJson::from_str(
+                        &serde_json::to_string(&slim).expect("slim JSON"),
+                    )
+                    .expect("validated JSON");
+                }
                 let ty = e.event.wire_type();
                 let frame = Encoded::typed(e, ty);
                 deliver_taps(
                     &taps,
                     &frame.ty,
-                    serde_json::from_str(&frame.json).expect("event JSON"),
+                    original
+                        .unwrap_or_else(|| serde_json::from_str(&frame.json).expect("event JSON")),
                     &mut tap_overflow,
                 );
                 out.send(frame);

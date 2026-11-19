@@ -38,3 +38,17 @@ impl Scoped for ChannelsEvent {
         }
     }
 }
+
+impl ChannelsEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Connection { .. } => "connection",
+            Self::Space { .. } => "space",
+            Self::ChanMessage { .. } => "chan_message",
+            Self::Persona { .. } => "persona",
+            Self::Digest { .. } => "digest",
+            Self::Channel { .. } => "channel",
+        }
+    }
+}

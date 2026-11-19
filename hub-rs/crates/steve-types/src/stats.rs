@@ -23,3 +23,12 @@ impl Scoped for StatsEvent {
         }
     }
 }
+
+impl StatsEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Stats { .. } => "stats",
+        }
+    }
+}

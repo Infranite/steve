@@ -22,3 +22,13 @@ impl Scoped for IntegrationsEvent {
         }
     }
 }
+
+impl IntegrationsEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Gh { .. } => "gh",
+            Self::Mail { .. } => "mail",
+        }
+    }
+}

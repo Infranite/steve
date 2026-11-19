@@ -232,7 +232,7 @@ impl From<steve_types::LiveEvent> for Published {
 
 impl Published {
     /// Compatibility for old test collectors and optional legacy subscribers only. The Hub overrides
-    /// publish_batch and never downgrades typed events. Removed with ChangeEvent in W1.3c.
+    /// publish_batch and never downgrades typed events. Removed with ChangeEvent in the final W1.3b commit.
     fn into_legacy(self) -> ChangeEvent {
         match self {
             Self::Legacy(event) => event,

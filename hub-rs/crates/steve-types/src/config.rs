@@ -37,3 +37,18 @@ impl Scoped for ConfigEvent {
         }
     }
 }
+
+impl ConfigEvent {
+    /// The public SSE tag for this domain event.
+    pub fn wire_type(&self) -> &'static str {
+        match self {
+            Self::Bot { .. } => "bot",
+            Self::Project { .. } => "project",
+            Self::Tag { .. } => "tag",
+            Self::Workspace { .. } => "workspace",
+            Self::Settings { .. } => "settings",
+            Self::Mm { .. } => "mm",
+            Self::Changeset { .. } => "changeset",
+        }
+    }
+}

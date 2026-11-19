@@ -189,7 +189,7 @@ ROOT = HERE.parents[3]
 ADAPTERS = {
     "steve-knowledge/src/sync.rs", "steve-mail/src/threads.rs",
     "steve-hub/src/wire/modules.rs", "steve-hub/src/wire/signals.rs",
-    # Value taps and the knowledge subscriber remain legacy until W1.3c (card §4).
+    # Value taps and the knowledge subscriber remain legacy until the final W1.3b commit (card §4).
     "steve-hub/src/wire/install/domain/knowledge.rs",
 }
 RAW = re.compile(r'r(#{0,})"')
@@ -488,7 +488,7 @@ def main():
                 if any(a <= match.start() < b for a, b in test_ranges(body)):
                     continue
                 line = body.count("\n", 0, match.start()) + 1
-                reason = "retained legacy forwarding (W1.3c)" if rel.endswith("bus.rs") else "unexpected production Value publisher"
+                reason = "retained legacy forwarding (the final W1.3b commit)" if rel.endswith("bus.rs") else "unexpected production Value publisher"
                 print(f"  {rel}:{line}: {reason}")
         print("Warning: no Hub/store production source was compiled by this preparation step.")
 

@@ -198,3 +198,35 @@ async fn typed_frames_preserve_the_wire_golden_plus_ws_and_rev() {
         .as_bytes()
     );
 }
+
+#[tokio::test]
+async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
+    let bus = Bus::new();
+    bus.set_session_workspace(|_| Some("a".into()));
+    let mut rx = bus.subscribe();
+    let mut tap = bus.tap(&["event"]);
+    let data = json!({"rawOutput": "x".repeat(5000), "content": {"type":"image", "data":"base64"}, "_meta":{"claudeCode":{"toolName":"Read"}}});
+    bus.publish(steve_hub::bus::HubEvent::Event {
+        session_id: "s".into(),
+        seq: 1,
+        kind: "tool".into(),
+        data: data.clone(),
+    });
+    let (_, old) = next(&mut rx).await;
+    assert_eq!(tap.recv().await.unwrap()["data"], data);
+    bus.live(
+        WorkLiveEvent::Event {
+            session_id: "s".into(),
+            seq: Seq(1),
+            kind: "tool".into(),
+            data: RawJson::from_str(&data.to_string()).unwrap(),
+            ws: "a".into(),
+        }
+        .into(),
+    );
+    let (_, typed) = next(&mut rx).await;
+    assert_eq!(tap.recv().await.unwrap()["data"], data);
+    assert_eq!(typed["data"], old["data"]);
+    assert_eq!(typed["data"]["tool"], "Read");
+    assert_eq!(typed["data"]["content"], json!({"type":"image"}));
+}
