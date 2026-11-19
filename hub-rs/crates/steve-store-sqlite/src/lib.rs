@@ -6,6 +6,7 @@
 pub mod backup;
 pub mod checkpoint;
 pub mod convert;
+pub mod digest;
 pub mod domains;
 pub mod engine;
 pub mod exec;
