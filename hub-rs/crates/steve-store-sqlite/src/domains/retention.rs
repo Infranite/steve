@@ -10,23 +10,24 @@ use steve_storage_api::{
 };
 
 /// Check capabilities and descriptor references before acquiring the write grant.
-pub(crate) fn authorize(entity: &SqlEntity) -> Result<&RetentionPolicy, Error> {
+/// The returned factory binds the root revision once the caller acquires that grant.
+pub(crate) fn authorize<'a>(
+    entity: &'a SqlEntity,
+) -> Result<impl FnOnce(Rev) -> EntityPolicy<'a>, Error> {
     let p = entity.desc.retention.as_ref().ok_or_else(|| {
         error(
             steve_types::Code::Unsupported,
             "entity has no retention policy",
         )
     })?;
-    if p.before.is_some()
-        || p.protect.is_some()
-        || !matches!(p.select, Select::MaxAge { .. } | Select::Terminal { .. })
-        || matches!(p.action, Action::Op(_))
-    {
+    if p.before.is_some() || p.protect.is_some() || matches!(p.action, Action::Op(_)) {
         return Err(error(
             steve_types::Code::Unsupported,
             "retention policy requires a domain handler",
         ));
     }
+    // Keep these checks despite scan::query validation: declaration errors must
+    // be reported before the caller acquires the write grant.
     crate::scan::validate_descriptor(&entity.desc)?;
     if p.entity != entity.desc.name || p.budget.rows == 0 || p.budget.target_ms == 0 {
         return Err(error(
@@ -45,7 +46,12 @@ pub(crate) fn authorize(entity: &SqlEntity) -> Result<&RetentionPolicy, Error> {
             }
             since
         }
-        _ => unreachable!("capability checked above"),
+        _ => {
+            return Err(error(
+                steve_types::Code::Unsupported,
+                "retention policy requires a domain handler",
+            ));
+        }
     };
     if entity.field(since).map_err(Error::from)?.ty != FieldType::Millis {
         return Err(error(
@@ -64,28 +70,34 @@ pub(crate) fn authorize(entity: &SqlEntity) -> Result<&RetentionPolicy, Error> {
             }
         }
     }
-    Ok(p)
+    Ok(move |rev| EntityPolicy {
+        entity,
+        definition: p,
+        rev,
+    })
 }
 
 pub(crate) struct EntityPolicy<'a> {
-    pub entity: &'a SqlEntity,
-    pub definition: &'a RetentionPolicy,
-    pub rev: Rev,
+    entity: &'a SqlEntity,
+    definition: &'a RetentionPolicy,
+    rev: Rev,
 }
 
 // Keep the original domain failure as the source, including retry classification.
 // The runner rolls back a failed row, records it and continues the window.
-fn action_error(e: CommitError) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
-}
-fn query_error(e: Error) -> rusqlite::Error {
+fn bridge_error(e: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(e))
 }
 pub(crate) fn read_error(e: rusqlite::Error) -> Error {
     match e {
         rusqlite::Error::ToSqlConversionFailure(source) => match source.downcast::<Error>() {
             Ok(e) => *e,
-            Err(source) => super::sql_error(rusqlite::Error::ToSqlConversionFailure(source)).into(),
+            Err(source) => match source.downcast::<CommitError>() {
+                Ok(e) => (*e).into(),
+                Err(source) => {
+                    super::sql_error(rusqlite::Error::ToSqlConversionFailure(source)).into()
+                }
+            },
         },
         e => super::sql_error(e).into(),
     }
@@ -123,11 +135,11 @@ impl Policy for EntityPolicy<'_> {
             AnyQuery {
                 name: "scan".into(),
                 domain: physical.domain,
-                body: Payload::Json(encode(&request).map_err(query_error)?),
+                body: Payload::Json(encode(&request).map_err(bridge_error)?),
             },
         )
         .and_then(|output| output.body.decode())
-        .map_err(query_error)?;
+        .map_err(bridge_error)?;
         Ok(Window {
             more: page.resume.is_some(),
             rows: page
@@ -154,9 +166,11 @@ impl Policy for EntityPolicy<'_> {
                     .update(c, &key, &patch, self.rev, None)
                     .map(|n| n as u64)
             }
-            Action::Op(_) => unreachable!("authorized before acquiring the write grant"),
+            Action::Op(_) => Err(super::unsupported(
+                "retention action requires a domain handler",
+            )),
         }
-        .map_err(action_error)
+        .map_err(bridge_error)
     }
 }
 
@@ -218,11 +232,7 @@ mod tests {
     }
     fn adapter(reg: &Registry) -> EntityPolicy<'_> {
         let entity = reg.entity("events", Domain::Core).unwrap();
-        EntityPolicy {
-            entity,
-            definition: authorize(entity).unwrap(),
-            rev: Rev(99),
-        }
+        authorize(entity).unwrap()(Rev(99))
     }
     fn token(group: i64, id: &str) -> ResumeToken {
         ResumeToken {
@@ -414,11 +424,12 @@ mod tests {
             after_ms: Some(17),
             detail: "busy action".into(),
         };
-        let bridged = action_error(original.clone());
+        let bridged = bridge_error(original.clone());
         assert_eq!(
             bridged.source().unwrap().downcast_ref::<CommitError>(),
             Some(&original)
         );
+        assert_eq!(read_error(bridged), Error::from(original));
     }
 
     #[test]
@@ -427,7 +438,7 @@ mod tests {
         let entity = reg.entities.get_mut("events").unwrap();
         entity.desc.retention.as_mut().unwrap().protect = Some(OpName("live".into()));
         assert_eq!(
-            authorize(entity).unwrap_err().code,
+            authorize(entity).err().unwrap().code,
             steve_types::Code::Unsupported
         );
         entity.desc.retention.as_mut().unwrap().protect = None;
@@ -435,11 +446,43 @@ mod tests {
             fields: vec!["id".into()],
         };
         assert_eq!(
-            authorize(entity).unwrap_err().code,
+            authorize(entity).err().unwrap().code,
             steve_types::Code::Invalid
+        );
+        let definition = entity.desc.retention.as_mut().unwrap();
+        definition.action = Action::Delete;
+        definition.select = Select::Bytes {
+            group: vec![],
+            max: 1,
+        };
+        assert_eq!(
+            authorize(entity).err().unwrap().code,
+            steve_types::Code::Unsupported
         );
         assert!(c.is_autocommit());
         let original = error(steve_types::Code::Incompatible, "bad stored cell");
-        assert_eq!(read_error(query_error(original.clone())), original);
+        assert_eq!(read_error(bridge_error(original.clone())), original);
+    }
+
+    #[test]
+    fn unsupported_action_returns_an_error_without_panicking_in_the_transaction() {
+        let (c, reg) = fixture(Action::Delete);
+        let mut p = adapter(&reg);
+        // Deliberately bypass authorization inside this child test module to
+        // exercise the defensive fallback; callers cannot alter these fields.
+        let mut definition = p.definition.clone();
+        definition.action = Action::Op(uow::AnyOp {
+            name: "unsupported".into(),
+            domain: Domain::Core,
+            body: encode(&()).unwrap(),
+        });
+        p.definition = &definition;
+        let row = p.entity.get(&c, &token(1, "b").key).unwrap().unwrap().0;
+        c.execute_batch("BEGIN").unwrap();
+        let e = read_error(p.apply(&c, &row).unwrap_err());
+        assert_eq!(e.code, steve_types::Code::Unsupported);
+        assert!(!c.is_autocommit());
+        assert!(p.entity.get(&c, &token(1, "b").key).unwrap().is_some());
+        c.execute_batch("ROLLBACK").unwrap();
     }
 }
