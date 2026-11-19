@@ -1,1 +1,0 @@
-# Remaining production legacy publications. Shrink per crate; remove with the last legacy path.

@@ -98,6 +98,10 @@ def normalized(path, scoped=False, project=False):
                     raise ValueError(f"workspace mismatch/leak: {name} {row['step']} {data}")
             if project and expected and ws != expected:
                 continue
+            if ty == 'stats':
+                # Five-second coalesced invalidation hints depend on scheduling and load.
+                # Validate their workspace/audience above, then omit only their sequence.
+                continue
             frame = {'event': row['event'], 'id': '<cursor>' if row['id'] else None,
                      'data': normal.value({k: v for k, v in data.items() if k != 'ws'}),
                      'ws': normal.ident(data['ws'], 'workspace') if 'ws' in data else None}

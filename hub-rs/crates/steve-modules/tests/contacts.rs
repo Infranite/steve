@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use steve_modules::contacts::{self, HandleSearch, PartyHooks, Ports};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiResult, Caller};
-use steve_store::BusEvent;
 use steve_store::Tx;
 use steve_store::base::mems::{self, NewMem};
 use steve_store::base::{ObjRef, Visibility};

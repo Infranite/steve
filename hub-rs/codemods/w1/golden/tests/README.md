@@ -150,3 +150,11 @@ invalidation except `client`, and the unchanged stateless set: `event`, `steve.d
 explicitly inject `ws`, so this does not prove that legacy producers now supply it: none of these
 tests currently fails for missing producer metadata. W1.3a must replace the JSON construction with
 typed events and remove the ignores. No production behavior is changed by these preparatory tests.
+
+
+Statistics notices are five-second coalesced invalidation hints, not a lossless business log.
+Their count and scenario step depend on scheduling and machine load. Normalization checks every
+statistics notice's workspace and receiving connection before excluding it from strict sequence
+comparison. Business frames, transcript sequence numbers, duplicate/loss detection and scope checks
+remain strict. Comparator tests cover changed statistics timing/counts, unknown or missing workspace,
+cross-workspace delivery and business-frame loss alongside statistics.

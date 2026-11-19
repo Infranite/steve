@@ -89,6 +89,52 @@ class Comparison(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare(before, after)
 
+    def stats(self, path, stream='a', step='background', workspace=None):
+        manifest = json.loads((path / 'manifest.json').read_text())
+        ws = workspace if workspace is not None else manifest['workspaces'][stream]
+        row = {'step': step, 'id': 'epoch:101', 'event': 'message',
+               'data': json.dumps({'type': 'stats', 'ws': ws, 'day': '2026-01-01', 'rev': 7})}
+        with (path / (stream + '.jsonl')).open('a') as output:
+            output.write(json.dumps(row) + '\n')
+
+    def test_stats_count_and_step_timing_are_not_a_business_sequence(self):
+        before = self.fixture('before')
+        after = self.fixture('after', scoped=True)
+        self.stats(before, step='item.create')
+        self.stats(before, stream='b', step='background')
+        self.stats(after, step='coalescing-window-end')
+        self.stats(after, step='later-window')
+        compare(before, after, scoped=True)
+
+    def test_stats_still_require_known_workspace_and_correct_audience(self):
+        before = self.fixture('before')
+        unknown = self.fixture('unknown', scoped=True)
+        self.stats(unknown, workspace='unknown-workspace')
+        with self.assertRaisesRegex(ValueError, 'stats names an unknown workspace'):
+            compare(before, unknown, scoped=True)
+        leaked = self.fixture('leaked-stats', scoped=True)
+        ws = json.loads((leaked / 'manifest.json').read_text())['workspaces']['a']
+        self.stats(leaked, stream='b', workspace=ws)
+        with self.assertRaisesRegex(ValueError, 'workspace mismatch'):
+            compare(before, leaked, scoped=True)
+        missing = self.fixture('missing-stats-ws', scoped=True)
+        self.stats(missing)
+        def remove_ws(rows):
+            data = json.loads(rows[-1]['data'])
+            data.pop('ws')
+            rows[-1]['data'] = json.dumps(data)
+        self.mutate(missing, remove_ws)
+        with self.assertRaisesRegex(ValueError, 'stats names an unknown workspace'):
+            compare(before, missing, scoped=True)
+
+    def test_ignoring_stats_never_hides_a_missing_business_frame(self):
+        before = self.fixture('before')
+        after = self.fixture('after', scoped=True)
+        self.mutate(after, lambda rows: rows.clear())
+        self.stats(after)
+        with self.assertRaises(ValueError):
+            compare(before, after, scoped=True)
+
 
 if __name__ == '__main__':
     unittest.main()
