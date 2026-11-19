@@ -101,13 +101,13 @@ fn same_named_column_with_one_different_word_is_rejected() {
     assert_eq!(diff, ["table t: definition differs"]); // table_info alone cannot detect it.
 }
 #[test]
-fn column_definition_literal_bytes_are_preserved() {
+fn column_default_literal_differences_are_preserved_by_table_info() {
     assert!(
         differences(
             "CREATE TABLE t(k TEXT DEFAULT 'two  spaces')",
             "CREATE TABLE t(k TEXT DEFAULT 'two spaces')"
         )
-        .contains(&"table t: definition differs".to_owned())
+        .contains(&"table_info(t) differs".to_owned())
     );
 }
 #[test]
@@ -163,4 +163,31 @@ fn table_constraints_options_indexes_triggers_views_and_foreign_keys_remain_stri
     ] {
         assert!(!differences(a, b).is_empty(), "{a} / {b}");
     }
+}
+
+#[test]
+fn declarations_constraints_header_and_suffix_share_whitespace_normalization() {
+    assert!(differences(
+        "CREATE TABLE t (a TEXT PRIMARY KEY NOT NULL,b INTEGER,CONSTRAINT pos CHECK (b > 0)) WITHOUT ROWID",
+        "CREATE TABLE t (b INTEGER,a TEXT PRIMARY KEY  NOT\nNULL,CONSTRAINT pos CHECK (b  >\n0)) WITHOUT\nROWID"
+    ).is_empty());
+}
+
+#[test]
+fn multiple_inline_references_ignore_only_generated_fk_ids() {
+    let parents = "CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE q(id INTEGER PRIMARY KEY);";
+    let a = format!(
+        "{parents} CREATE TABLE child(a INTEGER REFERENCES p(id),b INTEGER REFERENCES q(id))"
+    );
+    let b = format!(
+        "{parents} CREATE TABLE child(b INTEGER REFERENCES q(id),a INTEGER REFERENCES p(id))"
+    );
+    assert!(differences(&a, &b).is_empty());
+    let changed = format!(
+        "{parents} CREATE TABLE child(b INTEGER REFERENCES p(id),a INTEGER REFERENCES p(id))"
+    );
+    assert!(!differences(&a, &changed).is_empty());
+    let composite_a = "CREATE TABLE p(a,b,PRIMARY KEY(a,b)); CREATE TABLE child(a,b,FOREIGN KEY(a,b) REFERENCES p(a,b))";
+    let composite_b = "CREATE TABLE p(a,b,PRIMARY KEY(a,b)); CREATE TABLE child(a,b,FOREIGN KEY(b,a) REFERENCES p(a,b))";
+    assert!(!differences(composite_a, composite_b).is_empty());
 }

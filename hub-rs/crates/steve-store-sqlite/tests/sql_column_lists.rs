@@ -12,6 +12,77 @@ struct Token {
     line: usize,
 }
 
+/// Decode one ordinary/raw/byte/C literal; return None for identifiers/lifetimes.
+fn string_literal(source: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let mut p = start;
+    if matches!(bytes[p], b'b' | b'c') {
+        p += 1;
+    }
+    let raw = bytes.get(p) == Some(&b'r');
+    if raw {
+        p += 1;
+    }
+    let hashes = p;
+    if raw {
+        while bytes.get(p) == Some(&b'#') {
+            p += 1;
+        }
+    }
+    if bytes.get(p) != Some(&b'"') {
+        return None;
+    }
+    let hash_count = p - hashes;
+    let mut i = p + 1;
+    let body = i;
+    let mut decoded = String::new();
+    loop {
+        assert!(i < bytes.len(), "unterminated Rust string");
+        if bytes[i] == b'"'
+            && (!raw || bytes.get(i + 1..i + 1 + hash_count) == Some(&bytes[hashes..p]))
+        {
+            if raw {
+                decoded.push_str(&source[body..i]);
+            }
+            i += 1 + hash_count;
+            break;
+        }
+        if !raw && bytes[i] == b'\\' {
+            i += 1;
+            match bytes[i] {
+                b'n' => decoded.push('\n'),
+                b'r' => decoded.push('\r'),
+                b't' => decoded.push('\t'),
+                b'0' => decoded.push('\0'),
+                b'x' => {
+                    decoded.push(u8::from_str_radix(&source[i + 1..i + 3], 16).unwrap() as char);
+                    i += 2;
+                }
+                b'u' => {
+                    let end = source[i..].find('}').unwrap() + i;
+                    let hex = source[i + 2..end].replace('_', "");
+                    decoded.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+                    i = end;
+                }
+                b'\n' | b'\r' => {
+                    while bytes.get(i + 1).is_some_and(u8::is_ascii_whitespace) {
+                        i += 1;
+                    }
+                }
+                c => decoded.push(c as char),
+            }
+            i += 1;
+        } else {
+            let ch = source[i..].chars().next().unwrap();
+            if !raw {
+                decoded.push(ch);
+            }
+            i += ch.len_utf8();
+        }
+    }
+    Some((decoded, i))
+}
+
 fn rust_tokens(source: &str) -> Vec<Token> {
     let bytes = source.as_bytes();
     let newlines = bytes
@@ -49,77 +120,12 @@ fn rust_tokens(source: &str) -> Vec<Token> {
             }
             continue;
         }
-        let mut p = i;
-        if matches!(bytes[p], b'b' | b'c') {
-            p += 1;
-        }
-        let raw = bytes.get(p) == Some(&b'r');
-        if raw {
-            p += 1;
-        }
-        let hashes = p;
-        if raw {
-            while bytes.get(p) == Some(&b'#') {
-                p += 1;
-            }
-        }
-        let mut literal = false;
+        let decoded = string_literal(source, i);
+        let literal = decoded.is_some();
         let text;
-        if bytes.get(p) == Some(&b'"') {
-            literal = true;
-            let hash_count = p - hashes;
-            i = p + 1;
-            let body = i;
-            let mut decoded = String::new();
-            loop {
-                assert!(i < bytes.len(), "unterminated Rust string");
-                if bytes[i] == b'"'
-                    && (!raw || bytes.get(i + 1..i + 1 + hash_count) == Some(&bytes[hashes..p]))
-                {
-                    if raw {
-                        decoded.push_str(&source[body..i]);
-                    }
-                    i += 1 + hash_count;
-                    break;
-                }
-                if !raw && bytes[i] == b'\\' {
-                    i += 1;
-                    match bytes[i] {
-                        b'n' => decoded.push('\n'),
-                        b'r' => decoded.push('\r'),
-                        b't' => decoded.push('\t'),
-                        b'0' => decoded.push('\0'),
-                        b'x' => {
-                            decoded.push(
-                                u8::from_str_radix(&source[i + 1..i + 3], 16).unwrap() as char
-                            );
-                            i += 2;
-                        }
-                        b'u' => {
-                            let end = source[i..].find('}').unwrap() + i;
-                            let hex = source[i + 2..end].replace('_', "");
-                            decoded.push(
-                                char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap(),
-                            );
-                            i = end;
-                        }
-                        b'\n' | b'\r' => {
-                            while bytes.get(i + 1).is_some_and(u8::is_ascii_whitespace) {
-                                i += 1;
-                            }
-                        }
-                        c => decoded.push(c as char),
-                    }
-                    i += 1;
-                } else {
-                    let ch = source[i..].chars().next().unwrap();
-                    if !raw {
-                        decoded.push(ch);
-                    }
-                    i += ch.len_utf8();
-                }
-            }
-            text = decoded;
+        if let Some((value, end)) = decoded {
+            text = value;
+            i = end;
         } else if bytes[i] == b'\''
             && (bytes.get(i + 2) == Some(&b'\'')
                 || (bytes.get(i + 1) == Some(&b'\\') && bytes.get(i + 3) == Some(&b'\'')))
@@ -226,15 +232,6 @@ fn module_file(file: &Path, name: &str, explicit: Option<&str>) -> PathBuf {
         dir.join(name).join("mod.rs")
     }
 }
-fn module_name(tokens: &[Token], mut start: usize) -> Option<usize> {
-    if tokens.get(start)?.text == "pub" {
-        start += 1;
-        if tokens.get(start)?.text == "(" {
-            start = group_end(tokens, start);
-        }
-    }
-    (tokens.get(start)?.text == "mod").then_some(start + 1)
-}
 fn excluded_file(file: &Path, excluded: &BTreeSet<PathBuf>) -> bool {
     excluded.iter().any(|p| {
         file == p
@@ -246,6 +243,100 @@ fn excluded_file(file: &Path, excluded: &BTreeSet<PathBuf>) -> bool {
     })
 }
 
+struct Attributes<'a> {
+    end: usize,
+    test: bool,
+    inner: bool,
+    path: Option<&'a str>,
+}
+fn attributes(tokens: &[Token], start: usize) -> Option<Attributes<'_>> {
+    if tokens.get(start)?.text != "#" || tokens[start].literal {
+        return None;
+    }
+    let inner = tokens.get(start + 1)?.text == "!";
+    let bracket = start + 1 + usize::from(inner);
+    if tokens.get(bracket)?.text != "[" {
+        return None;
+    }
+    let mut result = Attributes {
+        end: start,
+        test: false,
+        inner,
+        path: None,
+    };
+    loop {
+        let next = group_end(tokens, result.end + 1 + usize::from(inner));
+        let attr = &tokens[result.end + 2 + usize::from(inner)..next - 1];
+        if attr.first().is_some_and(|t| t.text == "cfg") && attr.len() >= 3 {
+            result.test |= test_cfg(&attr[2..attr.len() - 1]);
+        }
+        if attr.first().is_some_and(|t| t.text == "path") {
+            result.path = attr.iter().find(|t| t.literal).map(|t| t.text.as_str());
+        }
+        result.end = next;
+        if !tokens.get(next).is_some_and(|t| t.text == "#")
+            || !tokens
+                .get(next + 1 + usize::from(inner))
+                .is_some_and(|t| t.text == "[")
+            || (inner && !tokens.get(next + 1).is_some_and(|t| t.text == "!"))
+        {
+            break;
+        }
+    }
+    Some(result)
+}
+fn item_head(tokens: &[Token], mut i: usize) -> Option<usize> {
+    if tokens.get(i)?.text == "pub" {
+        i += 1;
+        if tokens.get(i)?.text == "(" {
+            i = group_end(tokens, i);
+        }
+    }
+    while tokens
+        .get(i)
+        .is_some_and(|t| ["unsafe", "async", "default", "auto"].contains(&t.text.as_str()))
+    {
+        i += 1;
+    }
+    if tokens.get(i)?.text == "extern" {
+        i += 1;
+        if tokens.get(i)?.literal {
+            i += 1;
+        }
+        if tokens.get(i)?.text == "{" {
+            return Some(i);
+        }
+        if tokens.get(i)?.text == "crate" {
+            return Some(i);
+        }
+    }
+    let t = tokens.get(i)?;
+    (!t.literal
+        && [
+            "mod", "fn", "impl", "struct", "enum", "const", "static", "use", "trait", "type",
+            "union",
+        ]
+        .contains(&t.text.as_str()))
+    .then_some(i)
+}
+fn item_end(tokens: &[Token], mut i: usize) -> usize {
+    while i < tokens.len() {
+        if !tokens[i].literal {
+            match tokens[i].text.as_str() {
+                "(" | "[" => {
+                    i = group_end(tokens, i);
+                    continue;
+                }
+                "{" => return group_end(tokens, i),
+                ";" => return i + 1,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    i
+}
+
 /// Gather all source literals outside explicitly test-only items. Out-of-line
 /// test modules are recorded so their entire source trees can be excluded too.
 fn production_tokens(
@@ -255,63 +346,30 @@ fn production_tokens(
 ) -> Vec<Token> {
     let mut out = Vec::new();
     let mut i = 0;
+    let mut inner_position = true;
     while i < tokens.len() {
-        if tokens[i].text == "#"
-            && tokens.get(i + 1).is_some_and(|t| t.text == "!")
-            && tokens.get(i + 2).is_some_and(|t| t.text == "[")
-        {
-            let end = group_end(tokens, i + 2);
-            let attr = &tokens[i + 3..end - 1];
-            if attr.first().is_some_and(|t| t.text == "cfg")
-                && attr.len() >= 3
-                && test_cfg(&attr[2..attr.len() - 1])
-            {
+        if let Some(attr) = attributes(tokens, i) {
+            if attr.inner && attr.test && inner_position {
                 return Vec::new();
             }
-            i = end;
-            continue;
-        }
-        if tokens[i].text == "#" && tokens.get(i + 1).is_some_and(|t| t.text == "[") {
-            let mut end = i;
-            let mut test = false;
-            let mut path = None;
-            while tokens.get(end).is_some_and(|t| t.text == "#")
-                && tokens.get(end + 1).is_some_and(|t| t.text == "[")
+            if !attr.inner {
+                inner_position = false;
+            }
+            if !attr.inner
+                && attr.test
+                && let Some(head) = item_head(tokens, attr.end)
             {
-                let next = group_end(tokens, end + 1);
-                let attr = &tokens[end + 2..next - 1];
-                if attr.first().is_some_and(|t| t.text == "cfg") && attr.len() >= 3 {
-                    test |= test_cfg(&attr[2..attr.len() - 1]);
+                if tokens[head].text == "mod" {
+                    let name = &tokens[head + 1].text;
+                    excluded.insert(module_file(file, name, attr.path));
                 }
-                if attr.first().is_some_and(|t| t.text == "path") {
-                    path = attr.iter().find(|t| t.literal).map(|t| t.text.as_str());
-                }
-                end = next;
+                i = item_end(tokens, head);
+            } else {
+                i = attr.end;
             }
-            if test {
-                let mut j = end;
-                let module = module_name(tokens, end);
-                while j < tokens.len() && !["{", ";"].contains(&tokens[j].text.as_str()) {
-                    j += 1;
-                }
-                if let Some(name) = module {
-                    excluded.insert(module_file(file, &tokens[name].text, path));
-                    // Inline test modules can themselves contain out-of-line children.
-                    if tokens.get(j).is_some_and(|t| t.text == "{") {
-                        excluded.insert(module_dir(file).join(&tokens[name].text).join("mod.rs"));
-                    }
-                }
-                i = if tokens.get(j).is_some_and(|t| t.text == "{") {
-                    group_end(tokens, j)
-                } else {
-                    j + 1
-                };
-                continue;
-            }
-            // Ignore attribute strings themselves; e.g. documentation and cfg values.
-            i = end;
             continue;
         }
+        inner_position = false;
         if !tokens[i].literal
             && tokens[i].text == "mod"
             && tokens.get(i + 2).is_some_and(|t| t.text == "{")
@@ -388,17 +446,19 @@ fn sql_tokens(sql: &str) -> Vec<String> {
                 sql[start..i].to_owned()
             });
             i = (i + 1).min(b.len());
-        } else if b[i] == b'{' {
+        } else if b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 128 || b[i] == b'{' {
             let start = i;
-            while i < b.len() && b[i] != b'}' {
-                i += 1;
-            }
-            i = (i + 1).min(b.len());
-            out.push(sql[start..i].to_owned());
-        } else if b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 128 {
-            let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 128) {
-                i += 1;
+            while i < b.len() {
+                if b[i] == b'{' {
+                    while i < b.len() && b[i] != b'}' {
+                        i += 1;
+                    }
+                    i = (i + 1).min(b.len());
+                } else if b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] >= 128 {
+                    i += 1;
+                } else {
+                    break;
+                }
             }
             out.push(sql[start..i].to_ascii_uppercase());
         } else {
@@ -418,6 +478,13 @@ fn violations(sql: &str) -> Vec<String> {
         if !["INSERT", "REPLACE"].contains(&token.as_str()) {
             continue;
         }
+        if token == "REPLACE"
+            && start >= 2
+            && tokens[start - 1] == "OR"
+            && tokens[start - 2] == "INSERT"
+        {
+            continue;
+        }
         let mut i = start + 1;
         if tokens.get(i).is_some_and(|s| s == "OR") {
             i += 2;
@@ -432,8 +499,12 @@ fn violations(sql: &str) -> Vec<String> {
         if tokens.get(i).is_some_and(|s| s == "AS") {
             i += 2;
         }
-        if tokens.get(i).is_some_and(|s| s == "VALUES") {
-            found.push("VALUES without column list".into());
+        let columns = tokens.get(i).is_some_and(|s| s == "(");
+        let defaults = tokens.get(i).is_some_and(|s| s == "DEFAULT")
+            && tokens.get(i + 1).is_some_and(|s| s == "VALUES");
+        if !columns && !defaults {
+            found.push("insert without column list".into());
+            continue;
         }
         let tail = &tokens[i.min(tokens.len())..];
         let end = tail.iter().position(|s| s == ";").unwrap_or(tail.len());
@@ -452,6 +523,7 @@ fn violations(sql: &str) -> Vec<String> {
                     && tail.get(k + 2).is_some_and(|s| s == "*"))
             {
                 found.push("SELECT wildcard".into());
+                break;
             }
         }
     }
@@ -524,7 +596,7 @@ fn production_inserts_name_their_columns() {
         (
             "crates/steve-node/src/journal.rs".into(),
             "INSERT INTO command_specs VALUES (?1, ?2)".into(),
-            "VALUES without column list".into(),
+            "insert without column list".into(),
         ),
         1,
     )]);
@@ -641,4 +713,45 @@ fn tracks_visible_out_of_line_and_nested_test_modules_and_concat_literals() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn cfg_on_fields_variants_and_literals_never_consumes_following_production_items() {
+    for source in [
+        r#"struct Runtime { #[cfg(test)] simulated: bool, } impl Runtime { fn save() { let sql="INSERT INTO kept SELECT a,b FROM source"; } }"#,
+        r#"enum Launch { Live, #[cfg(test)] Fake(Arc<Mutex<State>>), } fn save() { let sql="INSERT INTO kept VALUES(1)"; }"#,
+        r#"struct Handles { #[cfg(test)] pub(crate) tool: Arc<Service>, #[cfg(test)] pub(crate) core: Core, } fn save() { let sql="INSERT INTO kept VALUES(1)"; }"#,
+        r#"fn save() { let value=Row { #[cfg(test)] testing: true, sql:"INSERT INTO kept VALUES(1)" }; }"#,
+        r#"fn save() { match value { #[cfg(test)] Fake(_) => {}, _=> {let sql="INSERT INTO kept VALUES(1)";} } }"#,
+        r#"fn save() { #![cfg(test)] let sql="INSERT INTO kept VALUES(1)"; }"#,
+    ] {
+        let tokens = production_tokens(
+            &rust_tokens(source),
+            Path::new("src/lib.rs"),
+            &mut BTreeSet::new(),
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| t.literal)
+                .flat_map(|t| violations(&t.text))
+                .count(),
+            1,
+            "{source}"
+        );
+    }
+}
+#[test]
+fn all_insert_sources_require_columns_except_default_values_and_replace_counts_once() {
+    for sql in [
+        "INSERT INTO t SELECT a,b FROM source",
+        "INSERT INTO {p}_items SELECT a,b FROM source",
+        "INSERT INTO items_{n} VALUES(1)",
+        "INSERT OR REPLACE INTO main.items_{n} SELECT * FROM source",
+        "REPLACE INTO t VALUES(1)",
+    ] {
+        assert_eq!(violations(sql).len(), 1, "{sql}");
+    }
+    assert!(violations("INSERT INTO t DEFAULT VALUES").is_empty());
+    assert!(violations("INSERT OR REPLACE INTO t(a,b) SELECT a,b FROM source").is_empty());
 }
