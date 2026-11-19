@@ -9,9 +9,7 @@ use serde_json::Value;
 
 use super::{Sets, all, exists, must, one, to_json};
 use crate::types::{double, json_or};
-use crate::{
-    ChangeEvent, Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid,
-};
+use crate::{Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid};
 
 impl Store {
     pub fn sessions(&self) -> Sessions<'_> {
@@ -171,7 +169,16 @@ impl Sessions<'_> {
                 "INSERT INTO sessions (id, workspace_id, item_id, no, bot_id, harness, model, reasoning_effort, cwd, status, token_hash, title, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?, ?, ?)",
                 params![id, p.workspace_id, p.item_id, no, p.bot_id, p.harness, p.model, p.reasoning_effort, p.cwd, sha(&p.token), p.title, t, t],
             )?;
-            w.publish(ChangeEvent::Session { id: id.clone(), item_id: Some(p.item_id.clone()) });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Session {
+                    ws: p.workspace_id.clone().into(),
+                    id: id.clone().into(),
+                    item_id: {
+                        let value: Option<Option<String>> = Some(p.item_id.clone());
+                        value.map(|value| value.map(Into::into))
+                    },
+                },
+            ));
             must(one(w.c, SESSION, [&id], Session::from_row)?)
         })
     }
@@ -210,10 +217,23 @@ impl Sessions<'_> {
                     [id],
                     |r| r.get::<_, Option<String>>(0),
                 )?;
-                w.publish(ChangeEvent::Session {
-                    id: id.into(),
-                    item_id,
-                });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM sessions WHERE id = ?",
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Session {
+                            ws: ws.into(),
+                            id: id.into(),
+                            item_id: {
+                                let value: Option<Option<String>> = item_id;
+                                value.map(|value| value.map(Into::into))
+                            },
+                        },
+                    ));
+                }
                 Ok(())
             })
         })
@@ -408,12 +428,27 @@ impl Sessions<'_> {
             tx.run("DELETE FROM queued WHERE session_id = ?", [id])?;
             // its view in shadow names other directories of the machine: it goes with it
             tx.run("DELETE FROM view_shadow WHERE session_id = ?", [id])?;
+            let ws = one(
+                &tx,
+                "SELECT workspace_id FROM sessions WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
             tx.commit()?;
-            w.publish(ChangeEvent::Session {
-                id: id.into(),
-                item_id: None,
-            });
+            if let Some(ws) = ws {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: ws.into(),
+                        id: id.into(),
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
+            }
+
             Ok(())
         })
     }
@@ -484,12 +519,26 @@ impl Events<'_> {
             super::stats::first_tool_in(&tx, session_id, kind, ts)?;
             crate::event_payload::save(&tx, session_id, seq, &payloads)?;
             tx.commit()?;
-            w.publish(ChangeEvent::Event {
-                session_id: session_id.into(),
-                seq,
-                kind: kind.into(),
-                data,
-            });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::LiveEvent::from(
+                    steve_types::WorkLiveEvent::Event {
+                        ws: ws.into(),
+                        session_id: session_id.into(),
+                        seq: steve_types::Seq(seq),
+                        kind: kind.into(),
+                        data: {
+                            let value: serde_json::Value = data;
+                            steve_types::RawJson::from_str(&serde_json::to_string(&value).expect("JSON value"))
+                                .expect("validated JSON")
+                        },
+                    },
+                ));
+            }
             Ok(seq)
         })
     }
@@ -740,10 +789,23 @@ impl QueuedRepo<'_> {
                 "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
                 params![uid("q"), session_id, text, via, now(), super::file_refs(files)?],
             )?;
-            w.publish(ChangeEvent::Session {
-                id: session_id.into(),
-                item_id: None,
-            });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: ws.into(),
+                        id: session_id.into(),
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -774,10 +836,23 @@ impl QueuedRepo<'_> {
                 "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
                 params![uid("q"), session_id, text, via, now(), refs],
             )?;
-            w.publish(ChangeEvent::Session {
-                id: session_id.into(),
-                item_id: None,
-            });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: ws.into(),
+                        id: session_id.into(),
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
+            }
             Ok(true)
         })
     }
@@ -826,10 +901,23 @@ impl QueuedRepo<'_> {
                 text: text.to_owned(),
                 ..before.clone()
             };
-            w.publish(ChangeEvent::Session {
-                id: session_id.into(),
-                item_id: None,
-            });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM sessions WHERE id = ?",
+                [session_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Session {
+                        ws: ws.into(),
+                        id: session_id.into(),
+                        item_id: {
+                            let value: Option<Option<String>> = None;
+                            value.map(|value| value.map(Into::into))
+                        },
+                    },
+                ));
+            }
             Ok(Some((before, after)))
         })
     }
@@ -844,10 +932,23 @@ impl QueuedRepo<'_> {
                 Queued::from_row,
             )?;
             if q.is_some() {
-                w.publish(ChangeEvent::Session {
-                    id: session_id.into(),
-                    item_id: None,
-                });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM sessions WHERE id = ?",
+                    [session_id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Session {
+                            ws: ws.into(),
+                            id: session_id.into(),
+                            item_id: {
+                                let value: Option<Option<String>> = None;
+                                value.map(|value| value.map(Into::into))
+                            },
+                        },
+                    ));
+                }
             }
             Ok(q)
         })
@@ -866,10 +967,23 @@ impl QueuedRepo<'_> {
                 Queued::from_row,
             )?;
             if q.is_some() {
-                w.publish(ChangeEvent::Session {
-                    id: session_id.into(),
-                    item_id: None,
-                });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM sessions WHERE id = ?",
+                    [session_id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Session {
+                            ws: ws.into(),
+                            id: session_id.into(),
+                            item_id: {
+                                let value: Option<Option<String>> = None;
+                                value.map(|value| value.map(Into::into))
+                            },
+                        },
+                    ));
+                }
                 return Ok(q);
             }
             // already first (or alone), or gone
@@ -891,10 +1005,23 @@ impl QueuedRepo<'_> {
                 |r| r.get(0),
             )?;
             if let Some(s) = s {
-                w.publish(ChangeEvent::Session {
-                    id: s,
-                    item_id: None,
-                });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM sessions WHERE id = ?",
+                    [&s],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Session {
+                            ws: ws.into(),
+                            id: s.into(),
+                            item_id: {
+                                let value: Option<Option<String>> = None;
+                                value.map(|value| value.map(Into::into))
+                            },
+                        },
+                    ));
+                }
             }
             Ok(())
         })

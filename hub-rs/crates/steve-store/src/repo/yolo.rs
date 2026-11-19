@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::{all, one, to_json};
 use crate::types::json_or;
-use crate::{ChangeEvent, Result, Tx, uid};
+use crate::{Result, Tx, uid};
 
 /// `object_type` of the workspace row.
 pub const WORKSPACE: &str = "workspace";
@@ -162,7 +162,9 @@ pub fn scope_put(
         &after.snapshot(),
         by,
     )?;
-    tx.publish(ChangeEvent::Yolo { ws: ws.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutonomyEvent::Yolo { ws: ws.into() },
+    ));
     Ok((before, after))
 }
 
@@ -368,11 +370,16 @@ pub fn action_add(tx: &Tx, a: &NewAction, now: i64) -> Result<ActionRow> {
         undo,
         now
     ])?;
-    tx.publish(ChangeEvent::YoloAction {
-        id: id.clone(),
-        decision_id: a.decision_id.clone(),
-        ws: a.workspace_id.clone(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutonomyEvent::YoloAction {
+            id: id.clone().into(),
+            decision_id: {
+                let value: Option<String> = a.decision_id.clone();
+                value.map(Into::into)
+            },
+            ws: a.workspace_id.clone().into(),
+        },
+    ));
     super::must(action_get(tx, &id)?)
 }
 
@@ -430,11 +437,16 @@ pub fn cancel_scheduled(tx: &Tx, ws: &str, window: &str, now: i64) -> Result<usi
             "UPDATE yolo_actions SET outcome = 'cancelled', done_at = ? WHERE id = ?",
         )?
         .execute(params![now, id])?;
-        tx.publish(ChangeEvent::YoloAction {
-            id: id.clone(),
-            decision_id: decision_id.clone(),
-            ws: ws.into(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::AutonomyEvent::YoloAction {
+                id: id.clone().into(),
+                decision_id: {
+                    let value: Option<String> = decision_id.clone();
+                    value.map(Into::into)
+                },
+                ws: ws.into(),
+            },
+        ));
     }
     Ok(ids.len())
 }
@@ -493,11 +505,16 @@ pub fn action_finish(
     if n == 1
         && let Some(a) = action_get(tx, id)?
     {
-        tx.publish(ChangeEvent::YoloAction {
-            id: a.id,
-            decision_id: a.decision_id,
-            ws: a.workspace_id,
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::AutonomyEvent::YoloAction {
+                id: a.id.into(),
+                decision_id: {
+                    let value: Option<String> = a.decision_id;
+                    value.map(Into::into)
+                },
+                ws: a.workspace_id.into(),
+            },
+        ));
     }
     Ok(n == 1)
 }
@@ -510,11 +527,16 @@ pub fn action_undone(tx: &Tx, id: &str, now: i64) -> Result<bool> {
     if n == 1
         && let Some(a) = action_get(tx, id)?
     {
-        tx.publish(ChangeEvent::YoloAction {
-            id: a.id,
-            decision_id: a.decision_id,
-            ws: a.workspace_id,
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::AutonomyEvent::YoloAction {
+                id: a.id.into(),
+                decision_id: {
+                    let value: Option<String> = a.decision_id;
+                    value.map(Into::into)
+                },
+                ws: a.workspace_id.into(),
+            },
+        ));
     }
     Ok(n == 1)
 }
@@ -633,6 +655,8 @@ pub fn scope_clear(tx: &Tx, ws: &str, object_type: &str, id: &str, by: &str) -> 
         &Value::Null,
         by,
     )?;
-    tx.publish(ChangeEvent::Yolo { ws: ws.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutonomyEvent::Yolo { ws: ws.into() },
+    ));
     Ok(true)
 }

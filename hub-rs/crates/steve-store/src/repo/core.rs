@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use super::{Sets, all, exists, must, one, revision, to_json};
 use crate::types::json_or;
-use crate::{ChangeEvent, MemberWorkspace, Result, Store, User, WS, Workspace, now, sha, uid};
+use crate::{MemberWorkspace, Result, Store, User, WS, Workspace, now, sha, uid};
 
 /// One entry of the audit trail: who did what to what, and the detail the writer kept.
 #[derive(Debug, Clone, Serialize)]
@@ -245,7 +245,12 @@ impl Workspaces<'_> {
                 params![id, owner_id, t],
             )?;
             super::kinds::ensure(w, &id)?;
-            w.publish(ChangeEvent::Workspace { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Workspace {
+                    ws: id.clone().into(),
+                    id: id.clone().into(),
+                },
+            ));
             must(one(w.c, "SELECT * FROM workspaces WHERE id = ?", [&id], Workspace::from_row)?)
         })
     }
@@ -262,7 +267,12 @@ impl Workspaces<'_> {
                     rusqlite::params_from_iter(s.params([id.to_string().into()])),
                 )?;
             }
-            w.publish(ChangeEvent::Workspace { id: id.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Workspace {
+                    ws: id.into(),
+                    id: id.into(),
+                },
+            ));
             one(
                 w.c,
                 "SELECT * FROM workspaces WHERE id = ?",
@@ -412,7 +422,12 @@ impl Settings<'_> {
             }
             tx.commit()?;
             revision(w.c, ws, "settings", ws, 0, p, author)?;
-            w.publish(ChangeEvent::Settings { id: ws.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Settings {
+                    ws: ws.into(),
+                    id: ws.into(),
+                },
+            ));
             Ok(())
         })
     }

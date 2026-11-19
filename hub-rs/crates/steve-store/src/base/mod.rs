@@ -345,7 +345,12 @@ pub fn message_add(
     space: &str,
 ) -> Result<String> {
     let id = crate::repo::message_insert(tx, ws, author, text, item_id, meta, space)?;
-    tx.publish(crate::ChangeEvent::Message { id: id.clone() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Message {
+            ws: ws.into(),
+            id: id.clone().into(),
+        },
+    ));
     Ok(id)
 }
 

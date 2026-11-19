@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use super::{Sets, all, exists, one, revision, to_json};
 use crate::types::double;
-use crate::{Avatar, Bot, BotWorkspace, ChangeEvent, Memory, Result, Store, StoreError, now, uid};
+use crate::{Avatar, Bot, BotWorkspace, Memory, Result, Store, StoreError, now, uid};
 
 impl Store {
     pub fn bots(&self) -> Bots<'_> {
@@ -168,7 +168,19 @@ impl Bots<'_> {
                 tx.run("INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)", params![id, ws, now()])?;
             }
             tx.commit()?;
-            w.publish(ChangeEvent::Bot { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM bots WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -187,7 +199,12 @@ impl Bots<'_> {
                 "INSERT INTO audit (workspace_id, ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)",
                 params![ws, now(), author, "bot.create", id, json!({"name": b.name}).to_string()],
             )?;
-            w.publish(ChangeEvent::Bot { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: ws.into(),
+                    id: id.clone().into(),
+                },
+            ));
             one(w.c, BOT, [&id], Bot::from_row)
         })
     }
@@ -242,7 +259,12 @@ impl Bots<'_> {
                 &json!({ "before": before, "after": after }),
                 author,
             )?;
-            w.publish(ChangeEvent::Bot { id: id.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: cur.workspace_id.clone().into(),
+                    id: id.into(),
+                },
+            ));
             one(w.c, BOT, [id], Bot::from_row)
         })
     }
@@ -254,7 +276,19 @@ impl Bots<'_> {
                 "UPDATE bots SET deleted = 1, enabled = 0, updated = ? WHERE id = ? AND main = 0",
                 params![now(), id],
             )?;
-            w.publish(ChangeEvent::Bot { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM bots WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -265,7 +299,19 @@ impl Bots<'_> {
                 "UPDATE bots SET deleted = 0, enabled = 1, updated = ? WHERE id = ?",
                 params![now(), id],
             )?;
-            w.publish(ChangeEvent::Bot { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM bots WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -358,21 +404,31 @@ impl Memories<'_> {
                 "INSERT INTO bot_memories (id, bot_id, workspace_id, text, source, created) VALUES (?, ?, ?, ?, ?, ?)",
                 params![id, bot, ws, text, source, now()],
             )?;
-            w.publish(ChangeEvent::Bot { id: bot.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: ws.into(),
+                    id: bot.into(),
+                },
+            ));
             Ok(id)
         })
     }
 
     pub fn edit(&self, id: &str, text: &str) -> Result<()> {
         self.0.write(|w| {
-            let bot: Option<String> = one(
+            let bot: Option<(String, String)> = one(
                 w.c,
-                "UPDATE bot_memories SET text = ? WHERE id = ? RETURNING bot_id",
+                "UPDATE bot_memories SET text = ? WHERE id = ? RETURNING bot_id, workspace_id",
                 [text, id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if let Some(bot) = bot {
-                w.publish(ChangeEvent::Bot { id: bot });
+            if let Some((bot, ws)) = bot {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: ws.into(),
+                        id: bot.into(),
+                    },
+                ));
             }
             Ok(())
         })
@@ -380,14 +436,19 @@ impl Memories<'_> {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
-            let bot: Option<String> = one(
+            let bot: Option<(String, String)> = one(
                 w.c,
-                "DELETE FROM bot_memories WHERE id = ? RETURNING bot_id",
+                "DELETE FROM bot_memories WHERE id = ? RETURNING bot_id, workspace_id",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if let Some(bot) = bot {
-                w.publish(ChangeEvent::Bot { id: bot });
+            if let Some((bot, ws)) = bot {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: ws.into(),
+                        id: bot.into(),
+                    },
+                ));
             }
             Ok(())
         })
@@ -397,7 +458,12 @@ impl Memories<'_> {
     pub fn clear(&self, ws: &str) -> Result<()> {
         self.0.write(|w| {
             w.c.run("DELETE FROM bot_memories WHERE workspace_id = ?", [ws])?;
-            w.publish(ChangeEvent::Bot { id: "*".into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::ConfigEvent::Bot {
+                    ws: ws.into(),
+                    id: "*".into(),
+                },
+            ));
             Ok(())
         })
     }

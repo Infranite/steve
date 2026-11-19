@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{Cached, all, one};
-use crate::{ChangeEvent, Result, Store, now, uid};
+use crate::{Result, Store, now, uid};
 
 /// A send interrupted (the Hub stopped between taking the drafts and writing the line) frees them after this.
 const SENDING_STALE_MS: i64 = 5 * 60 * 1000;
@@ -94,7 +94,19 @@ impl Annotations<'_> {
                 "INSERT INTO annotations (id, item_id, artifact_id, path, anchor, note, status, created, updated) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)",
                 params![id, item_id, artifact_id, path, anchor.to_string(), note, t, t],
             )?;
-            w.publish(ChangeEvent::Item { id: item_id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item_id.into(),
+                    },
+                ));
+            }
             super::must(one(w.c, ONE, [&id, item_id], Annotation::from_row)?)
         })
     }
@@ -109,7 +121,19 @@ impl Annotations<'_> {
             if n == 0 {
                 return Ok(None);
             }
-            w.publish(ChangeEvent::Item { id: item_id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item_id.into(),
+                    },
+                ));
+            }
             one(w.c, ONE, [id, item_id], Annotation::from_row)
         })
     }
@@ -122,7 +146,19 @@ impl Annotations<'_> {
                 [id, item_id],
             )?;
             if n > 0 {
-                w.publish(ChangeEvent::Item { id: item_id.into() });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM items WHERE id = ?",
+                    [item_id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: ws.into(),
+                            id: item_id.into(),
+                        },
+                    ));
+                }
             }
             Ok(n > 0)
         })
@@ -160,7 +196,19 @@ impl Annotations<'_> {
             )?;
             tx.commit()?;
             if !taken.is_empty() {
-                w.publish(ChangeEvent::Item { id: item_id.into() });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM items WHERE id = ?",
+                    [item_id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: ws.into(),
+                            id: item_id.into(),
+                        },
+                    ));
+                }
             }
             Ok(Claim {
                 again: false,
@@ -190,7 +238,19 @@ impl Annotations<'_> {
                     params![t, item_id, key],
                 )?,
             };
-            w.publish(ChangeEvent::Item { id: item_id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item_id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }

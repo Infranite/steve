@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::repo::to_json;
 use crate::types::truthy;
-use crate::{ChangeEvent, Decision, NewDecision, Result, Tx, now, uid};
+use crate::{Decision, NewDecision, Result, Tx, now, uid};
 
 pub fn get(c: &Connection, id: &str) -> Result<Option<Decision>> {
     let r = c
@@ -40,10 +40,16 @@ pub fn open(tx: &Tx, p: &NewDecision) -> Result<Decision> {
         p.requested_by,
         now()
     ])?;
-    tx.publish(ChangeEvent::Decision {
-        id: id.clone(),
-        item_id: Some(p.item_id.clone()),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Decision {
+            ws: p.workspace_id.clone().into(),
+            id: id.clone().into(),
+            item_id: {
+                let value: Option<Option<String>> = Some(p.item_id.clone());
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     let d = crate::repo::must(get(tx, &id)?)?;
     tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
     Ok(d)
@@ -81,19 +87,19 @@ pub fn settle(tx: &Tx, id: &str, result: &Value, status: &str, undo: &Value) -> 
         params![status, to_json(result)?, now(), undo, id],
     )?;
     if n > 0 {
-        let d = get(tx, id)?;
-        if let Some(d) = &d {
-            tx.diagnostic(crate::diagnostics::decision_event(
-                d,
-                "resolved",
-                Some("open"),
-            ));
-        }
-        let item_id = d.and_then(|d| d.item_id);
-        tx.publish(ChangeEvent::Decision {
-            id: id.into(),
-            item_id: Some(item_id),
-        });
+        let d = crate::repo::must(get(tx, id)?)?;
+        tx.diagnostic(crate::diagnostics::decision_event(
+            &d,
+            "resolved",
+            Some("open"),
+        ));
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: d.workspace_id.into(),
+                id: id.into(),
+                item_id: Some(d.item_id.map(Into::into)),
+            },
+        ));
     }
     Ok(n > 0)
 }

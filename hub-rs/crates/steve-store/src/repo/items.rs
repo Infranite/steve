@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{Sets, all, file_refs, next_counter, one, revision, to_json};
 use crate::types::{double, json_or};
 use crate::{
-    Artifact, ChangeEvent, FileRef, Goal, Item, Parent, PlanRound, PlanStep, Result, Snooze, Store,
+    Artifact, FileRef, Goal, Item, Parent, PlanRound, PlanStep, Result, Snooze, Store,
     TimelineEntry, Workspace, now, uid,
 };
 
@@ -221,7 +221,12 @@ impl Items<'_> {
             if let Some(until) = until {
                 self.0.stage_diagnostic_until(until);
             }
-            w.publish(ChangeEvent::Item { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: ws.into(),
+                    id: id.clone().into(),
+                },
+            ));
             one(w.c, ITEM, [&id], Item::from_row)
         })
     }
@@ -234,7 +239,19 @@ impl Items<'_> {
             let changed = patch_on(&tx, id, p)?;
             tx.commit()?;
             if changed {
-                w.publish(ChangeEvent::Item { id: id.into() });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM items WHERE id = ?",
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: ws.into(),
+                            id: id.into(),
+                        },
+                    ));
+                }
             }
             one(w.c, ITEM, [id], Item::from_row)
         })
@@ -250,7 +267,19 @@ impl Items<'_> {
                 params![on as i64, now(), id, on as i64],
             )?;
             if n > 0 {
-                w.publish(ChangeEvent::Item { id: id.into() });
+                if let Some(ws) = crate::repo::one(
+                    w.c,
+                    "SELECT workspace_id FROM items WHERE id = ?",
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )? {
+                    w.publish(steve_types::DomainEvent::from(
+                        steve_types::WorkEvent::Item {
+                            ws: ws.into(),
+                            id: id.into(),
+                        },
+                    ));
+                }
             }
             one(w.c, ITEM, [id], Item::from_row)
         })
@@ -295,13 +324,21 @@ impl Items<'_> {
             };
             tx.run("DELETE FROM items WHERE id = ?", [id])?;
             let mut hooked = None;
-            if let (Some(hook), Some(ws)) = (self.0.item_deleted_hook(), ws) {
+            if let (Some(hook), Some(ws)) = (self.0.item_deleted_hook(), ws.as_ref()) {
                 let t = crate::Tx::wrap(&tx);
                 hook(&t, &ws, id).map_err(crate::StoreError::Hook)?;
                 hooked = Some(t.into_effects());
             }
             tx.commit()?;
-            w.publish(ChangeEvent::Item { id: id.into() });
+            if let Some(ws) = ws {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.clone().into(),
+                        id: id.into(),
+                    },
+                ));
+            }
+
             if let Some(fx) = hooked {
                 fx.flush(self.0);
             }
@@ -379,7 +416,12 @@ impl Items<'_> {
             .flatten();
             let v = last.unwrap_or(0) + 1;
             revision(w.c, ws, "item_plan", id, v, &serde_json::json!({ "steps": steps, "end": end }), author)?;
-            w.publish(ChangeEvent::Item { id: id.into() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: ws.into(),
+                    id: id.into(),
+                },
+            ));
             Ok(v)
         })
     }
@@ -398,7 +440,19 @@ impl Items<'_> {
                 "INSERT INTO item_goals (item_id, version, text, created) VALUES (?, ?, ?, ?)",
                 params![id, v, text, now()],
             )?;
-            w.publish(ChangeEvent::Item { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(v)
         })
     }
@@ -440,7 +494,19 @@ impl Deps<'_> {
             if added > 0 {
                 super::dependency_waits::rearm_in(tx, item)?;
             }
-            tx.publish(ChangeEvent::Item { id: item.into() });
+            if let Some(ws) = crate::repo::one(
+                tx,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item],
+                |r| r.get::<_, String>(0),
+            )? {
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -451,7 +517,19 @@ impl Deps<'_> {
                 "DELETE FROM item_deps WHERE item_id = ? AND dep_id = ?",
                 [item, dep],
             )?;
-            w.publish(ChangeEvent::Item { id: item.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -471,7 +549,19 @@ impl Timeline<'_> {
     ) -> Result<()> {
         self.0.write(|w| {
             timeline_on(w.c, item_id, actor, kind, text, session_id, files)?;
-            w.publish(ChangeEvent::Item { id: item_id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM items WHERE id = ?",
+                [item_id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: ws.into(),
+                        id: item_id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -590,7 +680,12 @@ pub fn artifact_add_in(
         item_id,
         &super::kinds::output_deliveries(kind, title, location, role),
     )?;
-    tx.publish(ChangeEvent::Item { id: item_id.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: workspace.into(),
+            id: item_id.into(),
+        },
+    ));
     Ok(())
 }
 
@@ -621,7 +716,19 @@ pub(super) fn status_mark(
 /// [`Items::patch`] inside the caller's transaction (the event goes out after its commit).
 pub fn item_patch_in(tx: &crate::Tx, id: &str, p: &ItemPatch) -> Result<Option<Item>> {
     if patch_on(tx, id, p)? {
-        tx.publish(ChangeEvent::Item { id: id.into() });
+        if let Some(ws) = crate::repo::one(
+            tx,
+            "SELECT workspace_id FROM items WHERE id = ?",
+            [id],
+            |r| r.get::<_, String>(0),
+        )? {
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: ws.into(),
+                    id: id.into(),
+                },
+            ));
+        }
     }
     one(tx, ITEM, [id], Item::from_row)
 }
@@ -703,7 +810,19 @@ pub fn timeline_add_in(
     session_id: Option<&str>,
 ) -> Result<()> {
     timeline_on(tx, item_id, actor, kind, text, session_id, &[])?;
-    tx.publish(ChangeEvent::Item { id: item_id.into() });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM items WHERE id = ?",
+        [item_id],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: ws.into(),
+                id: item_id.into(),
+            },
+        ));
+    }
     Ok(())
 }
 
@@ -779,7 +898,12 @@ pub fn lifecycle_write_in(tx: &crate::Tx, id: &str, w: &LifecycleWrite) -> Resul
     {
         status_mark(tx, &ws, id, t, Some(&old), new)?;
     }
-    tx.publish(ChangeEvent::Item { id: id.into() });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Item {
+            ws: ws.into(),
+            id: id.into(),
+        },
+    ));
     one(tx, ITEM, [id], Item::from_row)
 }
 
@@ -921,7 +1045,19 @@ pub fn operation_add_in(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![id, item_id, cycle, revision, kind, effect_id, required as i64, status, label, to_json(evidence)?, t, t],
     )?;
-    tx.publish(ChangeEvent::Item { id: item_id.into() });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM items WHERE id = ?",
+        [item_id],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: ws.into(),
+                id: item_id.into(),
+            },
+        ));
+    }
     let op = one(
         tx,
         "SELECT * FROM item_operations WHERE id = ?",
@@ -962,7 +1098,19 @@ pub fn operation_set_in(
         "UPDATE item_operations SET status = ?, evidence = ?, updated = ? WHERE id = ?",
         params![status, to_json(&ev)?, now(), id],
     )?;
-    tx.publish(ChangeEvent::Item { id: op.item_id });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM items WHERE id = ?",
+        [&op.item_id],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Item {
+                ws: ws.into(),
+                id: op.item_id.into(),
+            },
+        ));
+    }
     Ok(true)
 }
 

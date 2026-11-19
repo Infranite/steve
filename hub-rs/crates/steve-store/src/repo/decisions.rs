@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{all, one, to_json};
 use crate::types::truthy;
-use crate::{ChangeEvent, Decision, Message, Result, Store, now, uid};
+use crate::{Decision, Message, Result, Store, now, uid};
 
 /// One row in `messages`; the caller publishes its event. Returns the id.
 pub(crate) fn message_insert(
@@ -91,10 +91,16 @@ fn insert(c: &rusqlite::Connection, p: &NewDecision) -> Result<Decision> {
 pub fn decision_create_in(tx: &crate::Tx<'_>, p: &NewDecision) -> Result<Decision> {
     let d = insert(tx, p)?;
     tx.diagnostic(crate::diagnostics::decision_event(&d, "created", None));
-    tx.publish(ChangeEvent::Decision {
-        id: d.id.clone(),
-        item_id: Some(p.item_id.clone()),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Decision {
+            ws: d.workspace_id.clone().into(),
+            id: d.id.clone().into(),
+            item_id: {
+                let value: Option<Option<String>> = Some(p.item_id.clone());
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     Ok(d)
 }
 
@@ -114,10 +120,23 @@ pub fn decision_resolve_in(
             r.get(0)
         })
         .ok();
-    tx.publish(ChangeEvent::Decision {
-        id: id.into(),
-        item_id: item,
-    });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM decisions WHERE id = ?",
+        [id],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: ws.into(),
+                id: id.into(),
+                item_id: {
+                    let value: Option<Option<String>> = item;
+                    value.map(|value| value.map(Into::into))
+                },
+            },
+        ));
+    }
     if n > 0
         && let Ok(Some(d)) = one(tx, DECISION, [id], Decision::from_row)
     {
@@ -142,19 +161,37 @@ pub fn decision_expire_unapplied_in(tx: &crate::Tx<'_>, id: &str, result: &Value
             r.get(0)
         })
         .ok();
-    tx.publish(ChangeEvent::Decision {
-        id: id.into(),
-        item_id: item,
-    });
+    if let Some(ws) = crate::repo::one(
+        tx,
+        "SELECT workspace_id FROM decisions WHERE id = ?",
+        [id],
+        |r| r.get::<_, String>(0),
+    )? {
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: ws.into(),
+                id: id.into(),
+                item_id: {
+                    let value: Option<Option<String>> = item;
+                    value.map(|value| value.map(Into::into))
+                },
+            },
+        ));
+    }
     Ok(n > 0)
 }
 
 fn changed(w: &crate::W, id: &str) -> Result<Option<Decision>> {
     let d = one(w.c, DECISION, [id], Decision::from_row)?;
-    w.publish(ChangeEvent::Decision {
-        id: id.into(),
-        item_id: d.as_ref().map(|d| d.item_id.clone()),
-    });
+    if let Some(row) = &d {
+        w.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: row.workspace_id.clone().into(),
+                id: id.into(),
+                item_id: Some(row.item_id.clone().map(Into::into)),
+            },
+        ));
+    }
     Ok(d)
 }
 
@@ -194,10 +231,16 @@ impl Decisions<'_> {
     pub fn create(&self, p: &NewDecision) -> Result<Option<Decision>> {
         let result = self.0.write(|w| {
             let d = insert(w.c, p)?;
-            w.publish(ChangeEvent::Decision {
-                id: d.id.clone(),
-                item_id: Some(p.item_id.clone()),
-            });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Decision {
+                    ws: d.workspace_id.clone().into(),
+                    id: d.id.clone().into(),
+                    item_id: {
+                        let value: Option<Option<String>> = Some(p.item_id.clone());
+                        value.map(|value| value.map(Into::into))
+                    },
+                },
+            ));
             Ok(Some(d))
         })?;
         if let Some(d) = &result {
@@ -207,7 +250,7 @@ impl Decisions<'_> {
         Ok(result)
     }
 
-    /// Settles an open decision (no-op if it is not open, but still publishes). `status` is `resolved`
+    /// Settles an open decision (still publishes for an existing closed row). `status` is `resolved`
     /// or `expired`; `undo` (the item fields to restore) is stored only if truthy, as in TS.
     pub fn resolve(
         &self,
@@ -383,7 +426,12 @@ impl Messages<'_> {
     ) -> Result<String> {
         self.0.write(|w| {
             let id = message_insert(w.c, ws, author, text, item_id, meta, space)?;
-            w.publish(ChangeEvent::Message { id: id.clone() });
+            w.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Message {
+                    ws: ws.into(),
+                    id: id.clone().into(),
+                },
+            ));
             Ok(id)
         })
     }
@@ -405,7 +453,19 @@ impl Messages<'_> {
                 "UPDATE messages SET meta = ? WHERE id = ?",
                 params![to_json(meta)?, id],
             )?;
-            w.publish(ChangeEvent::Message { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM messages WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Message {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -417,7 +477,19 @@ impl Messages<'_> {
                 "UPDATE messages SET text = ?, meta = ? WHERE id = ?",
                 params![text, to_json(meta)?, id],
             )?;
-            w.publish(ChangeEvent::Message { id: id.into() });
+            if let Some(ws) = crate::repo::one(
+                w.c,
+                "SELECT workspace_id FROM messages WHERE id = ?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )? {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Message {
+                        ws: ws.into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             Ok(())
         })
     }
@@ -439,23 +511,29 @@ impl Messages<'_> {
 /// Settles the item's open decisions as `expired` with `result`, inside the caller's transaction
 /// (`Decisions::resolve` for each, like a finished item's “nothing left to decide”). Returns how many.
 pub fn decisions_expire_open_in(tx: &crate::Tx, item_id: &str, result: &Value) -> Result<usize> {
-    let ids: Vec<String> = {
+    let ids: Vec<(String, String)> = {
         let mut st = tx.prepare_cached(
-            "SELECT id FROM decisions WHERE item_id = ? AND status = 'open' ORDER BY created",
+            "SELECT id, workspace_id FROM decisions WHERE item_id = ? AND status = 'open' ORDER BY created",
         )?;
-        st.query_map([item_id], |r| r.get(0))?
+        st.query_map([item_id], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?
     };
     let result = to_json(result)?;
-    for id in &ids {
+    for (id, ws) in &ids {
         tx.run(
             "UPDATE decisions SET status = 'expired', result = ?, resolved = ?, undo = NULL WHERE id = ? AND status = 'open'",
             params![result, now(), id],
         )?;
-        tx.publish(ChangeEvent::Decision {
-            id: id.clone(),
-            item_id: Some(Some(item_id.into())),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::WorkEvent::Decision {
+                ws: ws.clone().into(),
+                id: id.clone().into(),
+                item_id: {
+                    let value: Option<Option<String>> = Some(Some(item_id.into()));
+                    value.map(|value| value.map(Into::into))
+                },
+            },
+        ));
     }
     Ok(ids.len())
 }
