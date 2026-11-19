@@ -16,6 +16,7 @@ edge	steve-channels	steve-modules
 edge	steve-channels	steve-node-wire
 edge	steve-channels	steve-runtime
 edge	steve-channels	steve-store
+edge	steve-channels	steve-store-sqlite
 edge	steve-channels	steve-types
 edge	steve-channels	steve-work-api
 edge	steve-core	steve-acp
@@ -69,6 +70,7 @@ edge	steve-hub	steve-node-wire
 edge	steve-hub	steve-research
 edge	steve-hub	steve-stats
 edge	steve-hub	steve-store
+edge	steve-hub	steve-store-sqlite
 edge	steve-hub	steve-transcript
 edge	steve-hub	steve-types
 edge	steve-hub	steve-vault
