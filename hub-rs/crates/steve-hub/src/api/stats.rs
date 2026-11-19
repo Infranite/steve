@@ -811,7 +811,10 @@ fn save_setting(
                 "INSERT INTO revisions (workspace_id, object_type, object_id, version, patch, author, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![ws, object_type, ws, version, json!({ key.as_str(): value }).to_string(), me, t],
             )?;
-            c.publish(steve_store::ChangeEvent::Settings { id: ws.clone() });
+            c.publish(steve_types::DomainEvent::from(steve_types::ConfigEvent::Settings {
+                ws: ws.clone().into(),
+                id: ws.clone().into(),
+            }));
             c.publish(stats_changed(&ws, None));
             Ok::<_, StoreError>(())
         })

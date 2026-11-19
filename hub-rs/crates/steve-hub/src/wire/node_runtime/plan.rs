@@ -679,10 +679,25 @@ fn queue_in(
         None,
         now(),
     )?;
-    tx.publish(steve_store::ChangeEvent::Session {
-        id: session.into(),
-        item_id: None,
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            ws: tx
+                .query_row::<String, _, _>(
+                    "SELECT workspace_id FROM sessions WHERE id = ?",
+                    rusqlite::params![session],
+                    |r| r.get(0),
+                )?
+                .into(),
+            id: {
+                let value: String = session.into();
+                steve_types::SessionId::from(value)
+            },
+            item_id: {
+                let value: Option<Option<String>> = None;
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     Ok(())
 }
 
@@ -728,10 +743,25 @@ pub(crate) fn deliver_mid_turn(
             rt::add_event_in(tx, session, "user", ev, V1, None, now())?;
         }
         if !xs.is_empty() {
-            tx.publish(steve_store::ChangeEvent::Session {
-                id: session.into(),
-                item_id: None,
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Session {
+                    ws: tx
+                        .query_row::<String, _, _>(
+                            "SELECT workspace_id FROM sessions WHERE id = ?",
+                            rusqlite::params![session],
+                            |r| r.get(0),
+                        )?
+                        .into(),
+                    id: {
+                        let value: String = session.into();
+                        steve_types::SessionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = None;
+                        value.map(|value| value.map(Into::into))
+                    },
+                },
+            ));
         }
         Ok(xs.into_iter().map(|m| m.text).collect())
     })

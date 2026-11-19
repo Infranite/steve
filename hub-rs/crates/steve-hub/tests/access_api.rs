@@ -1246,6 +1246,26 @@ impl Live {
         true
     }
 
+    /// Reads complete JSON frames so added envelope fields and field order do not hide a notice.
+    async fn event(&mut self, secs: u64, matches: impl Fn(&Value) -> bool) -> Option<Value> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            if let Some(event) = self
+                .1
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                .find(|event| matches(event))
+            {
+                return Some(event);
+            }
+            match tokio::time::timeout_at(deadline, self.0.chunk()).await {
+                Ok(Ok(Some(b))) => self.1.push_str(&String::from_utf8_lossy(&b)),
+                _ => return None,
+            }
+        }
+    }
+
     /// Whether the stream ends within `secs`.
     async fn ends(&mut self, secs: u64) -> bool {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
@@ -1319,11 +1339,18 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
     let mut watching = Live::open(&e, &watcher_cred).await;
     let mut member = Live::open(&e, &member_cred).await;
     let mut on_laptop = Live::open(&e, &laptop_cred).await;
-    let said = format!(
-        "{{\"type\":\"client\",\"id\":\"{laptop}\",\"user\":\"{}\"}}",
-        owner.id
+    let notice = watching
+        .event(5, |v| {
+            v["type"] == "client" && v["id"] == laptop && v["user"] == owner.id
+        })
+        .await;
+    assert!(notice.is_some(), "{}", watching.1);
+    let notice = notice.unwrap();
+    assert!(notice["rev"].is_u64(), "{notice}");
+    assert!(
+        notice.get("ws").is_none(),
+        "clients keep their user audience: {notice}"
     );
-    assert!(watching.until(&said, 5).await, "{}", watching.1);
     let (_, v) = e
         .call("GET", "/api/access", Some(&watcher_cred), None)
         .await;

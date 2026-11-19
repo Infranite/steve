@@ -155,7 +155,21 @@ impl NodeRuntime {
                     |r| r.get(0),
                 )?;
                 steve_store::bot_dispatch::decision(tx, &item, placement)?;
-                tx.publish(steve_store::ChangeEvent::Item { id: item });
+                tx.publish(steve_types::DomainEvent::from(
+                    steve_types::WorkEvent::Item {
+                        ws: tx
+                            .query_row::<String, _, _>(
+                                "SELECT workspace_id FROM items WHERE id = ?",
+                                rusqlite::params![item],
+                                |r| r.get(0),
+                            )?
+                            .into(),
+                        id: {
+                            let value: String = item;
+                            steve_types::ItemId::from(value)
+                        },
+                    },
+                ));
             }
             // whose access it runs with and who reads it, fixed now (a remote Node's owner reads it too)
             let owner: Option<String> = if self.is_remote() {

@@ -421,7 +421,21 @@ impl RoutedRuntime {
     ) -> Result<()> {
         self.store.transaction(|tx| {
             bot_dispatch::decision(tx, item, &placement(bot, session, node, reason, rejected))?;
-            tx.publish(steve_store::ChangeEvent::Item { id: item.into() });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Item {
+                    ws: tx
+                        .query_row::<String, _, _>(
+                            "SELECT workspace_id FROM items WHERE id = ?",
+                            rusqlite::params![item],
+                            |r| r.get(0),
+                        )?
+                        .into(),
+                    id: {
+                        let value: String = item.into();
+                        steve_types::ItemId::from(value)
+                    },
+                },
+            ));
             Ok::<_, StoreError>(())
         })?;
         Ok(())
