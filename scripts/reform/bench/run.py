@@ -454,6 +454,8 @@ class Processes:
         assert safe_work(Path(env["STEVE_HOME"])) == Path(env["STEVE_HOME"])
         assert 8440 not in (int(env["STEVE_PORT"]), int(env["STEVE_LOCAL_NODE_PORT"]))
         assert env["STEVE_NO_RESUME"] == "1" and env["STEVE_BACKUP"] == "off"
+        # a snapshot copy has production's workspace ids: a keychain keystore would share their entries
+        assert env.get("STEVE_VAULT_KEYSTORE") == "file"
         assert "STEVE_CONFIG" not in env and "INVOCATION_ID" not in env
         assert all(env.get(k) == v for k, v in isolation.DISABLED_ENV.items())
         self.home = Path(env["STEVE_HOME"])
