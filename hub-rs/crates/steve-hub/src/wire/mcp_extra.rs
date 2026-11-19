@@ -860,7 +860,7 @@ mod upgrade_tests {
             for path in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
                 std::fs::create_dir_all(path).unwrap();
             }
-            let wired = super::super::wire_with(&cfg, &crate::bus::Bus::new(), Arc::new(get))
+            let wired = super::super::wire_with(&cfg, &crate::bus::Bus::new(Arc::new(steve_runtime::cache::Caches::new(cfg.cache))), Arc::new(get))
                 .unwrap();
             let store = &wired.tool_service.extra.store;
             store.ensure_workspace().unwrap();
