@@ -31,8 +31,6 @@ pub const DAY_MS: i64 = 24 * 3600 * 1000;
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Cursor {
     pub at: i64,
-    /// Fixed initial history floor, independent of the advancing high-water mark.
-    pub since: i64,
     pub msg_id: String,
     pub windows: i64,
     pub day: String,
@@ -41,7 +39,7 @@ pub struct Cursor {
 
 pub fn cursor(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Cursor>> {
     Ok(c
-        .prepare_cached("SELECT at, msg_id, windows, day, spent, since FROM digest_cursors WHERE workspace_id = ? AND conv = ?")?
+        .prepare_cached("SELECT at, msg_id, windows, day, spent FROM digest_cursors WHERE workspace_id = ? AND conv = ?")?
         .query_row(params![ws, conv.key()], |r| {
             Ok(Cursor {
                 at: r.get(0)?,
@@ -49,16 +47,16 @@ pub fn cursor(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<Cursor>
                 windows: r.get(2)?,
                 day: r.get(3)?,
                 spent: r.get(4)?,
-                since: r.get(5)?,
             })
         })
         .optional()?)
 }
 
+// The retired NOT NULL column is no longer read as a time floor.
 fn save_cursor(tx: &Tx, ws: &str, conv: &ConvRef, k: &Cursor, now: i64) -> Result<()> {
     tx.execute(
-        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now, k.since],
+        "INSERT OR REPLACE INTO digest_cursors (workspace_id, conv, at, msg_id, windows, day, spent, updated, since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        params![ws, conv.key(), k.at, k.msg_id, k.windows, k.day, k.spent, now],
     )?;
     Ok(())
 }
@@ -122,14 +120,6 @@ fn trigger(
     }
 }
 
-fn initial_since(now: i64, b: &Batching) -> i64 {
-    if b.backlog_days <= 0 {
-        i64::MIN
-    } else {
-        now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS))
-    }
-}
-
 /// Cuts every window that is due in `conv`. `manual` cuts what waits even when nothing is due.
 pub fn run_conv(
     tx: &Tx,
@@ -140,29 +130,54 @@ pub fn run_conv(
     manual: bool,
     rep: &mut Report,
 ) -> Result<()> {
+    run_conv_step(tx, ws, conv, now, b, manual, rep, &mut || {})
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_conv_step(
+    tx: &Tx,
+    ws: &str,
+    conv: &ConvRef,
+    now: i64,
+    b: &Batching,
+    manual: bool,
+    rep: &mut Report,
+    checkpoint: &mut impl FnMut(),
+) -> Result<()> {
     let Some(info) = conv::info(tx, ws, conv)? else {
         return Ok(());
     };
     let p = profile::profile(tx, ws, &info)?;
-    let mut k = cursor(tx, ws, conv)?.unwrap_or_else(|| Cursor {
-        at: initial_since(now, b),
-        since: initial_since(now, b),
-        ..Default::default()
-    });
+    let mut k = if let Some(k) = cursor(tx, ws, conv)? {
+        k
+    } else {
+        // Apply lookback once. Later insertions are eligible even with older provider timestamps.
+        if b.backlog_days > 0 {
+            let floor = now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS));
+            tx.execute(
+                "DELETE FROM digest_pending WHERE workspace_id = ? AND conv = ? AND at < ?",
+                params![ws, conv.key(), floor],
+            )?;
+        }
+        Cursor {
+            at: i64::MIN,
+            ..Default::default()
+        }
+    };
     // the budget day, on the clock of the person the digest is for
     let day = steve_modules::zone::Zone::of_owner(tx, ws)?.day(now);
     if k.day != day {
         k.day = day;
         k.spent = 0;
     }
-    // Persist the initial floor even when paused or budget-deferred.
+    // Persist initialization even when paused or budget-deferred.
     save_cursor(tx, ws, conv, &k, now)?;
     rep.conversations += 1;
     match p.settings.depth.as_str() {
         "paused" => return Ok(()),
         "record" => {
             loop {
-                let msgs = conv::unread(tx, ws, conv, k.since, 500)?;
+                let msgs = conv::unread(tx, ws, conv, 500)?;
                 let Some(last) = msgs.last() else {
                     break;
                 };
@@ -179,7 +194,7 @@ pub fn run_conv(
         _ => {}
     }
     loop {
-        let (n, oldest, newest) = conv::unread_stats(tx, ws, conv, k.since)?;
+        let (n, oldest, newest) = conv::unread_stats(tx, ws, conv)?;
         let Some(why) = trigger(
             n as usize,
             p.settings.window,
@@ -195,7 +210,7 @@ pub fn run_conv(
             rep.deferred += 1;
             break;
         }
-        let msgs = conv::unread(tx, ws, conv, k.since, p.settings.window.max(1) as usize)?;
+        let msgs = conv::unread(tx, ws, conv, p.settings.window.max(1) as usize)?;
         let Some(last) = msgs.last().cloned() else {
             break;
         };
@@ -218,7 +233,11 @@ pub fn run_conv(
         let seq = k.windows + 1;
         let tokens = cut_window(tx, ws, &info, &p, seq, why, &context, &msgs, b, now, rep)?;
         rep.windows += 1;
+        // The receipt trigger consumes the inbox positions. Packets, acknowledgement and the
+        // display cursor share this transaction, so a crash here leaves the entire window pending.
+        checkpoint();
         receipt(tx, ws, conv, &msgs, seq, now)?;
+        checkpoint();
         if (last.at, last.id.as_str()) > (k.at, k.msg_id.as_str()) {
             k.at = last.at;
             k.msg_id = last.id;
@@ -327,8 +346,7 @@ pub fn tick(store: &Store, ws: &str, now: i64) -> Result<Report> {
     if !b.enabled {
         return Ok(rep);
     }
-    let since = initial_since(now, &b);
-    let convs = store.reader(|c| conv::with_news(c, ws, since))?;
+    let convs = store.reader(|c| conv::with_news(c, ws))?;
     for (conv, _) in convs {
         store.transaction(|tx| run_conv(tx, ws, &conv, now, &b, false, &mut rep))?;
     }
@@ -342,4 +360,92 @@ pub fn cut_now(store: &Store, ws: &str, conv: &ConvRef, now: i64) -> Result<Repo
     let mut rep = Report::default();
     store.transaction(|tx| run_conv(tx, ws, conv, now, &b, true, &mut rep))?;
     Ok(rep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use steve_modules::testkit::{TestEnv, WS};
+
+    #[test]
+    fn panic_before_or_after_acknowledgement_replays_once_after_reopen() {
+        for fail_at in 1..=2 {
+            let e = TestEnv::new(|_| {});
+            e.store().with_conn(|c| {
+            c.execute_batch("INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+                VALUES ('s1', 'default', 'test', 'group', 's1', 'Group', 1, 1);
+                INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, created)
+                VALUES ('m1', 'default', 's1', 'in', 'backfilled message', 1);")?;
+            Ok::<_, StoreError>(())
+        }).unwrap();
+            let conv = ConvRef::new("space", "s1");
+            let mut checkpoints = 0;
+            let panicked = catch_unwind(AssertUnwindSafe(|| {
+                let _: Result<()> = e.store().transaction(|tx| {
+                    run_conv_step(
+                        tx,
+                        WS,
+                        &conv,
+                        DAY_MS,
+                        &Batching::default(),
+                        true,
+                        &mut Report::default(),
+                        &mut || {
+                            checkpoints += 1;
+                            assert_eq!(
+                                tx.query_row("SELECT count(*) FROM digest_packets", [], |r| r
+                                    .get::<_, i64>(0))
+                                    .unwrap(),
+                                1
+                            );
+                            assert_eq!(
+                                tx.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
+                                    .get::<_, i64>(0))
+                                    .unwrap(),
+                                i64::from(checkpoints == 2)
+                            );
+                            assert_eq!(
+                                tx.query_row("SELECT count(*) FROM digest_pending", [], |r| r
+                                    .get::<_, i64>(0))
+                                    .unwrap(),
+                                i64::from(checkpoints == 1)
+                            );
+                            if checkpoints == fail_at {
+                                panic!("crash at acknowledgement boundary {fail_at}");
+                            }
+                        },
+                    )
+                });
+            }));
+            assert!(panicked.is_err());
+            let reopened = Store::open(
+                e.dir.path().join("steve.sqlite3"),
+                steve_store::FnPublisher(|_| {}),
+            )
+            .unwrap();
+            reopened
+                .reader(|c| {
+                    assert!(queue::list(c, WS, None, None, 50)?.is_empty());
+                    assert_eq!(conv::unread_stats(c, WS, &conv)?.0, 1);
+                    assert!(cursor(c, WS, &conv)?.is_none());
+                    Ok::<_, StoreError>(())
+                })
+                .unwrap();
+            assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 1);
+            assert_eq!(cut_now(&reopened, WS, &conv, DAY_MS).unwrap().windows, 0);
+            reopened
+                .reader(|c| {
+                    assert_eq!(queue::list(c, WS, None, None, 50)?.len(), 1);
+                    assert_eq!(
+                        c.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
+                            .get::<_, i64>(0))?,
+                        1
+                    );
+                    assert_eq!(conv::unread_stats(c, WS, &conv)?, (0, 0, 0));
+                    Ok::<_, StoreError>(())
+                })
+                .unwrap();
+        }
+    }
 }

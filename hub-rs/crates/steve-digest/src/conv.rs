@@ -230,46 +230,21 @@ pub fn info(c: &Connection, ws: &str, conv: &ConvRef) -> Result<Option<ConvInfo>
     }
 }
 
-/// Conversations of `ws` with unreceipted messages (including late arrivals behind the cursor):
-/// `(conv, newest message time)`.
-pub fn with_news(c: &Connection, ws: &str, since: i64) -> Result<Vec<(ConvRef, i64)>> {
+/// Conversations with pending messages, including late arrivals and windows waiting to become due.
+/// The source-write triggers enqueue each eligible message once; acknowledged history is never scanned.
+pub fn with_news(c: &Connection, ws: &str) -> Result<Vec<(ConvRef, i64)>> {
+    let mut st =
+        c.prepare_cached("SELECT conv, newest FROM digest_pending_convs WHERE workspace_id = ?")?;
     let mut out = Vec::new();
-    let mut st = c.prepare_cached(
-        "SELECT s.id, x.last FROM spaces s
-           JOIN (SELECT space_id, max(created) AS last FROM chan_messages
-                  WHERE workspace_id = ?1 AND status IN ('received', 'sent') GROUP BY space_id) x ON x.space_id = s.id
-           LEFT JOIN digest_cursors d ON d.workspace_id = ?1 AND d.conv = 'space:' || s.id
-          WHERE s.workspace_id = ?1 AND EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id AND m.workspace_id = ?1
-            AND m.status IN ('received', 'sent') AND m.created >= coalesce(d.since, ?2) AND NOT EXISTS (SELECT 1 FROM digest_receipts r WHERE r.workspace_id = ?1 AND r.conv = 'space:' || s.id AND r.message_id = m.id))",
-    )?;
-    for r in st.query_map(params![ws, since], |r| {
-        Ok((ConvRef::new("space", &r.get::<_, String>(0)?), r.get(1)?))
-    })? {
-        out.push(r?);
-    }
-    let mut st = c.prepare_cached(
-        "SELECT t.id, x.last FROM mail_threads t
-           JOIN (SELECT thread_id, max(date) AS last FROM mail_messages WHERE workspace_id = ?1 GROUP BY thread_id) x
-             ON x.thread_id = t.id
-           LEFT JOIN digest_cursors d ON d.workspace_id = ?1 AND d.conv = 'mail_thread:' || t.id
-          WHERE t.workspace_id = ?1 AND EXISTS (SELECT 1 FROM mail_messages m WHERE m.thread_id = t.id AND m.workspace_id = ?1
-            AND m.status IN ('received', 'sent') AND m.date >= coalesce(d.since, ?2) AND NOT EXISTS (SELECT 1 FROM digest_receipts r WHERE r.workspace_id = ?1 AND r.conv = 'mail_thread:' || t.id AND r.message_id = m.id))",
-    )?;
-    for r in st.query_map(params![ws, since], |r| {
-        Ok((
-            ConvRef::new("mail_thread", &r.get::<_, String>(0)?),
-            r.get(1)?,
-        ))
-    })? {
-        out.push(r?);
-    }
-    let mut visible = Vec::new();
-    for (conv, at) in out {
-        if owner_sees(c, ws, &conv)? {
-            visible.push((conv, at));
+    for row in st.query_map([ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (key, at) = row?;
+        if let Some(conv) = ConvRef::parse(&key)
+            && owner_sees(c, ws, &conv)?
+        {
+            out.push((conv, at));
         }
     }
-    Ok(visible)
+    Ok(out)
 }
 
 /// Who an account is: `(party, display name, bot)`.
@@ -426,18 +401,28 @@ fn space_messages(
         ),
         (None, None) => ("1", "ASC", (0, "")),
     };
-    let receipt = if unread {
-        "AND NOT EXISTS (SELECT 1 FROM digest_receipts d WHERE d.workspace_id = m.workspace_id AND d.conv = 'space:' || m.space_id AND d.message_id = m.id)"
+    // Drive unread reads from the small inbox, then fetch source rows by primary key.
+    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
+    let (source, pending) = if unread {
+        (
+            "digest_pending p CROSS JOIN chan_messages m ON m.id = p.message_id",
+            "AND p.workspace_id = ?1 AND p.conv = 'space:' || ?2",
+        )
     } else {
-        ""
+        ("chan_messages m", "")
+    };
+    let ordering = if unread {
+        "p.at ASC, p.message_id ASC".to_string()
+    } else {
+        format!("m.created {order}, m.id {order}")
     };
     let sql = format!(
         "SELECT m.id, m.external_id, m.created, m.sender_party_id, m.sender_account_id, m.direction, coalesce(m.text, ''),
                 m.attachments, m.mentions, m.thread_key, m.on_behalf,
                 (SELECT q.id FROM chan_messages q WHERE q.space_id = m.space_id AND q.external_id = m.reply_to AND m.reply_to IS NOT NULL LIMIT 1)
-           FROM chan_messages m
-          WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {receipt}
-          ORDER BY m.created {order}, m.id {order} LIMIT {limit}"
+           FROM {source}
+          WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
+          ORDER BY {ordering} LIMIT ?5"
     );
     struct Row {
         id: String,
@@ -455,7 +440,7 @@ fn space_messages(
     }
     let rows: Vec<Row> = c
         .prepare_cached(&sql)?
-        .query_map(params![ws, space, at, id], |r| {
+        .query_map(params![ws, space, at, id, limit as i64], |r| {
             Ok(Row {
                 id: r.get(0)?,
                 ext: r.get(1)?,
@@ -525,18 +510,28 @@ fn mail_messages(
         (None, Some(u)) => ("(m.date < ?3 OR (m.date = ?3 AND m.id <= ?4))", "DESC", u),
         (None, None) => ("1", "ASC", (0, "")),
     };
-    let receipt = if unread {
-        "AND NOT EXISTS (SELECT 1 FROM digest_receipts d WHERE d.workspace_id = m.workspace_id AND d.conv = 'mail_thread:' || m.thread_id AND d.message_id = m.id)"
+    // Drive unread reads from the small inbox, then fetch source rows by primary key.
+    // CROSS JOIN fixes the loop order so a planner cannot fall back to scanning the conversation.
+    let (source, pending) = if unread {
+        (
+            "digest_pending p CROSS JOIN mail_messages m ON m.id = p.message_id",
+            "AND p.workspace_id = ?1 AND p.conv = 'mail_thread:' || ?2",
+        )
     } else {
-        ""
+        ("mail_messages m", "")
+    };
+    let ordering = if unread {
+        "p.at ASC, p.message_id ASC".to_string()
+    } else {
+        format!("m.date {order}, m.id {order}")
     };
     let sql = format!(
         "SELECT m.id, m.message_id, m.date, m.from_party_id, m.from_account_id, coalesce(nullif(m.body_new, ''), nullif(m.body_text, ''), m.snippet),
                 m.to_addrs, m.cc_addrs, m.from_name, m.from_addr, m.subject, m.bulk, m.refs,
-                (SELECT q.id FROM mail_messages q WHERE q.thread_id = m.thread_id AND q.message_id = m.in_reply_to AND m.in_reply_to IS NOT NULL LIMIT 1)
-           FROM mail_messages m
-          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {receipt}
-          ORDER BY m.date {order}, m.id {order} LIMIT {limit}"
+                (SELECT q.id FROM mail_messages q WHERE q.workspace_id = m.workspace_id AND q.thread_id = m.thread_id AND q.message_id = m.in_reply_to AND m.in_reply_to IS NOT NULL LIMIT 1)
+           FROM {source}
+          WHERE m.workspace_id = ?1 AND m.thread_id = ?2 AND m.status IN ('received', 'sent') AND {cond} {pending}
+          ORDER BY {ordering} LIMIT ?5"
     );
     struct Row {
         id: String,
@@ -556,7 +551,7 @@ fn mail_messages(
     }
     let rows: Vec<Row> = c
         .prepare_cached(&sql)?
-        .query_map(params![ws, thread, at, id], |r| {
+        .query_map(params![ws, thread, at, id, limit as i64], |r| {
             Ok(Row {
                 id: r.get(0)?,
                 mid: r.get(1)?,
@@ -669,38 +664,22 @@ pub fn bot_share(c: &Connection, ws: &str, conv: &ConvRef, n: usize) -> Result<O
     Ok(Some(bots as f64 / msgs.len() as f64))
 }
 
-/// Stored messages not yet cut, including late arrivals behind the timestamp cursor.
-pub fn unread(
-    c: &Connection,
-    ws: &str,
-    conv: &ConvRef,
-    since: i64,
-    limit: usize,
-) -> Result<Vec<Msg>> {
+/// Unconsumed stored messages, including arrivals older than the last cut's timestamp.
+pub fn unread(c: &Connection, ws: &str, conv: &ConvRef, limit: usize) -> Result<Vec<Msg>> {
     match conv.kind.as_str() {
-        "space" => space_messages(c, ws, &conv.id, Some((since, "")), None, limit, true),
-        "mail_thread" => mail_messages(c, ws, &conv.id, Some((since, "")), None, limit, true),
+        "space" => space_messages(c, ws, &conv.id, None, None, limit, true),
+        "mail_thread" => mail_messages(c, ws, &conv.id, None, None, limit, true),
         _ => Ok(Vec::new()),
     }
 }
 
-pub fn unread_stats(
-    c: &Connection,
-    ws: &str,
-    conv: &ConvRef,
-    since: i64,
-) -> Result<(i64, i64, i64)> {
-    let (table, parent, at) = match conv.kind.as_str() {
-        "space" => ("chan_messages", "space_id", "created"),
-        "mail_thread" => ("mail_messages", "thread_id", "date"),
-        _ => return Ok((0, 0, 0)),
-    };
-    let sql = format!("SELECT count(*), coalesce(min({at}), 0), coalesce(max({at}), 0) FROM {table} m
-        WHERE m.workspace_id = ?1 AND m.{parent} = ?2 AND m.{at} >= ?3 AND m.status IN ('received', 'sent')
-        AND NOT EXISTS (SELECT 1 FROM digest_receipts r WHERE r.workspace_id = ?1 AND r.conv = ?4 AND r.message_id = m.id)");
-    Ok(
-        c.query_row(&sql, params![ws, conv.id, since, conv.key()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?,
+pub fn unread_stats(c: &Connection, ws: &str, conv: &ConvRef) -> Result<(i64, i64, i64)> {
+    Ok(c.query_row(
+        "SELECT messages, oldest, newest
+           FROM digest_pending_convs WHERE workspace_id = ? AND conv = ?",
+        params![ws, conv.key()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
+    .optional()?
+    .unwrap_or((0, 0, 0)))
 }

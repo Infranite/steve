@@ -1144,3 +1144,203 @@ async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion
         .unwrap();
     assert_eq!(state, "applied");
 }
+
+#[test]
+fn intake_consumes_only_new_positions_including_older_backfill() {
+    let e = env();
+    patch(&e, "s1", json!({"depth": "record"}));
+    for n in 0..100 {
+        msg(&e, "s1", &format!("history{n}"), NOW, None, None, "history");
+    }
+    let position: i64 = e
+        .store()
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT max(position) FROM digest_pending",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 100);
+    e.store()
+        .reader(|c| {
+            assert!(conv::with_news(c, WS)?.is_empty());
+            assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?, (0, 0, 0));
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM digest_pending", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    // Provider time and id both sort before the consumed messages.
+    msg(
+        &e,
+        "s1",
+        "a-late",
+        NOW - 10 * window::DAY_MS,
+        None,
+        None,
+        "backfill",
+    );
+    msg(&e, "s1", "a-same-time", NOW, None, None, "late id");
+    e.store()
+        .reader(|c| {
+            let (n, first): (i64, i64) = c.query_row(
+                "SELECT count(*), min(position) FROM digest_pending",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(n, 2);
+            assert!(first > position);
+            assert_eq!(conv::unread(c, WS, &cv("s1"), 500)?.len(), 2);
+            assert_eq!(
+                conv::unread_stats(c, WS, &cv("s1"))?,
+                (2, NOW - 10 * window::DAY_MS, NOW)
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 2);
+    assert_eq!(window::tick(e.store(), WS, NOW).unwrap().recorded, 0);
+    e.store()
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM digest_receipts", [], |r| r
+                    .get::<_, i64>(0))?,
+                102
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn inbox_tracks_status_changes_moves_and_deletes_without_replaying_receipts() {
+    let e = env();
+    msg(&e, "s1", "outbound", NOW, None, None, "draft");
+    e.store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
+                [],
+            )?;
+            assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
+            // Same physical source row, newly eligible after an earlier tick saw pending status.
+            c.execute(
+                "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
+                [],
+            )?;
+            assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 1);
+            c.execute(
+                "UPDATE chan_messages SET space_id = 's2', created = ? WHERE id = 'outbound'",
+                [NOW - 1],
+            )?;
+            assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
+            assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?, (1, NOW - 1, NOW - 1));
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        window::cut_now(e.store(), WS, &cv("s2"), NOW)
+            .unwrap()
+            .windows,
+        1
+    );
+    e.store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE chan_messages SET status = 'pending' WHERE id = 'outbound'",
+                [],
+            )?;
+            c.execute(
+                "UPDATE chan_messages SET status = 'sent' WHERE id = 'outbound'",
+                [],
+            )?;
+            assert_eq!(conv::unread_stats(c, WS, &cv("s2"))?.0, 0);
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    msg(
+        &e,
+        "s1",
+        "deleted",
+        NOW,
+        None,
+        None,
+        "delete before cutting",
+    );
+    e.store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM chan_messages WHERE id = 'deleted'", [])?;
+            assert_eq!(conv::unread_stats(c, WS, &cv("s1"))?.0, 0);
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn bounded_initial_lookback_does_not_exclude_later_backfill() {
+    let e = env();
+    msg(
+        &e,
+        "s1",
+        "excluded-history",
+        NOW - 2 * window::DAY_MS,
+        None,
+        None,
+        "outside initial lookback",
+    );
+    msg(
+        &e,
+        "s1",
+        "recent",
+        NOW,
+        None,
+        None,
+        "inside initial lookback",
+    );
+    let b = queue::Batching {
+        backlog_days: 1,
+        ..Default::default()
+    };
+    e.store()
+        .transaction(|tx| {
+            window::run_conv(
+                tx,
+                WS,
+                &cv("s1"),
+                NOW,
+                &b,
+                true,
+                &mut window::Report::default(),
+            )
+        })
+        .unwrap();
+    msg(
+        &e,
+        "s1",
+        "late-history",
+        NOW - 3 * window::DAY_MS,
+        None,
+        None,
+        "inserted after initialization",
+    );
+    assert_eq!(
+        window::cut_now(e.store(), WS, &cv("s1"), NOW)
+            .unwrap()
+            .windows,
+        1
+    );
+    assert_eq!(
+        window::cut_now(e.store(), WS, &cv("s1"), NOW)
+            .unwrap()
+            .windows,
+        0
+    );
+    let ps = packets(&e);
+    assert_eq!(ps.iter().map(|p| p.count).sum::<i64>(), 2);
+    assert!(ps.iter().any(|p| p.first_id == "late-history"));
+}
