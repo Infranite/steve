@@ -6,6 +6,7 @@ mod node_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::json;
@@ -47,10 +48,7 @@ async fn only_the_owner_removes_a_node_which_is_asked_over_its_link_then_unpaire
     let fake = FakeNode::new(node.as_str());
     fake.set_features(vec![FEATURE_NODE_REMOVE.into()]);
     let l = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
 
     let (s, _) = h
         .post("u2", &format!("/api/nodes/{node}/remove"), json!({}))
@@ -66,11 +64,11 @@ async fn only_the_owner_removes_a_node_which_is_asked_over_its_link_then_unpaire
         .await;
     assert_eq!(s, 202, "{v}");
     let op = v["operation"].as_str().unwrap().to_string();
-    until("unpaired", 10, || {
+    eventually_sync("unpaired", || {
         h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "revoked"
     })
     .await;
-    until("recorded", 5, || {
+    eventually_sync("recorded", || {
         h.q::<String>(&format!(
             "SELECT phase FROM node_removals WHERE operation_id='{op}'"
         )) == "removed"
@@ -113,10 +111,7 @@ async fn an_offline_node_or_one_of_an_earlier_release_gets_the_command_to_run_th
     let (id, old) = h.paired("u1").await;
     let fake = FakeNode::new(old.as_str());
     let _l = dial(&h, &id, &old, fake.clone(), 1).await.unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(old.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(old.as_str()).is_some()).await;
     let (s, v) = h
         .post("u1", &format!("/api/nodes/{old}/remove"), json!({}))
         .await;

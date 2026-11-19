@@ -77,14 +77,12 @@ fn logged(log: &Log) -> Vec<String> {
     log.lock().unwrap().clone()
 }
 
-/// Waits (≤3 s) until the log has `n` entries.
-async fn until(log: &Log, n: usize) -> Vec<String> {
-    for _ in 0..300 {
-        if log.lock().unwrap().len() >= n {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+/// Return the observed runtime log after its expected entries have committed.
+async fn wait_log(log: &Log, n: usize) -> Vec<String> {
+    steve_runtime::testkit::eventually_sync("runtime log reaches its expected entry count", || {
+        log.lock().unwrap().len() >= n
+    })
+    .await;
     logged(log)
 }
 
@@ -109,7 +107,7 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
     });
     let i = new_item(&k, "写一首诗");
     assert_eq!(
-        until(&log, 2).await,
+        wait_log(&log, 2).await,
         ["a created ST-1 run", "b created ST-1 run"]
     );
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
@@ -118,7 +116,7 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
     assert!(k.wait(|| k.rt.st().cancelled.contains(&sid)));
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
     assert_eq!(
-        until(&log, 4).await[2..],
+        wait_log(&log, 4).await[2..],
         ["a dropped ST-1 drop", "b dropped ST-1 drop"]
     );
 }
@@ -143,7 +141,7 @@ async fn a_proposal_declined_is_a_drop() {
     let d = k.db().decisions_of_item(&i.id).unwrap().remove(0);
     k.core.resolve(&d.id, "no", "", "me").unwrap();
     assert_eq!(
-        until(&log, 2).await,
+        wait_log(&log, 2).await,
         ["a created ST-1 wait", "a dropped ST-1 drop"]
     );
 }
@@ -158,7 +156,7 @@ async fn accepted_asks_every_hook_then_core_finishes_and_reports_it() {
     });
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let got = until(&log, 4).await;
+    let got = wait_log(&log, 4).await;
     assert_eq!(
         got,
         [
@@ -186,7 +184,7 @@ async fn the_first_takeover_wins_and_core_does_not_finish() {
     });
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    until(&log, 2).await;
+    wait_log(&log, 2).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         logged(&log),
@@ -222,7 +220,7 @@ async fn an_acceptance_undone_before_the_hooks_answered_does_not_finish() {
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     k.core.undo_decision(&x.decision, "me").unwrap();
-    until(&log, 1).await;
+    wait_log(&log, 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     /* back to waiting for the reopened acceptance */
     assert_eq!(k.status(&x.id).0, "wait");
@@ -266,7 +264,7 @@ async fn auto_acceptance_asks_the_hooks_too() {
         )
         .unwrap();
     assert_eq!(
-        until(&log, 2).await,
+        wait_log(&log, 2).await,
         [
             format!("a accepted {} run", x.id),
             format!("a finished {} done", x.id)
@@ -706,7 +704,7 @@ async fn an_observer_that_fails_changes_no_outcome_and_stops_no_other_hook() {
     });
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    let got = until(&log, 2).await;
+    let got = wait_log(&log, 2).await;
     assert_eq!(
         got,
         [
@@ -726,7 +724,7 @@ async fn an_observer_that_fails_changes_no_outcome_and_stops_no_other_hook() {
     // the worker lives on: the next item's hooks still run
     let y = k.delivered(false);
     k.core.resolve(&y.decision, "pass", "", "me").unwrap();
-    assert_eq!(until(&log, 4).await.len(), 4);
+    assert_eq!(wait_log(&log, 4).await.len(), 4);
     assert_eq!(k.phase(&y.id), "closed");
 }
 
@@ -755,7 +753,7 @@ async fn a_consultation_that_dies_is_no_confirmation() {
     );
     // the hook worker survived it
     let y = new_item(&k, "下一件");
-    assert_eq!(until(&log, 1).await, [format!("b created {} run", y.id)]);
+    assert_eq!(wait_log(&log, 1).await, [format!("b created {} run", y.id)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -785,7 +783,10 @@ async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_
         0,
         "never closed over the missing consultation"
     );
-    assert_eq!(until(&log, 1).await, [format!("gh accepted {} run", x.id)]);
+    assert_eq!(
+        wait_log(&log, 1).await,
+        [format!("gh accepted {} run", x.id)]
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     // gh took the wrap-up over: closed once it says so
     assert_eq!(k.phase(&x.id), "closing");

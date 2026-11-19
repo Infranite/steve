@@ -6,6 +6,7 @@ mod node_harness;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -68,11 +69,8 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     let l = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
         .await
         .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    until("its machine kept", 5, || {
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
+    eventually_sync("its machine kept", || {
         h.q::<i64>("SELECT host IS NOT NULL FROM nodes WHERE local=0") == 1
     })
     .await;
@@ -102,7 +100,7 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
 
     // away: how it last came and what it is stay, the latency goes
     l.conn.close(None, steve_node_wire::close::GOODBYE, "bye");
-    until("unlinked", 5, || {
+    eventually_sync("unlinked", || {
         h.svc.registry.current(node.as_str()).is_none()
     })
     .await;
@@ -140,10 +138,7 @@ async fn a_link_through_tailcat_says_so() {
     )
     .await
     .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let v = row(&h, node.as_str()).await;
     assert_eq!(
         (&v["link"]["via"], &v["link"]["route"], &v["link"]["peer"]),
@@ -164,7 +159,7 @@ async fn every_change_of_a_node_tells_its_owner() {
     assert_eq!(node_events(&seen, n), 2);
     let l = dial(&h, &id, &node, FakeNode::new(n), 1).await.unwrap();
     // linked, and what its machine is
-    until("linked and described", 5, || node_events(&seen, n) >= 4).await;
+    eventually_sync("linked and described", || node_events(&seen, n) >= 4).await;
     let steps = [
         ("limit", json!({"max_sessions": 3})),
         ("pause", json!({})),
@@ -188,11 +183,11 @@ async fn every_change_of_a_node_tells_its_owner() {
     assert_eq!(node_events(&seen, n), before);
     // gone away
     l.conn.close(None, steve_node_wire::close::GOODBYE, "bye");
-    until("unlinked", 5, || node_events(&seen, n) > before).await;
+    eventually_sync("unlinked", || node_events(&seen, n) > before).await;
     // the same machine again says nothing new about it
     let before = node_events(&seen, n);
     let _l = dial(&h, &id, &node, FakeNode::new(n), 2).await.unwrap();
-    until("linked again", 5, || node_events(&seen, n) > before).await;
+    eventually_sync("linked again", || node_events(&seen, n) > before).await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(
         node_events(&seen, n),

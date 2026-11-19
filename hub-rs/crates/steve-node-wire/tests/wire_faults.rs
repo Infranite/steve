@@ -5,6 +5,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use async_trait::async_trait;
 use common::*;
@@ -46,7 +47,7 @@ async fn lost_after_it_was_sent_is_uncertain_and_asked_not_redone() {
         let c = c.clone();
         async move { remote.start_turn(c).await }
     });
-    until("the node took it", || starts(&fake) == 1).await;
+    eventually_sync("the node took it", || starts(&fake) == 1).await;
     w.hub_faults.cut_now();
     let e = call.await.unwrap().unwrap_err();
     assert_eq!(e.code, ErrorCode::OutcomeUnknown);
@@ -262,7 +263,7 @@ async fn a_lost_tool_call_is_unknown_to_the_agent() {
         let q = q.clone();
         async move { tools.call(q).await }
     });
-    until("the hub took it", || {
+    eventually_sync("the hub took it", || {
         w.tools.calls.lock().unwrap().len() == 1
     })
     .await;

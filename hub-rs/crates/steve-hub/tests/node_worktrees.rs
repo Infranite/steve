@@ -4,7 +4,7 @@
 //! session opens again; an item paused while its session opened starts nothing.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use steve_hub::wire::node_runtime::{
     Binding, NodeDomain, NodeRuntime, Planned, Release, Sink, WorkspaceFact,
@@ -132,16 +132,6 @@ impl H {
     }
 }
 
-async fn until(what: &str, f: impl Fn() -> bool) {
-    for _ in 0..1000 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 /// A normal item's pause must also gate the coordinator's direct follow-up path. The core's
 /// turn-end hook runs after this path, too late to protect the queued input on its own.
 #[tokio::test]
@@ -149,7 +139,7 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     let h = hub();
     h.bind(worktree());
     h.rt.prompt(S, "first turn", "user", &[]).unwrap();
-    until("the first turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the first turn", || h.count("start_turn") == 1).await;
     let first = h.rt.active_attempt(S).unwrap().unwrap();
     let execution: ExecutionRef =
         serde_json::from_str(&h.q::<String>("SELECT execution FROM runtime_attempts LIMIT 1"))
@@ -162,7 +152,7 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     // is not the attempt's completion; the Node still owns the running work until its event.
     h.exec("UPDATE items SET status='pause' WHERE id='i1'");
     assert!(h.rt.cancel(S).unwrap());
-    until("the cancel request", || h.count("cancel") == 1).await;
+    eventually_sync("the cancel request", || h.count("cancel") == 1).await;
     assert_eq!(
         h.rt.active_attempt(S).unwrap().as_deref(),
         Some(first.as_str())
@@ -177,7 +167,7 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
     completion.outcome = Outcome::Cancelled;
     completion.stop_reason = "cancelled".into();
     h.node.finish(&execution, completion).await.unwrap();
-    until("the cancelled attempt's completion", || {
+    eventually_sync("the cancelled attempt's completion", || {
         h.q::<String>("SELECT state FROM runtime_attempts ORDER BY created LIMIT 1") == "finished"
     })
     .await;
@@ -196,7 +186,7 @@ async fn a_paused_item_keeps_queued_input_until_cancel_finishes_and_resume_claim
 
     h.exec("UPDATE items SET status='run' WHERE id='i1'");
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
-    until("the resumed turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the resumed turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Busy);
     assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 2);
     assert_eq!(
@@ -214,9 +204,9 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
     let h = hub();
     h.bind(worktree());
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("the turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("the turn", || h.methods().contains(&"start_turn")).await;
     // the session waiting for it hears where it is, once
-    until("prepared", || h.prepared() == 1).await;
+    eventually_sync("prepared", || h.prepared() == 1).await;
     match &h.facts()[0] {
         WorkspaceFact::Prepared { view, .. } => {
             assert_eq!(view.branch.as_deref(), Some("steve/i1"));
@@ -237,9 +227,9 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
         .unwrap();
     let exec: ExecutionRef = serde_json::from_str(&exec).unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
 
     // given back through the ledger, told once, with its subject
     assert!(h.rt.tidy_workspace(ITEM, true).unwrap());
@@ -247,7 +237,7 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
         h.rt.tidy_workspace(ITEM, true).unwrap(),
         "on its way already: nothing new"
     );
-    until("tidied", || {
+    eventually_sync("tidied", || {
         h.facts()
             .iter()
             .any(|f| matches!(f, WorkspaceFact::Tidied { item, removed: true, .. } if item == ITEM))
@@ -265,13 +255,13 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
 
     // the next message makes it again (the same spec), then opens and runs
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("the second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("prepare_workspace"), 2);
     let m = h.methods();
     let second_prepare = m.iter().rposition(|x| *x == "prepare_workspace").unwrap();
     let last_open = m.iter().rposition(|x| *x == "open_session").unwrap();
     assert!(second_prepare < last_open, "{m:?}");
-    until("prepared again", || h.prepared() == 2).await;
+    eventually_sync("prepared again", || h.prepared() == 2).await;
 }
 
 #[tokio::test]
@@ -283,14 +273,14 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     );
     h.bind(worktree());
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("the failure", || {
+    eventually_sync("the failure", || {
         h.facts()
             .iter()
             .any(|f| matches!(f, WorkspaceFact::PrepareFailed { session, error: Some(e) } if session == S && e.code == ErrorCode::Invalid))
     })
     .await;
     // the open never goes (it would wait forever); the session is let go, the message stays
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("open_session"), 0);
     let open: String = h.q("SELECT state FROM node_commands WHERE method='open_session'");
     assert_eq!(open, "rejected");
@@ -303,13 +293,13 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     // Further input stays held until the user explicitly retries the failed startup.
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Held);
     h.rt.retry_open(S, &build::choice()).unwrap();
-    until("the turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("the turn", || h.methods().contains(&"start_turn")).await;
     assert_eq!(h.count("prepare_workspace"), 1, "the refused one never ran");
     assert_eq!(
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='prepare_workspace'"),
         2
     );
-    until("prepared", || h.prepared() == 1).await;
+    eventually_sync("prepared", || h.prepared() == 1).await;
 }
 
 #[tokio::test]
@@ -318,7 +308,7 @@ async fn an_item_paused_while_its_session_opened_starts_nothing_until_it_continu
     h.exec("UPDATE items SET status='pause' WHERE id='i1'");
     h.bind(worktree());
     assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Held);
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
     assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"), 0);
     assert_eq!(h.count("start_turn"), 0, "{:?}", h.methods());
@@ -330,7 +320,7 @@ async fn an_item_paused_while_its_session_opened_starts_nothing_until_it_continu
         h.rt.prompt(S, "继续这个事项。", "me", &[]).unwrap(),
         Planned::Created
     );
-    until("the turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("the turn", || h.methods().contains(&"start_turn")).await;
 }
 
 #[tokio::test]
@@ -338,12 +328,12 @@ async fn a_scratch_or_existing_workspace_is_not_one_the_node_makes_or_tidies() {
     let h = hub();
     h.bind(PrepareKind::Scratch);
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("the turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("the turn", || h.methods().contains(&"start_turn")).await;
     assert!(!h.rt.makes_workspace(S).unwrap());
     assert!(!h.rt.tidy_workspace(ITEM, true).unwrap());
     assert_eq!(h.count("tidy_workspace"), 0);
     // its prepare is told too, without a branch (the Hub records no worktree for it)
-    until("prepared", || h.prepared() == 1).await;
+    eventually_sync("prepared", || h.prepared() == 1).await;
     assert!(
         h.facts()
             .iter()
@@ -359,10 +349,10 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
     h.bind(PrepareKind::Existing {
         dir: root("scratch", ITEM),
     });
-    until("scratch session ready", || h.phase() == "ready").await;
+    eventually_sync("scratch session ready", || h.phase() == "ready").await;
     assert!(!h.rt.makes_workspace(S).unwrap());
     h.rt.release(S).unwrap();
-    until("scratch session released", || h.phase() == "released").await;
+    eventually_sync("scratch session released", || h.phase() == "released").await;
     h.exec("UPDATE sessions SET status='ended' WHERE id='s1';
         INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project','/project','git',1,1,1);
         UPDATE items SET project_id='p1',branch='steve/i1' WHERE id='i1';
@@ -378,7 +368,7 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
     let resource = plan.resource.clone();
     assert_ne!(resource, "item:i1");
     h.rt.bind(&plan).unwrap();
-    until("project session ready", || {
+    eventually_sync("project session ready", || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "ready"
     })
     .await;
@@ -390,17 +380,17 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
     );
     assert!(!h.rt.tidy_session_workspace(S, true).unwrap());
     h.rt.release("s2").unwrap();
-    until("project session released", || {
+    eventually_sync("project session released", || {
         h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "released"
     })
     .await;
     assert!(h.rt.tidy_session_workspace("s2", true).unwrap());
-    until("new workspace tidied", || h.count("tidy_workspace") == 1 && h.q::<i64>("SELECT count(*) FROM node_commands WHERE method='tidy_workspace' AND state='finished'") == 1).await;
+    eventually_sync("new workspace tidied", || h.count("tidy_workspace") == 1 && h.q::<i64>("SELECT count(*) FROM node_commands WHERE method='tidy_workspace' AND state='finished'") == 1).await;
     let target: String = h.q("SELECT json_extract(request,'$.body.workspace.id') FROM node_commands WHERE method='tidy_workspace'");
     assert_eq!(target, derived_id("w", &resource));
     h.rt.prompt("s2", "continue in the project", "user", &[])
         .unwrap();
-    until("project session reopened", || h.count("start_turn") == 1).await;
+    eventually_sync("project session reopened", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("prepare_workspace"), 3);
     let last: String = h.q("SELECT json_extract(request,'$.body.resource') FROM node_commands WHERE method='prepare_workspace' ORDER BY rowid DESC LIMIT 1");
     assert_eq!(last, resource);

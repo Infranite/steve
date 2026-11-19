@@ -41,6 +41,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 
@@ -289,24 +291,9 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    false
-}
-
-fn wait(secs: u64, mut f: impl FnMut() -> bool) -> impl std::future::Future<Output = bool> {
-    until(secs, move || std::future::ready(f()))
-}
-
 /// Up and serving the full app.
 async fn serving(h: &Home) {
-    let ok = until(60, || async {
+    let ok = eventually("node_real condition", || async {
         let Ok(r) = reqwest::Client::new()
             .get(format!("{}/healthz", h.base()))
             .timeout(Duration::from_secs(2))
@@ -528,7 +515,7 @@ impl Real {
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
         assert!(
-            wait(60, || {
+            eventually_sync("node_real state", || {
                 sid = self
                     .h
                     .one("SELECT id FROM sessions WHERE item_id=?", &[&item]);
@@ -540,7 +527,7 @@ impl Real {
         );
         let sid = sid.expect("session");
         assert!(
-            wait(60, || self.h.count(
+            eventually_sync("node_real state", || self.h.count(
                 "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
                 &[&sid]
             ) == 1)
@@ -639,12 +626,12 @@ impl Real {
     /// Waits for the session's permission mode to be configured on the Node, failing with the log.
     async fn configure_over(&self, sid: &str, permissions: &str) {
         assert!(
-            wait(60, || self.configured(sid, permissions) == 1).await,
+            eventually_sync("node_real state", || self.configured(sid, permissions) == 1).await,
             "configured {permissions} on the Node; log:\n{}",
             hub_log(&self.h)
         );
         assert!(
-            wait(30, || self
+            eventually_sync("node_real state", || self
                 .h
                 .one(
                     "SELECT phase FROM runtime_sessions WHERE session_id=?",
@@ -662,7 +649,7 @@ impl Real {
     async fn turn_over(&self, sid: &str, n: i64, what: &str) {
         let since = now_ms();
         let mut failed = None;
-        let over = wait(TURN, || {
+        let over = eventually_sync("node_real state", || {
             failed = self.failed(sid, since);
             failed.is_some() || self.done(sid, n)
         })
@@ -690,7 +677,7 @@ impl Real {
         let since = now_ms();
         let (mut card, mut failed) = (None, None);
         assert!(
-            wait(TURN, || {
+            eventually_sync("node_real state", || {
                 card = self.open_card(sid);
                 failed = self.failed(sid, since);
                 card.is_some() || failed.is_some()
@@ -1030,14 +1017,14 @@ async fn a_cancel_mid_turn_ends_it() {
         )
         .await;
     // some output first if it streams; the turn must still be running either way
-    let streamed = wait(90, || r.said(&sid, 0, "twenty") > 0).await;
+    let streamed = eventually_sync("node_real state", || r.said(&sid, 0, "twenty") > 0).await;
     assert!(!r.done(&sid, 1), "still running (streamed: {streamed})");
     let (st, v) =
         r.c.call("POST", &format!("/api/sessions/{sid}/cancel"), None)
             .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
     assert!(
-        wait(60, || r.done(&sid, 1)).await,
+        eventually_sync("node_real state", || r.done(&sid, 1)).await,
         "the cancelled turn is over; log:\n{}",
         hub_log(&r.h)
     );
@@ -1143,7 +1130,7 @@ async fn a_released_session_reopens_with_its_conversation() {
     r.hub.stop();
     r.restart().await;
     assert!(
-        wait(60, || r
+        eventually_sync("node_real state", || r
             .h
             .one(
                 "SELECT phase FROM runtime_sessions WHERE session_id=?",
@@ -1237,7 +1224,7 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     // B6: never re-run; the Hub gives the cut attempt up once the Node confirms its harness is
     // gone, and the agent is continued
     assert!(
-        wait(60, || r.h.count(
+        eventually_sync("node_real state", || r.h.count(
             "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='node_restarted'",
             &[&turn],
         ) == 1)
@@ -1246,7 +1233,7 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
         hub_log(&r.h)
     );
     assert!(
-        wait(30, || r.said(&sid, 0, "Node 重启了") > 0).await,
+        eventually_sync("node_real state", || r.said(&sid, 0, "Node 重启了") > 0).await,
         "the session says why"
     );
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1463,7 +1450,7 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
     }
     let mut own = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_real state", || {
             own = pid_of(&bg);
             own.is_some()
         })
@@ -1493,7 +1480,10 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
         ("resolved", "decided"),
         "{w:?}"
     );
-    assert!(wait(10, || !alive(own)).await, "the background sleep ended");
+    assert!(
+        eventually_sync("node_real state", || !alive(own)).await,
+        "the background sleep ended"
+    );
 
     // not the harness's: left to the user
     /// Killed with the case, even when it fails.
@@ -1522,7 +1512,7 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
     )
     .await;
     let mut w = None;
-    let looked = wait(TURN, || {
+    let looked = eventually_sync("node_real state", || {
         w = yolo_word(&r, &sid, since);
         w.is_some() || r.done(&sid, 3)
     })

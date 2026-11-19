@@ -8,6 +8,7 @@ mod node_harness;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use steve_acp::AcpConfig;
@@ -71,7 +72,7 @@ async fn the_fake_node_answers_the_same_over_a_real_socket() {
     let fake = FakeNode::new(node.as_str());
     let _l = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let remote = h.fleet.remote(&node);
-    until("attached", 5, || remote.generation() == Some(1)).await;
+    eventually_sync("attached", || remote.generation() == Some(1)).await;
     let b = scenario(remote.as_ref(), node.as_str()).await;
     assert_eq!(a, b);
     assert_eq!(direct.log(), fake.log());
@@ -199,10 +200,7 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
         steve_node_cli::dial::serve(local, &pairing, &id, &Trust::LoopbackPlaintext).await
     });
     let remote = h.fleet.remote(&node);
-    until("attached with 800 heads", 10, || {
-        remote.generation() == Some(1)
-    })
-    .await;
+    eventually_sync("attached with 800 heads", || remote.generation() == Some(1)).await;
     let snapshot = steve_hub::wire::node_runtime::read_snapshot(remote.as_ref(), 100)
         .await
         .unwrap();
@@ -268,7 +266,7 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
         &[],
     )
     .unwrap();
-    until("permission card", 20, || {
+    eventually_sync("permission card", || {
         h.q::<i64>(
             "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
         ) == 1
@@ -306,7 +304,7 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
         called["result"]["content"][0]["text"], "Steve updated the item.",
         "{called}"
     );
-    until("turn end", 20, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     let calls = h.service.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "s1");
@@ -336,10 +334,7 @@ async fn a_dropped_link_reconnects_and_replays_once() {
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     rt.prompt("s1", "@say one @sleep 1200 @say two", "user", &[])
         .unwrap();
-    until("first words", 20, || {
-        texts(&h, &node).join("").contains("one")
-    })
-    .await;
+    eventually_sync("first words", || texts(&h, &node).join("").contains("one")).await;
     let g1 = h.svc.registry.current(node.as_str()).unwrap();
     // the link breaks mid-turn; the Node journals on and dials again
     h.svc.registry.conn(node.as_str()).unwrap().close(
@@ -347,7 +342,7 @@ async fn a_dropped_link_reconnects_and_replays_once() {
         steve_node_wire::close::GOODBYE,
         "test",
     );
-    until("turn end", 30, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     let g2 = h.svc.registry.current(node.as_str()).unwrap();
     assert!(g2 > g1, "a new generation: {g1} → {g2}");
     let t = texts(&h, &node).join("");
@@ -387,7 +382,7 @@ async fn a_remote_local_node_refuses_history() {
     )
     .unwrap();
     let remote = h.fleet.remote(&node);
-    until("attached", 10, || remote.generation().is_some()).await;
+    eventually_sync("attached", || remote.generation().is_some()).await;
     let unsupported = |r: String| {
         assert!(r.contains("\"unsupported\""), "{r}");
         assert!(!r.contains("secret"), "{r}");
@@ -541,7 +536,7 @@ async fn a_remote_node_takes_only_its_owners_work() {
     // the owner's alone again: it runs
     member(false);
     rt.prompt("s1", "@say hello", "user", &[]).unwrap();
-    until("turn end", 20, || !h.ends.turns.lock().unwrap().is_empty()).await;
+    eventually_sync("turn end", || !h.ends.turns.lock().unwrap().is_empty()).await;
     rt.bind(&binding).unwrap();
     n.task.abort();
     n.node.shutdown().await;
@@ -611,10 +606,7 @@ async fn a_remote_nodes_link_failure_reaches_the_devices_page() {
     // once it links, the reason is gone
     let fake = FakeNode::new(node.as_str());
     let _l = dial(&h, &id, &node, fake, 1).await.unwrap();
-    until("linked", 10, || {
-        h.fleet.remote(&node).generation().is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.fleet.remote(&node).generation().is_some()).await;
     assert!(error_of(&nodes().await).is_null());
 }
 
@@ -634,7 +626,7 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
         })
         .unwrap();
     let n = local_node(&h, id, &node).await;
-    until("the fault reported", 15, || {
+    eventually_sync("the fault reported", || {
         h.fleet.link_failure(node.as_str()).is_some()
     })
     .await;
@@ -647,10 +639,7 @@ async fn the_dial_loop_reports_a_fault_and_links_once_it_clears() {
             Ok(())
         })
         .unwrap();
-    until("linked", 40, || {
-        h.fleet.remote(&node).generation().is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.fleet.remote(&node).generation().is_some()).await;
     assert_eq!(h.fleet.link_failure(node.as_str()), None);
     n.task.abort();
 }

@@ -131,13 +131,3 @@ impl HubTools for StubTools {
         Err(ApiError::new(ErrorCode::Unsupported, "no"))
     }
 }
-
-pub async fn until(what: &str, f: impl Fn() -> bool) {
-    for _ in 0..500 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
-}

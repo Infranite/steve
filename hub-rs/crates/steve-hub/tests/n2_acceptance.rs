@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_node_api::testkit::FakeNode;
@@ -193,23 +195,8 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
     Hub(c.spawn().expect("spawn hub"))
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
-fn wait(secs: u64, mut f: impl FnMut() -> bool) -> impl std::future::Future<Output = bool> {
-    until(secs, move || std::future::ready(f()))
-}
-
 async fn serving(h: &Home) {
-    let ok = until(60, || async {
+    let ok = eventually("n2_acceptance condition", || async {
         let Ok(r) = reqwest::Client::new()
             .get(format!("{}/healthz", h.base()))
             .timeout(Duration::from_secs(2))
@@ -308,7 +295,7 @@ impl Client {
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
         assert!(
-            wait(30, || {
+            eventually_sync("n2_acceptance state", || {
                 sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
                 sid.is_some()
             })
@@ -550,7 +537,7 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     serving(&h).await;
     let p = n.run();
     assert!(
-        wait(30, || {
+        eventually_sync("n2_acceptance state", || {
             h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
         })
         .await,
@@ -567,7 +554,9 @@ async fn a_second_node_runs_a_whole_item() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "远程验收 @say hello-remote-5R").await;
     assert!(
-        wait(60, || said(&h, &sid, "hello-remote-5R") > 0).await,
+        eventually_sync("n2_acceptance state", || said(&h, &sid, "hello-remote-5R")
+            > 0)
+        .await,
         "the agent's reply came back over the link; hub:\n{}\nnode:\n{}",
         h.log(),
         n.log()
@@ -581,14 +570,18 @@ async fn a_second_node_runs_a_whole_item() {
         Some(node.as_str()),
         "bound to the second Node"
     );
-    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    assert!(
+        eventually_sync("n2_acceptance state", || attempts(&h, &sid, "finished")
+            >= 1)
+        .await
+    );
     assert_eq!(n.got("hello-remote-5R"), 1, "the Node's agent got it once");
 
     // a permission request becomes a card on the Hub; its answer reaches the Node's agent
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
     assert!(
-        wait(60, || {
+        eventually_sync("n2_acceptance state", || {
             card = h.one(
                 "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
                 &sid,
@@ -610,7 +603,9 @@ async fn a_second_node_runs_a_whole_item() {
         .await;
     assert_eq!(st, 200, "answer: {v}");
     assert!(
-        wait(60, || said(&h, &sid, "perm:selected:") > 0).await,
+        eventually_sync("n2_acceptance state", || said(&h, &sid, "perm:selected:")
+            > 0)
+        .await,
         "the Node's agent got the answer; node:\n{}",
         n.log()
     );
@@ -644,7 +639,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
         .item(&h, "重启验收 @say one-8T @sleep 6000 @say two-8T")
         .await;
     assert!(
-        wait(60, || said(&h, &sid, "one-8T") > 0).await,
+        eventually_sync("n2_acceptance state", || said(&h, &sid, "one-8T") > 0).await,
         "the turn started on the Node; hub:\n{}\nnode:\n{}",
         h.log(),
         n.log()
@@ -654,14 +649,16 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     let _hub = spawn_hub(&h, Some(&node));
     serving(&h).await;
     assert!(
-        wait(90, || said(&h, &sid, "two-8T") > 0).await,
+        eventually_sync("n2_acceptance state", || said(&h, &sid, "two-8T") > 0).await,
         "the rest of the turn reached the restarted Hub; hub:\n{}\nnode:\n{}",
         h.log(),
         n.log()
     );
     assert!(
         // the turn, and Steve's own follow-ups after it (the agent delivered nothing)
-        wait(30, || attempts(&h, &sid, "finished") >= 1).await,
+        eventually_sync("n2_acceptance state", || attempts(&h, &sid, "finished")
+            >= 1)
+        .await,
         "{}\nhub:\n{}\nnode:\n{}",
         dump(&h, &sid),
         h.log(),
@@ -690,11 +687,11 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     // up on its own once the restarted Node confirms its harness is gone (B6)
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
-    assert!(wait(60, || n.got("断电验收-K7") == 1).await);
+    assert!(eventually_sync("n2_acceptance state", || n.got("断电验收-K7") == 1).await);
     p.kill();
     let _p = n.run();
     assert!(
-        wait(90, || {
+        eventually_sync("n2_acceptance state", || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
                 &sid,
@@ -734,13 +731,13 @@ async fn another_nodes_session_is_refused() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
     assert!(
-        wait(60, || n.got("iso-3M") == 1).await,
+        eventually_sync("n2_acceptance state", || n.got("iso-3M") == 1).await,
         "node:\n{}",
         n.log()
     );
     // what the harness said is in before the count below is taken
     assert!(
-        wait(60, || said(&h, &sid, "iso-3M") >= 1).await,
+        eventually_sync("n2_acceptance state", || said(&h, &sid, "iso-3M") >= 1).await,
         "node:\n{}",
         n.log()
     );
@@ -1064,7 +1061,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let _proc_a = a.run();
     let mut proc_b = b.run();
     assert!(
-        wait(30, || [&id_a, &id_b].iter().all(|id| {
+        eventually_sync("n2_acceptance state", || [&id_a, &id_b].iter().all(|id| {
             h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0
         }))
         .await
@@ -1204,7 +1201,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(run["dispatch"]["team"]["source"], "default");
     assert_eq!(run["dispatch"]["placement"]["node"], id_a);
     assert!(
-        wait(35, || a.got("never-moved") == 1).await,
+        eventually_sync("n2_acceptance state", || a.got("never-moved") == 1).await,
         "A received work: {}",
         a.log()
     );
@@ -1212,7 +1209,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let second = make(&c, bot, None, "@say default-to-B").await;
     assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
     assert!(
-        wait(35, || b.got("default-to-B") == 1).await,
+        eventually_sync("n2_acceptance state", || b.got("default-to-B") == 1).await,
         "B received work: {}",
         b.log()
     );
@@ -1220,7 +1217,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
     assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
     assert!(
-        wait(30, || said(&h, sid, "never-moved") > 0).await,
+        eventually_sync("n2_acceptance state", || said(&h, sid, "never-moved") > 0).await,
         "old session completed: {}",
         dump(&h, sid)
     );
@@ -1232,7 +1229,7 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
 
     proc_b.kill();
     assert!(
-        until(15, || async {
+        eventually("n2_acceptance condition", || async {
             let (_, v) = c.call("GET", &path, None).await;
             v["candidates"].as_array().is_some_and(|ns| {
                 ns.iter()

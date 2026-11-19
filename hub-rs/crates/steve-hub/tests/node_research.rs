@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_core::thread::{ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd, ToolSeen};
@@ -76,17 +77,6 @@ impl ResearchSink for Seen {
             .lock()
             .unwrap()
             .push((name.into(), kind.into(), brief.into()));
-    }
-}
-
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -192,7 +182,7 @@ impl World {
     }
 
     async fn pid(&self) -> i32 {
-        until("the adapter's child", || {
+        eventually_sync("the adapter's child", || {
             !self.read("pid").trim().is_empty()
         })
         .await;
@@ -367,7 +357,7 @@ impl Hub {
         tools.install(Arc::new(Tools)).unwrap();
         node.connect_tools(tools.clone()).await.unwrap();
         rt.start();
-        until("reconciled", || rt.is_reconciled()).await;
+        eventually_sync("reconciled", || rt.is_reconciled()).await;
         let told = Arc::new(Mutex::new(Ok(roots)));
         let now = told.clone();
         let adapter = adapter.on_node(NodeResearch {

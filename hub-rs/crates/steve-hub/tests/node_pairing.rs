@@ -4,6 +4,7 @@ mod node_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::json;
@@ -248,10 +249,7 @@ async fn only_the_owner_confirms_and_a_pending_node_is_refused() {
     assert_eq!(l.generation, 1);
     // the Hub installs the link after its welcome went out: the Node may be through the handshake
     // before the list says linked
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     // the confirm page shows the fingerprint the CLI printed
     let r = reqwest::Client::new()
         .get(format!("{}/api/nodes", h.url()))
@@ -271,10 +269,7 @@ async fn revoking_a_live_node_closes_it_and_refuses_it_after() {
     let (id, node) = h.paired("u1").await;
     let fake = FakeNode::new(node.as_str());
     let l = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let (s, _) = h
         .post("u1", &format!("/api/nodes/{node}/revoke"), json!({}))
         .await;
@@ -393,10 +388,7 @@ async fn a_node_rotates_its_key() {
     let l = dial(&h, &old, &node, FakeNode::new(node.as_str()), 1)
         .await
         .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let new = Identity::generate().unwrap();
 
     // signed by the old key only: the new key is not proven held
@@ -409,7 +401,7 @@ async fn a_node_rotates_its_key() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["fingerprint"], new.fingerprint());
-    until("the old key's link closed", 5, || l.conn.is_closed()).await;
+    eventually_sync("the old key's link closed", || l.conn.is_closed()).await;
     assert!(
         dial(&h, &old, &node, FakeNode::new(node.as_str()), 2)
             .await
@@ -444,13 +436,13 @@ async fn a_link_taken_over_again_and_again_pauses_the_node() {
         let l = dial(&h, &id, &node, FakeNode::new(node.as_str()), i + 1)
             .await
             .unwrap();
-        until("installed", 5, || {
+        eventually_sync("installed", || {
             h.svc.registry.current(node.as_str()) == Some(l.generation)
         })
         .await;
         links.push(l);
     }
-    until("paused", 5, || {
+    eventually_sync("paused", || {
         h.q::<String>(&format!("SELECT state FROM nodes WHERE node_id='{node}'")) == "paused"
     })
     .await;

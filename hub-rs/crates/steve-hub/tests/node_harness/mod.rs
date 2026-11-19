@@ -350,17 +350,6 @@ pub async fn dial_url_as(
     })
 }
 
-pub async fn until(what: &str, secs: u64, f: impl Fn() -> bool) {
-    let t0 = std::time::Instant::now();
-    while !f() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(secs),
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 impl Hub {
     /// The Hub process dies and comes back on the same database and port: every link drops, every
     /// coordinator is gone, and a new one starts from what the store says.

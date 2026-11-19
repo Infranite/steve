@@ -198,16 +198,8 @@ impl T {
         self.sink.kinds()
     }
 
-    async fn until(&self, what: &str, f: impl Fn(&T) -> bool) {
-        let t0 = Instant::now();
-        while !f(self) {
-            assert!(
-                t0.elapsed() < Duration::from_secs(15),
-                "timed out waiting for {what}: {:?}",
-                self.kinds()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn wait_for(&self, what: &str, f: impl Fn(&T) -> bool) {
+        steve_runtime::testkit::eventually_sync(what, || f(self)).await;
     }
 
     fn ended(&self) -> Vec<Completion> {
@@ -375,7 +367,7 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
             }]
         )
     );
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(
         t.kinds(),
         [
@@ -553,7 +545,7 @@ async fn a_failing_model_fails_once_and_nothing_tries_another() {
         c.error.map(|e| e.safe_detail),
         Some("API Error: 503 overloaded".into())
     );
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     // the failed try's tokens are reported too
     assert!(t.kinds().contains(&"usage".to_string()));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -567,8 +559,9 @@ async fn cancel_stops_the_whole_group() {
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
-    t.until("the harness", |t| !t.read("pid").is_empty()).await;
-    t.until("the draft", |t| t.kinds().contains(&"text_delta".into()))
+    t.wait_for("the harness", |t| !t.read("pid").is_empty())
+        .await;
+    t.wait_for("the draft", |t| t.kinds().contains(&"text_delta".into()))
         .await;
     let pid: i64 = t.read("pid").trim().parse().unwrap();
     n.cancel(now_cmd(
@@ -627,7 +620,8 @@ async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
-    t.until("the harness", |t| !t.read("pid").is_empty()).await;
+    t.wait_for("the harness", |t| !t.read("pid").is_empty())
+        .await;
     let pid: i64 = t.read("pid").trim().parse().unwrap();
     n.shutdown().await;
     drop(n);
@@ -654,7 +648,7 @@ async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     .unwrap();
     let c = completion(finished(&n, "op_j").await);
     assert_eq!(c.outcome, Outcome::Interrupted);
-    t.until("the end", |t| !t.ended().is_empty()).await;
+    t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Interrupted);
 }
 
@@ -669,7 +663,8 @@ async fn child_job_node_process() {
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
-    t.until("the harness", |t| !t.read("pid").is_empty()).await;
+    t.wait_for("the harness", |t| !t.read("pid").is_empty())
+        .await;
     std::fs::write(Path::new(&root).join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
 }

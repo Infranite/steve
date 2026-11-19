@@ -4,6 +4,7 @@
 mod common;
 
 use std::sync::Arc;
+use steve_runtime::testkit::eventually_sync;
 
 use async_trait::async_trait;
 use common::*;
@@ -328,7 +329,7 @@ async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
         let (fake, c) = (fake.clone(), cmd("op_e", spec.clone()));
         async move { fake.exec(c).await }
     });
-    until("the hub gave the secret", || hub_secrets.taken().len() == 1).await;
+    eventually_sync("the hub gave the secret", || hub_secrets.taken().len() == 1).await;
     w.node_faults.cut_now();
     let e = run.await.unwrap().unwrap_err();
     assert_eq!(e.code, ErrorCode::Stale, "{e}");

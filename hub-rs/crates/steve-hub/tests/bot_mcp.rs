@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -191,7 +192,7 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     let task = tokio::spawn(async move {
         let _ = steve_node_cli::dial::serve(n, &p, &id, &Trust::LoopbackPlaintext).await;
     });
-    until("session/new", 25, || {
+    eventually_sync("session/new", || {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
             .contains("\"method\":\"session/new\"")

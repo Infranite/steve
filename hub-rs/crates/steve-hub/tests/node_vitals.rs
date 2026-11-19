@@ -4,6 +4,7 @@
 mod node_harness;
 
 use std::sync::Arc;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use steve_hub::nodes::vitals;
@@ -17,10 +18,7 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
     let _l = dial(&h, &id, &node, FakeNode::new(node.as_str()), 1)
         .await
         .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
+    eventually_sync("linked", || h.svc.registry.current(node.as_str()).is_some()).await;
     let local: Arc<dyn Node> = FakeNode::new("local");
     vitals::sample_once(&h.store, Some(&local), Some(&h.svc)).await;
     let rows: Vec<(String, Option<i64>, String)> = h

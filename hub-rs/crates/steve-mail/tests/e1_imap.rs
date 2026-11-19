@@ -79,17 +79,23 @@ async fn idle_wakes_the_runner_and_it_reconnects() {
     // Watch and initial sync run independently. Login/IDLE only prove the watcher is ready:
     // injecting before the first sync commits makes the message historical backfill, not Ingest.
     assert!(
-        h.until(5, |h| inbox_synced(h, &conn)).await,
+        h.deliver_until("mail outbox delivery", |h| inbox_synced(h, &conn))
+            .await,
         "initial inbox cursor must be committed before testing live IDLE ingestion"
     );
     // let the watcher enter IDLE
     assert!(
-        h.until(5, |h| h.imap.commands().iter().any(|c| c.ends_with("IDLE")))
+        h.deliver_until("mail outbox delivery", |h| h
+            .imap
+            .commands()
+            .iter()
+            .any(|c| c.ends_with("IDLE")))
             .await
     );
     h.inject("INBOX", fixtures::get("multipart-alternative.eml").unwrap());
     assert!(
-        h.until(5, |h| h.events.ingested().len() == 1).await,
+        h.deliver_until("mail outbox delivery", |h| h.events.ingested().len() == 1)
+            .await,
         "IDLE → EXISTS → sync, well before the 2-minute poll"
     );
 
@@ -98,7 +104,8 @@ async fn idle_wakes_the_runner_and_it_reconnects() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
     assert!(
-        h.until(12, |h| h.events.ingested().len() == 2).await,
+        h.deliver_until("mail outbox delivery", |h| h.events.ingested().len() == 2)
+            .await,
         "after the reconnect the missed mail arrives"
     );
     h.mail.stop(&conn);
@@ -116,7 +123,11 @@ async fn idle_can_be_ready_while_initial_sync_is_still_backfilling() {
         .unwrap()
         .unwrap();
     assert!(
-        h.until(5, |h| h.imap.commands().iter().any(|c| c.ends_with("IDLE")))
+        h.deliver_until("mail outbox delivery", |h| h
+            .imap
+            .commands()
+            .iter()
+            .any(|c| c.ends_with("IDLE")))
             .await
     );
     assert!(
@@ -130,7 +141,7 @@ async fn idle_can_be_ready_while_initial_sync_is_still_backfilling() {
     h.inject("INBOX", fixtures::get("multipart-alternative.eml").unwrap());
     release_search.send(()).unwrap();
     assert!(
-        h.until(5, |h| inbox_synced(h, &conn)
+        h.deliver_until("mail outbox delivery", |h| inbox_synced(h, &conn)
             && h.messages(&conn).len() == 1
             && h.events.calls().len() == 1)
             .await
@@ -146,7 +157,10 @@ async fn idle_can_be_ready_while_initial_sync_is_still_backfilling() {
     );
     // Once the real completion condition holds, live mail must be ingested without the poll.
     h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
-    assert!(h.until(5, |h| h.events.ingested().len() == 1).await);
+    assert!(
+        h.deliver_until("mail outbox delivery", |h| h.events.ingested().len() == 1)
+            .await
+    );
     h.mail.stop(&conn);
 }
 

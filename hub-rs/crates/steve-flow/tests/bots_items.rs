@@ -2,7 +2,7 @@
 //! heir and each flow has one more version; `item.done` starts a flow; `steve_event_get` cannot read
 //! the events of another item. Plus `GET /bots/:id/flows` and `digest::take_now`.
 
-use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -52,16 +52,6 @@ fn q<T: rusqlite::types::FromSql>(e: &FlowEnv, sql: &str, p: impl rusqlite::Para
         .store()
         .with_conn(|c| Ok(c.query_row(sql, p, |r| r.get(0))?))
         .unwrap()
-}
-
-async fn until<F: Fn() -> bool>(f: F) {
-    for _ in 0..100 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("condition never held");
 }
 
 /// mail → bot(ops) → item.create(bot ops)
@@ -254,7 +244,10 @@ async fn item_done_triggers_a_flow() {
         ("item", "item.done", "ST-1「写周报」完成了")
     );
     let run = runs[0].clone();
-    until(|| q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done").await;
+    eventually_sync("bots_items condition", || {
+        q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
+    })
+    .await;
     let flow: String = q(&e, "SELECT flow_id FROM flow_runs WHERE id = ?", [&run]);
     assert_eq!(flow, fid);
     let notes = e.env.store().reader(|c| digest::pending(c, WS, 0)).unwrap();
@@ -299,7 +292,10 @@ async fn item_made_by_a_flow_does_not_restart_it() {
         panic!("not stored")
     };
     let run = runs[0].clone();
-    until(|| q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done").await;
+    eventually_sync("bots_items condition", || {
+        q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
+    })
+    .await;
     let made: String = q(
         &e,
         "SELECT work_item_id FROM flow_runs WHERE id = ?",

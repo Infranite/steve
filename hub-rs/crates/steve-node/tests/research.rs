@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::json;
 use steve_acp::AcpConfig;
@@ -352,7 +353,7 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.start_job(now_cmd("acp_stream", acp_job("a_acp", "stream")))
         .await
         .unwrap();
-    until("first ACP chunk", || {
+    eventually_sync("first ACP chunk", || {
         t.bodies()
             .iter()
             .any(|e| matches!(e, EventBody::TextDelta { text, .. } if text == "答案第一段"))
@@ -533,7 +534,7 @@ async fn acp_research_cancellation_keeps_the_partial_reply() {
     n.start_job(now_cmd("acp_cancel", acp_job("a_acp", "cancel")))
         .await
         .unwrap();
-    until("partial ACP reply", || {
+    eventually_sync("partial ACP reply", || {
         t.bodies()
             .iter()
             .any(|e| matches!(e, EventBody::TextDelta { .. }))
@@ -566,14 +567,6 @@ fn scripted(attempt: &str, model: &str, script: &str) -> JobSpec {
 
 fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
-}
-
-async fn until(what: &str, f: impl Fn() -> bool) {
-    let t0 = Instant::now();
-    while !f() {
-        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -903,7 +896,7 @@ async fn attachments_are_readable_and_secrets_are_not() {
     assert_eq!(prompt[1]["type"], "image");
     assert_eq!(prompt[1]["mimeType"], "image/png");
     // the copies are gone with the job
-    until("files removed", || {
+    eventually_sync("files removed", || {
         std::fs::read_dir(t.root.join("files")).map_or(true, |mut d| d.next().is_none())
     })
     .await;
@@ -999,7 +992,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
     let mut spec = scripted("a_1", "m", "q\n@mcp\n@msg m1\n@say 我先看看\n@child\n@wait");
     research(&mut spec).steve_tools = true;
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the adapter waits", || {
+    eventually_sync("the adapter waits", || {
         !t.read("pid").is_empty() && !t.read("mcp").is_empty()
     })
     .await;
@@ -1048,7 +1041,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             attempt: AttemptId::new("a_1").unwrap(),
         }
     );
-    until("the draft", || {
+    eventually_sync("the draft", || {
         t.bodies()
             .iter()
             .any(|b| matches!(b, EventBody::TextDelta { .. }))
@@ -1075,7 +1068,7 @@ async fn steves_tools_count_for_the_job_until_a_cancel_stops_it() {
             text: "我先看看".into()
         }]
     );
-    until("the adapter's child is gone", || !alive(child)).await;
+    eventually_sync("the adapter's child is gone", || !alive(child)).await;
     // the job's token went with it
     let (s, _) = mcp(
         &url,
@@ -1247,7 +1240,7 @@ async fn shutdown_stops_a_running_job_and_says_so() {
     ))
     .await
     .unwrap();
-    until("the adapter waits", || !t.read("pid").is_empty()).await;
+    eventually_sync("the adapter waits", || !t.read("pid").is_empty()).await;
     let child = pid_of(&t.log("pid"));
     n.shutdown().await;
     // its processes are gone, so it is over (not unknown): interrupted by this Node
@@ -1323,7 +1316,7 @@ async fn child_research_node() {
     n.start_job(now_cmd("op_j", holding(&t, "a_1")))
         .await
         .unwrap();
-    until("the adapter waits", || !t.read("pid").is_empty()).await;
+    eventually_sync("the adapter waits", || !t.read("pid").is_empty()).await;
     std::fs::write(t.root.join("ready"), "").unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
 }
@@ -1339,7 +1332,7 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    until("the child node runs its job", || {
+    eventually_sync("the child node runs its job", || {
         t.root.join("ready").exists()
     })
     .await;
@@ -1430,7 +1423,7 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     // can legitimately expire before @hold ever creates a child; that is a different case.
     spec.run.limits.offline_until = Timestamp(wall() + 8_000);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the leased job has a child to stop", || {
+    eventually_sync("the leased job has a child to stop", || {
         !t.read("pid").is_empty()
     })
     .await;
@@ -1481,7 +1474,7 @@ async fn a_job_stops_at_its_output_cap() {
     assert_eq!(c.error.unwrap().code, ErrorCode::Exhausted);
     assert_eq!(c.job.unwrap().end, JobEnd::Stopped);
     let child = pid_of(&t.log("pid"));
-    until("the adapter's child is gone", || !alive(child)).await;
+    eventually_sync("the adapter's child is gone", || !alive(child)).await;
     n.shutdown().await;
 }
 
@@ -1595,7 +1588,7 @@ async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
         + Duration::from_millis((spec.run.limits.deadline.0 - wall()) as u64);
     let n = t.scripted_node(1, files);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    until("the fetched job has a child to stop", || {
+    eventually_sync("the fetched job has a child to stop", || {
         !t.read("pid").is_empty()
     })
     .await;

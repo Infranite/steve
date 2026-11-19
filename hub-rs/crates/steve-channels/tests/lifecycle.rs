@@ -32,8 +32,6 @@ use steve_modules::vault::keystore::FileKeyStore;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-const T: Duration = Duration::from_secs(10);
-
 /// A provider with nothing behind it; `test_self` pairs with a `test_bot`, required.
 struct Provider {
     id: &'static str,
@@ -323,16 +321,8 @@ impl H {
         drop(self.rt.start(rx));
     }
 
-    async fn until(&self, what: &str, f: impl Fn(&H) -> bool) {
-        let t0 = std::time::Instant::now();
-        while !f(self) {
-            assert!(
-                t0.elapsed() < T,
-                "timed out: {what}; log {:?}",
-                self.probe.log()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    async fn wait_for(&self, what: &str, f: impl Fn(&H) -> bool) {
+        steve_runtime::testkit::eventually_sync(what, || f(self)).await;
     }
 }
 
@@ -347,7 +337,7 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
     h.add("con_x", "imap", json!({}));
     h.event("con_x");
     h.start();
-    h.until("both run", |h| h.rt.running() == ["con_a", "con_b"])
+    h.wait_for("both run", |h| h.rt.running() == ["con_a", "con_b"])
         .await;
     // the repeated event changes nothing
     h.event("con_b");
@@ -361,16 +351,16 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
     // paused: stopped; resumed: started again
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("stopped", |h| h.rt.running() == ["con_b"]).await;
+    h.wait_for("stopped", |h| h.rt.running() == ["con_b"]).await;
     assert_eq!(h.probe.count("con_a:end"), 1);
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("started again", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("started again", |h| h.probe.count("con_a:start") == 2)
         .await;
     // deleted: stopped for good
     h.exec("DELETE FROM connections WHERE id = 'con_b'");
     h.event("con_b");
-    h.until("gone", |h| h.rt.running() == ["con_a"]).await;
+    h.wait_for("gone", |h| h.rt.running() == ["con_a"]).await;
     h.rt.shutdown().await;
     assert!(h.rt.running().is_empty());
 }
@@ -380,11 +370,12 @@ async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
     let mut h = setup(fast());
     h.add("con_a", "test_bot", json!({}));
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // a new credential: the old run is stopped and awaited, then the new one starts
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("restarted", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
     assert_eq!(
         h.probe.log(),
@@ -417,10 +408,11 @@ async fn what_a_stopped_run_returns_is_not_reported() {
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::FailWhenStopped);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");
-    h.until("restarted", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
@@ -440,13 +432,14 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::FailOnSignal);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // the credential replaced (the old item destroyed): the run fails on it before the event
     // has reached the runtime
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.probe.fail_now.notify_one();
     // not reported, and the run follows the new credential without waiting for the event
-    h.until("started with the new credential", |h| {
+    h.wait_for("started with the new credential", |h| {
         h.probe.count("con_a:start") == 2
     })
     .await;
@@ -479,12 +472,12 @@ async fn failures_and_panics_are_retried_and_reported() {
     h.probe.set("con_p", How::Panic);
     h.probe.set("con_r", How::FailAuth);
     h.start();
-    h.until("failed runs retried", |h| {
+    h.wait_for("failed runs retried", |h| {
         h.probe.count("con_f:start") >= 3 && h.probe.count("con_p:start") >= 3
     })
     .await;
     // reported: failures count toward `error`, a panic is one too
-    h.until("failures counted", |h| {
+    h.wait_for("failures counted", |h| {
         h.one("SELECT status FROM connections WHERE id = 'con_f'") == "error"
             && h.one("SELECT status FROM connections WHERE id = 'con_p'") == "error"
     })
@@ -494,7 +487,7 @@ async fn failures_and_panics_are_retried_and_reported() {
             .contains("down")
     );
     // an auth failure: reauth, and no longer wanted once its event says so
-    h.until("reauth", |h| {
+    h.wait_for("reauth", |h| {
         h.one("SELECT status FROM connections WHERE id = 'con_r'") == "reauth"
     })
     .await;
@@ -512,7 +505,7 @@ async fn a_finished_run_starts_again_only_when_wanted_again() {
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::Finish);
     h.start();
-    h.until("ran", |h| h.probe.count("con_a:end") == 1).await;
+    h.wait_for("ran", |h| h.probe.count("con_a:end") == 1).await;
     h.event("con_a");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
@@ -528,7 +521,7 @@ async fn a_finished_run_starts_again_only_when_wanted_again() {
         h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
         h.event("con_a");
     }
-    h.until("ran again", |h| h.probe.count("con_a:start") == 2)
+    h.wait_for("ran again", |h| h.probe.count("con_a:start") == 2)
         .await;
     h.rt.shutdown().await;
 }
@@ -539,7 +532,7 @@ async fn a_slow_stop_holds_up_no_other_connection() {
     h.add("con_slow", "test_bot", json!({}));
     h.probe.set("con_slow", How::IgnoreStop);
     h.start();
-    h.until("runs", |h| h.probe.count("con_slow:start") == 1)
+    h.wait_for("runs", |h| h.probe.count("con_slow:start") == 1)
         .await;
     // its restart waits the whole grace (2 s) …
     h.exec("UPDATE connections SET credential_item = 'vi_2' WHERE id = 'con_slow'");
@@ -549,7 +542,7 @@ async fn a_slow_stop_holds_up_no_other_connection() {
     let t0 = std::time::Instant::now();
     h.add("con_b", "test_bot", json!({}));
     h.event("con_b");
-    h.until("the other runs", |h| h.probe.count("con_b:start") == 1)
+    h.wait_for("the other runs", |h| h.probe.count("con_b:start") == 1)
         .await;
     assert!(
         t0.elapsed() < Duration::from_millis(1500),
@@ -558,7 +551,7 @@ async fn a_slow_stop_holds_up_no_other_connection() {
     );
     assert_eq!(h.probe.count("con_slow:start"), 1);
     // then the slow one is aborted and started again
-    h.until("aborted and restarted", |h| {
+    h.wait_for("aborted and restarted", |h| {
         h.probe.count("con_slow:dropped") == 1 && h.probe.count("con_slow:start") == 2
     })
     .await;
@@ -573,7 +566,7 @@ async fn connections_paired_with_a_bot_follow_its_events() {
     // without a working pair it does not run (required)
     h.add("con_lone", "test_self", json!({}));
     h.start();
-    h.until("both run", |h| h.rt.running() == ["con_bot", "con_me"])
+    h.wait_for("both run", |h| h.rt.running() == ["con_bot", "con_me"])
         .await;
     let me = h
         .probe
@@ -593,17 +586,18 @@ async fn connections_paired_with_a_bot_follow_its_events() {
     // the bot paused: only its event comes, and the paired one stops with it
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_bot'");
     h.event("con_bot");
-    h.until("both stopped", |h| h.rt.running().is_empty()).await;
+    h.wait_for("both stopped", |h| h.rt.running().is_empty())
+        .await;
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_bot'");
     h.event("con_bot");
-    h.until("both run again", |h| {
+    h.wait_for("both run again", |h| {
         h.rt.running() == ["con_bot", "con_me"]
     })
     .await;
     // without `msg.receive`: not live
     h.exec("UPDATE connections SET caps = '[]' WHERE id = 'con_me'");
     h.event("con_me");
-    h.until("receiving off", |h| h.rt.running() == ["con_bot"])
+    h.wait_for("receiving off", |h| h.rt.running() == ["con_bot"])
         .await;
     h.rt.shutdown().await;
 }
@@ -615,7 +609,7 @@ async fn shutdown_aborts_a_run_that_does_not_stop() {
     h.add("con_b", "test_bot", json!({}));
     h.probe.set("con_a", How::IgnoreStop);
     h.start();
-    h.until("both run", |h| h.rt.running().len() == 2).await;
+    h.wait_for("both run", |h| h.rt.running().len() == 2).await;
     let t0 = std::time::Instant::now();
     h.rt.shutdown().await;
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
@@ -635,7 +629,8 @@ async fn shutdown_during_a_restart_waits_only_the_shutdown_grace() {
     h.add("con_a", "test_bot", json!({}));
     h.probe.set("con_a", How::IgnoreStop);
     h.start();
-    h.until("runs", |h| h.probe.count("con_a:start") == 1).await;
+    h.wait_for("runs", |h| h.probe.count("con_a:start") == 1)
+        .await;
     // a restart: its supervisor waits up to the stop grace (2 s) for the old run …
     h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
     h.event("con_a");

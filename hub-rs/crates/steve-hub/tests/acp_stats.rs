@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -58,17 +59,6 @@ impl Env {
     fn count(&self, sql: &str) -> i64 {
         self.db().query_row(sql, [], |r| r.get(0)).expect(sql)
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 async fn start() -> Env {
@@ -189,7 +179,10 @@ async fn item_on(e: &Env, goal: &str, bot: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
+        eventually("acp_stats condition", || async {
+            e.session(&sid).await["busy"] == true
+        })
+        .await,
         "the first turn runs"
     );
     sid
@@ -205,7 +198,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     .await;
     // the first turn is under way on the Node (a message queued before it starts goes with it)
     assert!(
-        until(10, || async {
+        eventually("acp_stats condition", || async {
             e.count("SELECT count(*) FROM agent_turns") == 1
         })
         .await,
@@ -220,7 +213,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(20, || async {
+        eventually("acp_stats condition", || async {
             e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
         })
         .await,
@@ -240,7 +233,12 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             .map(Result::unwrap)
             .collect::<Vec<_>>()
     );
-    assert!(until(10, || async { e.session(&sid).await["busy"] == false }).await);
+    assert!(
+        eventually("acp_stats condition", || async {
+            e.session(&sid).await["busy"] == false
+        })
+        .await
+    );
     let c = e.db();
     let turns: Vec<(Option<String>, Option<i64>, i64, String, i64, String)> = c
         .prepare("SELECT item_id, user_seq, attempt, stop_reason, tools, tool_kinds FROM agent_turns WHERE session_id = ? ORDER BY started, rowid")
@@ -330,7 +328,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     )
     .await;
     assert!(
-        until(10, || async {
+        eventually("acp_stats condition", || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;
@@ -343,13 +341,13 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "streamed text is visible while the attempt is running"
     );
     assert!(
-        until(10, || async {
+        eventually("acp_stats condition", || async {
             e.session(&streaming).await["busy"] == false
         })
         .await
     );
     assert!(
-        until(5, || async {
+        eventually("acp_stats condition", || async {
             e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3
         })
         .await
@@ -369,7 +367,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
         .await;
     assert!(
-        until(2, || async {
+        eventually("acp_stats condition", || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;

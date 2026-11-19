@@ -24,6 +24,8 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 
@@ -233,24 +235,9 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     Hub(c.spawn().expect("spawn hub"))
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
-fn wait(secs: u64, mut f: impl FnMut() -> bool) -> impl std::future::Future<Output = bool> {
-    until(secs, move || std::future::ready(f()))
-}
-
 /// Up and serving the full app.
 async fn serving(h: &Home) {
-    let ok = until(60, || async {
+    let ok = eventually("node_e2e condition", || async {
         let Ok(r) = reqwest::Client::new()
             .get(format!("{}/healthz", h.base()))
             .timeout(Duration::from_secs(2))
@@ -281,16 +268,17 @@ async fn node_health(h: &Home) -> Value {
         .clone()
 }
 
-/// Until `/healthz`'s `node` block satisfies `ok` (within `secs`); the last one seen.
-async fn node_health_until(h: &Home, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    loop {
-        let v = node_health(h).await;
-        if ok(&v) || tokio::time::Instant::now() >= end {
-            return v;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+/// Observe the health block that satisfies the expected Node state.
+async fn wait_node_health(h: &Home, ok: impl Fn(&Value) -> bool) -> Value {
+    let observed = std::sync::Mutex::new(None);
+    eventually("Node health reaches its expected state", || async {
+        let value = node_health(h).await;
+        let ready = ok(&value);
+        *observed.lock().unwrap() = Some(value);
+        ready
+    })
+    .await;
+    observed.into_inner().unwrap().unwrap()
 }
 
 fn hub_log(h: &Home) -> String {
@@ -547,7 +535,7 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
         h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item)
     };
     assert!(
-        wait(30, || retry_count() == 2).await,
+        eventually_sync("node_e2e state", || retry_count() == 2).await,
         "first retry; {}",
         hub_log(&h)
     );
@@ -563,7 +551,7 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     );
     h.make_retry_due(&sid);
     assert!(
-        wait(35, || h
+        eventually_sync("node_e2e state", || h
             .prompts()
             .iter()
             .filter(|p| p.contains("不占用未交付续跑次数"))
@@ -573,12 +561,12 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     );
     assert_eq!(cards(), 0);
     assert!(
-        wait(30, || retry_count() == 3).await,
+        eventually_sync("node_e2e state", || retry_count() == 3).await,
         "second retry planned"
     );
     h.make_retry_due(&sid);
     assert!(
-        wait(30, || cards() == 1).await,
+        eventually_sync("node_e2e state", || cards() == 1).await,
         "exhausted service card; {}",
         hub_log(&h)
     );
@@ -651,7 +639,7 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         )
     };
     assert!(
-        wait(30, || retry_count() == 2).await,
+        eventually_sync("node_e2e state", || retry_count() == 2).await,
         "first capacity wait; {}",
         hub_log(&h)
     );
@@ -677,13 +665,13 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
     );
     for attempts in 2..=4 {
         assert!(
-            wait(30, || retry_count() == attempts).await,
+            eventually_sync("node_e2e state", || retry_count() == attempts).await,
             "capacity retry planned"
         );
         assert_eq!(cards(), 0);
         h.make_retry_due(&sid);
     }
-    let exhausted = wait(30, || cards() == 1).await;
+    let exhausted = eventually_sync("node_e2e state", || cards() == 1).await;
     let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h.db().prepare(
         "SELECT a.ordinal,a.state,a.completion,a.updated FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? ORDER BY a.ordinal",
     ).unwrap().query_map([&sid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_, _>>().unwrap();
@@ -742,7 +730,7 @@ async fn a_node_session_end_to_end() {
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let n = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let n = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["stopped"]),
         (&json!(true), &json!(true), &json!(false)),
@@ -752,7 +740,7 @@ async fn a_node_session_end_to_end() {
     // ── a new session binds to the Node; its transcript is steve.v1
     let sid = c.item(&h, "节点验收 @say hello-node-7Q").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "hello-node-7Q") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "hello-node-7Q") > 0).await,
         "the agent's reply stored as steve.v1; log:\n{}",
         hub_log(&h)
     );
@@ -765,7 +753,7 @@ async fn a_node_session_end_to_end() {
         "bound to the local Node"
     );
     assert!(
-        wait(10, || attempts(&h, &sid, "finished") >= 1).await,
+        eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1).await,
         "the turn ran as a Node attempt"
     );
     assert_eq!(
@@ -781,7 +769,7 @@ async fn a_node_session_end_to_end() {
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             card = open_card(&h, &sid);
             card.is_some()
         })
@@ -799,7 +787,9 @@ async fn a_node_session_end_to_end() {
         .await;
     assert_eq!(st, 200, "answer: {v}");
     assert!(
-        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "perm:selected:")
+            > 0)
+        .await,
         "the agent got the answer; log:\n{}",
         hub_log(&h)
     );
@@ -811,13 +801,13 @@ async fn a_node_session_end_to_end() {
 
     // ── a cancel ends the running turn
     c.say(&sid, "取消验收-C4 @sleep 600000").await;
-    assert!(wait(30, || h.got("取消验收-C4") == 1).await);
+    assert!(eventually_sync("node_e2e state", || h.got("取消验收-C4") == 1).await);
     let (st, v) = c
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'",
                 &sid,
@@ -832,7 +822,7 @@ async fn a_node_session_end_to_end() {
         "the agent was told to cancel"
     );
     assert!(
-        wait(10, || steve_v1(&h, &sid, "cancelled") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "cancelled") > 0).await,
         "the turn ended as cancelled"
     );
 
@@ -855,21 +845,21 @@ async fn a_node_session_end_to_end() {
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
     assert!(
-        wait(30, || h.got("排队验收-H8") == 1).await,
+        eventually_sync("node_e2e state", || h.got("排队验收-H8") == 1).await,
         "sent once released; log:\n{}",
         hub_log(&h)
     );
-    assert!(wait(30, || steve_v1(&h, &sid, "held-done") > 0).await);
+    assert!(eventually_sync("node_e2e state", || steve_v1(&h, &sid, "held-done") > 0).await);
 
     // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
     // the Node confirms the old harness is gone, and the agent is continued (B6)
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
-    assert!(wait(30, || h.got("崩溃验收-K2") == 1).await);
+    assert!(eventually_sync("node_e2e state", || h.got("崩溃验收-K2") == 1).await);
     hub.kill();
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
                 &sid,
@@ -880,7 +870,7 @@ async fn a_node_session_end_to_end() {
         hub_log(&h)
     );
     assert!(
-        wait(10, || steve_v1(&h, &sid, "Node 重启了") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "Node 重启了") > 0).await,
         "the session says why"
     );
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -902,7 +892,7 @@ async fn a_node_session_end_to_end() {
     let r = c.say(&sid, "回滚验收-R5 @say legacy").await;
     assert_eq!(r["result"], "queued", "{r}");
     assert!(
-        wait(10, || {
+        eventually_sync("node_e2e state", || {
             h.count(
                 "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
                 &sid,
@@ -934,7 +924,7 @@ async fn a_permission_nobody_answers_expires() {
     let sid = c.item(&h, "过期验收 @perm Bash").await;
     let mut card = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             card = open_card(&h, &sid);
             card.is_some()
         })
@@ -944,7 +934,7 @@ async fn a_permission_nobody_answers_expires() {
     );
     let card = card.expect("card");
     assert!(
-        wait(30, || h
+        eventually_sync("node_e2e state", || h
             .one("SELECT status FROM decisions WHERE id=?", &card)
             .is_some_and(|s| s != "open"))
         .await,
@@ -994,11 +984,11 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "重启验收 @say idle-node-3R").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "idle-node-3R") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "idle-node-3R") > 0).await,
         "the first turn ran; log:\n{}",
         hub_log(&h)
     );
-    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    assert!(eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1).await);
     let fails = || {
         h.count(
             "SELECT COUNT(*) FROM decisions WHERE item_id=(SELECT item_id FROM sessions WHERE id=?) AND kind='fail' AND status='open'",
@@ -1006,7 +996,7 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
         )
     };
     assert!(
-        wait(10, || fails() == 1).await,
+        eventually_sync("node_e2e state", || fails() == 1).await,
         "the takeover's card; log:\n{}",
         hub_log(&h)
     );
@@ -1044,7 +1034,9 @@ async fn a_node_session_shows_its_status_and_harness_id() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "状态验收 @say status-node-5S").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "status-node-5S") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "status-node-5S")
+            > 0)
+        .await,
         "the first turn ran; log:\n{}",
         hub_log(&h)
     );
@@ -1066,15 +1058,21 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         v
     };
     assert!(
-        until(10, || async { status(&get().await) == "idle" }).await,
+        eventually("node_e2e condition", || async {
+            status(&get().await) == "idle"
+        })
+        .await,
         "idle after the turn: {}",
         get().await
     );
 
     c.say(&sid, "状态验收-运行 @sleep 600000").await;
-    assert!(wait(30, || h.got("状态验收-运行") == 1).await);
+    assert!(eventually_sync("node_e2e state", || h.got("状态验收-运行") == 1).await);
     assert!(
-        until(10, || async { status(&get().await) == "running" }).await,
+        eventually("node_e2e condition", || async {
+            status(&get().await) == "running"
+        })
+        .await,
         "running during the turn: {}",
         get().await
     );
@@ -1098,7 +1096,10 @@ async fn a_node_session_shows_its_status_and_harness_id() {
         .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
     assert!(
-        until(30, || async { status(&get().await) == "idle" }).await,
+        eventually("node_e2e condition", || async {
+            status(&get().await) == "idle"
+        })
+        .await,
         "idle after the cancel: {}",
         get().await
     );
@@ -1129,15 +1130,15 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "排空验收 @say drain-node-3D").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "drain-node-3D") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "drain-node-3D") > 0).await,
         "the first turn ran; log:\n{}",
         hub_log(&h)
     );
-    assert!(wait(10, || attempts(&h, &sid, "finished") >= 1).await);
+    assert!(eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1).await);
 
     // ── a running turn holds the drain
     c.say(&sid, "排空验收-运行 @sleep 600000").await;
-    assert!(wait(30, || h.got("排空验收-运行") == 1).await);
+    assert!(eventually_sync("node_e2e state", || h.got("排空验收-运行") == 1).await);
     let d = drain(&h, "POST", &token).await;
     assert_eq!(d["maintenance"], true, "{d}");
     assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
@@ -1174,7 +1175,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             card = open_card(&h, &sid);
             card.is_some()
         })
@@ -1200,7 +1201,9 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         .await;
     assert_eq!(st, 200, "answer: {v}");
     assert!(
-        wait(30, || steve_v1(&h, &sid, "perm:selected:") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "perm:selected:")
+            > 0)
+        .await,
         "the agent got the answer under the drain; log:\n{}",
         hub_log(&h)
     );
@@ -1215,11 +1218,11 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
     assert!(
-        wait(30, || h.got("排空验收-排队") == 1).await,
+        eventually_sync("node_e2e state", || h.got("排空验收-排队") == 1).await,
         "sent once the drain is lifted; log:\n{}",
         hub_log(&h)
     );
-    assert!(wait(30, || steve_v1(&h, &sid, "drained-done") > 0).await);
+    assert!(eventually_sync("node_e2e state", || steve_v1(&h, &sid, "drained-done") > 0).await);
 }
 
 /// A4: past STEVE_IDLE_RELEASE_MS an idle Node session's agent is let go (its process exits),
@@ -1236,7 +1239,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     let c = Client::login(&h).await;
     let sid = c.item(&h, "空闲验收 @say idle-release-4A").await;
     assert!(
-        wait(30, || attempts(&h, &sid, "finished") >= 1).await,
+        eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1).await,
         "the first turn ran; log:\n{}",
         hub_log(&h)
     );
@@ -1247,7 +1250,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
         .expect("the agent's pid") as i32;
     let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
     assert!(
-        wait(30, || !alive(pid)).await,
+        eventually_sync("node_e2e state", || !alive(pid)).await,
         "the idle agent exits; log:\n{}",
         hub_log(&h)
     );
@@ -1268,7 +1271,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
 
     c.say(&sid, "空闲验收-续 @say idle-again-4A").await;
     assert!(
-        wait(30, || attempts(&h, &sid, "finished") >= 2).await,
+        eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 2).await,
         "the next message ran; log:\n{}",
         hub_log(&h)
     );
@@ -1295,7 +1298,7 @@ async fn the_node_is_the_default() {
     serving(&h).await;
     let c = Client::login(&h).await;
     // the default runs the Node in a process of its own (B1): it starts and links first
-    let n = node_health_until(&h, 90, |n| n["reconciled"] == true).await;
+    let n = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"]),
         (&json!(true), &json!(true)),
@@ -1303,7 +1306,9 @@ async fn the_node_is_the_default() {
     );
     let sid = c.item(&h, "默认验收 @say default-node-B6").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "default-node-B6") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "default-node-B6")
+            > 0)
+        .await,
         "the reply stored as steve.v1; log:\n{}",
         hub_log(&h)
     );
@@ -1318,7 +1323,7 @@ async fn the_node_is_the_default() {
     // Wait for actual
     // completion (including bounded sampler settlement and automatic continuations) before
     // measuring the inert copy's process count; an unstarted old child can otherwise log late.
-    assert!(wait(30,||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
+    assert!(eventually_sync("node_e2e state", ||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
         && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await,"the original Node's turns settled: {}",hub_log(&h));
     assert!(
         h.spawns() >= 1,
@@ -1331,7 +1336,11 @@ async fn the_node_is_the_default() {
     // a STEVE_NO_RESUME copy: an explicit local is a boot error
     let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
     assert!(
-        wait(30, || matches!(refused.0.try_wait(), Ok(Some(_)))).await,
+        eventually_sync("node_e2e state", || matches!(
+            refused.0.try_wait(),
+            Ok(Some(_))
+        ))
+        .await,
         "an explicit local on a STEVE_NO_RESUME copy exits"
     );
     assert!(
@@ -1354,7 +1363,7 @@ async fn the_node_is_the_default() {
     let r = c.say(&sid, "副本验收-C6 @say copy").await;
     assert_eq!(r["result"], "queued", "{r}");
     assert!(
-        wait(10, || {
+        eventually_sync("node_e2e state", || {
             h.count(
                 "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND json_extract(data,'$.parked')=1",
                 &sid,
@@ -1377,7 +1386,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     let _hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    let before = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let before = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(before["fallbacks"], 0, "{before}");
     let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).expect("db");
     db.busy_timeout(Duration::from_secs(5)).expect("timeout");
@@ -1388,7 +1397,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     .expect("dontAsk");
     let spawns = h.spawns();
     let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
-    let n = node_health_until(&h, 30, |n| n["fallbacks"] == 1).await;
+    let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
     assert_eq!(
         h.count(
@@ -1465,7 +1474,7 @@ async fn git_worktree_case(mode: &str) {
     let _hub = spawn_mode(&h, Some(mode), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let (st, p) = c
         .call(
             "POST",
@@ -1492,7 +1501,7 @@ async fn git_worktree_case(mode: &str) {
     let item = i["id"].as_str().expect("item").to_string();
     let mut sid = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
             sid.is_some()
         })
@@ -1501,7 +1510,7 @@ async fn git_worktree_case(mode: &str) {
     let sid = sid.expect("session");
     let wt = h.steve().join("worktrees").join(&item);
     assert!(
-        wait(60, || attempts(&h, &sid, "finished") >= 1).await,
+        eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1).await,
         "the agent ran; log:\n{}",
         hub_log(&h)
     );
@@ -1545,18 +1554,14 @@ async fn git_worktree_case(mode: &str) {
         .await;
     assert_eq!(st, 200, "{v}");
     // what the ten-minute watcher does, now: once the harness is let go, the Node gives it back
-    let mut gone = false;
-    for _ in 0..60 {
+    eventually("the clean worktree is reclaimed", || async {
         let (st, v) = c.call("POST", "/api/system/workspaces/reclaim", None).await;
         assert_eq!(st, 200, "{v}");
-        if wait(1, || !wt.exists()).await {
-            gone = true;
-            break;
-        }
-    }
-    assert!(gone, "the worktree is given back; log:\n{}", hub_log(&h));
+        !wt.exists()
+    })
+    .await;
     assert!(
-        wait(10, || h.count(
+        eventually_sync("node_e2e state", || h.count(
             "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
             &item
         ) == 1)
@@ -1652,7 +1657,7 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     );
     serving(&h).await;
     let c = Client::login(&h).await;
-    let health = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    let health = wait_node_health(&h, |n| n["reconciled"] == true).await;
     assert_eq!(health["reconciled"], true, "{health}; {}", hub_log(&h));
     let bytes = png([21, 42, 63]);
     let sid = c
@@ -1665,7 +1670,7 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
         )
         .await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "/api/file-deliveries/") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "/api/file-deliveries/") > 0).await,
         "Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
         hub_log(&h),
         std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")).unwrap_or_default(),
@@ -1752,7 +1757,7 @@ async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     )
     .await;
     let mut text = None;
-    assert!(wait(30, || {
+    assert!(eventually_sync("node_e2e state", || {
         text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
         text.is_some()
     }).await, "{}", hub_log(&h));
@@ -1821,10 +1826,10 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     let _hub = spawn(&h, true, &[("FAKE_ACP_IMAGE", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let sid = c.item(&h, "附件验收 @say ready-A1").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "ready-A1") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "ready-A1") > 0).await,
         "the first turn; log:\n{}",
         hub_log(&h)
     );
@@ -1845,7 +1850,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
         .await;
     let mut blocks = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             blocks = prompt_blocks(&h, "附件验收-F3");
             blocks.is_some()
         })
@@ -1906,7 +1911,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
             sha256_hex(bytes)
         );
     }
-    assert!(wait(30, || steve_v1(&h, &sid, "got-files") > 0).await);
+    assert!(eventually_sync("node_e2e state", || steve_v1(&h, &sid, "got-files") > 0).await);
 
     // the blob is gone from the Hub: the turn goes on without it, and says so
     let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
@@ -1931,7 +1936,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     // event the moment it is sent, before the agent has seen anything
     let mut blocks = None;
     assert!(
-        wait(30, || {
+        eventually_sync("node_e2e state", || {
             blocks = prompt_blocks(&h, "附件验收-G4");
             blocks.is_some()
         })
@@ -1998,7 +2003,7 @@ async fn a_service_node_turn_outlives_the_hub() {
     serving(&h).await;
     let c = Client::login(&h).await;
     assert!(
-        wait(60, || h.count(
+        eventually_sync("node_e2e state", || h.count(
             "SELECT COUNT(*) FROM nodes WHERE node_id=? AND local=1 AND generation>0",
             "local"
         ) == 1)
@@ -2008,7 +2013,9 @@ async fn a_service_node_turn_outlives_the_hub() {
     );
     let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "hello-service-3S") > 0).await,
+        eventually_sync("node_e2e state", || steve_v1(&h, &sid, "hello-service-3S")
+            > 0)
+        .await,
         "a turn on the service Node; log:\n{}",
         hub_log(&h)
     );
@@ -2046,7 +2053,7 @@ async fn a_service_node_turn_outlives_the_hub() {
     assert!(
         // Collection permits a bounded three-second tail for each automatic continuation.
         // Keep the original finished-state assertion and leave room for all those settlements.
-        wait(30, || attempts(&h, &sid, "finished") >= 1
+        eventually_sync("node_e2e state", || attempts(&h, &sid, "finished") >= 1
             && states(&h).split(',').all(|s| s == "finished"))
         .await,
         "states {}; {}",
@@ -2055,7 +2062,7 @@ async fn a_service_node_turn_outlives_the_hub() {
     );
     c.say(&sid, "存活验收-V6 @sleep 12000 @say survived-V6")
         .await;
-    assert!(wait(30, || h.got("存活验收-V6") == 1).await);
+    assert!(eventually_sync("node_e2e state", || h.got("存活验收-V6") == 1).await);
     let started = std::time::Instant::now();
     let pid = hub.0.id() as i32;
     unsafe { libc::killpg(pid, libc::SIGKILL) };
@@ -2081,7 +2088,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         l[l.len().saturating_sub(60)..].join("\n")
     };
     assert!(
-        wait(60, || h.count(
+        eventually_sync("node_e2e state", || h.count(
             "SELECT COUNT(*) FROM events WHERE session_id=? AND kind NOT IN ('user','queued') AND instr(data,'survived-V6')>0",
             &sid
         ) > 0)
@@ -2118,7 +2125,7 @@ async fn node_tags_send_work_where_it_fits() {
     let _hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
-    node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    wait_node_health(&h, |n| n["reconciled"] == true).await;
     let (s, v) = c
         .call(
             "PUT",
@@ -2183,7 +2190,7 @@ async fn node_tags_send_work_where_it_fits() {
     assert_eq!(s, 200, "{v}");
     let next = v["session"].as_str().expect("new session").to_string();
     assert!(
-        wait(30, || h.count(
+        eventually_sync("node_e2e state", || h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
             &next
         ) == 1)
@@ -2209,12 +2216,12 @@ async fn node_tags_send_work_where_it_fits() {
     assert_eq!(s, 200, "{v}");
     let third = v["session"].as_str().expect("new session").to_string();
     assert!(
-        wait(30, || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await,
+        eventually_sync("node_e2e state", || h.count("SELECT COUNT(*) FROM events WHERE session_id=? AND kind='system' AND instr(data,'cuda')>0", &third) == 1).await,
         "told no device has the tag; log:\n{}",
         hub_log(&h)
     );
     assert!(
-        wait(30, || h.count(
+        eventually_sync("node_e2e state", || h.count(
             "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=?",
             &third
         ) == 1)
@@ -2241,7 +2248,7 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     serving(&h).await;
     let c = Client::login(&h).await;
     assert_eq!(
-        node_health_until(&h, 30, |n| n["reconciled"] == true).await["reconciled"],
+        wait_node_health(&h, |n| n["reconciled"] == true).await["reconciled"],
         true
     );
     let bytes = png([4, 45, 99]);
@@ -2253,7 +2260,7 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     let sql = "SELECT group_concat(json_extract(data,'$.text'),'') FROM
                (SELECT data FROM events WHERE session_id=? AND kind='text' ORDER BY seq)";
     assert!(
-        wait(30, || h
+        eventually_sync("node_e2e state", || h
             .one(sql, &sid)
             .is_some_and(|t| t.contains("[Report](/deliveries/")))
         .await,
@@ -2355,7 +2362,7 @@ async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
     c.say(&sid, &format!("@msg durable\n@say [Durable](<file://{}/result.txt>) · [Foreign output](<file://{}/result.txt>)",
         own.display(), other.display())).await;
     assert!(
-        wait(30, || h.one(sql, &sid).is_some_and(|t| {
+        eventually_sync("node_e2e state", || h.one(sql, &sid).is_some_and(|t| {
             t.contains("[Durable](/deliveries/")
                 && t.contains("[Foreign output](#steve-file-unavailable-scope)")
         }))

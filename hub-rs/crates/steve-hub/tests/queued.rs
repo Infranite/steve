@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -98,17 +99,6 @@ impl Env {
             .filter_map(|e| e["kind"].as_str().map(String::from))
             .collect()
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 async fn start() -> Env {
@@ -226,7 +216,7 @@ async fn item(e: &Env, goal: &str) -> String {
         .to_string();
     assert!(
         // on the Node: its turn is under way (not only the session opening)
-        until(10, || async {
+        eventually("queued condition", || async {
             let s = e.session(&sid).await;
             s["busy"] == true && s["status"] == "running"
         })
@@ -340,7 +330,7 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         .await;
     assert_eq!((s, v["result"].as_str()), (200, Some("interrupted")), "{v}");
     assert!(
-        until(10, || async { e.prompts().len() == 2 }).await,
+        eventually("queued condition", || async { e.prompts().len() == 2 }).await,
         "the next turn starts: {:?}",
         e.prompts()
     );
@@ -364,11 +354,16 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(s, 409, "{m} {p}: {v}");
         assert_eq!(v["error"], "这条消息已经发出，不能再改");
     }
-    assert!(until(10, || async { e.session(&sid).await["busy"] == false }).await);
+    assert!(
+        eventually("queued condition", || async {
+            e.session(&sid).await["busy"] == false
+        })
+        .await
+    );
     assert_eq!(e.prompts().len(), 2);
     // the turn ended: the hint is gone (the session change refreshes the state)
     assert!(
-        until(5, || async {
+        eventually("queued condition", || async {
             e.open_decision("dec_midturn")
                 .await
                 .get("agent_busy")

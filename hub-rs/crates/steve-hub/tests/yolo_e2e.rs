@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -47,17 +48,6 @@ impl Env {
         assert_eq!(s, 200, "{v}");
         v
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 async fn start() -> Env {
@@ -174,7 +164,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
+        eventually("yolo_e2e condition", || async {
+            e.session(&sid).await["busy"] == true
+        })
+        .await,
         "the first turn runs"
     );
     sid
@@ -218,7 +211,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // inside: answered at once with the allow_once option
     let inside = item(&e, "写笔记 @permtool edit notes.txt").await;
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             texts(&e, &inside).await.contains("perm:selected:once")
         })
         .await,
@@ -256,7 +249,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // outside: a delete stays with you, the reason recorded once
     let outside = item(&e, "清理 @permtool delete ../../../outside.txt").await;
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             !rows(
                 &e.db,
                 "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -330,13 +323,13 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     );
     // running sessions switch in place
     assert!(
-        until(10, || async { bypass_modes() > 0 }).await,
+        eventually("yolo_e2e condition", || async { bypass_modes() > 0 }).await,
         "a live session got bypassPermissions"
     );
     // a new session starts in bypass mode: the harness asks nothing, so no card and no YOLO row
     let free = item(&e, "清理 @permtool delete ../../../outside2.txt").await;
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             texts(&e, &free).await.contains("perm:bypassed:")
         })
         .await,
@@ -370,7 +363,10 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["full"], false);
     assert!(
-        until(10, || async { set_modes() > modes_before }).await,
+        eventually("yolo_e2e condition", || async {
+            set_modes() > modes_before
+        })
+        .await,
         "switched back in place"
     );
     let last_free_mode = std::fs::read_to_string(&e.log)
@@ -399,7 +395,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let ssh = "ssh -o BatchMode=yes macbook '/bin/launchctl print gui/501'";
     let unasked = item(&e, &format!("看看 @run {ssh} @say after")).await;
     assert!(
-        until(30, || async {
+        eventually("yolo_e2e condition", || async {
             let t = texts(&e, &unasked).await;
             t.contains("ran:ssh -o BatchMode=yes macbook") && t.contains("after")
         })
@@ -410,7 +406,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // `busy` describes the current turn: takeover may already have started another one
     // by the time we poll. Check the durable completion of the turn exercised here.
     assert!(
-        until(30, || async {
+        eventually("yolo_e2e condition", || async {
             texts(&e, &unasked)
                 .await
                 .contains("\"stopReason\":\"end_turn\"")
@@ -429,7 +425,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // it stays with the user as a card
     let push = item(&e, "推送 @permexec git push origin main").await;
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             !rows(
                 &e.db,
                 "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -475,7 +471,10 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     };
     let waiting_acts = acts(waiting.clone());
     assert!(
-        until(20, || async { !waiting_acts().is_empty() }).await,
+        eventually("yolo_e2e condition", || async {
+            !waiting_acts().is_empty()
+        })
+        .await,
         "YOLO looked at it"
     );
     assert_eq!(
@@ -503,7 +502,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             texts(&e, &waiting).await.contains("perm:selected:")
         })
         .await,
@@ -537,7 +536,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(row["status"], "after_turn", "{v}");
     assert_eq!(row["residual"], true, "{v}");
     assert!(
-        until(30, || async {
+        eventually("yolo_e2e condition", || async {
             let v = state().await;
             v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
         })
@@ -582,7 +581,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     };
     let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             ok_open().len() == 1 && kill_open().len() == 1
         })
         .await,
@@ -603,7 +602,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(20, || async {
+        eventually("yolo_e2e condition", || async {
             texts(&e, &off_ok).await.contains("perm:selected:")
         })
         .await,
@@ -621,11 +620,14 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         1
     );
     assert!(
-        until(20, || async { e.session(&off_ok).await["busy"] == false }).await,
+        eventually("yolo_e2e condition", || async {
+            e.session(&off_ok).await["busy"] == false
+        })
+        .await,
         "the turn went on to its end"
     );
     assert!(
-        until(20, || async { !kill_acts().is_empty() }).await,
+        eventually("yolo_e2e condition", || async { !kill_acts().is_empty() }).await,
         "YOLO looked at the other one"
     );
     let r = kill_acts();
@@ -655,7 +657,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         v["sessions"][0].clone()
     };
     assert!(
-        until(30, || async {
+        eventually("yolo_e2e condition", || async {
             let r = row().await;
             r["status"] == "applied" && r["applied"] == "full_access"
         })
@@ -665,7 +667,10 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     );
     assert_eq!(row().await["wanted_from"], "full_access");
     assert!(
-        until(20, || async { e.session(&nobot).await["busy"] == false }).await,
+        eventually("yolo_e2e condition", || async {
+            e.session(&nobot).await["busy"] == false
+        })
+        .await,
         "its turn ended"
     );
     let (s, v) = e
@@ -680,7 +685,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         "not applied while the harness still runs full access: {r}"
     );
     assert!(
-        until(30, || async {
+        eventually("yolo_e2e condition", || async {
             let r = row().await;
             r["status"] == "applied" && r["applied"] == "ask"
         })

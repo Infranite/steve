@@ -15,6 +15,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 
@@ -181,17 +182,6 @@ async fn health(h: &Home) -> Option<Value> {
     r.json().await.ok()
 }
 
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
-
 /// The first `/healthz` answer that satisfies `ok` within `secs`.
 async fn health_until(h: &Home, secs: u64, ok: impl Fn(&Value) -> bool) -> Value {
     let end = tokio::time::Instant::now() + Duration::from_secs(secs);
@@ -288,7 +278,7 @@ async fn item(h: &Home, c: &Client, goal: &str) -> String {
     let item = i["id"].as_str().expect("item").to_string();
     let needle = goal.split(' ').next().unwrap_or(goal).to_string();
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             h.prompts().iter().any(|p| p.contains(&needle))
         })
         .await,
@@ -328,7 +318,7 @@ async fn idle_session(h: &Home) -> String {
     let c = Client::login(h).await;
     let sid = item(h, &c, "空闲验证-I4 @say done").await;
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             count(
                 h,
                 "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'",
@@ -382,7 +372,7 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
                 && count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 0
         })
@@ -414,7 +404,7 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // and it gave up the turn the kill cut (B6)
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             count(
                 &h,
                 "SELECT COUNT(*) FROM node_commands WHERE method=?",
@@ -472,7 +462,7 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             h.prompts().iter().any(|p| p.contains(held))
         })
         .await,
@@ -549,7 +539,7 @@ async fn a_hub_stopped_in_maintenance_sends_nothing_until_maintenance_is_lifted(
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
     assert!(
-        until(30, || async {
+        eventually("recovery_ready condition", || async {
             h.prompts().iter().any(|p| p.contains(held))
         })
         .await,

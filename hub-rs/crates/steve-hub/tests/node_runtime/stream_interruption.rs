@@ -61,7 +61,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
         done.acted = true;
         let before = h.clock().now();
         h.node.finish(&exec, done).await.unwrap();
-        until("provider retry planned", || {
+        eventually_sync("provider retry planned", || {
             h.attempts().len() == ordinal + 1
         })
         .await;
@@ -122,7 +122,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             "not sent one millisecond early"
         );
         h.advance_to(at).await;
-        until("retry reached Node after backoff", || {
+        eventually_sync("retry reached Node after backoff", || {
             h.count("start_turn") == ordinal + 1
         })
         .await;
@@ -133,7 +133,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
     let mut done = build::done();
     done.acted = true;
     h.node.finish(&exec, done).await.unwrap();
-    until("provider failures exhausted", || h.ends().len() == 1).await;
+    eventually_sync("provider failures exhausted", || h.ends().len() == 1).await;
     let end = h.ends().pop().unwrap();
     assert_eq!(end.1, STOP);
     assert!(end.2.unwrap().contains("已自动重试 2 次仍失败"));
@@ -149,12 +149,12 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
     // A later user turn has a fresh execution-error budget and cannot inherit the old text.
     let next = h.running("new task").await;
     h.node.finish(&next, build::done()).await.unwrap();
-    until("new ordinary end", || h.ends().len() == 2).await;
+    eventually_sync("new ordinary end", || h.ends().len() == 2).await;
     assert_eq!(h.ends()[1].1, "end_turn");
     let next = h.running("another interrupted task").await;
     say(&h, &next, Role::Assistant, &[ERROR]).await;
     h.node.finish(&next, build::done()).await.unwrap();
-    until("new turn has its own retry budget", || {
+    eventually_sync("new turn has its own retry budget", || {
         h.attempts().len() == 6
     })
     .await;
@@ -188,7 +188,7 @@ async fn provider_stream_interruption_accepts_adapter_errors_and_stop_reasons() 
         c.error = error.map(|e| ApiError::new(ErrorCode::Internal, e));
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
-        until("provider retry", || h.attempts().len() == 2).await;
+        eventually_sync("provider retry", || h.attempts().len() == 2).await;
         assert!(h.ends().is_empty());
         assert_eq!(h.stat_rows().last().unwrap().1.as_deref(), Some(STOP));
     }
@@ -217,7 +217,7 @@ async fn provider_stream_interruption_ignores_quoted_user_and_thought_output_and
             c.stop_reason = "cancelled".into();
         }
         h.node.finish(&exec, c).await.unwrap();
-        until("ordinary end", || h.ends().len() == 1).await;
+        eventually_sync("ordinary end", || h.ends().len() == 1).await;
         assert_eq!(h.attempts().len(), 1);
         assert_eq!(
             h.ends()[0].1,
@@ -250,7 +250,7 @@ async fn provider_stream_interruption_reads_text_and_end_applied_in_the_same_bat
         })
         .await
         .unwrap();
-    until("batched diagnostic retried", || h.attempts().len() == 2).await;
+    eventually_sync("batched diagnostic retried", || h.attempts().len() == 2).await;
     assert!(h.ends().is_empty());
     assert_eq!(h.stat_rows().last().unwrap().1.as_deref(), Some(STOP));
 }
@@ -280,10 +280,10 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
         if state == "cancel" {
-            until("backoff planned", || h.attempts().len() == 2).await;
+            eventually_sync("backoff planned", || h.attempts().len() == 2).await;
             assert!(h.rt.cancel_attempt(S, exec.attempt().as_str()).unwrap());
         }
-        until("boundary respected", || h.ends().len() == 1).await;
+        eventually_sync("boundary respected", || h.ends().len() == 1).await;
         assert_eq!(h.count("start_turn"), 1, "{state}: no automatic start");
         assert_eq!(h.attempts().len(), if state == "cancel" { 2 } else { 1 });
         assert_eq!(

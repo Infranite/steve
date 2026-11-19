@@ -4,6 +4,7 @@
 mod node_harness;
 
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use node_harness::*;
 use serde_json::json;
@@ -18,10 +19,7 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
     let fake = FakeNode::new(node.as_str());
     let a = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let remote = h.fleet.remote(&node);
-    until("A attached", 5, || {
-        remote.generation() == Some(a.generation)
-    })
-    .await;
+    eventually_sync("A attached", || remote.generation() == Some(a.generation)).await;
     remote
         .prepare_workspace(cmd("op_prep", prepare("item:s_1")))
         .await
@@ -53,10 +51,7 @@ async fn the_newer_link_wins_and_the_old_ones_calls_are_uncertain() {
     assert_eq!(e.code, ErrorCode::OutcomeUnknown);
     assert_eq!(e.operation, Some(OperationId::new("op_t1").unwrap()));
     // asked over the new link, not redone
-    until("B attached", 5, || {
-        remote.generation() == Some(b.generation)
-    })
-    .await;
+    eventually_sync("B attached", || remote.generation() == Some(b.generation)).await;
     let r = remote
         .operation(OperationId::new("op_t1").unwrap())
         .await
@@ -84,7 +79,7 @@ async fn an_old_generation_is_stale_at_every_guard() {
     let fake = FakeNode::new(node.as_str());
     let _a = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
     let b = dial(&h, &id, &node, fake.clone(), 1).await.unwrap();
-    until("B current", 5, || {
+    eventually_sync("B current", || {
         h.svc.registry.current(node.as_str()) == Some(b.generation)
     })
     .await;

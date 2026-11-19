@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
@@ -187,7 +188,7 @@ impl H {
 
     async fn advance_to(&self, at: i64) {
         self.clock().advance_to(at);
-        until("sender observed advanced clock", || {
+        eventually_sync("sender observed advanced clock", || {
             self.clock().observed(at)
         })
         .await;
@@ -256,16 +257,6 @@ fn perm(pid: &str, exec: ExecutionRef, command: &str) -> PermissionRequest {
     perm_ttl(pid, exec, command, 600_000)
 }
 
-async fn until(what: &str, f: impl Fn() -> bool) {
-    for _ in 0..1000 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 fn text(exec: &ExecutionRef, t: &str) -> (Subject, EventBody) {
     (
         Subject::Execution(exec.clone()),
@@ -284,19 +275,19 @@ async fn bind_prepares_opens_then_runs_what_is_queued() {
     h.bind();
     // queued while opening: it waits for the open, then goes as one turn
     assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Busy);
-    until("start_turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("start_turn", || h.methods().contains(&"start_turn")).await;
     assert_eq!(
         h.methods(),
         ["prepare_workspace", "open_session", "start_turn"]
     );
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert!(h.rt.is_busy(S));
 
     let exec = h.attempts()[0].clone();
     let (s, b) = text(&exec, "hi there");
     h.node.emit(s, b).await.unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
 
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     assert_eq!(h.phase(), "ready");
@@ -315,8 +306,8 @@ async fn a_message_during_a_turn_goes_next_and_the_item_hears_one_end() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("first attempt", || h.attempts().len() == 1).await;
-    until("active", || h.phase() == "active").await;
+    eventually_sync("first attempt", || h.attempts().len() == 1).await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert_eq!(
         h.rt.prompt(S, "two", "user", &[]).unwrap(),
         Planned::Busy,
@@ -325,16 +316,16 @@ async fn a_message_during_a_turn_goes_next_and_the_item_hears_one_end() {
 
     let first = h.attempts()[0].clone();
     h.node.finish(&first, build::done()).await.unwrap();
-    until("second attempt", || h.attempts().len() == 2).await;
+    eventually_sync("second attempt", || h.attempts().len() == 2).await;
     assert!(h.ends().is_empty(), "the turn goes on with what was queued");
     let second = h.attempts()[1].clone();
     assert_ne!(turn_of(&first), turn_of(&second), "a new logical turn");
-    until("second running", || {
+    eventually_sync("second running", || {
         h.methods().iter().filter(|m| **m == "start_turn").count() == 2
     })
     .await;
     h.node.finish(&second, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends().len(), 1);
 }
 
@@ -343,15 +334,15 @@ async fn a_passing_failure_with_no_tool_run_is_a_new_attempt_of_the_same_turn() 
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let first = h.attempts()[0].clone();
     let mut c = build::done();
     c.outcome = Outcome::Failed;
     c.stop_reason = "error".into();
     c.transient = true;
     h.node.finish(&first, c).await.unwrap();
-    until("retry planned", || h.attempts().len() == 2).await;
+    eventually_sync("retry planned", || h.attempts().len() == 2).await;
     let second = h.attempts()[1].clone();
     assert_eq!(turn_of(&first), turn_of(&second), "the same turn");
     assert_ne!(first.attempt(), second.attempt(), "a new attempt");
@@ -368,7 +359,7 @@ async fn the_turn_end_names_the_last_attempt_of_its_retry_chain() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.count("start_turn") == 1).await;
+    eventually_sync("started", || h.count("start_turn") == 1).await;
     let first = h.attempts()[0].clone();
     h.transient_failure(&first).await;
     let retry = h.attempts()[1].clone();
@@ -390,9 +381,9 @@ async fn the_turn_end_names_the_last_attempt_of_its_retry_chain() {
             Ok(())
         })
         .unwrap();
-    until("retry sent", || h.count("start_turn") == 2).await;
+    eventually_sync("retry sent", || h.count("start_turn") == 2).await;
     h.node.finish(&retry, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends().len(), 1, "one end for the turn");
     assert_eq!(
         *h.ends.5.lock().unwrap(),
@@ -413,7 +404,7 @@ async fn a_failure_after_a_tool_ran_ends_the_turn() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let first = h.attempts()[0].clone();
     let mut c = build::done();
     c.outcome = Outcome::Failed;
@@ -421,7 +412,7 @@ async fn a_failure_after_a_tool_ran_ends_the_turn() {
     c.transient = true;
     c.acted = true;
     h.node.finish(&first, c).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.attempts().len(), 1, "no retry once something ran");
 }
 
@@ -430,10 +421,10 @@ async fn cancel_targets_the_attempt_running_when_asked() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     assert!(h.rt.cancel(S).unwrap());
-    until("cancel sent", || h.methods().contains(&"cancel")).await;
+    eventually_sync("cancel sent", || h.methods().contains(&"cancel")).await;
     let (_, op) = h
         .node
         .log()
@@ -446,7 +437,7 @@ async fn cancel_targets_the_attempt_running_when_asked() {
     c.stop_reason = "cancelled".into();
     c.transient = true;
     h.node.finish(&exec, c).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.attempts().len(), 1, "a cancelled turn is not retried");
     assert!(!h.rt.cancel(S).unwrap(), "nothing left to cancel");
 }
@@ -456,15 +447,15 @@ async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
     h.rt.prompt(S, "next", "user", &[]).unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("the next turn", || h.attempts().len() == 2).await;
+    eventually_sync("the next turn", || h.attempts().len() == 2).await;
     let a2 = h.rt.active_attempt(S).unwrap().expect("a2 runs");
     assert_ne!(a1, a2);
-    until("a2 sent", || {
+    eventually_sync("a2 sent", || {
         h.methods().iter().filter(|m| **m == "start_turn").count() == 2
     })
     .await;
@@ -476,7 +467,7 @@ async fn cancel_attempt_with_an_old_attempt_queues_nothing() {
     assert!(h.rt.is_busy(S), "a2 still runs");
     assert!(h.rt.cancel_attempt(S, &a2).unwrap());
     // queued now, or once the Node is known to hold a2's start
-    until("a2's cancel", || cancels() == 1).await;
+    eventually_sync("a2's cancel", || cancels() == 1).await;
 }
 
 /// Issue (B2a review): a stop frozen on an attempt that then failed in passing reaches its gateway
@@ -487,7 +478,7 @@ async fn cancel_attempt_reaches_the_retry_of_its_turn() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("started", || h.count("start_turn") == 1).await;
+    eventually_sync("started", || h.count("start_turn") == 1).await;
     let a1 = h.rt.active_attempt(S).unwrap().expect("a1 runs");
     let first = h.attempts()[0].clone();
     h.transient_failure(&first).await;
@@ -504,14 +495,14 @@ async fn cancel_attempt_reaches_the_retry_of_its_turn() {
         "SELECT state FROM node_commands WHERE operation_id='{op}'"
     ));
     assert_eq!(state, "rejected", "the retry is settled here, never sent");
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "cancelled".to_string(), None)]);
     assert_eq!(h.count("start_turn"), 1, "no second start_turn");
     assert!(!h.rt.is_busy(S));
 
     // a stop of that turn, late, leaves the next turn alone
     h.rt.prompt(S, "two", "user", &[]).unwrap();
-    until("the next turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the next turn", || h.count("start_turn") == 2).await;
     assert!(!h.rt.cancel_attempt(S, &a1).unwrap(), "a1's turn is over");
     assert!(!h.rt.cancel_attempt(S, &retry).unwrap());
     let cancels: i64 =
@@ -525,13 +516,13 @@ async fn the_same_events_again_are_stored_once() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let (s, b) = text(&exec, "x");
     h.node.emit(s, b).await.unwrap();
     // the Node did not hear the ack and sends what it kept again
     let replay = h.seen.seen.lock().unwrap().clone();
-    until("first inbox write", || {
+    eventually_sync("first inbox write", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_event_inbox") == replay.len() as i64
     })
     .await;
@@ -545,7 +536,7 @@ async fn the_same_events_again_are_stored_once() {
     sink.commit(EventBatch { events: replay }).await.unwrap();
     let after: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
     assert_eq!(before, after);
-    until("applied", || {
+    eventually_sync("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
     })
     .await;
@@ -561,7 +552,7 @@ async fn a_busy_node_gets_the_very_same_command_again() {
     });
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("refused", || {
+    eventually_sync("refused", || {
         h.q::<i64>(
             "SELECT COALESCE(MAX(lease_generation),0) FROM node_commands WHERE method='start_turn'",
         ) >= 1
@@ -591,7 +582,7 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
     };
     let mut delays = vec![];
     for n in 1..=3 {
-        until("refused again", || exhausted() == n).await;
+        eventually_sync("refused again", || exhausted() == n).await;
         // the time between the refusal and the next send
         delays.push(
             h.q::<i64>("SELECT retry_at-updated FROM node_commands WHERE method='start_turn'"),
@@ -618,8 +609,8 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
     h.node.refuse("start_turn", None);
     h.advance_to(h.q("SELECT retry_at FROM node_commands WHERE method='start_turn'"))
         .await;
-    until("start_turn", || h.methods().contains(&"start_turn")).await;
-    until("active", || h.phase() == "active").await;
+    eventually_sync("start_turn", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("active", || h.phase() == "active").await;
     let ran: Vec<_> = h
         .node
         .log()
@@ -656,13 +647,13 @@ async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     h.rt.prompt(S, "look", "user", std::slice::from_ref(&f))
         .unwrap();
     // the open is not done yet: the lead joins the queue in front, once
-    until("opened", || {
+    eventually_sync("opened", || {
         h.methods().contains(&"start_turn") || h.phase() == "ready"
     })
     .await;
     let _ = h.rt.flush(S, Some(("lead", "steve")));
     let _ = h.rt.flush(S, Some(("lead", "steve")));
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let spec: String = h.q("SELECT spec FROM runtime_attempts");
     let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
     let Part::Text { text } = &spec.run.prompt[0] else {
@@ -700,7 +691,7 @@ async fn a_message_whose_file_is_gone_goes_without_it() {
     };
     h.rt.prompt(S, "still here", "user", std::slice::from_ref(&f))
         .unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let spec: String = h.q("SELECT spec FROM runtime_attempts");
     let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
     assert!(
@@ -717,11 +708,11 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let req = perm("p1", exec.clone(), "git push");
     h.node.ask_permission(req.clone()).await.unwrap();
-    until("card", || {
+    eventually_sync("card", || {
         h.q::<i64>(
             "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
         ) == 1
@@ -739,8 +730,8 @@ async fn a_permission_is_a_card_and_its_answer_goes_to_the_very_request() {
         .await
         .unwrap();
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
-    until("answered", || h.methods().contains(&"resolve_permission")).await;
-    until("card settled", || {
+    eventually_sync("answered", || h.methods().contains(&"resolve_permission")).await;
+    eventually_sync("card settled", || {
         h.q::<String>(&format!("SELECT status FROM decisions WHERE id='{d}'")) == "resolved"
     })
     .await;
@@ -765,7 +756,7 @@ async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
         let h = hub();
         h.bind();
         h.rt.prompt(S, "hello", "user", &[]).unwrap();
-        until("started", || h.methods().contains(&"start_turn")).await;
+        eventually_sync("started", || h.methods().contains(&"start_turn")).await;
         h.store.transaction::<_, StoreError>(|tx| {
             tx.execute_batch(
                 "INSERT INTO items(id,workspace_id,no,title,status,stage,source,created,updated)
@@ -785,7 +776,7 @@ async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
             .ask_permission(perm("p1", h.attempts()[0].clone(), "git push"))
             .await
             .unwrap();
-        until("permission card", || {
+        eventually_sync("permission card", || {
             h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE status='open'") == 1
         })
         .await;
@@ -807,7 +798,7 @@ async fn workflow_pause_cancel_and_replan_expire_late_permission_allows() {
             h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'"),
             "expired",
         );
-        until("rejection reached Node", || {
+        eventually_sync("rejection reached Node", || {
             h.methods().contains(&"resolve_permission")
         })
         .await;
@@ -823,18 +814,18 @@ async fn a_card_expires_with_its_attempt() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     h.node
         .ask_permission(perm("p1", exec.clone(), "rm -rf x"))
         .await
         .unwrap();
-    until("card", || {
+    eventually_sync("card", || {
         h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call'") == 1
     })
     .await;
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("expired", || {
+    eventually_sync("expired", || {
         h.q::<String>("SELECT status FROM decisions WHERE subject_type='tool_call'") == "expired"
     })
     .await;
@@ -867,7 +858,7 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let sub = || Subject::Execution(exec.clone());
     h.node.emit(sub(), usage("u1", "0.5")).await.unwrap();
@@ -898,7 +889,7 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
         .await
         .unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     let cost: f64 = h.q(&format!("SELECT cost FROM sessions WHERE id='{S}'"));
     assert!(
         (cost - 0.8).abs() < 1e-9,
@@ -923,7 +914,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "live usage", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let live = |id: &str, measurement: Measurement, n: u64| {
         let EventBody::Usage { mut report } = usage(id, "0") else {
@@ -947,7 +938,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         )
         .await
         .unwrap();
-    until("live booked before end", || {
+    eventually_sync("live booked before end", || {
         h.q::<i64>("SELECT COALESCE(SUM(input),0) FROM usage_records") == 100
     })
     .await;
@@ -970,7 +961,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         )
         .await
         .unwrap();
-    until("snapshot replaces delta", || {
+    eventually_sync("snapshot replaces delta", || {
         h.q::<i64>("SELECT SUM(input) FROM usage_records") == 120
     })
     .await;
@@ -981,7 +972,7 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         )
         .await
         .unwrap();
-    until("final replaces snapshot", || {
+    eventually_sync("final replaces snapshot", || {
         h.q::<i64>("SELECT SUM(input) FROM usage_records") == 140
     })
     .await;
@@ -992,17 +983,17 @@ async fn live_usage_survives_restart_report_replay_final_and_cancel() {
         )
         .await
         .unwrap();
-    until("late report applied", || {
+    eventually_sync("late report applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == 4
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
-    until("cancel sent", || h.methods().contains(&"cancel")).await;
+    eventually_sync("cancel sent", || h.methods().contains(&"cancel")).await;
     let mut completion = build::done();
     completion.outcome = Outcome::Cancelled;
     completion.stop_reason = "cancelled".into();
     h.node.finish(&exec, completion).await.unwrap();
-    until("cancelled", || !h.ends().is_empty()).await;
+    eventually_sync("cancelled", || !h.ends().is_empty()).await;
     let replay = h.seen.seen.lock().unwrap().clone();
     Sink(Arc::downgrade(&h.rt))
         .commit(EventBatch { events: replay })
@@ -1023,7 +1014,7 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
     h.rt.set_cost_caps(steve_hub::wire::node_runtime::CostCaps::new(5.0, 6.0));
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     let sub = || Subject::Execution(exec.clone());
     let cost = || h.q::<Option<f64>>(&format!("SELECT cost FROM sessions WHERE id='{S}'"));
@@ -1053,7 +1044,7 @@ async fn bad_cost_reports_never_clear_lower_or_inflate_the_cost() {
     }
     h.node.emit(sub(), huge).await.unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     let c = cost().expect("never cleared");
     assert!((c - 3.0).abs() < 1e-9, "1, then 2 (11 to 13): {c}");
     let used: i64 = h.q(&format!("SELECT used FROM sessions WHERE id='{S}'"));
@@ -1071,9 +1062,9 @@ impl H {
     async fn one_turn(&self, text: &str) {
         let (before, n) = (self.ends().len(), self.attempts().len());
         self.rt.prompt(S, text, "user", &[]).unwrap();
-        until("attempt", || self.attempts().len() == n + 1).await;
+        eventually_sync("attempt", || self.attempts().len() == n + 1).await;
         let exec = self.attempts().last().unwrap().clone();
-        until("started", || {
+        eventually_sync("started", || {
             self.node
                 .log()
                 .iter()
@@ -1083,8 +1074,8 @@ impl H {
         })
         .await;
         self.node.finish(&exec, build::done()).await.unwrap();
-        until("turn end", || self.ends().len() > before).await;
-        until("ready", || self.phase() == "ready").await;
+        eventually_sync("turn end", || self.ends().len() > before).await;
+        eventually_sync("ready", || self.phase() == "ready").await;
     }
 
     fn count(&self, method: &str) -> usize {
@@ -1097,11 +1088,11 @@ async fn release_lets_an_idle_session_go_and_only_an_idle_one() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert_eq!(h.rt.release(S).unwrap(), Release::Busy, "busy: not let go");
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
 
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.phase(), "releasing");
@@ -1109,7 +1100,7 @@ async fn release_lets_an_idle_session_go_and_only_an_idle_one() {
         matches!(h.rt.release(S).unwrap(), Release::Pending(_)),
         "already being let go"
     );
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
     let receipt: String = h.q("SELECT state FROM node_commands WHERE method='release_session'");
     assert_eq!(receipt, "finished");
@@ -1127,14 +1118,14 @@ async fn a_released_session_opens_again_for_the_next_message_with_its_resume_han
     h.bind();
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
 
     assert_eq!(
         h.rt.prompt(S, "again", "user", &[]).unwrap(),
         Planned::Busy,
         "waits for the open"
     );
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(
         h.methods(),
         [
@@ -1164,7 +1155,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     // both before the release goes out (one thread: nothing is sent until the test waits)
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("release_session"), 1);
     assert_eq!(h.count("open_session"), 2, "opened again after the release");
     let queued: i64 = h.q(&format!(
@@ -1173,7 +1164,7 @@ async fn a_message_queued_while_releasing_reopens_once_the_release_is_done() {
     assert_eq!(queued, 0, "the message went with the turn");
     let exec = h.attempts().last().unwrap().clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("second end", || h.ends().len() == 2).await;
+    eventually_sync("second end", || h.ends().len() == 2).await;
     assert_eq!(h.phase(), "ready");
 }
 
@@ -1185,13 +1176,13 @@ async fn an_idle_session_is_let_go_once_and_the_next_message_resumes_it() {
     h.rt.set_idle_release(300);
     h.bind();
     h.one_turn("hello").await;
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     // more passes of the worker let nothing else go
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(h.count("release_session"), 1);
 
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Busy);
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     let resume: Option<String> = h.q(
         "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
@@ -1205,14 +1196,14 @@ async fn a_session_with_a_turn_running_is_not_let_go_however_long_it_takes() {
     h.rt.set_idle_release(0);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(h.phase(), "active");
     assert_eq!(h.count("release_session"), 0);
     // over: idle from now, let go
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
 }
 
@@ -1260,13 +1251,13 @@ async fn a_session_with_an_open_card_is_not_let_go() {
     h.rt.set_idle_release(0);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     h.node
         .ask_permission(perm("p1", exec.clone(), "git push"))
         .await
         .unwrap();
-    until("card", || {
+    eventually_sync("card", || {
         h.q::<i64>(
             "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
         ) == 1
@@ -1282,8 +1273,8 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
-    until("active", || h.phase() == "active").await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("active", || h.phase() == "active").await;
     let exec = h.attempts()[0].clone();
     let (_, start_op) = h
         .node
@@ -1307,7 +1298,7 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
         )
         .await
         .unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
     })
     .await;
@@ -1325,7 +1316,7 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     assert!(h.rt.is_busy(S));
 
     assert!(h.rt.cancel(S).unwrap());
-    until("abandon sent", || h.methods().contains(&"abandon")).await;
+    eventually_sync("abandon sent", || h.methods().contains(&"abandon")).await;
     assert!(!h.methods().contains(&"cancel"), "abandoned, not cancelled");
     let target: String = h.q(
         "SELECT json_extract(request,'$.body.target') FROM node_commands WHERE method='abandon'",
@@ -1337,14 +1328,14 @@ async fn an_unknown_attempt_keeps_its_session_and_cancel_abandons_it() {
     );
 
     // the Node proves it stopped: the turn is over, interrupted
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends()[0].1, "abandoned");
     let dispatched: String =
         h.q("SELECT state FROM session_dispatch WHERE backend='node' ORDER BY rowid LIMIT 1");
     assert_eq!(dispatched, "interrupted");
     assert_eq!(h.count("abandon"), 1);
     // the harness went with it: what waited opens the session again before its turn
-    until("next turn", || h.count("start_turn") == 2).await;
+    eventually_sync("next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     let refused: i64 =
         h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
@@ -1389,7 +1380,7 @@ async fn after_a_restart_events_taken_in_but_not_applied_are_applied() {
         })
         .unwrap();
     first.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || {
+    eventually_sync("started", || {
         node.log().iter().any(|(m, _)| *m == "start_turn")
             && q("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
@@ -1408,7 +1399,7 @@ async fn after_a_restart_events_taken_in_but_not_applied_are_applied() {
     .unwrap();
     let gone = Arc::downgrade(&first);
     drop(first);
-    until("first Hub gone", || gone.upgrade().is_none()).await;
+    eventually_sync("first Hub gone", || gone.upgrade().is_none()).await;
 
     // the second takes the events in (durable) and stops before applying them
     let second = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
@@ -1427,7 +1418,7 @@ async fn after_a_restart_events_taken_in_but_not_applied_are_applied() {
     let third = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
     node.connect(Arc::new(Sink(Arc::downgrade(&third))));
     third.start();
-    until("caught up", || {
+    eventually_sync("caught up", || {
         q("SELECT COUNT(*) FROM events WHERE kind='text'") == 1
     })
     .await;
@@ -1442,7 +1433,7 @@ async fn after_a_restart_events_taken_in_but_not_applied_are_applied() {
 async fn a_stopped_runtime_refuses_instead_of_queueing() {
     let h = hub();
     h.bind();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     h.rt.stop("its tools did not connect");
     let e = h.rt.prompt(S, "hello", "user", &[]).unwrap_err();
     assert!(e.to_string().contains("not running"), "{e}");
@@ -1499,10 +1490,10 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
         )
         .await
         .unwrap();
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     let ends = h.ends().len();
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Busy);
-    until("refused open reported", || h.ends().len() == ends + 1).await;
+    eventually_sync("refused open reported", || h.ends().len() == ends + 1).await;
     let (session, stop, error) = h.ends().last().unwrap().clone();
     assert_eq!(
         (session.as_str(), stop.as_str()),
@@ -1528,7 +1519,7 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
         .unwrap();
     assert_eq!(h.rt.prompt(S, "third", "user", &[]).unwrap(), Planned::Held);
     h.rt.retry_open(S, &build::choice()).unwrap();
-    until("reopened turn", || h.count("start_turn") == 2).await;
+    eventually_sync("reopened turn", || h.count("start_turn") == 2).await;
     let opens: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='open_session'");
     assert_eq!(opens, 3);
     let queued: i64 = h.q(&format!(
@@ -1544,14 +1535,14 @@ async fn a_pruned_event_delivered_again_is_acknowledged_and_not_applied_again() 
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
+    eventually_sync("running", || h.phase() == "active").await;
     let (s, b) = text(&exec, "x");
     h.node.emit(s, b).await.unwrap();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
-    until("applied", || {
+    eventually_sync("turn end", || h.ends().len() == 1).await;
+    eventually_sync("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
     })
     .await;
@@ -1624,9 +1615,9 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
+    eventually_sync("running", || h.phase() == "active").await;
     for (id, cost) in [("u1", "0.1"), ("u2", "0.3")] {
         h.node
             .emit(Subject::Execution(exec.clone()), usage(id, cost))
@@ -1634,10 +1625,10 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
             .unwrap();
     }
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     let all: i64 = h.q("SELECT COUNT(*) FROM node_event_inbox");
-    until("applied", || {
+    eventually_sync("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
     })
     .await;
@@ -1672,9 +1663,9 @@ async fn pruning_the_inbox_keeps_what_is_read_again() {
 
     // and the session still opens again where it left off
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     let resume: Option<String> = h.q(
         "SELECT json_extract(request,'$.body.resume') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
     );
@@ -1767,14 +1758,14 @@ impl H {
         let old = Arc::downgrade(&self.rt);
         self.rt = rt;
         self.seen = seen;
-        until("old Hub gone", || old.upgrade().is_none()).await;
+        eventually_sync("old Hub gone", || old.upgrade().is_none()).await;
         if let Some(at) = at {
             self.clock().advance_to(at);
         }
         // the boot closes the statistics rows the restart cut, before anything runs
         acp_stats::interrupt_open(&self.store, steve_store::now());
         self.rt.start();
-        until("reconciled", || self.rt.is_reconciled()).await;
+        eventually_sync("reconciled", || self.rt.is_reconciled()).await;
     }
 
     /// The statistics rows of the attempts: (ended, stop_reason), in the attempts' order.
@@ -1828,7 +1819,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -1842,7 +1833,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
 
     h.node.restart();
     h.restart_hub().await;
-    until("given up on its own", || h.ends().len() == 1).await;
+    eventually_sync("given up on its own", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, steve_node_api::NODE_RESTARTED);
     assert_eq!(h.systems("Node 重启了"), 1, "told why");
     assert_eq!(h.systems("等待对账"), 0, "nothing waits for a person");
@@ -1867,7 +1858,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
 
     // the next message opens the session again; the first turn is never retried
     h.rt.prompt(S, "second", "user", &[]).unwrap();
-    until("reopened and next turn", || h.count("start_turn") == 2).await;
+    eventually_sync("reopened and next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     let first_turn: i64 = h.q(
         "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=(SELECT turn_id FROM runtime_attempts ORDER BY created, rowid LIMIT 1)",
@@ -1877,7 +1868,7 @@ async fn a_restart_mid_turn_is_never_rerun_and_the_hub_gives_it_up() {
     assert!(!h.prompt_of(1).contains("first"));
     let exec = h.attempts()[1].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("second end", || h.ends().len() == 2).await;
+    eventually_sync("second end", || h.ends().len() == 2).await;
 }
 
 /// B6: a person who pressed Stop on the attempt before the Hub's own abandon landed is answered
@@ -1887,7 +1878,7 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -1900,7 +1891,7 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
     );
     h.node.restart();
     h.restart_hub().await;
-    until("the Hub's abandon refused", || {
+    eventually_sync("the Hub's abandon refused", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
     })
     .await;
@@ -1910,7 +1901,7 @@ async fn a_stop_pressed_on_a_restart_cut_turn_stays_a_stop() {
         "still unknown: yours"
     );
     assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 1).await;
+    eventually_sync("abandoned", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, "abandoned", "a Stop is never continued");
 }
 
@@ -1925,7 +1916,7 @@ async fn a_restart_lets_an_idle_session_go_and_the_next_message_opens_it_again()
     h.restart_hub().await;
     assert_eq!(h.phase(), "released");
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     let refused: i64 =
         h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
@@ -1938,7 +1929,7 @@ async fn reconciling_expires_cards_nobody_waits_for() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -1947,7 +1938,7 @@ async fn reconciling_expires_cards_nobody_waits_for() {
         .ask_permission(perm("p1", exec, "rm -rf build"))
         .await
         .unwrap();
-    until("card", || {
+    eventually_sync("card", || {
         h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE status='open'") == 1
     })
     .await;
@@ -1967,7 +1958,7 @@ async fn a_turn_refused_on_a_released_session_goes_again_after_a_reopen() {
     h.node.restart();
     assert_eq!(h.phase(), "ready");
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("second turn accepted", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn accepted", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2, "opened again");
     let refused: i64 =
         h.q("SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='rejected'");
@@ -1982,7 +1973,7 @@ async fn a_turn_refused_on_a_released_session_goes_again_after_a_reopen() {
     assert_eq!(h.ends().len(), 1, "no turn end for the refusal");
     let exec = h.attempts()[2].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("end", || h.ends().len() == 2).await;
+    eventually_sync("end", || h.ends().len() == 2).await;
     let dispatched: String =
         h.q("SELECT state FROM session_dispatch WHERE backend='node' ORDER BY rowid DESC LIMIT 1");
     assert_eq!(dispatched, "completed");
@@ -1997,7 +1988,7 @@ async fn a_turn_refused_for_good_ends_and_the_item_hears_it() {
     h.node
         .refuse_next("start_turn", ApiError::new(ErrorCode::Unsupported, "no"));
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("end", || h.ends().len() == 2).await;
+    eventually_sync("end", || h.ends().len() == 2).await;
     assert_eq!(h.ends()[1].1, "error");
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
@@ -2014,7 +2005,7 @@ async fn a_refused_release_leaves_the_session_ready_and_what_waited_runs() {
         .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     assert_eq!(h.rt.prompt(S, "more", "user", &[]).unwrap(), Planned::Busy);
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 1, "never let go");
     assert_eq!(h.last_state("release_session"), "rejected");
 }
@@ -2027,13 +2018,13 @@ async fn a_refused_reopen_leaves_the_session_released_until_a_human_retries() {
     h.bind();
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     h.node.refuse_next(
         "open_session",
         ApiError::new(ErrorCode::Invalid, "no workspace"),
     );
     h.rt.prompt(S, "more", "user", &[]).unwrap();
-    until("refused", || h.last_state("open_session") == "rejected").await;
+    eventually_sync("refused", || h.last_state("open_session") == "rejected").await;
     assert_eq!(h.phase(), "released");
     assert!(!h.rt.is_busy(S));
     assert_eq!(h.systems("没能打开"), 1);
@@ -2041,7 +2032,7 @@ async fn a_refused_reopen_leaves_the_session_released_until_a_human_retries() {
     assert_eq!(h.count("open_session"), 1, "not retried by itself");
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Held);
     h.rt.retry_open(S, &build::choice()).unwrap();
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert!(h.prompt_of(1).contains("more") && h.prompt_of(1).contains("again"));
 }
 
@@ -2052,7 +2043,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -2075,7 +2066,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
         )
         .await
         .unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
     })
     .await;
@@ -2083,7 +2074,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     h.node
         .refuse_next("abandon", ApiError::new(ErrorCode::Conflict, "not now"));
     assert!(h.rt.cancel(S).unwrap());
-    until("refused", || {
+    eventually_sync("refused", || {
         h.state_of(&format!("op_abandon_{a}")) == "rejected"
     })
     .await;
@@ -2094,7 +2085,7 @@ async fn a_second_stop_after_a_refused_abandon_asks_again() {
     assert!(h.rt.cancel(S).unwrap(), "the one on its way is not doubled");
     let n: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='abandon'");
     assert_eq!(n, 2);
-    until("abandoned", || h.ends().len() == 1).await;
+    eventually_sync("abandoned", || h.ends().len() == 1).await;
     assert_eq!(h.state_of(&format!("op_abandon_{a}_1")), "finished");
     assert!(h.rt.cancel(S).is_ok_and(|x| !x), "nothing left to stop");
 }
@@ -2106,12 +2097,12 @@ async fn a_lead_on_a_released_idle_session_opens_it() {
     h.bind();
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(
         h.rt.flush(S, Some(("go on", "steve"))).unwrap(),
         Planned::Busy
     );
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     assert!(h.prompt_of(1).contains("go on"));
 }
@@ -2126,7 +2117,7 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
     // the stream is late from here on; answers still come
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     // a message reopens it, then is withdrawn before its turn: the session ends up idle and ready
     h.rt.prompt(S, "x", "user", &[]).unwrap();
     h.store
@@ -2135,13 +2126,13 @@ async fn a_late_release_view_does_not_let_a_reopened_session_go() {
             Ok(())
         })
         .unwrap();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     let late = h.seen.stash.lock().unwrap().take().unwrap();
     assert!(!late.is_empty());
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    until("applied", || {
+    eventually_sync("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
     })
     .await;
@@ -2155,7 +2146,7 @@ async fn an_ended_session_is_let_go_when_its_turn_is_over() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.store
         .transaction::<_, StoreError>(|tx| {
             tx.execute("UPDATE sessions SET status='ended'", [])?;
@@ -2168,7 +2159,7 @@ async fn an_ended_session_is_let_go_when_its_turn_is_over() {
     );
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("release_session"), 1);
 }
 
@@ -2222,7 +2213,7 @@ async fn a_handoff_mid_turn_opens_the_successor_only_after_the_old_harness_is_le
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     let op = h.hand_off();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
@@ -2235,7 +2226,7 @@ async fn a_handoff_mid_turn_opens_the_successor_only_after_the_old_harness_is_le
 
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("the successor's turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     assert_eq!(
         h.methods(),
         [
@@ -2270,14 +2261,14 @@ async fn a_refused_release_on_a_handoff_is_asked_again_and_the_successor_opens_a
     h.node
         .refuse_next("release_session", ApiError::new(ErrorCode::Invalid, "no"));
     let op = h.hand_off();
-    until("refused", || h.state_of(&op) == "rejected").await;
+    eventually_sync("refused", || h.state_of(&op) == "rejected").await;
     assert_eq!(
         h.count("prepare_workspace"),
         1,
         "not beside the old harness"
     );
     assert_eq!(h.phase_of(S2), "opening");
-    until("the successor's turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     assert_eq!(
         h.count("release_session"),
         1,
@@ -2305,10 +2296,10 @@ async fn a_stop_accepted_but_not_done_holds_the_release_and_the_successor() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert!(h.rt.cancel(S).unwrap());
     let op = h.hand_off();
-    until("cancel accepted", || h.count("cancel") == 1).await;
+    eventually_sync("cancel accepted", || h.count("cancel") == 1).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.count("release_session"), 0);
     assert_eq!(h.count("prepare_workspace"), 1, "no successor start");
@@ -2319,7 +2310,7 @@ async fn a_stop_accepted_but_not_done_holds_the_release_and_the_successor() {
     stopped.outcome = Outcome::Cancelled;
     stopped.stop_reason = "cancelled".into();
     h.node.finish(&exec, stopped).await.unwrap();
-    until("the successor's turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.state_of(&op), "finished");
     assert_eq!(h.node.most_open_in_a_workspace(), 1);
 }
@@ -2331,7 +2322,7 @@ async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.store
         .transaction::<_, StoreError>(|tx| {
             tx.execute(
@@ -2342,7 +2333,7 @@ async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
         })
         .unwrap();
     h.rt.bind(&on_the_item(S2)).unwrap();
-    until("opened", || h.phase_of(S2) == "ready").await;
+    eventually_sync("opened", || h.phase_of(S2) == "ready").await;
     assert_eq!(h.node.most_open_in_a_workspace(), 2);
 }
 
@@ -2354,7 +2345,7 @@ async fn a_handoff_before_the_old_open_is_sent_never_opens_the_ended_session() {
     h.rt.bind(&on_the_item(S)).unwrap();
     // one thread: nothing went out yet
     let op = h.hand_off();
-    until("the successor's turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 1).await;
     assert_eq!(h.state_of(&op), "finished");
     assert_eq!(h.count("release_session"), 0, "nothing was open to let go");
     assert_eq!(h.phase_of(S), "released");
@@ -2368,7 +2359,7 @@ async fn a_command_that_waited_past_its_window_goes_issued_again() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.hand_off();
     let past = steve_store::now() - 1;
     h.store
@@ -2383,7 +2374,7 @@ async fn a_command_that_waited_past_its_window_goes_issued_again() {
     h.node.set_now(steve_store::now());
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("the successor's turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     let issued: i64 = h.q(&format!(
         "SELECT json_extract(request,'$.accept_before') FROM node_commands WHERE operation_id='op_prep_{S2}'"
     ));
@@ -2400,7 +2391,7 @@ async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
     let Release::Pending(first) = h.rt.release(S).unwrap() else {
         panic!("idle: let go");
     };
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     h.one_turn("again").await;
     // the second release: the Node cannot tell what became of it
     h.node.script_once("release_session", Scripted::Unknown);
@@ -2408,7 +2399,7 @@ async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
         panic!("idle: let go");
     };
     assert_ne!(first, second);
-    until("unknown", || h.state_of(&second) == "unknown").await;
+    eventually_sync("unknown", || h.state_of(&second) == "unknown").await;
     // as if the first one's final receipt had never come in, and comes now
     h.store
         .transaction::<_, StoreError>(|tx| {
@@ -2431,7 +2422,7 @@ async fn a_stale_release_receipt_does_not_move_a_reopened_session() {
         )
         .await
         .unwrap();
-    until("applied", || h.state_of(&first) == "finished").await;
+    eventually_sync("applied", || h.state_of(&first) == "finished").await;
     assert_eq!(
         h.phase(),
         "releasing",
@@ -2458,7 +2449,7 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
     assert_eq!(h.count("start_turn"), 1);
     h.node.restart();
     h.restart_hub().await;
-    until("parked messages go", || h.count("start_turn") == 2).await;
+    eventually_sync("parked messages go", || h.count("start_turn") == 2).await;
     assert!(h.prompt_of(1).contains("while off") && h.prompt_of(1).contains("and more"));
 }
 
@@ -2470,20 +2461,20 @@ async fn a_replayed_permission_after_a_restart_is_neither_a_new_card_nor_answere
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     h.node
         .ask_permission(perm("p1", exec.clone(), "kill 4242"))
         .await
         .unwrap();
-    until("card", || h.ends.3.lock().unwrap().len() == 1).await;
+    eventually_sync("card", || h.ends.3.lock().unwrap().len() == 1).await;
     let replay = h.seen.seen.lock().unwrap().clone();
 
     // a second Hub process on the same ledger
     let ends = Arc::new(Ends::default());
     let second = NodeRuntime::new(h.store.clone(), h.node.clone(), ends.clone());
     second.start();
-    until("reconciled", || second.is_reconciled()).await;
+    eventually_sync("reconciled", || second.is_reconciled()).await;
     Sink(Arc::downgrade(&second))
         .commit(EventBatch { events: replay })
         .await
@@ -2551,10 +2542,10 @@ impl H {
     async fn running(&self, text: &str) -> ExecutionRef {
         let n = self.attempts().len();
         self.rt.prompt(S, text, "user", &[]).unwrap();
-        until("attempt", || self.attempts().len() == n + 1).await;
-        until("started", || self.count("start_turn") == n + 1).await;
+        eventually_sync("attempt", || self.attempts().len() == n + 1).await;
+        eventually_sync("started", || self.count("start_turn") == n + 1).await;
         // the Hub has the Node's answer too (a stop before it waits for it)
-        until("accepted", || {
+        eventually_sync("accepted", || {
             self.q::<i64>(
                 "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending'",
             ) == 0
@@ -2568,7 +2559,7 @@ impl H {
         let gone = Arc::downgrade(&self.rt);
         let next = NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone());
         drop(std::mem::replace(&mut self.rt, next));
-        until("old Hub gone", || gone.upgrade().is_none()).await;
+        eventually_sync("old Hub gone", || gone.upgrade().is_none()).await;
         tokio::time::sleep(pause).await;
         self.node.connect(Arc::new(Sink(Arc::downgrade(&self.rt))));
         self.rt.start();
@@ -2584,21 +2575,21 @@ async fn a_card_expires_at_its_expires_at() {
         .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     assert_eq!(h.status(&d), "open");
     // only the Hub's clock: the Node says nothing
-    until("expired", || h.status(&d) == "expired").await;
+    eventually_sync("expired", || h.status(&d) == "expired").await;
     assert_eq!(h.perm_state(&d), "expired");
     let op = format!("op_answer_{d}");
-    until("reject sent", || h.cmd_state(&op) == "finished").await;
+    eventually_sync("reject sent", || h.cmd_state(&op) == "finished").await;
     assert_eq!(h.commands("resolve_permission"), 1);
     let decided: String = h.q(&format!(
         "SELECT json_extract(request,'$.body.decision') FROM node_commands WHERE operation_id='{op}'"
     ));
     assert_eq!(decided, "reject");
     assert_eq!(h.count("resolve_permission"), 1, "the Node took the reject");
-    until("Node's resolution applied", || h.node.unacked() == 0).await;
+    eventually_sync("Node's resolution applied", || h.node.unacked() == 0).await;
     assert_eq!(
         h.status(&d),
         "expired",
@@ -2608,7 +2599,7 @@ async fn a_card_expires_at_its_expires_at() {
     assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
     assert_eq!(h.commands("resolve_permission"), 1);
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, "end_turn");
 }
 
@@ -2621,9 +2612,9 @@ async fn a_request_already_past_expires_at_is_closed_at_once() {
         .ask_permission(perm_ttl("p1", exec.clone(), "rm x", -1))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
-    until("expired", || h.status(&d) == "expired").await;
+    eventually_sync("expired", || h.status(&d) == "expired").await;
     assert!(h.ends.3.lock().unwrap().is_empty(), "never offered to YOLO");
     assert_eq!(
         h.commands("resolve_permission"),
@@ -2642,7 +2633,7 @@ async fn a_refused_answer_is_not_an_answer() {
         .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 60_000))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     assert_eq!(
         h.ends.3.lock().unwrap().as_slice(),
@@ -2664,7 +2655,7 @@ async fn a_refused_answer_is_not_an_answer() {
             Ok(())
         })
         .unwrap();
-    until("refused", || {
+    eventually_sync("refused", || {
         h.cmd_state(&format!("op_answer_{d}")) == "rejected"
     })
     .await;
@@ -2689,7 +2680,7 @@ async fn an_overdue_card_expires_after_a_restart() {
         .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 400))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     h.restart(Duration::from_millis(600)).await;
     // the sweep at start closes it, no wait for a tick
@@ -2706,7 +2697,7 @@ async fn a_card_closes_when_its_attempt_ends_without_the_nodes_expiry() {
         .ask_permission(perm("p1", exec.clone(), "rm x"))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     let d = h.cards()[0].clone();
     // a Node that ends the attempt and says nothing of its waits
     h.node
@@ -2718,7 +2709,7 @@ async fn a_card_closes_when_its_attempt_ends_without_the_nodes_expiry() {
         )
         .await
         .unwrap();
-    until("closed", || h.status(&d) == "expired").await;
+    eventually_sync("closed", || h.status(&d) == "expired").await;
     assert_eq!(h.perm_state(&d), "expired");
     assert_eq!(h.commands("resolve_permission"), 0);
     assert!(!h.rt.answer_permission(&d, Some("allow_once")).unwrap());
@@ -2735,13 +2726,13 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
         .ask_permission(perm("p1", a.clone(), "rm x"))
         .await
         .unwrap();
-    until("card A", || h.cards().len() == 1).await;
+    eventually_sync("card A", || h.cards().len() == 1).await;
     let da = h.cards()[0].clone();
     assert!(h.rt.answer_permission(&da, Some("allow_once")).unwrap());
     assert_eq!(h.perm_state(&da), "answering");
     h.node.finish(&a, build::done()).await.unwrap();
-    until("turn A end", || h.ends().len() == 1).await;
-    until("card A closed", || h.status(&da) == "expired").await;
+    eventually_sync("turn A end", || h.ends().len() == 1).await;
+    eventually_sync("card A closed", || h.status(&da) == "expired").await;
     assert_eq!(h.perm_state(&da), "expired");
 
     // attempt B asks the very same thing under the very same id
@@ -2750,14 +2741,14 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
         .ask_permission(perm("p1", b.clone(), "rm x"))
         .await
         .unwrap();
-    until("card B", || h.cards().len() == 2).await;
+    eventually_sync("card B", || h.cards().len() == 2).await;
     let db = h.cards()[1].clone();
     assert_ne!(da, db);
     assert_eq!(h.status(&db), "open");
 
     // the old answer gets through now: the Node refuses it, nothing of B moves
     h.node.refuse("resolve_permission", None);
-    until("old answer refused", || {
+    eventually_sync("old answer refused", || {
         h.cmd_state(&format!("op_answer_{da}")) == "rejected"
     })
     .await;
@@ -2767,8 +2758,8 @@ async fn a_late_answer_never_reaches_a_newer_attempt() {
 
     // B's own answer is its own command
     assert!(h.rt.answer_permission(&db, Some("allow_once")).unwrap());
-    until("B applied", || h.perm_state(&db) == "applied").await;
-    until("B resolved", || h.status(&db) == "resolved").await;
+    eventually_sync("B applied", || h.perm_state(&db) == "applied").await;
+    eventually_sync("B resolved", || h.status(&db) == "resolved").await;
     assert_eq!(h.commands("resolve_permission"), 2);
     let applied = h
         .seen
@@ -2808,11 +2799,11 @@ async fn an_old_cancel_never_hits_a_newer_attempt() {
     assert_eq!((target_attempt, target), (a_id, a_op));
     // A ends normally before the cancel gets through
     h.node.finish(&a, build::done()).await.unwrap();
-    until("turn A end", || h.ends().len() == 1).await;
+    eventually_sync("turn A end", || h.ends().len() == 1).await;
 
     let b = h.running("two").await;
     h.node.refuse("cancel", None);
-    until("cancel delivered", || h.count("cancel") == 1).await;
+    eventually_sync("cancel delivered", || h.count("cancel") == 1).await;
     let b_op: String = h.q(&format!(
         "SELECT operation_id FROM runtime_attempts WHERE attempt_id='{}'",
         b.attempt()
@@ -2827,7 +2818,7 @@ async fn an_old_cancel_never_hits_a_newer_attempt() {
     ));
     assert_eq!(flagged, 0);
     h.node.finish(&b, build::done()).await.unwrap();
-    until("turn B end", || h.ends().len() == 2).await;
+    eventually_sync("turn B end", || h.ends().len() == 2).await;
     assert_eq!(h.ends()[1].1, "end_turn");
     assert_eq!(h.attempts().len(), 2);
     assert!(!h.rt.cancel(S).unwrap());
@@ -2880,7 +2871,7 @@ impl H {
     }
 
     async fn ready(&self) {
-        until("ready", || self.phase() == "ready").await;
+        eventually_sync("ready", || self.phase() == "ready").await;
     }
 }
 
@@ -2893,7 +2884,7 @@ async fn an_idle_session_is_configured_through_the_node() {
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
     assert_eq!(h.phase(), "configuring");
     assert!(h.rt.is_busy(S));
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
     let expected: String =
@@ -2911,7 +2902,7 @@ async fn a_change_during_a_turn_waits_for_its_end_and_goes_before_the_next() {
     let h = hub();
     h.bind();
     let a = h.running("one").await;
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Busy);
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Pending);
     assert!(h.said("将在当前回合结束后生效"));
@@ -2922,7 +2913,7 @@ async fn a_change_during_a_turn_waits_for_its_end_and_goes_before_the_next() {
         "never under a running attempt"
     );
     h.node.finish(&a, build::done()).await.unwrap();
-    until("second start", || h.count("start_turn") == 2).await;
+    eventually_sync("second start", || h.count("start_turn") == 2).await;
     let order: Vec<_> = h
         .methods()
         .into_iter()
@@ -2949,9 +2940,9 @@ async fn model_and_effort_changes_go_through_configure() {
         )
         .unwrap();
     assert_eq!(c, Configured::Sent);
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
-    until("model recorded", || {
+    eventually_sync("model recorded", || {
         h.q::<Option<String>>(&format!("SELECT model FROM sessions WHERE id='{S}'"))
             .as_deref()
             == Some("m2")
@@ -2974,7 +2965,7 @@ async fn a_lost_answer_sends_the_very_same_configure_again() {
     h.ready().await;
     h.node.script_once("configure_session", Scripted::DropReply);
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     let leases: i64 =
         h.q("SELECT lease_generation FROM node_commands WHERE method='configure_session'");
     assert!(leases >= 2, "sent again: {leases}");
@@ -2991,7 +2982,7 @@ async fn an_unknown_configure_holds_the_session_and_is_never_resent() {
     h.ready().await;
     h.node.script_once("configure_session", Scripted::Unknown);
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    eventually_sync("unknown", || h.cfg_states() == ["unknown"]).await;
     assert_eq!(h.phase(), "configuring");
     assert!(h.rt.is_busy(S));
     assert!(h.rt.running_turns() >= 1, "a drain waits for it");
@@ -3017,7 +3008,7 @@ async fn a_stale_revision_is_refreshed_with_a_new_operation() {
         })
         .unwrap();
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("refreshed", || h.cfg_states() == ["rejected", "finished"]).await;
+    eventually_sync("refreshed", || h.cfg_states() == ["rejected", "finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
     assert_eq!(h.count("configure_session"), 1);
@@ -3032,7 +3023,7 @@ async fn a_configure_needs_no_session_view_left_in_the_inbox() {
     h.ready().await;
     // "ready" comes with the open's receipt; the session view that carries the revision is
     // applied on its own, so wait for it before pruning the inbox under it
-    until("revision kept", || {
+    eventually_sync("revision kept", || {
         h.q::<Option<String>>("SELECT node_revision FROM runtime_sessions")
             .is_some()
     })
@@ -3044,7 +3035,7 @@ async fn a_configure_needs_no_session_view_left_in_the_inbox() {
         })
         .unwrap();
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
 }
@@ -3064,7 +3055,7 @@ async fn refreshes_are_bounded() {
         );
     }
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("given up", || h.said("未能切换")).await;
+    eventually_sync("given up", || h.said("未能切换")).await;
     assert_eq!(h.cfg_states(), ["rejected", "rejected", "rejected"]);
     h.ready().await;
     assert_eq!(h.desired(), None, "a widening falls back");
@@ -3082,7 +3073,7 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
         Scripted::Refuse(ApiError::new(ErrorCode::Unsupported, "no")),
     );
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("refused", || h.cfg_states() == ["rejected"]).await;
+    eventually_sync("refused", || h.cfg_states() == ["rejected"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
     assert!(h.said("未能切换"));
@@ -3091,14 +3082,14 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
 
     // now wide, then a narrowing the Node refuses: the session is let go and opens narrow
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("wide", || h.cfg_states() == ["rejected", "finished"]).await;
+    eventually_sync("wide", || h.cfg_states() == ["rejected", "finished"]).await;
     h.ready().await;
     h.node.script_once(
         "configure_session",
         Scripted::Refuse(ApiError::new(ErrorCode::Unsupported, "no")),
     );
     assert_eq!(h.mode(PermissionMode::Ask), Configured::Sent);
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert!(h.desired().is_some(), "the narrowing holds");
     assert_eq!(h.count("release_session"), 1);
     let exec = h.running("two").await;
@@ -3107,7 +3098,7 @@ async fn a_refused_widening_falls_back_and_a_refused_narrowing_releases() {
     assert_eq!(h.last_mode(), "ask", "never a turn wider than asked");
     assert_eq!(h.desired(), None);
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 2).await;
+    eventually_sync("turn end", || h.ends().len() == 2).await;
 }
 
 #[tokio::test]
@@ -3116,7 +3107,7 @@ async fn a_released_session_takes_the_change_when_it_opens_again() {
     h.bind();
     h.ready().await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::OnReopen);
     h.one_turn("hello").await;
     assert_eq!(h.count("configure_session"), 0);
@@ -3137,11 +3128,11 @@ async fn a_pending_change_skips_the_automatic_retry() {
     c.stop_reason = "error".into();
     c.transient = true;
     h.node.finish(&a, c).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     assert!(h.said("不自动重试"));
-    until("configure", || h.count("configure_session") == 1).await;
+    eventually_sync("configure", || h.count("configure_session") == 1).await;
     assert_eq!(h.attempts().len(), 1, "no second attempt with the old mode");
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
 }
@@ -3174,7 +3165,7 @@ async fn a_change_reads_as_applied_only_once_the_node_confirmed_it() {
     let h = hub();
     h.bind();
     let a = h.running("one").await;
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     let st = || h.rt.mode_state(S).unwrap().expect("a session of this Node");
     assert_eq!(st().applied.as_deref(), Some("ask"));
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Pending);
@@ -3183,7 +3174,7 @@ async fn a_change_reads_as_applied_only_once_the_node_confirmed_it() {
     assert_eq!(s.desired.as_deref(), Some("full_access"));
     assert!(s.busy && !s.sending && s.refused.is_none());
     h.node.finish(&a, build::done()).await.unwrap();
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     let s = st();
     assert_eq!(s.applied.as_deref(), Some("full_access"));
@@ -3207,7 +3198,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
         )),
     );
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("refused", || h.cfg_states() == ["rejected"]).await;
+    eventually_sync("refused", || h.cfg_states() == ["rejected"]).await;
     h.ready().await;
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("ask"));
@@ -3219,7 +3210,7 @@ async fn a_refused_change_reads_as_refused_with_the_nodes_reason() {
             .contains("at most permission mode auto")
     );
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("applied", || h.cfg_states() == ["rejected", "finished"]).await;
+    eventually_sync("applied", || h.cfg_states() == ["rejected", "finished"]).await;
     h.ready().await;
     let s = h.rt.mode_state(S).unwrap().unwrap();
     assert_eq!(s.applied.as_deref(), Some("full_access"));
@@ -3237,10 +3228,10 @@ async fn a_card_the_node_still_waits_for_is_offered_to_yolo_again_after_a_restar
         .ask_permission(perm("p1", exec.clone(), "cargo build"))
         .await
         .unwrap();
-    until("card", || h.ends.3.lock().unwrap().len() == 1).await;
+    eventually_sync("card", || h.ends.3.lock().unwrap().len() == 1).await;
     let d = h.cards()[0].clone();
     h.restart(Duration::ZERO).await;
-    until("offered again", || h.ends.3.lock().unwrap().len() == 2).await;
+    eventually_sync("offered again", || h.ends.3.lock().unwrap().len() == 2).await;
     assert_eq!(h.ends.3.lock().unwrap().as_slice(), [d.clone(), d.clone()]);
     assert_eq!(h.cards(), std::slice::from_ref(&d), "no second card");
     assert_eq!(h.status(&d), "open");
@@ -3255,8 +3246,8 @@ async fn a_desired_change_survives_a_hub_restart() {
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Pending);
     h.restart(Duration::ZERO).await;
     h.node.finish(&a, build::done()).await.unwrap();
-    until("configure", || h.count("configure_session") == 1).await;
-    until("applied", || h.cfg_states() == ["finished"]).await;
+    eventually_sync("configure", || h.count("configure_session") == 1).await;
+    eventually_sync("applied", || h.cfg_states() == ["finished"]).await;
     h.ready().await;
     assert_eq!(h.desired(), None);
 }
@@ -3298,7 +3289,7 @@ impl H {
         c.transient = true;
         let n = self.attempts().len();
         self.node.finish(exec, c).await.unwrap();
-        until("retry planned", || self.attempts().len() == n + 1).await;
+        eventually_sync("retry planned", || self.attempts().len() == n + 1).await;
     }
 }
 
@@ -3308,12 +3299,12 @@ async fn hold_keeps_the_queue_through_a_turn_end() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.rt.hold(true);
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Held);
     let first = h.attempts()[0].clone();
     h.node.finish(&first, build::done()).await.unwrap();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("start_turn"), 1, "nothing starts under the hold");
     assert_eq!(h.queued(), 1, "the queue is kept");
@@ -3323,7 +3314,7 @@ async fn hold_keeps_the_queue_through_a_turn_end() {
 
     h.rt.hold(false);
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.turn_texts()[1], "two");
     assert_eq!(h.queued(), 0);
 }
@@ -3335,16 +3326,16 @@ async fn hold_keeps_the_queue_through_open_and_release_receipts() {
     h.rt.hold(true);
     h.bind();
     assert_eq!(h.rt.prompt(S, "one", "user", &[]).unwrap(), Planned::Held);
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("start_turn"), 0);
     assert_eq!(h.queued(), 1);
     h.rt.hold(false);
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
-    until("first turn", || h.count("start_turn") == 1).await;
+    eventually_sync("first turn", || h.count("start_turn") == 1).await;
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("ready again", || {
+    eventually_sync("ready again", || {
         h.phase() == "ready" && !h.ends().is_empty()
     })
     .await;
@@ -3353,7 +3344,7 @@ async fn hold_keeps_the_queue_through_open_and_release_receipts() {
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
     h.rt.hold(true);
     assert_eq!(h.rt.prompt(S, "two", "user", &[]).unwrap(), Planned::Held);
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         h.count("open_session"),
@@ -3369,7 +3360,7 @@ async fn hold_keeps_the_queue_through_open_and_release_receipts() {
         Planned::Busy,
         "it opens first"
     );
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("open_session"), 2);
     assert_eq!(h.turn_texts()[1], "two");
 }
@@ -3382,14 +3373,14 @@ async fn persisted_maintenance_holds_node_turns() {
     h.bind();
     assert!(h.rt.is_holding());
     assert_eq!(h.rt.prompt(S, "one", "user", &[]).unwrap(), Planned::Held);
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("start_turn"), 0);
     assert_eq!(h.queued(), 1);
     h.store.maintenance_set(false).unwrap();
     assert!(!h.rt.is_holding());
     assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Created);
-    until("turn", || h.count("start_turn") == 1).await;
+    eventually_sync("turn", || h.count("start_turn") == 1).await;
 }
 
 #[tokio::test]
@@ -3397,12 +3388,12 @@ async fn a_claimed_message_cannot_be_edited_removed_or_moved() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.rt.prompt(S, "two", "user", &[]).unwrap();
     let id = h.queued_id("two");
     let first = h.attempts()[0].clone();
     h.node.finish(&first, build::done()).await.unwrap();
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
 
     let queued = h.store.queued();
     assert!(queued.edit(S, &id, "changed").unwrap().is_none());
@@ -3424,13 +3415,13 @@ async fn an_edit_before_the_claim_is_what_the_turn_sends() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     h.rt.prompt(S, "two", "user", &[]).unwrap();
     let id = h.queued_id("two");
     assert!(h.store.queued().edit(S, &id, "two'").unwrap().is_some());
     let first = h.attempts()[0].clone();
     h.node.finish(&first, build::done()).await.unwrap();
-    until("second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("second turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.turn_texts(), ["one", "two'"]);
 }
 
@@ -3439,7 +3430,7 @@ async fn an_uncertain_turn_reports_uncertain_and_nothing_abandons_it_implicitly(
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("active", || h.phase() == "active").await;
+    eventually_sync("active", || h.phase() == "active").await;
     assert!(!h.rt.is_uncertain(S));
     let exec = h.attempts()[0].clone();
     let (_, op) = h
@@ -3463,7 +3454,7 @@ async fn an_uncertain_turn_reports_uncertain_and_nothing_abandons_it_implicitly(
         )
         .await
         .unwrap();
-    until("uncertain", || h.rt.is_uncertain(S)).await;
+    eventually_sync("uncertain", || h.rt.is_uncertain(S)).await;
     h.rt.prompt(S, "next", "user", &[]).unwrap();
     assert_ne!(h.rt.flush(S, None).unwrap(), Planned::Created);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3479,7 +3470,7 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("started", || h.count("start_turn") == 1).await;
+    eventually_sync("started", || h.count("start_turn") == 1).await;
     let first = h.attempts()[0].clone();
     h.transient_failure(&first).await;
     let retry: String =
@@ -3498,7 +3489,7 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
         h.q("SELECT state FROM session_dispatch WHERE backend='node' AND text='one'");
     assert_eq!(dispatched, "cancelled");
     // what waited goes next, a new turn
-    until("next turn", || h.count("start_turn") == 2).await;
+    eventually_sync("next turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.turn_texts(), ["one", "one", "two"]);
     assert!(
         !h.node.log().iter().any(|(_, o)| o.as_str() == retry),
@@ -3512,7 +3503,7 @@ async fn cancel_in_retry_wait_never_sends_the_pending_attempt() {
     assert_eq!(retry_rows, 0);
     let exec = h.attempts().last().unwrap().clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends().len(), 1);
 }
 
@@ -3521,11 +3512,11 @@ async fn cancel_in_retry_wait_with_nothing_queued_tells_the_item_once() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("started", || h.count("start_turn") == 1).await;
+    eventually_sync("started", || h.count("start_turn") == 1).await;
     let first = h.attempts()[0].clone();
     h.transient_failure(&first).await;
     assert!(h.rt.cancel(S).unwrap());
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "cancelled".to_string(), None)]);
     assert_eq!(h.phase(), "ready");
     assert!(!h.rt.is_busy(S));
@@ -3542,11 +3533,11 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "one", "user", &[]).unwrap();
-    until("started", || h.count("start_turn") == 1).await;
+    eventually_sync("started", || h.count("start_turn") == 1).await;
     let first = h.attempts()[0].clone();
     h.ends.6.store(true, SeqCst);
     h.transient_failure(&first).await;
-    until("worker held", || h.ends.7.load(SeqCst)).await;
+    eventually_sync("worker held", || h.ends.7.load(SeqCst)).await;
     let retry = h.attempts()[1].clone();
 
     assert!(h.rt.cancel(S).unwrap(), "the waiting retry is settled here");
@@ -3554,7 +3545,7 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
         h.rt.prompt(S, "two", "user", &[]).unwrap(),
         Planned::Created
     );
-    until("second sent", || h.count("start_turn") == 2).await;
+    eventually_sync("second sent", || h.count("start_turn") == 2).await;
     let second = h.attempts().last().unwrap().clone();
     assert!(
         !h.rt
@@ -3564,7 +3555,7 @@ async fn a_locally_settled_end_is_told_before_a_newer_turns_end() {
     h.node.finish(&second, build::done()).await.unwrap();
     h.ends.6.store(false, SeqCst);
 
-    until("both ends", || h.ends().len() == 2).await;
+    eventually_sync("both ends", || h.ends().len() == 2).await;
     assert_eq!(
         *h.ends.5.lock().unwrap(),
         [
@@ -3590,14 +3581,14 @@ async fn a_start_turn_refused_before_acceptance_is_settled_by_stop() {
     });
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("leased", || {
+    eventually_sync("leased", || {
         h.q::<i64>(
             "SELECT COALESCE(MAX(lease_generation),0) FROM node_commands WHERE method='start_turn'",
         ) >= 1
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
-    until("cancelled", || !h.ends().is_empty()).await;
+    eventually_sync("cancelled", || !h.ends().is_empty()).await;
     assert_eq!(h.ends()[0].1, "cancelled");
     assert_eq!(
         h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'"),
@@ -3628,7 +3619,7 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     h.ready().await;
     h.node.refuse("start_turn", Some(ErrorCode::OutcomeUnknown));
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("uncertain", || {
+    eventually_sync("uncertain", || {
         h.q::<i64>("SELECT COALESCE(MAX(maybe_sent),0) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL") == 1
     })
     .await;
@@ -3640,7 +3631,7 @@ async fn a_cancel_after_an_uncertain_send_goes_once_the_node_holds_the_turn() {
     );
     assert!(h.rt.is_busy(S), "it may run: never settled here");
     h.node.refuse("start_turn", None);
-    until("cancel sent", || h.count("cancel") == 1).await;
+    eventually_sync("cancel sent", || h.count("cancel") == 1).await;
     let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
     assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
 }
@@ -3658,7 +3649,7 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     h.node.script_once("start_turn", Scripted::DropReply);
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     let uncertain = "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND lease_owner IS NULL AND maybe_sent=1";
-    until("uncertain", || h.q::<i64>(uncertain) == 1).await;
+    eventually_sync("uncertain", || h.q::<i64>(uncertain) == 1).await;
     let generation: i64 =
         h.q("SELECT lease_generation FROM node_commands WHERE method='start_turn'");
     assert!(h.rt.cancel(S).unwrap());
@@ -3668,7 +3659,7 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
         "held back: the Node may not know it yet"
     );
     h.node.refuse("start_turn", Some(ErrorCode::Busy));
-    until("refused", || {
+    eventually_sync("refused", || {
         h.q::<i64>(&format!(
             "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_owner IS NULL AND lease_generation>{generation}"
         )) == 1
@@ -3682,7 +3673,7 @@ async fn a_refusal_after_an_uncertain_send_still_sends_the_cancel() {
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    until("cancel sent", || h.count("cancel") == 1).await;
+    eventually_sync("cancel sent", || h.count("cancel") == 1).await;
     let op: String = h.q("SELECT operation_id FROM node_commands WHERE method='start_turn'");
     assert!(h.node.cancel_requested(&OperationId::try_from(op).unwrap()));
     assert_eq!(h.count("start_turn"), 1, "it ran once");
@@ -3697,14 +3688,14 @@ async fn a_second_stop_after_a_refused_cancel_asks_again() {
     h.node
         .refuse_next("cancel", ApiError::new(ErrorCode::Invalid, "not now"));
     assert!(h.rt.cancel(S).unwrap());
-    until("refused", || {
+    eventually_sync("refused", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='cancel' AND state='rejected'")
             == 1
     })
     .await;
     assert!(h.rt.cancel(S).unwrap());
     assert_eq!(h.commands("cancel"), 2);
-    until("cancel sent", || h.count("cancel") == 1).await;
+    eventually_sync("cancel sent", || h.count("cancel") == 1).await;
 }
 
 /// Issue: an attempt reconciled as unknown because the Node holds no record of its start_turn is
@@ -3715,7 +3706,7 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -3729,13 +3720,13 @@ async fn an_attempt_the_node_has_no_record_of_ends_on_stop() {
     );
     assert!(h.rt.is_busy(S));
     assert!(h.rt.cancel(S).unwrap());
-    until("settled", || h.ends().len() == 1).await;
+    eventually_sync("settled", || h.ends().len() == 1).await;
     assert_eq!(h.ends()[0].1, "error");
     assert!(!h.rt.is_busy(S));
     assert_eq!(h.rt.running_turns(), 0);
     assert_eq!(h.systems("没有这次执行的记录"), 1);
     // L4: settled by the Hub, the attempt's statistics row ends with that outcome
-    until("stats row ended", || {
+    eventually_sync("stats row ended", || {
         h.stat_rows().first().is_some_and(|r| r.0.is_some())
     })
     .await;
@@ -3754,7 +3745,7 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     h.bind();
     h.one_turn("hello").await;
     h.rt.prompt(S, "second", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -3784,7 +3775,7 @@ async fn a_new_node_journal_mid_session_is_taken_in_without_a_conflict() {
     // the new journal speaks on the same session stream again, from seq 1
     let failures = h.node.delivery_failures();
     build::ready(&h.node, S).await;
-    until("delivered", || h.node.unacked() == 0).await;
+    eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert_eq!(h.node.delivery_failures(), failures, "no batch was refused");
     let stream = derived_id("session", S);
     let fresh: i64 = h.q(&format!(
@@ -3844,14 +3835,14 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
     };
     h.rt.prompt(S, "a", "user", &[]).unwrap();
     h.rt.prompt(B, "b", "user", &[]).unwrap();
-    until("both running", || {
+    eventually_sync("both running", || {
         attempt_of(S).is_some() && attempt_of(B).is_some() && h.count("start_turn") == 2
     })
     .await;
     let (a, b) = (attempt_of(S).unwrap(), attempt_of(B).unwrap());
     let (s, t) = text(&a, "first");
     h.node.emit(s, t).await.unwrap();
-    until("delivered", || h.node.unacked() == 0).await;
+    eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert!(!h.rt.is_uncertain(S));
 
     // A's journal forgets its last event: the next one reuses a position the Hub holds
@@ -3862,7 +3853,7 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
     let (s, t) = text(&b, "fine");
     h.node.emit(s, t).await.unwrap();
     h.node.finish(&b, build::done()).await.unwrap();
-    until("B's turn ends", || h.ends().iter().any(|e| e.0 == B)).await;
+    eventually_sync("B's turn ends", || h.ends().iter().any(|e| e.0 == B)).await;
     assert_eq!(
         h.node.unacked(),
         0,
@@ -3897,7 +3888,7 @@ async fn a_conflict_on_one_stream_quarantines_it_and_the_others_go_on() {
 
     // A's stream applies nothing more: its end waits, and nothing is run again
     h.node.finish(&a, build::done()).await.unwrap();
-    until("delivered", || h.node.unacked() == 0).await;
+    eventually_sync("delivered", || h.node.unacked() == 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!h.ends().iter().any(|e| e.0 == S));
     assert!(h.rt.is_busy(S));
@@ -3944,7 +3935,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     })
     .unwrap();
     h.rt.prompt(S, "a", "user", &[]).unwrap();
-    until("A started", || {
+    eventually_sync("A started", || {
         h.attempts().len() == 1 && h.count("start_turn") == 1
     })
     .await;
@@ -3952,8 +3943,8 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     let (s, t) = text(&a, "first");
     h.node.emit(s, t).await.unwrap();
     h.node.finish(&a, build::done()).await.unwrap();
-    until("A's turn ends", || h.ends().iter().any(|e| e.0 == S)).await;
-    until("delivered", || h.node.unacked() == 0).await;
+    eventually_sync("A's turn ends", || h.ends().iter().any(|e| e.0 == S)).await;
+    eventually_sync("delivered", || h.node.unacked() == 0).await;
     assert!(!h.rt.is_busy(S), "A is idle");
 
     // A's journal forgets its last event: the next one on A's stream conflicts while A is idle
@@ -3986,7 +3977,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
         )
         .await
         .unwrap();
-    until("delivered", || h.node.unacked() == 0).await;
+    eventually_sync("delivered", || h.node.unacked() == 0).await;
     let stream = derived_id("session", S);
     assert_eq!(
         h.q::<String>(&format!(
@@ -4010,7 +4001,7 @@ async fn an_idle_session_on_a_faulted_stream_plans_no_turn() {
     assert_eq!(queued, 1, "the message waits in the queue");
 
     assert_eq!(h.rt.prompt(B, "b", "user", &[]).unwrap(), Planned::Created);
-    until("B started", || h.count("start_turn") == 2).await;
+    eventually_sync("B started", || h.count("start_turn") == 2).await;
 }
 
 /// Issue: an AttemptStarted applied after reconciliation made the attempt unknown leaves it
@@ -4059,34 +4050,34 @@ async fn a_turn_sets_the_session_running_then_idle_and_keeps_the_harness_id() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("running", || h.session_status() == "running").await;
+    eventually_sync("running", || h.session_status() == "running").await;
     let view = h
         .node
         .session(SessionId::try_from(S.to_string()).unwrap())
         .await
         .unwrap();
     let resume = view.resume.expect("the fake Node has a resume handle");
-    until("harness id", || h.acp_id().is_some()).await;
+    eventually_sync("harness id", || h.acp_id().is_some()).await;
     assert_eq!(h.acp_id().as_deref(), Some(resume.as_str()));
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     assert_eq!(h.session_status(), "idle");
 
     // a message during a turn: the session stays running across the turn end that has a next
     h.rt.prompt(S, "two", "user", &[]).unwrap();
-    until("second running", || h.attempts().len() == 2).await;
-    until("running again", || h.session_status() == "running").await;
+    eventually_sync("second running", || h.attempts().len() == 2).await;
+    eventually_sync("running again", || h.session_status() == "running").await;
     h.rt.prompt(S, "three", "user", &[]).unwrap();
-    until("second started", || h.count("start_turn") == 2).await;
+    eventually_sync("second started", || h.count("start_turn") == 2).await;
     let second = h.attempts()[1].clone();
     h.node.finish(&second, build::done()).await.unwrap();
-    until("third planned", || h.attempts().len() == 3).await;
+    eventually_sync("third planned", || h.attempts().len() == 3).await;
     assert_eq!(h.session_status(), "running", "a turn follows");
-    until("third started", || h.count("start_turn") == 3).await;
+    eventually_sync("third started", || h.count("start_turn") == 3).await;
     let third = h.attempts()[2].clone();
     h.node.finish(&third, build::done()).await.unwrap();
-    until("idle", || h.session_status() == "idle").await;
+    eventually_sync("idle", || h.session_status() == "idle").await;
 }
 
 #[tokio::test]
@@ -4094,28 +4085,28 @@ async fn a_failed_turn_leaves_the_session_in_error_and_a_retry_stays_running() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let first = h.attempts()[0].clone();
     let mut c = build::done();
     c.outcome = Outcome::Failed;
     c.stop_reason = "error".into();
     c.transient = true;
     h.node.finish(&first, c).await.unwrap();
-    until("retry planned", || h.attempts().len() == 2).await;
+    eventually_sync("retry planned", || h.attempts().len() == 2).await;
     assert_eq!(h.session_status(), "running", "a retry is the same turn");
     h.rt.cancel(S).unwrap();
-    until("cancelled", || h.ends().len() == 1).await;
+    eventually_sync("cancelled", || h.ends().len() == 1).await;
     assert_eq!(h.session_status(), "idle");
 
     h.rt.prompt(S, "again", "user", &[]).unwrap();
-    until("second started", || h.count("start_turn") == 2).await;
+    eventually_sync("second started", || h.count("start_turn") == 2).await;
     let exec = h.attempts().last().unwrap().clone();
     let mut c = build::done();
     c.outcome = Outcome::Failed;
     c.stop_reason = "error".into();
     c.acted = true;
     h.node.finish(&exec, c).await.unwrap();
-    until("turn end", || h.ends().len() == 2).await;
+    eventually_sync("turn end", || h.ends().len() == 2).await;
     assert_eq!(h.session_status(), "error");
 }
 
@@ -4124,7 +4115,7 @@ async fn an_ended_session_stays_ended_through_its_last_turn() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("running", || h.session_status() == "running").await;
+    eventually_sync("running", || h.session_status() == "running").await;
     h.store
         .transaction::<_, StoreError>(|tx| {
             tx.execute("UPDATE sessions SET status='ended'", [])?;
@@ -4133,7 +4124,7 @@ async fn an_ended_session_stays_ended_through_its_last_turn() {
         .unwrap();
     let exec = h.attempts()[0].clone();
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.session_status(), "ended");
 }
 
@@ -4144,7 +4135,7 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("running", || h.session_status() == "running").await;
+    eventually_sync("running", || h.session_status() == "running").await;
     // the Hub's own abandon (B6) is refused here, so the attempt stays unknown for this check
     h.node.refuse_next(
         "abandon",
@@ -4155,7 +4146,7 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     );
     h.node.restart();
     h.restart_hub().await;
-    until("the Hub's abandon refused", || {
+    eventually_sync("the Hub's abandon refused", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
     })
     .await;
@@ -4165,7 +4156,7 @@ async fn an_unknown_attempt_keeps_the_session_running_until_it_is_abandoned() {
     );
     assert_eq!(h.session_status(), "running");
     assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 1).await;
+    eventually_sync("abandoned", || h.ends().len() == 1).await;
     assert_eq!(h.session_status(), "idle");
 }
 
@@ -4182,13 +4173,13 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     // the Node's facts are late from here on: its AttemptStarted never reaches this Hub
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     h.rt.prompt(S, "second", "user", &[]).unwrap();
-    until("second planned", || h.attempts().len() == 2).await;
+    eventually_sync("second planned", || h.attempts().len() == 2).await;
     assert_eq!(
         h.session_status(),
         "running",
         "the harness has a session already"
     );
-    until("sent", || h.count("start_turn") == 2).await;
+    eventually_sync("sent", || h.count("start_turn") == 2).await;
     assert_eq!(
         h.q::<String>(
             "SELECT state FROM runtime_attempts ORDER BY created DESC, rowid DESC LIMIT 1"
@@ -4206,7 +4197,7 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     );
     h.node.restart();
     h.restart_hub().await;
-    until("the Hub's abandon refused", || {
+    eventually_sync("the Hub's abandon refused", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='abandon' AND state IN ('finished','rejected')") == 1
     })
     .await;
@@ -4226,7 +4217,7 @@ async fn an_attempt_unknown_before_it_started_keeps_the_session_running() {
     }
     assert_eq!(h.session_status(), "running");
     assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 2).await;
+    eventually_sync("abandoned", || h.ends().len() == 2).await;
     assert_eq!(h.session_status(), "idle");
 }
 
@@ -4244,14 +4235,14 @@ async fn a_first_turn_is_starting_until_its_attempt_starts() {
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("planned", || h.attempts().len() == 1).await;
+    eventually_sync("planned", || h.attempts().len() == 1).await;
     assert_eq!(h.acp_id(), None);
     assert_eq!(h.session_status(), "starting");
     let late = h.seen.stash.lock().unwrap().take().unwrap();
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    until("running", || h.session_status() == "running").await;
+    eventually_sync("running", || h.session_status() == "running").await;
 }
 
 /// N1-3 review: a recreated journal hands out revisions the old one also had. A `Released` of the
@@ -4264,7 +4255,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     // the old journal: a turn, a release, a reopen (its views stay in the Hub's inbox)
     h.one_turn("hello").await;
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     let reopen = |h: &H, text: &str| {
         h.rt.prompt(S, text, "user", &[]).unwrap();
         h.store
@@ -4275,7 +4266,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
             .unwrap();
     };
     reopen(&h, "x");
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     let old: Vec<String> = h
         .store
         .reader(|c| {
@@ -4304,9 +4295,9 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     h.one_turn("again").await;
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     reopen(&h, "y");
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     let opened: String = h.q(
         "SELECT json_extract(receipt,'$.payload.state.result.revision') FROM node_commands WHERE method='open_session' ORDER BY created DESC, rowid DESC LIMIT 1",
     );
@@ -4319,7 +4310,7 @@ async fn a_late_release_of_a_new_journal_does_not_let_a_reopened_session_go() {
     for b in late {
         h.seen.to.commit(b).await.unwrap();
     }
-    until("applied", || {
+    eventually_sync("applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE durable > applied") == 0
     })
     .await;
@@ -4336,7 +4327,7 @@ async fn working_counts_a_turn_waiting_for_a_permission_until_it_settles() {
     let h = hub();
     *h.seen.stash.lock().unwrap() = Some(vec![]);
     h.bind();
-    until("opening", || h.phase() == "opening").await;
+    eventually_sync("opening", || h.phase() == "opening").await;
     assert_eq!(h.rt.working(), 1, "a harness opening is Node work");
     let late = h.seen.stash.lock().unwrap().take().unwrap();
     for b in late {
@@ -4351,14 +4342,14 @@ async fn working_counts_a_turn_waiting_for_a_permission_until_it_settles() {
         .ask_permission(perm("p1", exec.clone(), "git push"))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     assert_eq!(h.rt.working(), 1, "a permission wait holds the drain");
     let d = h.cards()[0].clone();
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
-    until("answered", || h.status(&d) == "resolved").await;
+    eventually_sync("answered", || h.status(&d) == "resolved").await;
     assert_eq!(h.rt.working(), 1, "the turn goes on after the answer");
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     h.ready().await;
     assert_eq!(h.rt.working(), 0);
 }
@@ -4373,12 +4364,12 @@ async fn working_drops_to_zero_after_an_expired_card_and_the_turn_end() {
         .ask_permission(perm_ttl("p1", exec.clone(), "rm x", 300))
         .await
         .unwrap();
-    until("card", || h.cards().len() == 1).await;
+    eventually_sync("card", || h.cards().len() == 1).await;
     assert_eq!(h.rt.working(), 1);
     let d = h.cards()[0].clone();
-    until("expired", || h.status(&d) == "expired").await;
+    eventually_sync("expired", || h.status(&d) == "expired").await;
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     h.ready().await;
     assert_eq!(h.rt.working(), 0);
 }
@@ -4410,15 +4401,15 @@ async fn working_counts_an_unknown_attempt_until_it_is_abandoned() {
         )
         .await
         .unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
     })
     .await;
     assert_eq!(h.rt.working(), 1, "an unknown attempt holds the drain");
     assert!(h.rt.cancel(S).unwrap());
-    until("abandoned", || h.ends().len() == 1).await;
+    eventually_sync("abandoned", || h.ends().len() == 1).await;
     // the harness went with it: nothing waits, so nothing reopens it
-    until("settled", || h.rt.working() == 0).await;
+    eventually_sync("settled", || h.rt.working() == 0).await;
 }
 
 /// A Node stopped at boot (its tools did not connect) refuses the Stop that would settle its open
@@ -4449,7 +4440,7 @@ async fn a_stopped_node_holds_no_drain_with_an_open_or_unknown_turn() {
         )
         .await
         .unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
     })
     .await;
@@ -4472,7 +4463,7 @@ async fn working_counts_a_configuring_harness() {
     h.ready().await;
     h.node.script_once("configure_session", Scripted::Unknown);
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    eventually_sync("unknown", || h.cfg_states() == ["unknown"]).await;
     assert_eq!(h.phase(), "configuring");
     assert_eq!(h.rt.working(), 1);
 }
@@ -4515,14 +4506,14 @@ impl H {
     async fn ended_turn(&self) {
         let before = self.ends().len();
         self.rt.prompt(S, "hello", "user", &[]).unwrap();
-        until("attempt", || self.attempts().len() > before).await;
+        eventually_sync("attempt", || self.attempts().len() > before).await;
         let exec = self.attempts().last().unwrap().clone();
-        until("running", || self.phase() == "active").await;
+        eventually_sync("running", || self.phase() == "active").await;
         let (s, b) = text(&exec, "x");
         self.node.emit(s, b).await.unwrap();
         self.node.finish(&exec, build::done()).await.unwrap();
-        until("turn end", || self.ends().len() == before + 1).await;
-        until("acknowledged", || self.node.unacked() == 0).await;
+        eventually_sync("turn end", || self.ends().len() == before + 1).await;
+        eventually_sync("acknowledged", || self.node.unacked() == 0).await;
     }
 
     /// The Hub's database goes back (a restored backup): it holds none of `S`'s stream any more,
@@ -4558,9 +4549,9 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
+    eventually_sync("running", || h.phase() == "active").await;
     h.node.connect(Arc::new(Refusing));
     let (s, b) = text(&exec, "missed");
     h.node.emit(s, b).await.unwrap();
@@ -4574,7 +4565,7 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
     assert!(h.ends().is_empty(), "the Hub never heard the end");
 
     h.restart_hub().await;
-    until("the second turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the second turn", || h.count("start_turn") == 2).await;
     let texts: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%missed%'");
     assert_eq!(texts, 1, "replayed once");
     let first: bool = h.q(
@@ -4582,13 +4573,13 @@ async fn reconcile_replays_what_the_hub_missed_before_the_first_new_plan() {
     );
     assert!(first, "applied before the next turn was planned");
     // told after its event's commit: the next turn may be sent before that
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
     let dup: i64 = h.q("SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE source_node IS NOT NULL GROUP BY source_node,source_stream,source_epoch,source_seq HAVING COUNT(*)>1)");
     assert_eq!(dup, 0);
-    until("the journal drained", || h.node.unacked() == 0).await;
+    eventually_sync("the journal drained", || h.node.unacked() == 0).await;
     // the second turn's events may still be applying
-    until("all applied", || {
+    eventually_sync("all applied", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_streams WHERE applied < durable") == 0
     })
     .await;
@@ -4642,7 +4633,7 @@ async fn a_node_journal_behind_the_hub_faults_ahead() {
 async fn node_work_the_hub_does_not_know_holds_the_session_and_sends_nothing() {
     let mut h = hub();
     h.bind();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     let op = OperationId::new("op_stranger").unwrap();
     h.node
         .start_turn(build::cmd(
@@ -4680,13 +4671,13 @@ async fn events_pushed_while_reconcile_reads_the_snapshot_do_not_fault_ahead() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
-    until("the Node runs it", || h.count("start_turn") == 1).await;
+    eventually_sync("running", || h.phase() == "active").await;
+    eventually_sync("the Node runs it", || h.count("start_turn") == 1).await;
     let (s, b) = text(&exec, "before");
     h.node.emit(s, b).await.unwrap();
-    until("acknowledged", || h.node.unacked() == 0).await;
+    eventually_sync("acknowledged", || h.node.unacked() == 0).await;
 
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (node, a, e) = (h.node.clone(), armed.clone(), exec.clone());
@@ -4710,7 +4701,7 @@ async fn events_pushed_while_reconcile_reads_the_snapshot_do_not_fault_ahead() {
     assert!(!h.rt.is_uncertain(S));
 
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("turn end", || h.ends().len() == 1).await;
+    eventually_sync("turn end", || h.ends().len() == 1).await;
     let during: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%during%'");
     assert_eq!(during, 1);
     assert_eq!(
@@ -4750,16 +4741,16 @@ async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
         policy: build::policy(),
     })
     .unwrap();
-    until("both ready", || {
+    eventually_sync("both ready", || {
         h.phase() == "ready" && phase2(&h) == "ready"
     })
     .await;
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
+    eventually_sync("running", || h.phase() == "active").await;
     let stream = derived_id("session", S);
-    until("the Node runs it, all applied", || {
+    eventually_sync("the Node runs it, all applied", || {
         h.count("start_turn") == 1
             && h.node.unacked() == 0
             && h.q::<i64>(&format!(
@@ -4777,7 +4768,7 @@ async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
         .unwrap();
     let (s, b) = text(&exec, "unapplied");
     h.node.emit(s, b).await.unwrap();
-    until("acknowledged", || h.node.unacked() == 0).await;
+    eventually_sync("acknowledged", || h.node.unacked() == 0).await;
     let behind: i64 = h.q(&format!(
         "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
     ));
@@ -4792,7 +4783,7 @@ async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
     );
     let starts = h.count("start_turn");
     h.rt.prompt(S2, "elsewhere", "user", &[]).unwrap();
-    until("the other session's turn", || {
+    eventually_sync("the other session's turn", || {
         h.count("start_turn") == starts + 1
     })
     .await;
@@ -4805,15 +4796,15 @@ async fn a_stream_that_cannot_be_applied_holds_only_its_own_session() {
             Ok(())
         })
         .unwrap();
-    until("applied", || {
+    eventually_sync("applied", || {
         h.q::<i64>(&format!(
             "SELECT durable - applied FROM node_streams WHERE stream='{stream}'"
         )) == 0
     })
     .await;
-    until("lifted", || !h.rt.is_uncertain(S)).await;
+    eventually_sync("lifted", || !h.rt.is_uncertain(S)).await;
     h.node.finish(&exec, build::done()).await.unwrap();
-    until("the queued turn", || h.count("start_turn") == starts + 2).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == starts + 2).await;
     assert_eq!(h.systems("未能及时应用"), 1);
 }
 
@@ -4824,10 +4815,10 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
     let mut h = hub();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("attempt", || h.attempts().len() == 1).await;
+    eventually_sync("attempt", || h.attempts().len() == 1).await;
     let exec = h.attempts()[0].clone();
-    until("running", || h.phase() == "active").await;
-    until("the Node runs it", || h.count("start_turn") == 1).await;
+    eventually_sync("running", || h.phase() == "active").await;
+    eventually_sync("the Node runs it", || h.count("start_turn") == 1).await;
     h.node.connect(Arc::new(Refusing));
     let big = format!("big{}", "x".repeat(300 * 1024));
     let (s, b) = text(&exec, &big);
@@ -4839,9 +4830,9 @@ async fn reconcile_replays_an_event_bigger_than_a_page() {
     let bigs: i64 = h.q("SELECT COUNT(*) FROM events WHERE kind='text' AND data LIKE '%bigxxx%'");
     assert_eq!(bigs, 1, "replayed once");
     // the end is told once its event's commit is over, which reconcile does not wait for
-    until("turn end", || !h.ends().is_empty()).await;
+    eventually_sync("turn end", || !h.ends().is_empty()).await;
     assert_eq!(h.ends(), [(S.to_string(), "end_turn".to_string(), None)]);
-    until("the journal drained", || h.node.unacked() == 0).await;
+    eventually_sync("the journal drained", || h.node.unacked() == 0).await;
 }
 
 // ── N1-8: Stop retires a control whose outcome is unknown, by one explicit recover (D7) ──
@@ -4873,7 +4864,7 @@ impl H {
         let before = self.ends().len();
         let exec = self.attempts().last().unwrap().clone();
         self.node.finish(&exec, build::done()).await.unwrap();
-        until("turn end", || self.ends().len() > before).await;
+        eventually_sync("turn end", || self.ends().len() > before).await;
     }
 }
 
@@ -4883,7 +4874,7 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
     h.node.script_once("open_session", Scripted::Unknown);
     h.bind();
     assert_eq!(h.rt.prompt(S, "hello", "user", &[]).unwrap(), Planned::Busy);
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.state_of(&format!("op_open_{S}")) == "unknown"
     })
     .await;
@@ -4905,7 +4896,7 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
     );
     assert!(expected.starts_with("sha256:"), "frozen when planned");
     h.node.refuse("recover", None);
-    until("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("recover"), 1, "exactly one recover");
     assert_eq!(
         h.sent(&format!("op_open_{S}")),
@@ -4915,7 +4906,7 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
     assert_eq!(h.count("open_session"), 2, "opened again under a new id");
     // the target's end comes on the Node's event stream, not with the recover's answer that
     // reopened the session: it may be applied after the queued turn started
-    until("the target's end applied", || {
+    eventually_sync("the target's end applied", || {
         h.state_of(&format!("op_open_{S}")) == "finished"
     })
     .await;
@@ -4930,16 +4921,16 @@ async fn stop_retires_an_unknown_open_once_and_the_queued_message_opens_it_again
 async fn stop_retires_an_unknown_release_and_the_next_message_reopens() {
     let h = hub();
     h.bind();
-    until("ready", || h.phase() == "ready").await;
+    eventually_sync("ready", || h.phase() == "ready").await;
     h.node.script_once("release_session", Scripted::Unknown);
     assert!(matches!(h.rt.release(S).unwrap(), Release::Pending(_)));
-    until("unknown", || h.last_state("release_session") == "unknown").await;
+    eventually_sync("unknown", || h.last_state("release_session") == "unknown").await;
     assert_eq!(h.phase(), "releasing");
     assert!(h.rt.user_stop(S).unwrap());
-    until("released", || h.phase() == "released").await;
+    eventually_sync("released", || h.phase() == "released").await;
     assert_eq!(h.count("recover"), 1);
     h.rt.prompt(S, "next", "user", &[]).unwrap();
-    until("the turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the turn", || h.count("start_turn") == 1).await;
     assert_eq!(
         h.count("release_session"),
         1,
@@ -4960,11 +4951,11 @@ async fn a_retired_unknown_release_on_a_handoff_is_asked_again_and_the_successor
     h.one_turn("hello").await;
     h.node.script_once("release_session", Scripted::Unknown);
     let op = h.hand_off();
-    until("unknown", || h.state_of(&op) == "unknown").await;
+    eventually_sync("unknown", || h.state_of(&op) == "unknown").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("prepare_workspace"), 1, "the successor waits");
     assert!(h.rt.user_stop(S).unwrap());
-    until("the successor's turn", || h.count("start_turn") == 2).await;
+    eventually_sync("the successor's turn", || h.count("start_turn") == 2).await;
     assert_eq!(h.count("recover"), 1);
     assert_eq!(h.sent(&op), 1, "the target is never sent again");
     let releases: i64 = h.q(&format!(
@@ -4988,10 +4979,10 @@ async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
     h.ready().await;
     h.node.script_once("configure_session", Scripted::Unknown);
     assert_eq!(h.mode(PermissionMode::FullAccess), Configured::Sent);
-    until("unknown", || h.cfg_states() == ["unknown"]).await;
+    eventually_sync("unknown", || h.cfg_states() == ["unknown"]).await;
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     assert!(h.rt.user_stop(S).unwrap());
-    until("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("recover"), 1);
     assert_eq!(
         h.count("configure_session"),
@@ -5000,7 +4991,7 @@ async fn stop_retires_an_unknown_configure_and_the_reopen_carries_the_change() {
     );
     // the target's end comes on the Node's event stream, not with the recover's answer that
     // reopened the session: it may be applied after the queued turn started
-    until("the target's end applied", || {
+    eventually_sync("the target's end applied", || {
         h.cfg_states() == ["finished"]
     })
     .await;
@@ -5019,14 +5010,14 @@ async fn stop_retires_an_unknown_prepare_with_a_new_prepare_and_open() {
     h.node.script_once("prepare_workspace", Scripted::Unknown);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.state_of(&format!("op_prep_{S}")) == "unknown"
     })
     .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("open_session"), 0, "the open waits on its prepare");
     assert!(h.rt.user_stop(S).unwrap());
-    until("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("recover"), 1);
     assert_eq!(
         h.sent(&format!("op_prep_{S}")),
@@ -5054,13 +5045,13 @@ async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_ag
     h.node.script_once("open_session", Scripted::Unknown);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.state_of(&format!("op_open_{S}")) == "unknown"
     })
     .await;
     h.node.refuse("recover", Some(ErrorCode::Unsupported));
     assert!(h.rt.user_stop(S).unwrap());
-    until("refused", || h.last_state("recover") == "rejected").await;
+    eventually_sync("refused", || h.last_state("recover") == "rejected").await;
     assert_eq!(h.systems("需要人工核验 Node 状态"), 1);
     assert_eq!(h.phase(), "opening", "still held");
     assert!(h.rt.is_busy(S));
@@ -5075,7 +5066,7 @@ async fn an_unsupported_recover_keeps_the_session_held_and_the_next_stop_asks_ag
         "SELECT operation_id FROM node_commands WHERE method='recover' ORDER BY created DESC, rowid DESC LIMIT 1",
     );
     assert_eq!(second, format!("op_recover_op_open_{S}_1"), "a new id");
-    until("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(
         h.sent(&format!("op_open_{S}")),
         1,
@@ -5089,7 +5080,7 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("running", || {
+    eventually_sync("running", || {
         h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts WHERE state='running'") == 1
     })
     .await;
@@ -5112,14 +5103,14 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
         )
         .await
         .unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.q::<String>("SELECT state FROM runtime_attempts") == "unknown"
     })
     .await;
     let a: String = h.q("SELECT attempt_id FROM runtime_attempts");
     h.node.script_once("abandon", Scripted::Unknown);
     assert!(h.rt.user_stop(S).unwrap());
-    until("abandon unknown", || {
+    eventually_sync("abandon unknown", || {
         h.state_of(&format!("op_abandon_{a}")) == "unknown"
     })
     .await;
@@ -5127,7 +5118,7 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     // the abandon nobody can tell the end of is retired first, nothing else goes
     assert!(h.rt.user_stop(S).unwrap());
     assert_eq!(h.recover_target(), format!("op_abandon_{a}"));
-    until("recovered", || h.last_state("recover") == "finished").await;
+    eventually_sync("recovered", || h.last_state("recover") == "finished").await;
     assert_eq!(h.planned("abandon"), 1);
     assert_eq!(h.systems("已撤回结果未知的放弃操作"), 1);
     assert_eq!(
@@ -5141,7 +5132,7 @@ async fn stop_retires_an_unknown_abandon_and_the_next_stop_abandons_anew() {
     assert!(h.rt.user_stop(S).unwrap());
     assert_eq!(h.planned("abandon"), 2);
     assert_eq!(h.planned("recover"), 1, "exactly one recover");
-    until("the new abandon sent", || {
+    eventually_sync("the new abandon sent", || {
         h.state_of(&format!("op_abandon_{a}_1")) != "pending"
     })
     .await;
@@ -5157,13 +5148,13 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
     let h = hub();
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("started", || h.methods().contains(&"start_turn")).await;
+    eventually_sync("started", || h.methods().contains(&"start_turn")).await;
     let exec = h.attempts()[0].clone();
     h.node
         .ask_permission(perm("p1", exec.clone(), "git push"))
         .await
         .unwrap();
-    until("card", || {
+    eventually_sync("card", || {
         h.q::<i64>(
             "SELECT COUNT(*) FROM decisions WHERE subject_type='tool_call' AND status='open'",
         ) == 1
@@ -5172,7 +5163,7 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
     let d: String = h.q("SELECT id FROM decisions WHERE subject_type='tool_call'");
     h.node.script_once("resolve_permission", Scripted::Unknown);
     assert!(h.rt.answer_permission(&d, Some("allow_once")).unwrap());
-    until("answer unknown", || {
+    eventually_sync("answer unknown", || {
         h.state_of(&format!("op_answer_{d}")) == "unknown"
     })
     .await;
@@ -5180,7 +5171,7 @@ async fn stop_retires_an_unknown_answer_and_leaves_its_attempt_alone() {
     let completion: String = h.q("SELECT completion FROM runtime_attempts");
 
     assert!(h.rt.user_stop(S).unwrap());
-    until("recovered", || h.last_state("recover") == "finished").await;
+    eventually_sync("recovered", || h.last_state("recover") == "finished").await;
     assert_eq!(h.recover_target(), format!("op_answer_{d}"));
     assert_eq!(h.systems("已撤回结果未知的授权回复"), 1);
     let card: String = h.q(&format!("SELECT status FROM decisions WHERE id='{d}'"));
@@ -5204,7 +5195,7 @@ async fn a_target_end_pushed_before_the_recover_answer_is_merged_waits_for_the_r
     h.node.script_once("open_session", Scripted::Unknown);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.state_of(&format!("op_open_{S}")) == "unknown"
     })
     .await;
@@ -5212,7 +5203,7 @@ async fn a_target_end_pushed_before_the_recover_answer_is_merged_waits_for_the_r
     // target's end is applied while the recover is still pending here (maybe sent)
     h.node.script_once("recover", Scripted::DropReply);
     assert!(h.rt.user_stop(S).unwrap());
-    until("the target's end applied", || {
+    eventually_sync("the target's end applied", || {
         h.state_of(&format!("op_open_{S}")) == "finished"
     })
     .await;
@@ -5224,7 +5215,7 @@ async fn a_target_end_pushed_before_the_recover_answer_is_merged_waits_for_the_r
     assert_eq!(h.phase(), "opening", "not taken as a failed open");
     assert_eq!(h.count("start_turn"), 0);
     // the same recover again: the Node answers what it did, and the queued message runs
-    until("the queued turn", || h.count("start_turn") == 1).await;
+    eventually_sync("the queued turn", || h.count("start_turn") == 1).await;
     assert_eq!(h.planned("recover"), 1, "exactly one recover");
     assert_eq!(h.systems("不算成功"), 1, "never said to have succeeded");
     assert_eq!(h.count("open_session"), 2, "opened again under a new id");
@@ -5238,7 +5229,7 @@ async fn a_lifecycle_cancel_never_retires_an_unknown_prepare() {
     h.node.script_once("prepare_workspace", Scripted::Unknown);
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
-    until("unknown", || {
+    eventually_sync("unknown", || {
         h.state_of(&format!("op_prep_{S}")) == "unknown"
     })
     .await;
@@ -5332,7 +5323,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     }).unwrap();
     h.bind();
     h.rt.prompt(S, "first", "user", &[]).unwrap();
-    until("first active", || {
+    eventually_sync("first active", || {
         h.count("start_turn") == 1 && h.phase() == "active"
     })
     .await;
@@ -5345,11 +5336,11 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     })
     .unwrap();
     h.rt.prompt("s2", "second", "user", &[]).unwrap();
-    until("capacity queued", || {
+    eventually_sync("capacity queued", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'") == 2
     })
     .await;
-    until("capacity reason projected", || {
+    eventually_sync("capacity reason projected", || {
         h.store
             .reader(steve_store::runtime::sessions_waiting_for_room)
             .unwrap()
@@ -5372,7 +5363,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
             Ok(())
         })
         .unwrap();
-    until("second dispatched", || h.count("start_turn") == 2).await;
+    eventually_sync("second dispatched", || h.count("start_turn") == 2).await;
     assert_eq!(h.node.probe(false).await.unwrap().capacity.sessions, 2);
     assert!(
         h.node
@@ -5380,7 +5371,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
             .iter()
             .any(|(m, op)| *m == "start_turn" && op.as_str() == queued)
     );
-    until("capacity wait cleared", || {
+    eventually_sync("capacity wait cleared", || {
         h.store
             .reader(steve_store::runtime::sessions_waiting_for_room)
             .unwrap()
@@ -5394,7 +5385,7 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     );
     // Cancel remains dispatchable even though every slot is occupied.
     assert!(h.rt.cancel("s2").unwrap());
-    until("cancel reached Node", || h.count("cancel") == 1).await;
+    eventually_sync("cancel reached Node", || h.count("cancel") == 1).await;
     for exec in h.attempts() {
         let _ = h.node.finish(&exec, build::done()).await;
     }
@@ -5418,7 +5409,7 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
         let h = hub();
         h.bind();
         h.rt.prompt(S, "accounting vector", "user", &[]).unwrap();
-        until("started", || h.methods().contains(&"start_turn")).await;
+        eventually_sync("started", || h.methods().contains(&"start_turn")).await;
         let exec = h.attempts()[0].clone();
         let mut seen = std::collections::HashSet::new();
         for r in &c.reports {
@@ -5432,7 +5423,7 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
             if r.scope != UsageScope::Background {
                 seen.insert(r.report_id.clone());
             }
-            until("durable report", || {
+            eventually_sync("durable report", || {
                 h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == seen.len() as i64
             })
             .await;
@@ -5463,7 +5454,7 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
             c.name
         );
         h.node.finish(&exec, build::done()).await.unwrap();
-        until("settled", || !h.ends().is_empty()).await;
+        eventually_sync("settled", || !h.ends().is_empty()).await;
         assert_eq!(
             h.q::<Option<f64>>("SELECT SUM(cost_reported) FROM usage_records"),
             cost,
@@ -5484,7 +5475,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
     );
     h.bind();
     h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
-    until("blocked startup", || {
+    eventually_sync("blocked startup", || {
         h.phase() == "released" && !h.ends().is_empty()
     })
     .await;
@@ -5517,7 +5508,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
         ApiError::new(ErrorCode::Invalid, "unsupported effort"),
     );
     h.rt.retry_open(S, &build::choice()).unwrap();
-    until("retry failed", || {
+    eventually_sync("retry failed", || {
         h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'") == 2
             && h.phase() == "released"
     })
@@ -5528,7 +5519,7 @@ async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry()
         "open"
     );
     h.rt.retry_open(S, &build::choice()).unwrap();
-    until("retry started the queued task", || {
+    eventually_sync("retry started the queued task", || {
         h.count("start_turn") == 1
     })
     .await;
@@ -5547,7 +5538,7 @@ async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_sessi
     );
     h.rt.bind(&on_the_item(S)).unwrap();
     h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
-    until("failure", || {
+    eventually_sync("failure", || {
         h.phase() == "released" && !h.ends().is_empty()
     })
     .await;
@@ -5572,7 +5563,7 @@ async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_sessi
     }).unwrap();
     h.rt.bind(&on_the_item(S2)).unwrap();
     h.rt.prompt(S2, "successor protocol", "steve", &[]).unwrap();
-    until("successor", || h.count("start_turn") == 1).await;
+    eventually_sync("successor", || h.count("start_turn") == 1).await;
     assert!(h.store.queued().list(S).unwrap().is_empty());
     assert_eq!(
         h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='session_start'"),
@@ -5632,7 +5623,7 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
     h.node.set_harnesses(caps);
     h.bind(); // build::choice names a model, while this Node only offers its default.
     h.rt.prompt(S, "task", "steve", &[]).unwrap();
-    until("preflight blocked", || {
+    eventually_sync("preflight blocked", || {
         h.phase() == "released" && !h.ends().is_empty()
     })
     .await;
@@ -5644,7 +5635,7 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
     let mut default = build::choice();
     default.model = None;
     h.rt.retry_open(S, &default).unwrap();
-    until("default starts", || h.count("start_turn") == 1).await;
+    eventually_sync("default starts", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("open_session"), 1);
 }
 
@@ -5657,7 +5648,7 @@ async fn startup_upgrade_repairs_legacy_failure_loops_before_planning() {
     );
     h.bind();
     h.rt.prompt(S, "legacy task", "steve", &[]).unwrap();
-    until("initial failure", || {
+    eventually_sync("initial failure", || {
         h.phase() == "released" && !h.ends().is_empty()
     })
     .await;

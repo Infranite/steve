@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use steve_runtime::testkit::eventually;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -100,17 +100,6 @@ impl Env {
             .filter_map(|e| e["kind"].as_str().map(String::from))
             .collect()
     }
-}
-
-async fn until<F: std::future::Future<Output = bool>>(secs: u64, mut f: impl FnMut() -> F) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 async fn start() -> Env {
@@ -227,7 +216,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     assert!(
-        until(10, || async { e.session(&sid).await["busy"] == true }).await,
+        eventually("annotations_api condition", || async {
+            e.session(&sid).await["busy"] == true
+        })
+        .await,
         "the first turn runs"
     );
     sid
@@ -364,7 +356,7 @@ async fn drafts_one_send_and_the_item_line() {
         (200, Some(true), Some(false))
     );
     assert!(
-        until(10, || async {
+        eventually("annotations_api condition", || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("对产出的批注（2 条）"))

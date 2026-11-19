@@ -140,17 +140,9 @@ fn n(h: &H, sql: &str) -> i64 {
 }
 
 /// Waits until `sql` (a count) reaches `want`.
-async fn until(h: &H, sql: &str, want: i64) {
-    let t0 = std::time::Instant::now();
-    loop {
-        let got = n(h, sql);
-        if got >= want {
-            assert_eq!(got, want, "{sql}");
-            return;
-        }
-        assert!(t0.elapsed() < T, "{sql}: {got} < {want}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+async fn wait_count(h: &H, sql: &str, want: i64) {
+    steve_runtime::testkit::eventually(sql, || std::future::ready(n(h, sql) >= want)).await;
+    assert_eq!(n(h, sql), want, "{sql}");
 }
 
 async fn start(h: &H) -> LongConnection {
@@ -191,9 +183,9 @@ async fn group_mention_over_the_long_connection() {
         .ws_push_envelope(fixture("message_group_at_bot").unwrap());
     let d = h.fake.ws_wait_acked(&id, T).await.expect("acked");
     assert_eq!(d.ack.expect("ack").code, 200);
-    until(&h, MSGS, 1).await;
+    wait_count(&h, MSGS, 1).await;
     // the message is stored before it is linked to its event: wait for the link too
-    until(
+    wait_count(
         &h,
         "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in' AND event_id IS NOT NULL",
         1,
@@ -308,9 +300,9 @@ async fn dm_external_bots_and_own_messages() {
     // a DM: no decision, the space named after Alice
     h.fake
         .ws_push_envelope(fixture("message_p2p_text").unwrap());
-    until(&h, MSGS, 1).await;
+    wait_count(&h, MSGS, 1).await;
     // The channel message commits before the asynchronous event sink finishes.
-    until(&h, EVENTS, 1).await;
+    wait_count(&h, EVENTS, 1).await;
     let s = &q(
         &h,
         "SELECT name, kind FROM spaces WHERE external_id = ?",
@@ -332,7 +324,7 @@ async fn dm_external_bots_and_own_messages() {
     // a customer in the external group
     h.fake
         .ws_push_envelope(fixture("message_external_user").unwrap());
-    until(&h, MSGS, 2).await;
+    wait_count(&h, MSGS, 2).await;
     let s = &q(
         &h,
         "SELECT s.has_external, ss.disclosure FROM spaces s JOIN space_settings ss ON ss.space_id = s.id WHERE s.external_id = ?",
@@ -343,7 +335,7 @@ async fn dm_external_bots_and_own_messages() {
     // another app's bot: only recorded
     h.fake
         .ws_push_envelope(fixture("message_from_bot").unwrap());
-    until(&h, MSGS, 3).await;
+    wait_count(&h, MSGS, 3).await;
     let e = &row(
         &h,
         "SELECT e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",
@@ -358,7 +350,7 @@ async fn dm_external_bots_and_own_messages() {
     env["event"]["sender"]["sender_id"]["open_id"] = json!(ids::BOT_OPEN_ID);
     env["event"]["message"]["message_id"] = json!("om_own00000000000000000000000001");
     h.fake.ws_push_envelope(env);
-    until(&h, MSGS, 4).await;
+    wait_count(&h, MSGS, 4).await;
     let r = &row(
         &h,
         "SELECT m.sender_account_id, e.outcome_label FROM chan_messages m JOIN ext_events e ON e.id = m.event_id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",

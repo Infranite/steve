@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
 use steve_hub::api::AppState;
@@ -63,17 +64,6 @@ impl Env {
         c.busy_timeout(Duration::from_secs(5)).expect("timeout");
         c.execute(sql, p).expect("sql");
     }
-}
-
-async fn until(secs: u64, f: impl Fn() -> bool) -> bool {
-    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while tokio::time::Instant::now() < end {
-        if f() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
 }
 
 struct NotificationFake(Arc<steve_channels::fake::channel::FakeChannel>);
@@ -246,7 +236,7 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     // the request returns at once; with the modules' hooks wired the close commits once they answered
     assert_eq!(v["phase"], "closing", "{v}");
     assert!(
-        until(10, || e.one(
+        eventually_sync("outbox_wired condition", || e.one(
             "SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'"
         ) == 1)
         .await,
@@ -257,18 +247,22 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         1
     );
     assert!(
-        until(10, || e.one("SELECT count(*) FROM outbox_receipts") == 3).await,
+        eventually_sync("outbox_wired condition", || e
+            .one("SELECT count(*) FROM outbox_receipts")
+            == 3)
+        .await,
         "all three consumers received it"
     );
     assert!(
-        until(10, || e
+        eventually_sync("outbox_wired condition", || e
             .one("SELECT count(*) FROM flow_runs WHERE status = 'done'")
             == 1)
         .await,
         "the flow ran"
     );
     assert!(
-        until(10, || e.one("SELECT count(*) FROM personal_notifications")
+        eventually_sync("outbox_wired condition", || e
+            .one("SELECT count(*) FROM personal_notifications")
             == 1)
         .await
     );
@@ -617,7 +611,7 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(
-        until(15, || e.one(
+        eventually_sync("outbox_wired condition", || e.one(
             "SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL"
         ) == 1)
         .await
