@@ -7453,3 +7453,23 @@ async fn durable_send_deadlines_keep_direct_claim_strict_boundaries() {
     );
     assert_eq!(f.source.next_due().await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn deferred_rows_advance_without_failing_the_source_or_blocking_other_rows() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    let pending = f.add(now, false);
+    // A store maintenance pause is a normal refusal, not a broken due source.
+    f.h.env.store().maintenance_set(true).unwrap();
+    f.source.run_due(now).await.unwrap();
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now + 2_000));
+    f.h.env.store().maintenance_set(false).unwrap();
+    let ready = f.add(now, false);
+    f.source.run_due(now).await.unwrap();
+    assert!(f.done().contains(&ready));
+    assert!(!f.done().contains(&pending));
+    f.h.env.clock.set(now + 2_000);
+    f.source.run_due(now + 2_000).await.unwrap();
+    assert!(f.done().contains(&pending));
+}

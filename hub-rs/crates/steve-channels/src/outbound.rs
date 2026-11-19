@@ -1937,6 +1937,8 @@ pub struct Outbox {
     /// Where the sweep of stale cards goes on (`created`, `id` of the last card it looked at), so
     /// cards it leaves open never hold up the ones after them ([`Outbox::expire_stale`]).
     expiry_cursor: Mutex<Option<(i64, String)>>,
+    // Transient per-row deferrals do not change claims or authorization. A restart retries immediately.
+    deferred: Mutex<std::collections::HashMap<String, i64>>,
     #[cfg(feature = "fake")]
     before_attempt: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
@@ -1952,6 +1954,7 @@ impl Outbox {
             rewriting: Arc::default(),
             converting: Arc::default(),
             expiry_cursor: Mutex::new(None),
+            deferred: Mutex::default(),
             #[cfg(feature = "fake")]
             before_attempt: Mutex::new(None),
         }
@@ -3090,6 +3093,9 @@ impl Outbox {
     /// delay is over are sent; handoffs answered “to_item” become items. Returns how many were
     /// sent.
     pub async fn send_due(&self, ch: &Channels) -> usize {
+        // An explicit recovery pass must recheck freshly resumed connections immediately.
+        // Background DueSource passes alone observe the transient per-row retry deadlines.
+        lock(&self.deferred).clear();
         self.maintain(ch).await;
         self.send_ready(ch, ch.now()).await + self.settle_unknown(ch, ch.now()).await
     }
@@ -3219,6 +3225,16 @@ impl Outbox {
         }
     }
 
+    fn retry_deadlines(&self, now: i64) -> String {
+        let mut deferred = lock(&self.deferred);
+        deferred.retain(|_, at| *at > now);
+        serde_json::to_string(&*deferred).expect("string deadlines serialize")
+    }
+
+    fn defer_row(&self, id: &str, now: i64) {
+        lock(&self.deferred).insert(id.to_owned(), now + QUEUE_EVERY.as_millis() as i64);
+    }
+
     async fn send_ready(&self, ch: &Channels, now: i64) -> usize {
         // B3: only due messages are selected before the LIMIT, so approved ones still inside their
         // delay can't fill the batch and starve those that are due
@@ -3228,11 +3244,12 @@ impl Outbox {
                   WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?1)
                     AND d.status = 'resolved' AND d.subject_type = ?2 AND d.subject_id = m.id
                     AND json_extract(d.result, '$.send_at') <= ?3
+                    AND coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)<=?3
                   ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
                     JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
             Ok(st
-                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE, now], |r| {
+                .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE, now, self.retry_deadlines(now)], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3246,6 +3263,7 @@ impl Outbox {
         };
         let mut n = 0;
         for (m, d) in due {
+            self.defer_row(&m, now);
             match self.send(ch, &m, &Auth::Decision { id: d }).await {
                 Ok(SendOutcome::Sent { .. }) => n += 1,
                 Ok(_) => {}
@@ -3318,6 +3336,7 @@ impl Outbox {
                 "SELECT m.id, m.created, s.first_at FROM chan_messages m JOIN chan_send_state s ON s.message_id = m.id
                   WHERE m.direction = 'out' AND m.status = 'pending' AND m.decision_id IS NULL
                     AND ((m.sent IS NULL AND m.created < ?1) OR m.sent < ?2)
+                    AND coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)<=?3
                     AND (s.first_at IS NOT NULL OR NOT EXISTS (
                       SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
                       JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
@@ -3326,7 +3345,7 @@ impl Outbox {
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st
-                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS, now], |r| {
+                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS, now, self.retry_deadlines(now)], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3341,6 +3360,7 @@ impl Outbox {
         };
         let mut n = 0;
         for (m, created, tried) in rows {
+            self.defer_row(&m, now);
             let now = ch.now();
             // tried before (the Hub stopped during its send): it may be out, so it is unknown,
             // not late; [`Outbox::settle_unknown`] takes it from there
@@ -4532,14 +4552,14 @@ impl steve_runtime::due::DueSource for QueueDue {
         self.channels.store().reader(|c| -> ChannelResult<_> {
             Ok(c.query_row(
                 "SELECT min(at) FROM (
-                   SELECT max(json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
+                   SELECT max(coalesce((SELECT value FROM json_each(?5) WHERE key=m.id),0),json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
                       coalesce((SELECT n.next_attempt_at FROM personal_notifications n
                         JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0)) AS at
                    FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
                    WHERE m.direction='out' AND m.status='pending' AND d.status='resolved'
                      AND d.subject_type=?2 AND d.subject_id=m.id AND json_extract(d.result,'$.send_at') IS NOT NULL
                    UNION ALL
-                   SELECT CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END
+                   SELECT max(coalesce((SELECT value FROM json_each(?5) WHERE key=m.id),0),CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END)
                    FROM chan_messages m JOIN chan_send_state s ON s.message_id=m.id
                    WHERE m.direction='out' AND m.status='pending' AND m.decision_id IS NULL
                      AND (s.first_at IS NOT NULL OR NOT EXISTS (
@@ -4547,17 +4567,12 @@ impl steve_runtime::due::DueSource for QueueDue {
                        JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
                        WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?4 OR p.mode='log'
                          OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
-                )", params![CLAIM_STALE_MS, SUBJECT_MESSAGE, UNCLAIMED_MS, self.channels.now()], |r|r.get(0))?)
+                )", params![CLAIM_STALE_MS, SUBJECT_MESSAGE, UNCLAIMED_MS, self.channels.now(), self.outbox.retry_deadlines(self.channels.now())], |r|r.get(0))?)
         }).map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
     async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
         self.outbox.bind(&self.channels);
-        let sent = self.outbox.send_ready(&self.channels, now).await;
-        // A paused store or a live authorization check may defer every row. Back off at the
-        // legacy cadence instead of spinning on the same past deadline; do not change its state.
-        if sent == 0 && self.next_due().await?.is_some_and(|at| at <= now) {
-            return Err(steve_runtime::due::DueError("send batch deferred".into()));
-        }
+        self.outbox.send_ready(&self.channels, now).await;
         Ok(())
     }
 }
