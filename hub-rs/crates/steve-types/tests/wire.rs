@@ -1,4 +1,4 @@
-//! Golden bytes were captured from the pre-migration enums, not from these new types.
+//! Captured wire bytes pin the public event contract, independently of the Rust declarations.
 use serde::Serialize;
 use std::{collections::BTreeSet, fs, path::Path};
 use steve_types::*;

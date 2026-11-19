@@ -1485,7 +1485,6 @@ mod mention_tests {
 #[cfg(test)]
 mod draft_tests {
     use super::*;
-    use crate::repo::BusEvent;
     use crate::repo::WS;
     use crate::testkit::Kit;
 

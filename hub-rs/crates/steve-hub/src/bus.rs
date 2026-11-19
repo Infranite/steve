@@ -653,7 +653,7 @@ impl StatsThrottle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::Value;
     use std::time::Duration;
     use steve_types::*;
     fn item(id: &str, ws: &str) -> BusEvent {

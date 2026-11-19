@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use steve_modules::contacts::{self, Ports, SpacePort, TeamSync};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiResult, Caller};
-use steve_store::BusEvent;
 use steve_store::base::Viewer;
 
 const READONLY: &str = "组织架构团队跟随同步，不能改这一项";

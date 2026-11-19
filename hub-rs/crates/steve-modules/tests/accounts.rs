@@ -10,7 +10,6 @@ use steve_modules::changes::{self, Origin, Plan, Prepared};
 use steve_modules::contacts::{self, PartyHooks};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiError, Caller};
-use steve_store::BusEvent;
 
 fn env() -> TestEnv {
     TestEnv::new(accounts::register)

@@ -1,7 +1,6 @@
 //! Items left in `run` with nothing going on get one “它停下了” card (crate::stall).
 
 use crate::AgentRuntime;
-use crate::repo::BusEvent;
 use crate::stall::{STALL, STALL_AFTER_MS};
 use crate::testkit::Kit;
 use crate::util::now;

@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 #[cfg(test)]
-use steve_store::BusEvent;
 use steve_store::Store;
 use tokio::sync::watch;
 

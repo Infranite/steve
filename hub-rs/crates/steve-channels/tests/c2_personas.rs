@@ -17,7 +17,6 @@ use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig}
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
-use steve_store::BusEvent;
 use steve_store::base::Viewer;
 use tempfile::TempDir;
 
