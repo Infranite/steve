@@ -275,7 +275,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     let link = node_harness::dial(&h, &identity, &id, delayed.clone(), 1)
         .await
         .unwrap();
-    node_harness::until("linked", 5, || {
+    steve_runtime::testkit::eventually_sync("linked", || {
         h.svc.registry.current(id.as_str()).is_some()
     })
     .await;
@@ -309,7 +309,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     delayed.entered.notified().await;
     link.conn
         .close(None, steve_node_wire::close::GOODBYE, "test disconnect");
-    node_harness::until("unlinked", 5, || {
+    steve_runtime::testkit::eventually_sync("unlinked", || {
         h.svc.registry.current(id.as_str()).is_none()
     })
     .await;
@@ -323,7 +323,7 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
         .await
         .unwrap();
     delayed.gate.add_permits(1);
-    node_harness::until("relinked", 5, || {
+    steve_runtime::testkit::eventually_sync("relinked", || {
         h.svc.registry.current(id.as_str()).is_some()
     })
     .await;
