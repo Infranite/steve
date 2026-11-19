@@ -2968,8 +2968,20 @@ async fn sqlite_full_mid_turn_keeps_numbered_events_and_skips_no_seq() {
     };
     t.wait_for("output journaled", |_| {
         let c = count();
-        // the gate follows what is journaled (a few events are not chunks: fewer still are ahead)
-        std::fs::write(&gate, (c + AHEAD).to_string()).unwrap();
+        // Follow committed bytes, not row count: the journal can join several 4 KiB chunks
+        // into one delta. The flood is one block, so its latest byte offset is its input progress.
+        let chunks: i64 = db
+            .query_row(
+                "SELECT COALESCE((SELECT
+                (json_extract(event, '$.body.utf8_offset') +
+                 length(CAST(json_extract(event, '$.body.text') AS BLOB))) / 4096
+             FROM events WHERE json_extract(event, '$.body.type')='text_delta'
+             ORDER BY rowid DESC LIMIT 1), 0)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        std::fs::write(&gate, (chunks + AHEAD).to_string()).unwrap();
         c > 100
     })
     .await;

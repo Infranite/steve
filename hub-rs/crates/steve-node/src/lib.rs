@@ -476,7 +476,7 @@ pub(crate) struct Inner {
     remover: std::sync::OnceLock<Arc<dyn Remover>>,
     /// Being removed: no new work is taken ([`LocalNode::set_retiring`]).
     retiring: AtomicBool,
-    wake: tokio::sync::Notify,
+    wake: Arc<tokio::sync::Notify>,
     delivering: AtomicBool,
     closed: AtomicBool,
     /// The journal failed: no new work until a restart.
@@ -552,7 +552,7 @@ impl Inner {
         self.faulted.store(true, Ordering::SeqCst);
     }
     pub(crate) fn faulted(&self) -> bool {
-        self.faulted.load(Ordering::SeqCst)
+        self.faulted.load(Ordering::SeqCst) || self.j.failed()
     }
     pub(crate) fn hub_down_since(&self) -> Option<i64> {
         *self.hub_down_since.lock().unwrap()
@@ -572,31 +572,13 @@ impl Inner {
         self.output_counter(session).store(0, Ordering::SeqCst);
     }
 
-    /// The journal's limit now (bytes of live pages): the quota, or the room the filesystem has
-    /// past the reserve. Pages SQLite freed inside the file count as room.
-    pub(crate) fn journal_limit(&self, t: &Tx) -> ApiResult<u64> {
-        let s = &self.cfg.storage;
-        let free = match &s.free_space {
-            Some(f) => Some(f()),
-            None => journal::free_bytes(&self.cfg.home),
-        };
-        let Some(free) = free else {
-            return Ok(s.quota);
-        };
-        let room = t
-            .file_bytes()?
-            .saturating_add(free)
-            .saturating_sub(s.reserve);
-        Ok(s.quota.min(room))
-    }
-
-    /// The journal is at its limit (and then counts as full): running work stops.
-    pub(crate) fn over_limit(&self, t: &Tx) -> ApiResult<bool> {
-        let over = t.payload_bytes()? >= self.journal_limit(t)?;
+    /// Limit checks never visit the journal connection or filesystem.
+    pub(crate) fn over_limit(&self) -> bool {
+        let over = self.j.over_limit();
         if over {
             self.full.store(true, Ordering::SeqCst);
         }
-        Ok(over)
+        over
     }
 }
 
@@ -640,13 +622,22 @@ const CUT_TEXT: usize = 4000;
 const CUT_MARK: &str = "…[cut by the node: too long for one event]";
 
 /// `body` as events that each fit [`EVENT_CAP`].
+#[cfg(test)]
 fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
-    let size = |b: &EventBody| serde_json::to_vec(b).map(|v| v.len()).unwrap_or(usize::MAX);
-    // the subject and the envelope's other fields are small, but they count too
-    let budget =
-        EVENT_CAP.saturating_sub(serde_json::to_vec(subject).map(|v| v.len()).unwrap_or(0) + 512);
-    if size(&body) <= budget {
-        return vec![body];
+    fit_encoded(
+        &serde_json::to_string(subject).expect("subject serializes"),
+        body,
+    )
+    .into_iter()
+    .map(|(body, _)| body)
+    .collect()
+}
+
+fn fit_encoded(subject: &str, body: EventBody) -> Vec<(EventBody, String)> {
+    let encoded = serde_json::to_string(&body).expect("event serializes");
+    let budget = EVENT_CAP.saturating_sub(subject.len() + 512);
+    if encoded.len() <= budget {
+        return vec![(body, encoded)];
     }
     if let EventBody::TextDelta {
         message,
@@ -656,46 +647,60 @@ fn fit(subject: &Subject, body: EventBody) -> Vec<EventBody> {
     } = body
     {
         let mut out = vec![];
-        let mut at = 0usize;
+        let mut at = 0;
         while at < text.len() {
             let mut end = (at + PIECE).min(text.len());
             while !text.is_char_boundary(end) {
                 end -= 1;
             }
-            out.push(EventBody::TextDelta {
+            let piece = EventBody::TextDelta {
                 message: message.clone(),
                 block: block.clone(),
                 utf8_offset: utf8_offset + at as u64,
-                text: text[at..end].to_string(),
-            });
+                text: text[at..end].into(),
+            };
+            out.push((
+                piece.clone(),
+                serde_json::to_string(&piece).expect("event serializes"),
+            ));
             at = end;
         }
         return out;
     }
-    let kind = serde_json::to_value(&body)
-        .ok()
-        .and_then(|v| v.get("type").and_then(Value::as_str).map(String::from))
-        .unwrap_or_default();
-    let was = size(&body);
+    let mut value: Value = serde_json::from_str(&encoded).expect("encoded event");
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     for keep in [CUT_TEXT, CUT_TEXT / 8] {
-        let Ok(mut v) = serde_json::to_value(&body) else {
-            break;
-        };
-        cut_strings(&mut v, keep);
-        if let Ok(b) = serde_json::from_value::<EventBody>(v)
-            && size(&b) <= budget
-        {
-            tracing::warn!("{kind} event of {was} bytes cut to fit one event");
-            return vec![b];
+        cut_strings(&mut value, keep);
+        if let Ok(body) = serde_json::from_value::<EventBody>(value.clone()) {
+            let raw = serde_json::to_string(&body).expect("event serializes");
+            if raw.len() <= budget {
+                tracing::warn!(
+                    "{kind} event of {} bytes cut to fit one event",
+                    encoded.len()
+                );
+                return vec![(body, raw)];
+            }
         }
     }
-    tracing::warn!("{kind} event of {was} bytes dropped: too big for one event");
-    vec![EventBody::Diagnostic {
+    tracing::warn!(
+        "{kind} event of {} bytes dropped: too big for one event",
+        encoded.len()
+    );
+    let diagnostic = EventBody::Diagnostic {
         severity: Severity::Warning,
         code: "event_too_large".into(),
-        safe_text: format!("a {kind} event of {was} bytes was too big to report"),
+        safe_text: format!(
+            "a {kind} event of {} bytes was too big to report",
+            encoded.len()
+        ),
         details: None,
-    }]
+    };
+    let raw = serde_json::to_string(&diagnostic).expect("event serializes");
+    vec![(diagnostic, raw)]
 }
 
 fn cut_strings(v: &mut Value, keep: usize) {
@@ -712,50 +717,13 @@ fn cut_strings(v: &mut Value, keep: usize) {
 
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
-    let mut limit = None;
-    let evs = evs
-        .into_iter()
-        .flat_map(|(subject, body)| {
-            fit(&subject, body)
-                .into_iter()
-                .map(move |b| (subject.clone(), b))
-        })
-        .collect::<Vec<_>>();
-    for (subject, body) in evs {
-        let data = match &body {
-            EventBody::OperationChanged { .. }
-            | EventBody::AttemptEnded { .. }
-            | EventBody::PermissionExpired { .. }
-            | EventBody::PermissionResolved { .. }
-            | EventBody::SessionChanged { .. }
-            | EventBody::MessageCompleted { .. } => false,
-            EventBody::Usage { report } => report.measurement != Measurement::Final,
-            _ => true,
-        };
-        if data {
-            let limit = match limit {
-                Some(l) => l,
-                None => *limit.insert(inner.journal_limit(t)?),
-            };
-            if t.payload_bytes()?
-                .saturating_add(serde_json::to_vec(&body).map_err(internal)?.len() as u64 + 16384)
-                > limit
-            {
+    for event in journal::prepare(evs)? {
+        if let Err(e) = t.emit(&event, inner.incarnation) {
+            if e.code == ErrorCode::Exhausted {
                 inner.full.store(true, Ordering::SeqCst);
-                return Err(NodeStop::JournalBudget.error());
             }
+            return Err(e);
         }
-        let stream: StreamId = id(stream_of(&subject))?;
-        let n = t.bump("event")?;
-        let event_id: EventId = id(format!("ev_{}_{}_{n}", inner.j.id(), inner.incarnation))?;
-        t.record(&stream, |cursor| NodeEvent {
-            schema: EVENT_SCHEMA,
-            id: event_id,
-            at: Timestamp(now()),
-            cursor,
-            subject,
-            body,
-        })?;
     }
     Ok(())
 }
@@ -1558,7 +1526,7 @@ impl LocalNode {
             upgrader: std::sync::OnceLock::new(),
             remover: std::sync::OnceLock::new(),
             retiring: AtomicBool::new(false),
-            wake: tokio::sync::Notify::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
@@ -1577,13 +1545,16 @@ impl LocalNode {
             tasks: Mutex::new(Vec::new()),
             research: Default::default(),
         }));
+        node.0
+            .j
+            .configure(node.0.cfg.storage.clone(), node.0.wake.clone())?;
         // Opening is also supported outside a Tokio runtime. In that case delivery will begin
         // the sweep once connected; maintenance must never prevent the Node from opening.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&node.0);
             let task = runtime.spawn_blocking(move || {
                 if let Some(me) = weak.upgrade()
-                    && let Err(e) = me.j.tx(|t| t.resume_pruning())
+                    && let Err(e) = me.j.resume_pruning()
                 {
                     tracing::warn!("node journal prune: {e}");
                     return;
@@ -1593,7 +1564,7 @@ impl LocalNode {
                     if me.closed.load(Ordering::SeqCst) {
                         break;
                     }
-                    match me.j.tx(|t| t.prune(now())) {
+                    match me.j.prune(now()) {
                         Ok(0) => break,
                         Ok(_) => {}
                         Err(e) => {
@@ -1885,15 +1856,16 @@ impl LocalNode {
     /// otherwise conflict. New: past the window → stale; a closed or faulted Node takes nothing new;
     /// `decide` checks against the journal and changes it, in the same transaction as the command
     /// and its events. Returns whether it was new.
-    fn accept<T: serde::Serialize>(
+    fn accept<T: serde::Serialize + Sync>(
         &self,
         method: &'static str,
         c: &Command<T>,
-        decide: impl FnOnce(&Tx) -> ApiResult<Decided>,
+        decide: impl FnOnce(&Tx) -> ApiResult<Decided> + Send,
     ) -> ApiResult<(Receipt, bool)> {
         c.check_window()?;
         let digest = c.digest(method)?;
-        let mut maintenance = self.0.adapter_maintenance.lock().unwrap();
+        let mut maintenance_guard = self.0.adapter_maintenance.lock().unwrap();
+        let maintenance = &mut *maintenance_guard;
         let r = self.0.j.tx(|t| {
             if let Some(op) = t.op(&c.id)? {
                 return if op.digest == digest && op.method == method {
@@ -1954,11 +1926,11 @@ impl LocalNode {
                 adapter_setup::no_orphan_installer(t)?;
             }
             let bytes = serde_json::to_vec(&c.body).map_err(internal)?.len() as u64;
-            let (used, limit) = (t.payload_bytes()?, self.0.journal_limit(t)?);
+            let (used, limit) = (t.payload_bytes()?, t.limit());
             let taken = if control {
                 used.saturating_add(bytes) < limit.saturating_add(CONTROL_MARGIN)
             } else {
-                let full = self.0.full.load(Ordering::SeqCst);
+                let full = self.0.full.load(Ordering::SeqCst) || self.0.j.over_limit();
                 let (taken, full) = admit(full, used, bytes, limit, self.0.cfg.storage.low_water);
                 self.0.full.store(full, Ordering::SeqCst);
                 taken
@@ -2142,7 +2114,7 @@ impl LocalNode {
         &self,
         op: &OperationId,
         state: Observed,
-        more: impl Fn(&Tx) -> ApiResult<()>,
+        more: impl Fn(&Tx) -> ApiResult<()> + Send + Sync,
     ) {
         loop {
             let r = self.0.j.tx(|t| {
@@ -2453,11 +2425,11 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             Ok(Ok(ack)) => {
                 last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
-                let moved = me.j.tx(|t| t.ack(&ack));
+                let moved = me.j.acknowledge(&ack);
                 match moved {
                     Ok(m) => {
                         progress |= m;
-                        if let Err(e) = me.j.tx(|t| t.prune(now())) {
+                        if let Err(e) = me.j.prune(now()) {
                             tracing::warn!("node journal prune after ack: {e}");
                         }
                     }
@@ -3208,7 +3180,7 @@ impl ExecutionControl for LocalNode {
                     }
                     Ok((entries, t.heads()?))
                 })?;
-                let token = self.0.j.tx(|t| t.bump("snapshot"))?;
+                let token = self.0.j.snapshot_token()?;
                 let mut snaps = self.0.snapshots.lock().unwrap();
                 // pages of the last snapshots stay readable (a lost answer can be asked again)
                 snaps.retain(|k, _| *k + 8 > token);
@@ -3289,7 +3261,7 @@ impl ExecutionControl for LocalNode {
     }
 
     async fn acknowledge(&self, ack: EventAck) -> ApiResult<()> {
-        self.0.j.tx(|t| t.ack(&ack).map(|_| ()))
+        self.0.j.acknowledge(&ack).map(|_| ())
     }
 }
 

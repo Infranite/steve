@@ -367,6 +367,7 @@ impl LocalNode {
         req: &r::ResearchRequest,
         plan: &r::AttemptPlan,
         spawned: &(dyn Fn(u32) -> bool + Send + Sync),
+        budget_epoch: u64,
     ) -> (r::ResearchOutcome, Option<Stop>, Vec<(Subject, EventBody)>) {
         let started = Instant::now();
         let run_id = workspace::dir_name(exec.attempt().as_str());
@@ -492,7 +493,7 @@ impl LocalNode {
         let mut tick = tokio::time::interval(POLL);
         let mut why = None;
         let mut open_message = None;
-        let mut pending_final = vec![];
+        let mut pending_closing = vec![];
         let mut receive = async |body: EventBody| -> ApiResult<()> {
             let original = vec![(Subject::Execution(exec.clone()), body.clone())];
             {
@@ -509,7 +510,7 @@ impl LocalNode {
                 }
                 _ => {}
             }
-            let final_usage = matches!(&body, EventBody::Usage { report } if report.measurement == Measurement::Final);
+            let closing_fact = !crate::journal::needs_budget(&body);
             let evs = images
                 .process(&image_scope, exec, self.hub_files(), vec![body])
                 .await
@@ -517,8 +518,8 @@ impl LocalNode {
                 .map(|body| (Subject::Execution(exec.clone()), body))
                 .collect::<Vec<_>>();
             let result = self.emit(evs.clone());
-            if final_usage && result.is_err() {
-                pending_final.extend(evs);
+            if closing_fact && result.is_err() {
+                pending_closing.extend(evs);
             }
             result
         };
@@ -528,7 +529,7 @@ impl LocalNode {
                 biased;
                 _ = tick.tick() => {
                     let state = state.lock().unwrap();
-                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output) {
+                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output, budget_epoch) {
                         why = Some(stop);
                         break None;
                     }
@@ -545,7 +546,7 @@ impl LocalNode {
                     if state.lock().unwrap().stop.is_some() {
                         break None;
                     }
-                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.lock().unwrap().output) {
+                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.lock().unwrap().output, budget_epoch) {
                         why = Some(stop);
                         break None;
                     }
@@ -607,7 +608,7 @@ impl LocalNode {
             .capture(&image_scope, exec, self.hub_files(), true)
             .await;
         out.raw = images.rewrite(&out.raw);
-        let mut tail = pending_final;
+        let mut tail = pending_closing;
         tail.extend(
             captured
                 .into_iter()

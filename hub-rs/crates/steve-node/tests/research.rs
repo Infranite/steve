@@ -353,10 +353,11 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.start_job(now_cmd("acp_stream", acp_job("a_acp", "stream")))
         .await
         .unwrap();
+    // Observe the streamed prefix: the journal may join neighbouring transport chunks.
     eventually_sync("first ACP chunk", || {
-        t.bodies()
-            .iter()
-            .any(|e| matches!(e, EventBody::TextDelta { text, .. } if text == "答案第一段"))
+        t.bodies().iter().any(
+            |e| matches!(e, EventBody::TextDelta { text, .. } if text.starts_with("答案第一段")),
+        )
     })
     .await;
     assert!(
@@ -1627,5 +1628,30 @@ async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     );
     assert_eq!(t.spawns(), 1);
     assert!(!alive(child));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_journal_window_stops_a_quiet_research_backend_before_storage_recovers() {
+    let t = T::new();
+    let n = t.acp_node();
+    let db = rusqlite::Connection::open(t.root.join("node/node.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_text BEFORE INSERT ON events WHEN json_extract(NEW.event,'$.body.type')='text_delta' BEGIN SELECT RAISE(ABORT,'injected streamed write failure'); END;").unwrap();
+    n.start_job(now_cmd("journal_stop", acp_job("journal_stop", "cancel")))
+        .await
+        .unwrap();
+    let pgid = || db.query_row("SELECT pgid FROM procs LIMIT 1", [], |r| r.get::<_, i64>(0));
+    eventually_sync("research process registered", || pgid().is_ok()).await;
+    let pid = pgid().unwrap();
+    // The peer emits text once and then stays quiet until cancelled. The failed 200 ms window
+    // must stop it without relying on another producer callback to return the journal error.
+    eventually_sync("quiet research process stopped after journal failure", || {
+        !alive(pid as i32)
+    })
+    .await;
+    db.execute_batch("DROP TRIGGER reject_text").unwrap();
+    let completion = t.end_of(&n, "journal_stop").await;
+    assert_eq!(completion.outcome, Outcome::Failed, "{completion:?}");
+    assert_eq!(completion.error, Some(NodeStop::JournalFails.error()));
     n.shutdown().await;
 }

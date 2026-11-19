@@ -45,6 +45,8 @@ enum Stop {
     Offline,
     /// The draft and tool rows went past `max_output_bytes`.
     Output,
+    JournalBudget,
+    JournalFailed,
 }
 
 /// What `start_job` checked and resolved before accepting, for the run.
@@ -226,6 +228,7 @@ impl LocalNode {
     }
 
     async fn run_research(self, op: OperationId, exec: ExecutionRef, spec: JobSpec, p: Plan) {
+        let budget_epoch = self.0.j.budget_epoch();
         let Plan {
             mut cfg,
             mut req,
@@ -257,9 +260,9 @@ impl LocalNode {
                 tokio::select! {
                     got = &mut fetch => break got,
                     _ = tick.tick() => {
-                        if let Some(why) = self.stop_now(&op, limits, 0) {
+                        if let Some(why) = self.stop_now(&op, limits, 0, budget_epoch) {
                             let c = ended(Some(why), &r::RunStatus::Stopped, String::new(), None, 0, &[], false);
-                            return self.end_research(&op, &exec, c, vec![]).await;
+                            return self.end_research(&op, &exec, c, vec![], budget_epoch).await;
                         }
                     }
                 }
@@ -275,7 +278,7 @@ impl LocalNode {
                 Err(e) => {
                     let failed = r::RunStatus::Failed(format!("research attachments: {e}"));
                     let c = ended(None, &failed, String::new(), None, 0, &[], false);
-                    return self.end_research(&op, &exec, c, vec![]).await;
+                    return self.end_research(&op, &exec, c, vec![], budget_epoch).await;
                 }
             }
         }
@@ -291,7 +294,7 @@ impl LocalNode {
                 &[],
                 false,
             );
-            return self.end_research(&op, &exec, c, vec![]).await;
+            return self.end_research(&op, &exec, c, vec![], budget_epoch).await;
         }
         cfg.budget.hard = Some(left);
         cfg.budget.soft = left;
@@ -323,7 +326,16 @@ impl LocalNode {
             }
         };
         let (outcome, why, tail) = self
-            .research_acp_attempt(&op, &exec, &spec, &cfg, &req, &plan, &on_spawn)
+            .research_acp_attempt(
+                &op,
+                &exec,
+                &spec,
+                &cfg,
+                &req,
+                &plan,
+                &on_spawn,
+                budget_epoch,
+            )
             .await;
         inner.tools.revoke_job(&exec);
         let recorded = *group.lock().unwrap();
@@ -354,13 +366,27 @@ impl LocalNode {
             &outcome.files_read,
             outcome.sandboxed,
         );
-        self.end_research(&op, &exec, c, tail).await
+        self.end_research(&op, &exec, c, tail, budget_epoch).await
     }
 
     /// Whether the Node stops the job now, and why: a cancel, a shutdown, its deadline, the Hub
     /// unreachable past the lease, or its output past the cap (the actor's limits for a turn).
-    fn stop_now(&self, op: &OperationId, limits: &Limits, output: u64) -> Option<Stop> {
+    fn stop_now(
+        &self,
+        op: &OperationId,
+        limits: &Limits,
+        output: u64,
+        budget_epoch: u64,
+    ) -> Option<Stop> {
         let inner = &self.0;
+        // Check the owner's atomic alarms before asking a failed owner for cancellation state.
+        // The epoch remembers a refused window even after space has recovered.
+        if inner.over_limit() || inner.j.budget_epoch() != budget_epoch {
+            return Some(Stop::JournalBudget);
+        }
+        if inner.faulted() {
+            return Some(Stop::JournalFailed);
+        }
         let now = now();
         if inner
             .j
@@ -386,7 +412,7 @@ impl LocalNode {
     }
 
     fn emit(&self, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
-        let r = self.0.j.tx(|t| emit_all(&self.0, t, evs));
+        let r = self.0.j.events(evs, None);
         self.0.wake.notify_one();
         r
     }
@@ -399,10 +425,12 @@ impl LocalNode {
         exec: &ExecutionRef,
         c: Completion,
         before: Vec<(Subject, EventBody)>,
+        budget_epoch: u64,
     ) {
         let inner = self.0.clone();
         loop {
             let r = inner.j.tx(|t| {
+                let c = inner.j.recorded_completion(budget_epoch, c.clone());
                 let state = Observed::Finished {
                     outcome: c.outcome,
                     result: Some(OperationResult::Execution(c.clone())),
@@ -570,6 +598,16 @@ fn ended(
             c.outcome = Outcome::Cancelled;
             c.stop_reason = "max_output".into();
             c.error = Some(NodeStop::OutputLimit.error());
+        }
+        Some(Stop::JournalBudget) => {
+            c.outcome = Outcome::Cancelled;
+            c.stop_reason = "cancelled".into();
+            c.error = Some(NodeStop::JournalBudget.error());
+        }
+        Some(Stop::JournalFailed) => {
+            c.outcome = Outcome::Failed;
+            c.stop_reason = "error".into();
+            c.error = Some(NodeStop::JournalFails.error());
         }
         Some(Stop::Cancel | Stop::Deadline) | None => {}
     }

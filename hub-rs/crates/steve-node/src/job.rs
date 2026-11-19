@@ -71,6 +71,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         job: spec.job.clone(),
         attempt: spec.run.attempt.clone(),
     };
+    let budget_epoch = inner.j.budget_epoch();
     let key = group_key(&spec.run.attempt);
     let dir = scratch(&inner, &spec.run.attempt);
     let group: Mutex<Option<(i64, Option<u64>)>> = Mutex::new(None);
@@ -122,7 +123,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             .into_iter()
             .map(|b| (Subject::Execution(exec.clone()), b))
             .collect();
-        if inner.j.tx(|t| emit_all(&inner, t, evs)).is_err() {
+        if inner.j.events(evs, None).is_err() {
             broken.store(true, Ordering::SeqCst);
         }
         inner.wake.notify_one();
@@ -153,7 +154,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     };
     let stop = async {
         loop {
-            if let Some(s) = why_stop(&inner, &op, &lim, &output, &broken) {
+            if let Some(s) = why_stop(&inner, &op, &lim, &output, &broken, budget_epoch) {
                 return s;
             }
             tokio::select! {
@@ -219,14 +220,24 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         },
         Ok(Ok(mut ran)) => {
             ran.usage.extend(pending_usage);
-            return end(&inner, &op, &exec, &key, recorded, ran).await;
+            return end(&inner, &op, &exec, &key, recorded, ran, budget_epoch).await;
         }
     };
     let before = pending_usage
         .into_iter()
         .map(|report| EventBody::Usage { report })
         .collect();
-    end_with(&inner, &op, &exec, &key, recorded, completion, before).await;
+    end_with(
+        &inner,
+        &op,
+        &exec,
+        &key,
+        recorded,
+        completion,
+        before,
+        budget_epoch,
+    )
+    .await;
 }
 
 /// What the adapter ended the call with: its answer or error, how it stopped (ACP's
@@ -360,7 +371,7 @@ async fn acp_think(
                 };
                 if inner
                     .j
-                    .tx(|t| emit_all(inner, t, vec![(Subject::Execution(exec), diagnostic)]))
+                    .events(vec![(Subject::Execution(exec), diagnostic)], None)
                     .is_err()
                 {
                     inner.fault();
@@ -379,13 +390,10 @@ async fn acp_think(
                 };
                 if inner
                     .j
-                    .tx(|t| {
-                        emit_all(
-                            inner,
-                            t,
-                            vec![(Subject::Execution(exec), EventBody::Usage { report })],
-                        )
-                    })
+                    .events(
+                        vec![(Subject::Execution(exec), EventBody::Usage { report })],
+                        None,
+                    )
                     .is_err()
                 {
                     inner.fault();
@@ -560,6 +568,7 @@ fn why_stop(
     lim: &Limits,
     output: &AtomicU64,
     broken: &AtomicBool,
+    budget_epoch: u64,
 ) -> Option<Stop> {
     let now = now();
     let hub_down = inner.hub_down_since().is_some_and(|since| since < now);
@@ -589,7 +598,8 @@ fn why_stop(
     } else if output.load(Ordering::SeqCst) > lim.max_output_bytes {
         exhausted(NodeStop::OutputLimit)
     } else if broken.load(Ordering::SeqCst)
-        || inner.j.read(|t| inner.over_limit(t)).unwrap_or(false)
+        || inner.over_limit()
+        || inner.j.budget_epoch() != budget_epoch
     {
         exhausted(NodeStop::JournalBudget)
     } else if inner.faulted() {
@@ -627,6 +637,7 @@ async fn end(
     key: &SessionId,
     group: Option<(i64, Option<u64>)>,
     ran: Ran,
+    budget_epoch: u64,
 ) {
     let completion = match ran.reply {
         Ok(text) if ran.stop_reason == "end_turn" => Completion {
@@ -676,7 +687,7 @@ async fn end(
         .into_iter()
         .map(|report| EventBody::Usage { report })
         .collect();
-    end_with(inner, op, exec, key, group, completion, usage).await;
+    end_with(inner, op, exec, key, group, completion, usage, budget_epoch).await;
 }
 
 /// The attempt's last events, its final state and `attempt_ended`, and its group forgotten, in one
@@ -689,8 +700,12 @@ async fn end_with(
     group: Option<(i64, Option<u64>)>,
     completion: Completion,
     before: Vec<EventBody>,
+    budget_epoch: u64,
 ) {
     finish(inner, |t| {
+        let completion = inner
+            .j
+            .recorded_completion(budget_epoch, completion.clone());
         if let Some((pgid, _)) = group {
             t.drop_proc(key, pgid)?;
         }
@@ -739,7 +754,7 @@ fn unknown(inner: &Inner, t: &Tx, op: &OperationId, why: &str) -> ApiResult<()> 
 }
 
 /// Writes the end, again until the journal takes it (the end of an attempt is always written).
-async fn finish(inner: &Inner, f: impl Fn(&Tx) -> ApiResult<()>) {
+async fn finish(inner: &Inner, f: impl Fn(&Tx) -> ApiResult<()> + Send + Sync) {
     loop {
         let r = inner.j.tx(&f);
         inner.wake.notify_one();
