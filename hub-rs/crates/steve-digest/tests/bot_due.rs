@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use serde_json::json;
-use steve_digest::queue::{self, BOT_BATCH, BotRunner, BotSource};
+use steve_digest::queue::{self, BOT_BATCH, BOT_WAKE_TABLES, BotRunner, BotSource};
 use steve_modules::testkit::TestEnv;
 use steve_runtime::due::contract::{self, Fixture};
 use steve_runtime::due::{DueSource, due_loop};
@@ -160,7 +160,7 @@ async fn packet_age_runs_at_the_deadline_between_minute_ticks() {
 async fn a_committed_packet_wakes_an_idle_source_without_advancing_time() {
     let p = Packets::new();
     assert_eq!(p.source.next_due().await.unwrap(), None);
-    let wake = p.env.store().commit_wake(&["digest_packets", "settings"]);
+    let wake = p.env.store().commit_wake(BOT_WAKE_TABLES);
     let task = tokio::spawn(due_loop(
         p.source.clone(),
         p.env.clock.clone(),
@@ -274,7 +274,7 @@ async fn packet_commits_do_not_self_wake_into_a_busy_loop() {
             due_loop(
                 source.clone(),
                 Arc::new(FixedWall(elapsed.clone())),
-                p.env.store().commit_wake(&["digest_packets", "settings"]),
+                p.env.store().commit_wake(BOT_WAKE_TABLES),
                 backoff(),
             ),
         );

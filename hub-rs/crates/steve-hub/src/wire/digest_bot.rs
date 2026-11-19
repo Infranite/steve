@@ -10,7 +10,7 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steve_digest::{bot, conv, queue};
-use steve_flow::{FlowCx, policy::OverlapPolicy, schedules};
+use steve_flow::{FlowCx, policy::OverlapPolicy, runs, schedules};
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 
 pub fn routes(flow: Arc<FlowCx>) -> Router<Modules> {
@@ -86,7 +86,7 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
         return Ok(None);
     }
     if let Err(e) = schedules::check_refs(c, ws, &s.spec) {
-        tracing::warn!(workspace = ws, "digest Bot binding: {e}");
+        tracing::debug!(workspace = ws, "digest Bot binding: {e}");
         return Ok(None);
     }
     let busy: bool = c.query_row(
@@ -100,7 +100,7 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
         return Ok(None);
     }
     // A skipped/failed/empty run must not immediately start again while packets still wait.
-    // Keep the old one-minute retry ceiling, using the existing durable run history.
+    // All runs (including cron/manual starts) share this minute, using durable run history.
     let last: Option<i64> = c.query_row(
         "SELECT max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ?",
         params![ws, id],
@@ -110,6 +110,56 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
         id,
         last.map_or(i64::MIN, |at| at.saturating_add(60_000)),
     )))
+}
+
+impl Runner {
+    fn failed_start(
+        &self,
+        ws: &str,
+        id: &str,
+        now: i64,
+        error: ApiError,
+    ) -> Result<(), steve_store::StoreError> {
+        // ApiError::Internal is the flow API's storage/bug boundary, not a row rejection.
+        if let ApiError::Internal(reason) = error {
+            return Err(steve_store::StoreError::Hook(reason));
+        }
+        let reason = error.to_string();
+        self.0
+            .store()
+            .transaction(|tx| -> ApiResult<()> {
+                // A concurrent removal makes this binding unavailable; there is no start to retry.
+                let Some(schedule) = schedules::get(tx, ws, id)? else {
+                    return Ok(());
+                };
+                let run = runs::insert(
+                    tx,
+                    &runs::NewRun {
+                        ws,
+                        flow_id: id,
+                        flow_version: schedule.version,
+                        trigger_kind: "manual",
+                        status: "failed",
+                        outcome_label: &reason,
+                        cursor: None,
+                        context: &json!({"at":now,"trigger":"manual","source":"digest.bot"}),
+                        now,
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE flow_runs SET error = ? WHERE id = ?",
+                    params![reason, run],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| steve_store::StoreError::Hook(e.to_string()))?;
+        tracing::warn!(
+            workspace = ws,
+            schedule = id,
+            "digest Bot start failed: {reason}"
+        );
+        Ok(())
+    }
 }
 
 impl queue::BotRunner for Runner {
@@ -131,10 +181,12 @@ impl queue::BotRunner for Runner {
         if let Some((id, at)) = due
             && at <= now
         {
-            let (run, go) = steve_flow::scheduler::start_manual(&self.0, ws, &id)
-                .map_err(|e| steve_store::StoreError::Hook(e.to_string()))?;
-            if go {
-                drop(steve_flow::scheduler::spawn_drive(self.0.clone(), run));
+            match steve_flow::scheduler::start_manual(&self.0, ws, &id) {
+                Ok((run, true)) => {
+                    drop(steve_flow::scheduler::spawn_drive(self.0.clone(), run));
+                }
+                Ok((_, false)) => {}
+                Err(error) => self.failed_start(ws, &id, now, error)?,
             }
         }
         Ok(())
@@ -144,19 +196,7 @@ impl queue::BotRunner for Runner {
 /// Tables read by BotSource and runnable/check_refs, including schedule reference checks.
 /// This is only a recheck hint; queue and policy decisions always read the store again.
 fn wake(store: &steve_store::Store) -> Arc<tokio::sync::Notify> {
-    store.commit_wake(&[
-        "digest_packets",
-        "settings",
-        "flows",
-        "flow_triggers",
-        "workspace_members",
-        "bots",
-        "bot_workspaces",
-        "projects",
-        "tags",
-        "flow_runs",
-        "items",
-    ])
+    store.commit_wake(queue::BOT_WAKE_TABLES)
 }
 
 /// Packet-count/age and lease deadlines, woken by committed changes to their input tables.
@@ -214,6 +254,157 @@ mod tests {
         assert_eq!(st, 200, "{v}");
         assert!(changed.notified().now_or_never().is_some());
         (e, id)
+    }
+
+    fn packet(e: &FlowEnv, ws: &str, at: i64) -> String {
+        e.env.store().transaction(|tx| -> Result<_, steve_store::StoreError> {
+            tx.execute("INSERT OR IGNORE INTO workspaces (id,name,created) VALUES (?, 'digest test', 1)", [ws])?;
+            tx.execute("INSERT OR REPLACE INTO settings (workspace_id,key,value,updated) VALUES (?, 'digest', '{\"every_min\":1,\"packets\":1000}', 1)", [ws])?;
+            queue::insert(tx, &queue::NewPacket {
+                ws, conv: "space:fixture", seq: 1, kind: "window", trigger: "quiet",
+                first_id: "m", last_id: "m", first_at: at, last_at: at,
+                count: 1, priority: 1, facts: &json!({}), candidates: &json!([]),
+            }, &[], at - 60_000)
+        }).unwrap()
+    }
+
+    // WS uses the production runner against a graph that always rejects startup. Other
+    // workspaces replace only the consumer, keeping the same source and durable packet queue.
+    struct PartlyBroken(Runner);
+    impl queue::BotRunner for PartlyBroken {
+        fn ready(
+            &self,
+            c: &rusqlite::Connection,
+            ws: &str,
+        ) -> Result<Option<i64>, steve_store::StoreError> {
+            if ws == WS {
+                self.0.ready(c, ws)
+            } else {
+                Ok(Some(i64::MIN))
+            }
+        }
+        fn start(&self, ws: &str, now: i64) -> Result<(), steve_store::StoreError> {
+            if ws == WS {
+                return self.0.start(ws, now);
+            }
+            self.0
+                .0
+                .store()
+                .transaction(|tx| -> Result<(), steve_store::StoreError> {
+                    let b = queue::batching(tx, ws)?;
+                    let (_, ids) = queue::lease(tx, ws, now, &b, 10)?;
+                    for id in ids {
+                        let p = queue::get(tx, ws, &id)?.unwrap();
+                        queue::packet_done(tx, &p, true, None, &b, now)?;
+                    }
+                    Ok(())
+                })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_broken_schedule_defers_only_itself_and_healthy_workspaces_keep_their_deadlines() {
+        use steve_runtime::{Clock, due::DueSource};
+        let (e, id) = bound().await;
+        let now = e.env.clock.now();
+        let bad = packet(&e, WS, now);
+        let healthy = packet(&e, "ws_digest_healthy", now);
+        let future = packet(&e, "ws_digest_future", now + 17_123);
+        e.env
+            .store()
+            .with_conn(|c| {
+                c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            steve_flow::scheduler::start_manual(&e.flow, WS, &id),
+            Err(ApiError::Rule(_))
+        ));
+        let source = queue::BotSource::new(&e.env.modules, PartlyBroken(Runner(e.flow.clone())));
+        let changed = wake(e.env.store());
+        assert_eq!(source.next_due().await.unwrap(), Some(now));
+        source
+            .run_due(now)
+            .await
+            .expect("a row rejection must not back off the source");
+        assert!(
+            changed.notified().now_or_never().is_some(),
+            "the failed run writes a production wake table"
+        );
+        let history = || {
+            e.env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .unwrap()
+        };
+        let rows = history();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].ended, Some(now));
+        assert!(
+            rows[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Invalid stored flow graph")
+        );
+        assert_eq!(
+            e.env.store().reader(|c| runnable(c, WS)).unwrap(),
+            Some((id.clone(), now + 60_000))
+        );
+        let state = |ws: &str, packet: &str| {
+            e.env
+                .store()
+                .reader(|c| queue::get(c, ws, packet))
+                .unwrap()
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(WS, &bad), "queued");
+        assert_eq!(state("ws_digest_healthy", &healthy), "done");
+        assert_eq!(source.next_due().await.unwrap(), Some(now + 17_123));
+        source.run_due(now).await.unwrap();
+        assert_eq!(
+            history().len(),
+            1,
+            "own commit hints cannot cause another failed start"
+        );
+        e.env.clock.advance(17_123);
+        source.run_due(now + 17_123).await.unwrap();
+        assert_eq!(state("ws_digest_future", &future), "done");
+        assert_eq!(source.next_due().await.unwrap(), Some(now + 60_000));
+        e.env.clock.advance(60_000 - 17_123);
+        source.run_due(now + 60_000).await.unwrap();
+        assert_eq!(
+            history().len(),
+            2,
+            "the still-broken graph gets one new attempt per minute"
+        );
+        assert_eq!(source.next_due().await.unwrap(), Some(now + 120_000));
+    }
+
+    #[tokio::test]
+    async fn failure_to_persist_a_rejected_start_remains_a_source_error() {
+        use steve_runtime::{Clock, due::DueSource};
+        let (e, id) = bound().await;
+        let now = e.env.clock.now();
+        packet(&e, WS, now);
+        e.env.store().with_conn(|c| {
+            c.execute("UPDATE flows SET graph = 'broken json' WHERE id = ?", [&id])?;
+            c.execute_batch("CREATE TRIGGER reject_failed_run BEFORE INSERT ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot persist failed start'); END")?;
+            Ok(())
+        }).unwrap();
+        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let error = source.run_due(now).await.unwrap_err();
+        assert!(error.0.contains("cannot persist failed start"));
+        assert!(
+            e.env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 10))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

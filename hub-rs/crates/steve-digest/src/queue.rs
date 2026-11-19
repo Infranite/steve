@@ -473,11 +473,29 @@ pub fn stats(c: &Connection, ws: &str, conv: Option<&str>) -> Result<Value> {
 pub trait BotRunner: Send + Sync + 'static {
     /// None when unavailable/busy; otherwise the earliest time another start is allowed.
     fn ready(&self, c: &Connection, ws: &str) -> Result<Option<i64>>;
+    /// Expected schedule rejections must persist a failed/skipped run and return Ok, advancing
+    /// ready's deadline. Err is reserved for source failures (storage/read/persistence failure).
     fn start(&self, ws: &str, now: i64) -> Result<()>;
 }
 
 /// One due batch contains at most this many workspaces (each starts at most one Bot).
 pub const BOT_BATCH: usize = 32;
+
+/// Tables read by BotSource and the Hub's schedule readiness/reference checks.
+/// Production and real-store wake tests must subscribe to this same set.
+pub const BOT_WAKE_TABLES: &[&str] = &[
+    "digest_packets",
+    "settings",
+    "flows",
+    "flow_triggers",
+    "workspace_members",
+    "bots",
+    "bot_workspaces",
+    "projects",
+    "tags",
+    "flow_runs",
+    "items",
+];
 
 /// Queue/lease deadlines over workspaces with unfinished packets; never scans all workspaces.
 pub struct BotSource<R> {
@@ -516,7 +534,7 @@ fn bot_work(c: &Connection, runner: &impl BotRunner, now: i64) -> Result<Vec<(i6
                     at = Some(at.map_or(queued, |lease| lease.min(queued)));
                 }
                 Ok(None) => {}
-                Err(e) => tracing::warn!(workspace = %ws, "digest Bot binding: {e}"),
+                Err(e) => tracing::debug!(workspace = %ws, "digest Bot binding: {e}"),
             }
         }
         if let Some(at) = at {
@@ -578,7 +596,8 @@ impl<R: BotRunner> steve_runtime::due::DueSource for BotSource<R> {
                 })();
                 if let Err(e) = step {
                     tracing::warn!(workspace = %ws, "digest Bot queue: {e}");
-                    // Start/store failures back off the source, after the other workspaces run.
+                    // Expected start rejections have already been recorded by the runner.
+                    // Only source failures back off, after the other workspaces run.
                     error.get_or_insert(e);
                 }
             }
