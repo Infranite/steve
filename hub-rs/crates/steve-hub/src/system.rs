@@ -347,6 +347,11 @@ impl Runtimes {
         Value::Array(rows(&self.cfg, None))
     }
     async fn list(&self, fresh: bool) -> Value {
+        // No configured local Node is not a failed observation. In particular an
+        // idle state poll must not revoke dependency generations or reconcile models.
+        if self.node.get().is_none() {
+            return Value::Array(rows(&self.cfg, None));
+        }
         if fresh {
             self.invalidate();
         }
@@ -1028,6 +1033,38 @@ mod tests {
         assert_eq!(ev[1].1["title"], json!("shell {\"cmd\":\"ls\"}"));
     }
 
+    #[tokio::test]
+    async fn no_local_node_stays_unknown_without_invalidating_idle_state() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(
+            Config::from_vars(|key| match key {
+                "HOME" | "STEVE_HOME" => Some(home.path().display().to_string()),
+                _ => None,
+            })
+            .unwrap(),
+        );
+        let caches = Arc::new(steve_runtime::cache::Caches::new(cfg.cache));
+        let runtimes = Runtimes::new(cfg, caches.clone());
+        for fresh in [false, false, true] {
+            let list = runtimes.list(fresh).await;
+            assert!(
+                list.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["note"] == "unknown")
+            );
+        }
+        assert_eq!(
+            caches.generation(&steve_runtime::cache::Tag::of("runtimes", "local")),
+            0
+        );
+        assert_eq!(
+            caches.generation(&steve_runtime::cache::Tag::global("state")),
+            0
+        );
+        assert!(runtimes.reports.nodes().is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn expired_runtimes_are_served_while_refreshing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1050,6 +1087,7 @@ mod tests {
             Arc::new(steve_runtime::cache::Caches::new(Default::default())),
         );
 
+        rt.set_node(steve_node_api::testkit::FakeNode::new("local"));
         rt.reports.seed("local", vec![ready_fixture()], None).await;
         tokio::time::advance(RUNTIMES_MAX_AGE).await;
         // the expired list comes back at once; a background probe replaces it
