@@ -770,63 +770,26 @@ fn found() -> Counts {
     }
     out
 }
-fn differences(now: &Counts, listed: &Counts) -> Vec<String> {
-    let keys: BTreeSet<_> = now.keys().chain(listed.keys()).collect();
-    keys.into_iter()
-        .filter_map(|key| {
-            let actual = now.get(key).copied().unwrap_or(0);
-            let old = listed.get(key).copied().unwrap_or(0);
-            (actual != old).then(|| {
-                format!(
-                    "{} {} {}: found {actual}, listed {old}; {}",
-                    key.0,
-                    key.1,
-                    key.2,
-                    if actual < old {
-                        "shorten the list"
-                    } else {
-                        HELP
-                    }
-                )
-            })
+#[path = "support/ratchet.rs"]
+mod ratchet;
+#[path = "support/test_sleep.rs"]
+mod test_sleep;
+
+fn inventory(counts: &Counts) -> ratchet::Counts {
+    counts
+        .iter()
+        .map(|((file, category, function), n)| {
+            (vec![file.clone(), category.clone(), function.clone()], *n)
         })
         .collect()
 }
+fn differences(now: &Counts, listed: &Counts) -> Vec<String> {
+    ratchet::differences(&inventory(now), &inventory(listed), HELP)
+}
 #[test]
 fn runtime_policy_only_shrinks() {
-    let now = found();
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LIST);
-    if std::env::var("STEVE_RUNTIME_BLESS").as_deref() == Ok("1") {
-        let mut text = String::from(LIST_HEADER);
-        for ((file, category, function), count) in now {
-            text.push_str(&format!("{file}\t{category}\t{function}\t{count}\n"));
-        }
-        std::fs::write(file, text).unwrap();
-        return;
-    }
-    let mut listed = Counts::new();
-    for line in std::fs::read_to_string(file)
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-    {
-        let parts: Vec<_> = line.split('\t').collect();
-        assert_eq!(parts.len(), 4, "bad runtime baseline row: {line}");
-        let count: usize = parts[3].parse().expect("runtime count");
-        assert!(
-            count > 0
-                && listed
-                    .insert((parts[0].into(), parts[1].into(), parts[2].into()), count)
-                    .is_none(),
-            "duplicate or empty row: {line}"
-        );
-    }
-    let problems = differences(&now, &listed);
-    assert!(
-        problems.is_empty(),
-        "runtime guard:\n{}",
-        problems.join("\n")
-    );
+    ratchet::check(inventory(&found()), &file, 3, LIST_HEADER, HELP);
 }
 
 fn fixture_counts(code: &str) -> Counts {
