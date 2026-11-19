@@ -391,6 +391,13 @@ async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
 async fn pause_finish_drop_and_new_cycles() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;
+    // the prompt reached the adapter; "finish" must land while the Hub sees the turn running,
+    // otherwise it would close an idle item and the test would pass without stopping anything
+    eventually("the Hub sees the first turn running", || async {
+        let s = e.session(&sid).await;
+        s["busy"] == true && s["status"] == "running"
+    })
+    .await;
     let iid = item_of(&e, &sid).await;
     assert_eq!(lifecycle(&e, &iid).await["phase"], "active");
 
