@@ -75,7 +75,6 @@ pub struct Registry {
     contexts: context::PromptContexts,
     panels: Vec<Box<dyn panels::ItemPanel>>,
     outbound: Option<Box<dyn outbound::OutboundCheck>>,
-    scopes: Vec<Box<dyn ViewerScopes>>,
     digests: Vec<Box<dyn DigestNotes>>,
     bot_deleted: Vec<Box<dyn BotDeleted>>,
 }
@@ -195,9 +194,8 @@ impl Registry {
         self
     }
 
-    /// A provider of extra viewer scopes.
-    pub fn viewer_scopes(&mut self, s: Box<dyn ViewerScopes>) -> &mut Self {
-        self.scopes.push(s);
+    /// G2-T7: compatibility for installers still registering the unused scope provider.
+    pub fn viewer_scopes(&mut self, _s: Box<dyn ViewerScopes>) -> &mut Self {
         self
     }
 

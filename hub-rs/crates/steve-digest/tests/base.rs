@@ -14,6 +14,21 @@ use steve_store::{
 };
 
 const NOW: i64 = 1_800_000_000_000;
+
+#[test]
+fn owner_viewer_does_not_read_channel_scopes_or_expand_sql_bindings() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE workspace_members (workspace_id TEXT, user_id TEXT, role TEXT, created INTEGER);
+        INSERT INTO workspace_members VALUES ('default', 'usr_owner', 'owner', 1);")
+        .unwrap();
+    // No spaces or identities schema: resolving the owner must not enumerate either table.
+    let viewer = conv::owner_viewer(&c, WS).unwrap().unwrap();
+    assert_eq!(viewer.user, "usr_owner");
+    assert!(viewer.scopes.is_empty());
+    assert_eq!(viewer.sql("m").params.len(), 1);
+    assert!(conv::owner_viewer(&c, WS2).unwrap().is_none());
+}
+
 fn cv(id: &str) -> ConvRef {
     ConvRef::new("space", id)
 }

@@ -402,10 +402,15 @@ fn single_user_memory_links_keep_range_validation_and_existing_confirmation() {
             .any(|candidate| candidate["id"] == private)
     );
     let mut write = chunk(&e, &l);
-    write["memories"] = json!([{"id":visible, "first":1,"last":2}, {"text":"The source fact changed", "supersedes":visible, "first":2,"last":3}]);
+    write["memories"] = json!([{"id":visible, "first":1,"last":2}, {"text":"The source fact changed", "supersedes":visible, "first":2,"last":3}, {"id":private, "first":1,"last":3}]);
     let out = call(&e, tools::CHUNK, write).unwrap();
     assert_eq!(out["memories"][0]["id"], visible);
     assert_eq!(out["memories"][0]["indexed"], true);
+    assert_eq!(out["memories"][2]["id"], private);
+    assert_eq!(out["memories"][2]["indexed"], true);
+    assert_eq!(e.store().reader(|c| Ok::<_, StoreError>(c.query_row(
+        "SELECT COUNT(*) FROM mem_about WHERE mem_id = ? AND object_type = 'space' AND object_id = 's1'", [&private], |r| r.get::<_, i64>(0)
+    )?)).unwrap(), 1);
     let id = out["memories"][1]["id"].as_str().unwrap();
     let (old, new, replacement): (String, String, String) = e
         .store()

@@ -178,7 +178,7 @@ fn validate(tool: &str, args: &Value, fields: &[(&str, bool, &str)]) -> Result<(
 }
 
 /// The session principal resolved by the integrator, not a guess from the item's audit. Service
-/// callers see workspace objects; personal callers keep only their own and their authorized scopes.
+/// callers see workspace objects; personal callers use the single-user read rule.
 pub fn session_viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
     m.store.reader(|c| Ok(Viewer::load(c, &cx.ws, &cx.user)?))
 }

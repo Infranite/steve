@@ -288,11 +288,10 @@ async fn single_user_sessions_read_private_knowledge_but_shared_chat_keeps_its_a
         Some(OTHER),
     );
     let (steves, _) = e.item(WS, "ST-3", "Acme 合同续签", "准备 Acme 合同续签材料", None);
-    for it in [&theirs, &steves] {
-        let t = e.session_text(it);
-        assert!(t.contains("Sarah"), "{t}");
-        assert!(t.contains("底价八折"), "{t}");
-    }
+    let t = e.session_text(&theirs);
+    assert!(t.contains("Sarah") && t.contains("底价八折"), "{t}");
+    let t = e.session_text(&steves);
+    assert!(t.contains("Sarah") && !t.contains("底价八折"), "{t}");
 
     // main thread of a two-member workspace: only workspace knowledge, even for the note's owner
     let p = e.provider();
@@ -446,6 +445,10 @@ async fn single_user_mcp_reads_private_documents_but_not_another_workspace() {
     );
     assert!(found.contains(&shared), "{found}");
     assert!(found.ends_with(LEVELS));
+    assert!(
+        found.contains("Acme 联系人 · 笔记 · Acme 联系人 · level: conclusion"),
+        "{found}"
+    );
 
     let r = e.tool(&cx, READ, json!({"id": shared})).unwrap();
     assert!(
@@ -657,9 +660,13 @@ fn chat_finish_without_citations_still_reports_an_empty_list() {
 #[tokio::test]
 async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
     let e = setup();
-    e.note(WS2, ME, "部署脚本", "部署脚本的私人凭据位置。", "private")
+    let private = e
+        .note(WS2, ME, "部署脚本", "部署脚本的私人凭据位置。", "private")
         .await;
-    let (service, _) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
+    let shared = e
+        .note(WS2, ME, "部署脚本", "部署脚本的公开操作步骤。", "workspace")
+        .await;
+    let (service, service_session) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
     // Even a matching owner audit must not turn a service requester into that owner.
     e.env.store().with_conn(|c| {
         c.execute("INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)", rusqlite::params![WS2, ME, service.id])?;
@@ -680,9 +687,27 @@ async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
             .user
             .is_empty()
     );
-    assert!(e.session_text(&service).contains("私人凭据位置"));
+    let text = e.session_text(&service);
+    assert!(
+        !text.contains("私人凭据位置") && text.contains("公开操作步骤"),
+        "{text}"
+    );
+    for user in ["", "svc:workspace"] {
+        let cx = e.cx(WS2, user, &service.id, &service_session);
+        assert!(e.tool(&cx, READ, json!({"id": private})).is_err());
+        assert!(
+            e.tool(&cx, READ, json!({"id": shared}))
+                .unwrap()
+                .contains("公开操作步骤")
+        );
+        let search = e.tool(&cx, SEARCH, json!({"query": "部署脚本"})).unwrap();
+        assert!(
+            !search.contains("私人凭据位置") && search.contains("公开操作步骤"),
+            "{search}"
+        );
+    }
     let (personal, _) = e.item(WS2, "W2-personal", "部署脚本", "改部署脚本", Some(ME));
-    assert!(!e.session_text(&personal).is_empty());
+    assert!(e.session_text(&personal).contains("私人凭据位置"));
     e.env
         .store()
         .with_conn(|c| {
@@ -708,5 +733,9 @@ async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
             .user
             .is_empty()
     );
-    assert!(e.session_text(&personal).contains("私人凭据位置"));
+    let text = e.session_text(&personal);
+    assert!(
+        !text.contains("私人凭据位置") && text.contains("公开操作步骤"),
+        "{text}"
+    );
 }

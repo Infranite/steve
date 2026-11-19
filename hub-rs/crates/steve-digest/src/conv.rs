@@ -137,18 +137,12 @@ pub fn owner(c: &Connection, ws: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-/// The owner is not entitled to other members' personal channels or private mail.
-/// Reuse the source's access contract; connector adapters must supply the same boundary.
+/// The digest owner's identity, without loading legacy team or space visibility scopes.
 pub fn owner_viewer(c: &Connection, ws: &str) -> Result<Option<Viewer>> {
     let Some(user) = owner(c, ws)? else {
         return Ok(None);
     };
-    let viewer = Viewer::load(c, ws, &user)?;
-    let scopes = steve_channels::spaces::visible_ids(c, &viewer)
-        .map_err(|e| StoreError::Hook(e.to_string()))?
-        .into_iter()
-        .map(|id| format!("space:{id}"));
-    Ok(Some(viewer.with_scopes(scopes)))
+    Ok(Some(Viewer::bare(ws, &user)))
 }
 
 pub fn owner_sees(c: &Connection, ws: &str, conv: &ConvRef) -> Result<bool> {

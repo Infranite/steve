@@ -762,11 +762,12 @@ mod session_identity_tests {
                     .as_deref(),
                 user
             );
-            // Read visibility no longer stands in for identity: all same-workspace docs
-            // are readable, while session identity and the owner-only digest tool stay pinned.
-            for doc in &docs {
-                assert!(
+            // Personal reads are unconditional; service audiences stay workspace-only.
+            // Session identity and the owner-only digest tool remain pinned.
+            for (index, doc) in docs.iter().enumerate() {
+                assert_eq!(
                     steve_knowledge::tools::read(&e.modules, &cx, doc, 0.0).is_ok(),
+                    user.is_some() || index == 2,
                     "caller {user:?}, doc {doc}"
                 );
             }
@@ -792,7 +793,7 @@ mod session_identity_tests {
                     .unwrap();
                 let cx = session_cx(e.store(), &session).unwrap();
                 assert_eq!(cx.user, "svc:default");
-                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_ok());
+                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_err());
                 assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[2], 0.0).is_ok());
                 assert!(
                     e.store()

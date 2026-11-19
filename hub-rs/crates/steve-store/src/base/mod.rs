@@ -172,7 +172,7 @@ pub const CONFIRM_OPTIONS: [&str; 2] = ["yes", "no"];
 pub struct Viewer {
     pub ws: String,
     pub user: String,
-    /// `team:<id>` / `space:<id>` codes this user belongs to.
+    /// Legacy scope codes kept only for existing SQL bindings; no membership scopes are loaded.
     pub scopes: Vec<String>,
 }
 
@@ -191,7 +191,7 @@ impl Viewer {
         Ok(Self::bare(ws, user))
     }
 
-    /// Adds scopes from other modules (e.g. `space:<id>`), keeping them unique.
+    /// Keeps explicitly supplied legacy SQL scope bindings unique.
     pub fn with_scopes(mut self, extra: impl IntoIterator<Item = String>) -> Self {
         for s in extra {
             if !self.scopes.contains(&s) {
@@ -201,15 +201,23 @@ impl Viewer {
         self
     }
 
-    /// Read visibility is unconditional; callers still enforce workspace isolation.
-    pub fn sees(&self, _visibility: &Visibility, _created_by: &str) -> bool {
-        true
+    /// Service principals have no personal audience, including when the requester is absent.
+    pub fn is_service(&self) -> bool {
+        self.user.is_empty() || self.user.starts_with("svc:")
+    }
+
+    /// Personal read visibility is unconditional. Service audiences remain workspace-only;
+    /// callers still enforce workspace isolation separately.
+    pub fn sees(&self, visibility: &Visibility, _created_by: &str) -> bool {
+        !self.is_service() || *visibility == Visibility::Workspace
     }
 
     /// The visibility condition for rows of table alias `alias` (columns `visibility`, `created_by`).
     /// Workspace scoping is separate: the caller still filters `workspace_id`.
     /// G2-T7: retain the original predicate and bindings under a true OR branch,
-    /// including for NULL columns. Remove with the query call sites in wave 4.
+    /// including for NULL columns for personal viewers. Service audience policy is independent
+    /// of member visibility and still requires workspace-level content.
+    /// Remove the legacy predicate and bindings with their call sites in wave 4.
     pub fn sql(&self, alias: &str) -> Scope {
         let mut sql = format!("(1 OR ({alias}.visibility = 'workspace' OR {alias}.created_by = ?");
         let mut params = vec![Sql::Text(self.user.clone())];
@@ -221,6 +229,9 @@ impl Viewer {
             params.extend(self.scopes.iter().cloned().map(Sql::Text));
         }
         sql.push_str("))");
+        if self.is_service() {
+            sql = format!("({sql} AND {alias}.visibility = 'workspace')");
+        }
         Scope { sql, params }
     }
 }

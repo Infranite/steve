@@ -336,8 +336,8 @@ async fn single_user_semantic_reads_keep_workspace_and_shared_chat_audience_boun
     h.env
         .store()
         .reader(|c| {
-            let search = |ws, purpose| {
-                let scope = Scope::for_viewer(c, &Viewer::bare(ws, ME), purpose, None)?;
+            let search = |ws, user, purpose| {
+                let scope = Scope::for_viewer(c, &Viewer::bare(ws, user), purpose, None)?;
                 let mut ids: Vec<_> =
                     h.ov.search(c, &scope, "关网州杭", Pass::Semantic, 20)?
                         .into_iter()
@@ -348,9 +348,13 @@ async fn single_user_semantic_reads_keep_workspace_and_shared_chat_audience_boun
             };
             let mut expected = vec![private.clone(), shared.clone()];
             expected.sort();
-            assert_eq!(search(WS, Purpose::Search)?, expected);
-            assert_eq!(search(WS, Purpose::Chat)?, vec![shared]);
-            assert_eq!(search(WS2, Purpose::Search)?, vec![foreign.to_string()]);
+            assert_eq!(search(WS, ME, Purpose::Search)?, expected);
+            assert_eq!(search(WS, ME, Purpose::Chat)?, vec![shared.clone()]);
+            for user in ["", "svc:default"] {
+                assert_eq!(search(WS, user, Purpose::Agent)?, vec![shared.clone()]);
+                assert!(search(WS2, user, Purpose::Agent)?.is_empty());
+            }
+            assert_eq!(search(WS2, ME, Purpose::Search)?, vec![foreign.to_string()]);
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();

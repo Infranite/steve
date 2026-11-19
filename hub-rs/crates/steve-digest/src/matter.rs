@@ -814,7 +814,7 @@ pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
     get_for(c, &viewer, id)
 }
 
-/// Matter detail for the actual caller; owner status does not bypass memory visibility.
+/// Matter detail for the actual caller within their workspace.
 pub fn get_for(
     c: &Connection,
     viewer: &steve_store::base::Viewer,

@@ -18,7 +18,7 @@ use crate::repo;
 use crate::retrieve::{CANDIDATES, Purpose};
 use crate::seg::{fts_query, fts_query_relaxed, is_single_cjk};
 
-/// Single-user reads follow [`Viewer::sees`], with no creator or team/space restriction.
+/// Personal reads follow [`Viewer::sees`], with no creator or team/space restriction.
 /// Purpose/audience, source and disclosure-level constraints still apply.
 /// `never` is never in it. Built only by [`Scope::for_viewer`] (and, for a conversation, by its
 /// card), so callers never write their own conditions.
@@ -29,7 +29,7 @@ pub struct Scope {
     pub user: String,
     /// Legacy scope codes retained for the shared SQL bindings.
     pub scopes: Vec<String>,
-    /// Only `workspace` objects (the main thread's chat in a shared workspace).
+    /// Only `workspace` objects (service audiences, or shared-workspace main-thread chat).
     pub workspace_only: bool,
     /// Only these source kinds (`notes`, `folder`, `mems` …).
     pub kinds: Option<Vec<String>>,
@@ -48,7 +48,8 @@ impl Scope {
         purpose: Purpose,
         kinds: Option<&[&str]>,
     ) -> Result<Self> {
-        let workspace_only = purpose == Purpose::Chat && repo::member_count(c, &viewer.ws)? > 1;
+        let workspace_only = viewer.is_service()
+            || (purpose == Purpose::Chat && repo::member_count(c, &viewer.ws)? > 1);
         let mut paused_docs = Vec::new();
         let (mut paused_mems, mut paused_bot_mems) = (false, false);
         for (id, kind) in repo::paused(c, &viewer.ws)? {
@@ -76,7 +77,13 @@ impl Scope {
         if c.level == Level::Never {
             return false;
         }
-        // This is a shared conversation's audience policy, not member read access.
+        let viewer = Viewer {
+            ws: self.ws.clone(),
+            user: self.user.clone(),
+            scopes: self.scopes.clone(),
+        };
+        let visible = viewer.sees(&c.visibility, &c.created_by);
+        // Service and shared-conversation audiences are independent of member read access.
         let audience_ok = !self.workspace_only || c.visibility == Visibility::Workspace;
         let kind_ok = self
             .kinds
@@ -84,7 +91,7 @@ impl Scope {
             .is_none_or(|k| k.contains(&c.source_kind));
         let paused = (self.paused_mems && c.obj_type == "mem")
             || (self.paused_bot_mems && c.obj_type == "bot_mem");
-        audience_ok && kind_ok && !paused
+        visible && audience_ok && kind_ok && !paused
     }
 
     /// The `WHERE` tail on `kb_chunks c` for [`SqliteStore`].
@@ -98,7 +105,7 @@ impl Scope {
         let mut sql = format!("c.workspace_id = ? AND c.level <> 'never' AND {}", vis.sql);
         let mut p = vec![Sql::Text(self.ws.clone())];
         p.extend(vis.params);
-        if self.workspace_only {
+        if self.workspace_only && !v.is_service() {
             sql.push_str(" AND c.visibility = 'workspace'");
         }
         if let Some(kinds) = &self.kinds {

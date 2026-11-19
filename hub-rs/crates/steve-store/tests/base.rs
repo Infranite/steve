@@ -301,6 +301,37 @@ fn single_user_reads_private_memory_without_crossing_workspaces_or_disclosure_le
 }
 
 #[test]
+fn service_audiences_remain_workspace_only_with_legacy_bindings() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE objects (visibility TEXT, created_by TEXT);
+        INSERT INTO objects VALUES ('workspace', NULL), ('private', ''), ('private', 'svc:default'), ('team:t1', 'usr_a'), (NULL, NULL);")
+        .unwrap();
+    for user in ["", "svc:default"] {
+        let viewer = Viewer::bare("default", user).with_scopes(["team:t1".into()]);
+        assert!(viewer.is_service());
+        assert!(viewer.sees(&Visibility::Workspace, A));
+        assert!(!viewer.sees(&Visibility::Private, user));
+        assert!(!viewer.sees(&Visibility::Team("t1".into()), A));
+        let scope = viewer.sql("o");
+        assert_eq!(scope.params.len(), 2);
+        let found = c
+            .prepare(&format!(
+                "SELECT visibility FROM objects o WHERE {}",
+                scope.sql
+            ))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(scope.params), |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(found, ["workspace"]);
+    }
+    assert!(!Viewer::bare("default", A).is_service());
+}
+
+#[test]
 fn single_user_visibility_keeps_bindings_and_does_not_load_team_scopes() {
     let t = setup();
     party(&t.store, "ct_b", "default", "contact", Some(B));

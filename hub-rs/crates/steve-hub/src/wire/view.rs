@@ -98,8 +98,8 @@ pub fn of_session(c: &Connection, session: &str) -> Result<Option<View>, StoreEr
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    // Personal and service principals use the same single-user read rule, while their
-    // identity, working directories and workspace boundary remain separate.
+    // The shared Viewer rule preserves workspace-only service audiences and unconditional
+    // personal reads, without borrowing a personal identity for service sessions.
     let viewer = Viewer::load(c, &ws, p.user().unwrap_or(""))?;
     let ro: Vec<String> = folders
         .into_iter()
@@ -268,8 +268,9 @@ mod tests {
         assert_eq!(v.principal, "svc:team");
         assert_eq!(v.rw, ["/w/dir-proj"], "a directory project's root, once");
         assert_eq!(
-            v.ro, folders,
-            "service identity does not restrict single-user reads"
+            v.ro,
+            ["/docs/shared"],
+            "service audiences cannot read private or team folders"
         );
         // Changing the requester changes identity, not member read visibility.
         c.execute("UPDATE items SET requested_by='u1' WHERE id='i2'", [])

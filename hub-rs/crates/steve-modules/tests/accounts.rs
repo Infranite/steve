@@ -738,6 +738,53 @@ async fn single_user_reads_accounts_of_private_contacts() {
             .iter()
             .any(|row| row["id"] == a["id"])
     );
+    let scoped = ok(
+        &r,
+        "GET",
+        &format!("/accounts?party={}", id(&p)),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        scoped
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == a["id"])
+    );
+    let (s, changed) = req(
+        &r,
+        &me(),
+        "PATCH",
+        &format!("/accounts/{}", id(&a)),
+        Some(json!({"display_name": "可读取的私人联系人账号"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{changed}");
+    assert_eq!(changed["display_name"], "可读取的私人联系人账号");
+    assert_eq!(changed["party"]["id"], p["id"]);
+    let added = ok(&r, "POST", "/accounts", json!({"system_id": "phone", "party_id": id(&p), "kind": "phone", "handle": "+86 139 0000 0000"})).await;
+    assert_eq!(added["party"]["id"], p["id"]);
+    for account in [&a, &added] {
+        let (s, _) = req(
+            &r,
+            &caller(WS2, ME),
+            "GET",
+            &format!("/accounts/{}", id(account)),
+            None,
+        )
+        .await;
+        assert_eq!(s, 404);
+    }
+    let (s, removed) = req(
+        &r,
+        &me(),
+        "DELETE",
+        &format!("/accounts/{}", id(&added)),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{removed}");
 }
 
 #[tokio::test]

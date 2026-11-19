@@ -730,16 +730,10 @@ pub(crate) fn reached_own_sql(m: &str, cs: &str) -> String {
     )
 }
 
-/// Read-selection mask for all known identities in single-user mode.
-/// G2-T7: retain bindings while bypassing the old ownership filter. This does not
-/// change which identity actually received or sent a message (`seen_by`).
-pub fn viewer_mask(c: &Connection, space: &str, me: &str) -> ChannelResult<i64> {
-    Ok(c.query_row(
-        "SELECT coalesce(sum(1 << ordinal), 0) FROM space_identities
-          WHERE space_id = ?1 AND ordinal IS NOT NULL AND (1 OR (owner_user IS NULL OR owner_user = ?2))",
-        params![space, me],
-        |r| r.get(0),
-    )?)
+/// G2-T7: all receipt bits are readable, including legacy bits whose identity is gone.
+/// Keep the page query's mask binding without changing stored `seen_by` or outbound identity.
+pub fn viewer_mask(_c: &Connection, _space: &str, _me: &str) -> ChannelResult<i64> {
+    Ok(-1)
 }
 
 /// Single-user read visibility, retaining the old predicate's bindings (G2-T7).
