@@ -186,6 +186,18 @@ pub enum Cell {
     Millis(i64),
     Json(RawJson),
 }
+impl Cell {
+    /// Validate local fast-path values as well as serialized DTOs.
+    pub fn validate(&self) -> Result<(), Error> {
+        if matches!(self, Self::Real(v) if !v.is_finite()) {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "Real must be finite",
+            ));
+        }
+        Ok(())
+    }
+}
 mod finite {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
@@ -233,4 +245,15 @@ pub trait StoredEntity:
     ToRow + FromRow + Serialize + serde::de::DeserializeOwned + Send + 'static
 {
     const ENTITY: &'static Entity;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn real_deserializer_rejects_non_finite_values_from_non_json_formats() {
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let input = serde::de::value::F64Deserializer::<serde::de::value::Error>::new(v);
+            assert!(super::finite::deserialize(input).is_err());
+        }
+    }
 }

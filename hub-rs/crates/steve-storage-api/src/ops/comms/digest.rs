@@ -54,6 +54,7 @@ pub enum EntryPoint {
 /// - receipt: remove exactly (workspace, conv, message_id), never a whole conversation;
 /// - every insertion/deletion updates conversation count/min/max; remove zero-count
 ///   conversations. Insert positions are durable, monotone, and not reused after deletion.
+///
 /// sync_pending_conversation reconciles the conversation(s) identified by the source
 /// against pending rows; it never re-enqueues acknowledged messages or changes FIFO order.
 /// Call in the same transaction as the source change. Backends must retain old source
@@ -68,8 +69,44 @@ pub struct SyncPendingMembership {
 impl Op for SyncPendingMembership {
     const NAME: &'static str = "comms.digest.sync_pending_membership";
     const DOMAIN: Domain = Domain::Comms;
+    fn validate(&self) -> Result<(), Error> {
+        if self.workspace_id.as_str().is_empty()
+            || self.id.is_empty()
+            || (self.entry == EntryPoint::EnqueueDigestible && self.source == Source::Receipt)
+            || (self.entry == EntryPoint::DequeueOnReceipt && self.source != Source::Receipt)
+        {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "invalid digest membership parameters",
+            ));
+        }
+        if self.source == Source::Receipt {
+            self.receipt_identity()?;
+        }
+        Ok(())
+    }
 }
 impl SyncPendingMembership {
+    /// Decode a receipt's composite identity without delimiter ambiguity. Backends use this
+    /// for exact acknowledgement; a bare message id cannot identify a receipt row.
+    pub fn receipt_identity(&self) -> Result<(String, String), Error> {
+        if self.source != Source::Receipt {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "source is not a receipt",
+            ));
+        }
+        let raw = crate::RawJson::from_str(&self.id)
+            .map_err(|_| crate::error(steve_types::Code::Invalid, "invalid receipt identity"))?;
+        let (conv, id): (String, String) = crate::query::decode(&raw)?;
+        if conv.is_empty() || id.is_empty() {
+            return Err(crate::error(
+                steve_types::Code::Invalid,
+                "empty receipt identity",
+            ));
+        }
+        Ok((conv, id))
+    }
     /// Message intake/update/delete; Receipt is rejected here instead of misinterpreted.
     pub fn enqueue_digestible(
         source: Source,
@@ -95,7 +132,8 @@ impl SyncPendingMembership {
         message_id: &str,
         workspace_id: WorkspaceId,
     ) -> Result<Self, Error> {
-        let id = serde_json::to_string(&(conv, message_id))
+        let raw = crate::query::encode(&(conv, message_id))?;
+        let id = serde_json::to_string(&raw)
             .map_err(|_| crate::error(steve_types::Code::Invalid, "invalid receipt identity"))?;
         Ok(Self {
             source: Source::Receipt,
