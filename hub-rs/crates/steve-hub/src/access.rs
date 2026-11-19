@@ -479,12 +479,61 @@ pub fn bearer(headers: &HeaderMap) -> Option<String> {
 
 /// `steve-hub --access …` (see the module docs); the process exit code.
 pub fn main(args: &[String]) -> i32 {
-    match run(args) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{e:#}");
-            2
+    let output = match crate::config::Config::from_env() {
+        Ok(cfg) => command(&cfg, args),
+        Err(e) => CliOutput::result(Err(e.into())),
+    };
+    print!("{}", output.stdout);
+    eprint!("{}", output.stderr);
+    output.code
+}
+
+/// Exact legacy CLI rendering, also carried by the local management transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
+}
+impl CliOutput {
+    pub(crate) fn result(result: anyhow::Result<String>) -> Self {
+        match result {
+            Ok(stdout) => Self {
+                stdout,
+                stderr: String::new(),
+                code: 0,
+            },
+            Err(e) => Self {
+                stdout: String::new(),
+                stderr: format!("{e:#}\n"),
+                code: 2,
+            },
         }
+    }
+}
+/// Shared socket discovery for integrations that invoke the access CLI in-process.
+pub use crate::admin::socket_path as admin_socket_path;
+
+/// Execute the CLI against this installation. Connected requests never fall back after
+/// an error: their writes may already have committed. Offline fallback is temporary
+/// until the S1-frozen Store can acquire a non-migrating administrative open mode.
+pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
+    match crate::admin::client::try_command(&cfg.home, args) {
+        Ok(Some(output)) => output,
+        Err(e) => CliOutput::result(Err(e)),
+        Ok(None) => CliOutput::result((|| {
+            let socket = crate::admin::socket_path(&cfg.home)?;
+            let _lock = crate::upgrades::instance_lock(cfg).map_err(|e| {
+                anyhow::anyhow!(
+                    "Hub 正在运行或正在升级，但管理 socket 没有响应（{}）：{e:#}",
+                    socket.display()
+                )
+            })?;
+            // Temporary offline direct-open: removed by W2a.8a part 2 after S1 unfreezes Store.
+            let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {}))?;
+            store.ensure_workspace()?;
+            command_on(&store, args)
+        })()),
     }
 }
 
@@ -504,12 +553,9 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// The user a token is for: `--user`, else the owner. On a Hub nobody has signed in to yet, `--user`
 /// (default: this account's name) becomes its owner.
-fn user_for(store: &Store, name: Option<&str>) -> anyhow::Result<User> {
+fn user_for(store: &Store, name: Option<&str>, default_user: &str) -> anyhow::Result<User> {
     if store.users().count()? == 0 {
-        let name = name
-            .map(str::to_string)
-            .or_else(|| std::env::var("USER").ok())
-            .unwrap_or_else(|| "owner".into());
+        let name = name.unwrap_or(default_user).to_owned();
         let id = store
             .users()
             .create(&format!("local:{name}"), &name, None, "owner")?;
@@ -534,19 +580,30 @@ fn user_for(store: &Store, name: Option<&str>) -> anyhow::Result<User> {
     }
 }
 
-fn run(args: &[String]) -> anyhow::Result<()> {
-    let cfg = crate::config::Config::from_env()?;
-    let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {}))?;
-    store.ensure_workspace()?;
+/// Business operations on an already-open Store; list operations use only its read pool.
+/// Workspace initialization belongs to the offline opener or Hub boot, never a list request.
+pub fn command_on(store: &Store, args: &[String]) -> anyhow::Result<String> {
+    let default_user = std::env::var("USER").unwrap_or_else(|_| "owner".into());
+    command_with_default_user(store, args, &default_user)
+}
+
+// A local service can have a different environment from the CLI that bootstraps its owner.
+pub(crate) fn command_with_default_user(
+    store: &Store,
+    args: &[String],
+    default_user: &str,
+) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
     let json = args.iter().any(|a| a == "--json");
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .take_while(|a| !a.starts_with("--"))
         .collect();
+    let mut out = String::new();
     match words.as_slice() {
         ["token", "create"] => {
-            let u = user_for(&store, flag(args, "--user"))?;
+            let u = user_for(store, flag(args, "--user"), default_user)?;
             let name = flag(args, "--name").unwrap_or("cli");
             let expires = flag(args, "--days")
                 .map(|d| d.parse::<i64>())
@@ -561,21 +618,27 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 steve_store::WS,
             )?;
             if json {
-                println!("{}", json!({"id": t.id, "user": u.name, "token": token}));
+                writeln!(
+                    out,
+                    "{}",
+                    json!({"id": t.id, "user": u.name, "token": token})
+                )?;
             } else {
-                println!(
+                writeln!(
+                    out,
                     "user:  {}\ntoken: {token}\n(shown once; sign a client in with the user and this token)",
                     u.name
-                );
+                )?;
             }
         }
         ["token", "list"] => {
             let ts = store.access().tokens(None)?;
             if json {
-                println!("{}", serde_json::to_string(&ts)?);
+                writeln!(out, "{}", serde_json::to_string(&ts)?)?;
             } else {
                 for t in ts {
-                    println!(
+                    writeln!(
+                        out,
                         "{}  {}  {}{}",
                         t.id,
                         t.name,
@@ -585,21 +648,22 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                         } else {
                             ""
                         }
-                    );
+                    )?;
                 }
             }
         }
         ["token", "revoke", id] => {
             anyhow::ensure!(store.access().token_revoke(id)?, "no live token {id}");
-            println!("revoked {id} and the clients signed in with it");
+            writeln!(out, "revoked {id} and the clients signed in with it")?;
         }
         ["client", "list"] => {
             let cs = store.access().clients(None)?;
             if json {
-                println!("{}", serde_json::to_string(&cs)?);
+                writeln!(out, "{}", serde_json::to_string(&cs)?)?;
             } else {
                 for c in cs {
-                    println!(
+                    writeln!(
+                        out,
                         "{}  {}  {}  {}{}",
                         c.id,
                         c.kind,
@@ -610,17 +674,21 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                         } else {
                             ""
                         }
-                    );
+                    )?;
                 }
             }
         }
         ["client", "revoke", id] => {
             anyhow::ensure!(store.access().client_revoke(id)?, "no live client {id}");
-            println!("revoked {id}");
+            writeln!(out, "revoked {id}")?;
         }
         _ => anyhow::bail!("{USAGE}"),
     }
-    Ok(())
+    Ok(out)
+}
+
+pub(crate) fn usage() -> anyhow::Error {
+    anyhow::anyhow!("{USAGE}")
 }
 
 #[cfg(test)]
