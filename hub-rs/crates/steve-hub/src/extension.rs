@@ -628,7 +628,10 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         return Ok(());
     }
     // tokens and clients on this machine (access.rs); needs the configuration, not the running Hub
-    if std::env::args().nth(1).as_deref() == Some("--access") {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--access" | "--admin")
+    ) {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(crate::access::main(&args));
     }

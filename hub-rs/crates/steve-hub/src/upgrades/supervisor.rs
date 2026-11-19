@@ -173,43 +173,38 @@ async fn stop(child: &mut HubChild) -> Result<()> {
     Ok(())
 }
 
-/// An online copy of `db` at `dest`, for its owner only, kept by the caller only when this returns
-/// `Ok`: the copy passed `quick_check` and is on disk.
-pub(crate) fn backup(db: &Path, dest: &Path) -> Result<()> {
-    if !db.exists() {
-        bail!("database missing; cannot make a verified backup")
-    }
-    let src = rusqlite::Connection::open(db)?;
-    let mut dst = rusqlite::Connection::open(dest)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dest, fs::Permissions::from_mode(0o600))?;
-    }
-    {
-        // Every page in one step, from one snapshot: a copy taken in pieces starts over whenever
-        // another connection commits between two of them, which beside a running Hub (the daily
-        // copy) is without end. The database is in WAL mode, where a reader holds no writer back.
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
-        let mut waited = 0;
-        loop {
-            match backup.step(-1)? {
-                rusqlite::backup::StepResult::Done => break,
-                _ if waited < 100 => {
-                    waited += 1;
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                _ => bail!("the database stayed busy; no copy was made"),
-            }
-        }
-    }
-    let result: String = dst.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-    if result != "ok" {
-        bail!("backup integrity check failed: {result}")
-    }
-    dst.close().map_err(|(_, e)| e)?;
-    File::open(dest)?.sync_all()?;
-    File::open(dest.parent().context("backup needs parent directory")?)?.sync_all()?;
-    Ok(())
+/// Verified canonical backup; the operation journal records its actual database path.
+pub(crate) fn backup(db: &Path, root: &Path, from: String, to: String) -> Result<PathBuf> {
+    let plan = steve_store_sqlite::backup::BackupPlan::new(
+        root.to_owned(),
+        steve_store_sqlite::backup::Reason::PreUpgrade { from, to },
+    );
+    Ok(steve_store_sqlite::backup::backup(
+        db,
+        &plan,
+        &|_| {},
+        &steve_store_sqlite::backup::CancelFlag::default(),
+    )?
+    .database_path())
+}
+/// Existing upgrade status/journals use a fixed reference name. A symlink keeps that
+/// contract without holding a second database copy alive beyond bundle retention.
+fn journal_backup_link(saved: PathBuf, legacy: &Path) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(&saved)?;
+    std::os::unix::fs::symlink(&canonical, legacy)?;
+    File::open(
+        legacy
+            .parent()
+            .context("journal reference needs a parent")?,
+    )?
+    .sync_all()?;
+    Ok(canonical)
+}
+fn saved_path(u: &Updates, op: &Operation) -> PathBuf {
+    op.backup
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| u.dir().join(format!("{}.sqlite3", op.id)))
 }
 fn restore(db: &Path, saved: &Path, failed: &Path) -> Result<()> {
     // Child is stopped, so no open database/wal writers remain.
@@ -316,6 +311,7 @@ async fn wait_health(
 }
 async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operation) -> Result<()> {
     let previous = fs::canonicalize(cfg.home.join("current"))?;
+    let from: Manifest = read(&previous.join("release.json"))?;
     let target = PathBuf::from(op.target.as_ref().context("staged target missing")?);
     let manifest: Manifest = read(&target.join("release.json"))?;
     super::client::validate_manifest(&manifest, &op.version)?;
@@ -331,14 +327,22 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
     u.phase(op, "stopping", None)?;
     stop(child).await?;
     u.phase(op, "backing_up", None)?;
-    let backup_path = u.dir().join(format!("{}.sqlite3", op.id));
-    if let Err(e) = backup(&cfg.db_path(), &backup_path) {
+    let copied = backup(
+        &cfg.db_path(),
+        &cfg.home.join("backups"),
+        from.version,
+        op.version.clone(),
+    )
+    .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
+    if let Err(e) = &copied {
         *child = spawn(cfg, &previous, None)?;
         let old: Manifest = read(&previous.join("release.json"))?;
         wait_health(cfg, u, child, &old.version, None).await?;
         release_maintenance(cfg, u).await?;
-        return Err(e);
+        return Err(anyhow::anyhow!("{e:#}"));
     }
+    let backup_path = copied?;
+    op.backup = Some(backup_path.to_string_lossy().into_owned());
     u.phase(op, "restarting", None)?;
     switch(&cfg.home, &target)?;
     *child = spawn(cfg, &target, Some(op))?;
@@ -424,7 +428,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     PathBuf::from(op.previous.as_ref().context("missing rollback bundle")?);
                 restore(
                     &cfg.db_path(),
-                    &u.dir().join(format!("{}.sqlite3", op.id)),
+                    &saved_path(&u, &op),
                     &u.dir().join(format!("{}.failed.sqlite3", op.id)),
                 )?;
                 switch(&cfg.home, &previous)?;
@@ -493,7 +497,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         {
             // If we crossed the switch but not commit, make a best-effort rollback under the closed gate.
             if matches!(op.phase.as_str(), "restarting" | "verifying") {
-                let backup = u.dir().join(format!("{}.sqlite3", op.id));
+                let backup = saved_path(&u, &op);
                 if let Err(rb) =
                     rollback(&cfg, &u, &mut child, &mut op, &backup, format!("{e:#}")).await
                 {
@@ -861,6 +865,42 @@ server.serve_forever()
         );
     }
 
+    #[test]
+    fn pre_upgrade_backup_uses_the_shared_manifest_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let db = t.path().join("db.sqlite3");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
+            .unwrap();
+        let saved = backup(&db, &t.path().join("backups"), "old".into(), "new".into()).unwrap();
+        let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
+            &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.database_path(), saved);
+        let reference = t.path().join("operation.sqlite3");
+        assert_eq!(
+            journal_backup_link(saved.clone(), &reference).unwrap(),
+            fs::canonicalize(&saved).unwrap()
+        );
+        assert!(
+            fs::symlink_metadata(reference)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            matches!(manifest.reason,steve_store_sqlite::backup::Reason::PreUpgrade{from,to} if from=="old"&&to=="new")
+        );
+        assert_eq!(
+            rusqlite::Connection::open(saved)
+                .unwrap()
+                .query_row("SELECT v FROM record", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+    }
     #[test]
     fn repeated_restore_preserves_failed_databases() {
         let dir = tempfile::tempdir().unwrap();

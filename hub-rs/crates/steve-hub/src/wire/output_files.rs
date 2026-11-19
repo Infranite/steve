@@ -142,19 +142,19 @@ pub fn recover_legacy(store: &Store, home: &Path, db_path: &Path) -> anyhow::Res
     if candidates.is_empty() {
         return Ok(0);
     }
-    let backups = home.join("backups");
-    if !backups.exists() {
-        fs::create_dir(&backups)?;
-    }
-    if !fs::symlink_metadata(&backups)?.file_type().is_dir() {
-        return Err(io::Error::other("backup directory is not a real directory").into());
-    }
-    fs::set_permissions(&backups, fs::Permissions::from_mode(0o700))?;
-    let backup = backups.join(format!(
-        "pre-delivery-recovery-{}.sqlite3",
-        uuid::Uuid::new_v4().simple()
-    ));
-    crate::upgrades::supervisor::backup(db_path, &backup)?;
+    let plan = steve_store_sqlite::backup::BackupPlan::new(
+        home.join("backups"),
+        steve_store_sqlite::backup::Reason::PreDestructive {
+            what: "delivery-recovery".into(),
+        },
+    );
+    let manifest = steve_store_sqlite::backup::backup(
+        db_path,
+        &plan,
+        &|_| {},
+        &steve_store_sqlite::backup::CancelFlag::default(),
+    )?;
+    let backup = manifest.database_path();
     let paths: Vec<(String, Option<String>, String)> = candidates
         .into_iter()
         .map(|(id, item, old, body)| {
@@ -256,7 +256,10 @@ mod tests {
         assert_eq!(second, path);
         let backups: Vec<_> = fs::read_dir(home.path().join("backups")).unwrap().collect();
         assert_eq!(backups.len(), 1);
-        let backup_path = backups[0].as_ref().unwrap().path();
+        let directory = backups[0].as_ref().unwrap().path();
+        let manifest: steve_store_sqlite::backup::Manifest =
+            serde_json::from_slice(&fs::read(directory.join("manifest.json")).unwrap()).unwrap();
+        let backup_path = directory.join(manifest.database.name);
         let backup = rusqlite::Connection::open(backup_path).unwrap();
         let old: String = backup
             .query_row("SELECT location FROM artifacts WHERE id='a1'", [], |r| {

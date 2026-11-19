@@ -1,72 +1,23 @@
-//! The daily copy under `<home>/backups`, made by the Hub itself so that every installation has one
-//! whatever installed it: once a day, at or after 03:30 local time (a Hub that was not running then
-//! makes it when it next is), kept 14 days.
-//! - `daily-YYYYMMDD.sqlite3`: an online backup of the database, checked (`quick_check`) before it
-//!   is kept;
-//! - `daily-YYYYMMDD-files.tar`: what the database alone cannot bring back, readable by the owner
-//!   only: attachments (`data/files`), the signing identity (`signing`, without the keychain's
-//!   password: a copy in a file would unlock the identity for anyone who reads the backup), the
-//!   secret files (`secrets`), item deliverables (`workspaces`, `deliveries`) and the configuration
-//!   (`steve.env`), as far as they are in the home.
-//!
-//! Same disk, no restore drill: a copy against mistakes and a corrupt database, not disaster
-//! recovery. The names are those of `ops/backup.sh`, the job of a source-based installation: where
-//! both run, the day's copy is made once.
-//!
-//! `STEVE_BACKUP=off` turns it off (the copies before an upgrade are made either way).
-
+//! Daily scheduling for the shared backup implementation. Once at/after 03:30 local,
+//! with the existing startup delay, retry interval and STEVE_BACKUP switch.
+use anyhow::Result;
+use serde_json::{Value, json};
 use std::{
-    fs,
-    io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-use anyhow::{Context, Result};
-use serde_json::{Value, json};
-
-/// Days a daily copy is kept.
+use steve_store_sqlite::backup::{self, BackupPlan, CancelFlag, Reason};
 pub const KEEP_DAYS: u64 = 14;
-/// The minute of the local day from which the day's copy is due: 03:30.
 const FROM_MINUTE: u32 = 3 * 60 + 30;
 const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(300);
-/// After a copy that failed (a full disk): not before this many ticks.
 const RETRY_TICKS: u32 = 6;
-/// What the tar takes of the home, where it is there.
-const PARTS: [&str; 6] = [
-    "data/files",
-    "signing",
-    "secrets",
-    "workspaces",
-    "deliveries",
-    "steve.env",
-];
-/// How often the files are tried for a day's copy.
-const TAR_TRIES: u32 = 3;
-/// What the name of a copy still being written ends in (SQLite's journal comes after it).
-const PARTIAL: &str = ".hub.partial";
-/// In `signing`: the keychain's password as an earlier installation kept it.
-const NOT_COPIED: &str = "keychain-pass";
-
-/// Whether a `STEVE_BACKUP` value leaves the daily copy on.
 pub fn enabled(var: Option<&str>) -> bool {
     !var.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
 }
-
 pub fn dir(home: &Path) -> PathBuf {
     home.join("backups")
 }
-
-fn db_name(day: &str) -> String {
-    format!("daily-{day}.sqlite3")
-}
-
-fn tar_name(day: &str) -> String {
-    format!("daily-{day}-files.tar")
-}
-
 /// The local day (`YYYYMMDD`) and minute of the day at `secs` since the epoch.
 fn local(secs: u64) -> (String, u32) {
     let t = secs as libc::time_t;
@@ -91,187 +42,44 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Whether the copy of `day` is still to be made at `minute` of that day.
+fn at_local_day(ms: u64) -> String {
+    local(ms / 1000).0
+}
 pub fn due(home: &Path, day: &str, minute: u32) -> bool {
-    minute >= FROM_MINUTE && !dir(home).join(db_name(day)).exists()
+    minute >= FROM_MINUTE
+        && !backup::list(&dir(home))
+            .unwrap_or_default()
+            .iter()
+            .any(|m| m.reason == Reason::Daily && at_local_day(m.created_ms) == day)
 }
-
-/// The day of a daily copy's file name, a database's or a tar's.
-fn day_of(name: &str) -> Option<&str> {
-    let rest = name.strip_prefix("daily-")?;
-    let day = rest
-        .strip_suffix("-files.tar")
-        .or_else(|| rest.strip_suffix(".sqlite3"))?;
-    (day.len() == 8 && day.bytes().all(|b| b.is_ascii_digit())).then_some(day)
-}
-
-/// What a day's copy made.
 #[derive(Debug, PartialEq)]
 pub struct Made {
     pub database: PathBuf,
-    /// `None`: nothing of [`PARTS`] is in the home.
     pub files: Option<PathBuf>,
-    /// Daily copies past [`KEEP_DAYS`] that were removed.
     pub removed: usize,
 }
-
-/// Makes the copy of `day` in `home`: the database first, kept only when it checks out; then the
-/// files, whose failure leaves the database's copy standing; then the old copies go.
-pub fn make(home: &Path, db: &Path, day: &str) -> Result<Made> {
-    let out = dir(home);
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&out)
-        .with_context(|| format!("create {}", out.display()))?;
-    // a directory that was there before (the job of a source-based installation makes it too) is
-    // the owner's alone from now on
-    fs::set_permissions(&out, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("close {}", out.display()))?;
-    clear_partials(&out);
-    let database = out.join(db_name(day));
-    let partial = out.join(format!("{}{PARTIAL}", db_name(day)));
-    if let Err(e) = crate::upgrades::supervisor::backup(db, &partial) {
-        clear_partials(&out);
-        return Err(e.context("database copy"));
-    }
-    fs::rename(&partial, &database)?;
-    // a file that goes away while the tar walks the attachments (an upload being moved into place)
-    // fails that tar as a whole, and the day is not looked at again once its database is copied
-    let mut files = None;
-    for left in (0..TAR_TRIES).rev() {
-        match tar(home, &out, day) {
-            Ok(f) => {
-                files = f;
-                break;
-            }
-            Err(e) if left > 0 => tracing::info!("daily backup: the files once more: {e:#}"),
-            Err(e) => tracing::warn!("daily backup: the files were not copied: {e:#}"),
-        }
-    }
-    let removed = prune(&out, SystemTime::now());
+pub fn make(home: &Path, db: &Path, _day: &str) -> Result<Made> {
+    let mut plan = BackupPlan::new(dir(home), Reason::Daily);
+    plan.keep = backup::Keep::All;
+    plan.with_files = Some(crate::admin::client::backup::files(home));
+    let m = backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?;
+    let removed = backup::prune(&plan.dest_root, &Reason::Daily)?;
     Ok(Made {
-        database,
-        files,
+        database: m.database_path(),
+        files: m.files.artifacts.first().map(|a| m.directory.join(&a.name)),
         removed,
     })
 }
-
-/// Removes what a copy that was interrupted (a Hub stopped in the middle of one) left in `out`: the
-/// half-made file of any day and the journal SQLite kept beside it. Only one copy is made at a time.
-fn clear_partials(out: &Path) {
-    for entry in fs::read_dir(out).into_iter().flatten().flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("daily-") && name.contains(PARTIAL) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// The tar of [`PARTS`], `None` when the home has none of them.
-fn tar(home: &Path, out: &Path, day: &str) -> Result<Option<PathBuf>> {
-    let parts: Vec<&str> = PARTS
-        .into_iter()
-        .filter(|p| home.join(p).exists())
-        .collect();
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    let dest = out.join(tar_name(day));
-    let partial = out.join(format!("{}{PARTIAL}", tar_name(day)));
-    let _ = fs::remove_file(&partial);
-    let written = (|| {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&partial)?;
-        let mut b = tar::Builder::new(file);
-        b.follow_symlinks(false);
-        for part in parts {
-            let path = home.join(part);
-            if !path.is_dir() {
-                b.append_path_with_name(&path, part)?;
-            } else if part == "signing" {
-                for entry in fs::read_dir(&path)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    if name == NOT_COPIED {
-                        continue;
-                    }
-                    let inside = Path::new(part).join(&name);
-                    if entry.file_type()?.is_dir() {
-                        b.append_dir_all(&inside, entry.path())?;
-                    } else {
-                        b.append_path_with_name(entry.path(), &inside)?;
-                    }
-                }
-            } else {
-                b.append_dir_all(part, &path)?;
-            }
-        }
-        let mut file = b.into_inner()?;
-        file.flush()?;
-        file.sync_all()
-    })();
-    if let Err(e) = written {
-        let _ = fs::remove_file(&partial);
-        return Err(e).with_context(|| format!("write {}", dest.display()));
-    }
-    fs::rename(&partial, &dest)?;
-    Ok(Some(dest))
-}
-
-/// Removes the daily copies in `out` last written more than [`KEEP_DAYS`] before `now`; nothing
-/// else there is touched (the copies made before an upgrade have their own keeper).
-fn prune(out: &Path, now: SystemTime) -> usize {
-    let Ok(entries) = fs::read_dir(out) else {
-        return 0;
-    };
-    let keep = Duration::from_secs(KEEP_DAYS * 24 * 3600);
-    let mut removed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let old = day_of(&name.to_string_lossy()).is_some()
-            && entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > keep));
-        if old && fs::remove_file(entry.path()).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
-/// `GET /api/system/backup`: where the database and its copies are, whether the daily copy is on,
-/// and the newest one.
 pub fn status(home: &Path, db: &Path, on: bool) -> Value {
     let out = dir(home);
-    let last = fs::read_dir(&out)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            (name.ends_with(".sqlite3") && day_of(&name).is_some()).then_some((name, e))
-        })
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .and_then(|(name, e)| {
-            let m = e.metadata().ok()?;
-            let at = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-            Some(json!({"name": name, "at": at.as_millis() as u64, "bytes": m.len()}))
-        });
-    json!({
-        "database": db.to_string_lossy(),
-        "dir": out.to_string_lossy(),
-        "daily": on,
-        "keep_days": KEEP_DAYS,
-        "last": last,
-    })
+    let all = backup::list(&out).unwrap_or_default();
+    let last = all
+        .iter()
+        .rev()
+        .find(|m| m.reason == Reason::Daily)
+        .map(|m| json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes}));
+    json!({"database":db,"dir":out,"daily":on,"keep_days":KEEP_DAYS,"last":last,"purposes":backup::usage(&out).unwrap_or_default()})
 }
-
 /// The background loop (a Hub job): looks every ten minutes whether the day's copy is due.
 pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
     if !on {
@@ -314,6 +122,8 @@ pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    const NOT_COPIED: &str = "keychain-pass";
 
     /// Only the owner reads what the copies hold.
     fn owner_only(p: &Path) -> bool {
@@ -360,10 +170,10 @@ mod tests {
     #[test]
     fn due_from_half_past_three_until_the_days_copy_is_there() {
         let (t, db) = home();
-        assert!(!due(t.path(), "20260102", FROM_MINUTE - 1));
-        assert!(due(t.path(), "20260102", FROM_MINUTE));
+        assert!(!due(t.path(), &local(now_secs()).0, FROM_MINUTE - 1));
+        assert!(due(t.path(), &local(now_secs()).0, FROM_MINUTE));
         make(t.path(), &db, "20260102").unwrap();
-        assert!(!due(t.path(), "20260102", 23 * 60));
+        assert!(!due(t.path(), &local(now_secs()).0, 23 * 60));
         assert!(due(t.path(), "20260103", FROM_MINUTE));
     }
 
@@ -384,13 +194,21 @@ mod tests {
         fs::write(h.join("deliveries/objects/digest"), "immutable delivery").unwrap();
 
         let m = make(h, &db, "20260102").unwrap();
-        assert_eq!(m.database, h.join("backups/daily-20260102.sqlite3"));
+        assert!(
+            m.database
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("daily-")
+        );
         assert_eq!(m.removed, 0);
         let c = rusqlite::Connection::open(&m.database).unwrap();
         let x: String = c.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(x, "kept");
         let files = m.files.expect("files");
-        assert_eq!(files, h.join("backups/daily-20260102-files.tar"));
+        assert_eq!(files, m.database.parent().unwrap().join("files.tar"));
         assert_eq!(
             names(&files),
             [
@@ -476,29 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn what_an_interrupted_copy_left_goes_with_the_next() {
+    fn foreign_and_interrupted_files_are_not_deleted() {
         let (t, db) = home();
         let out = t.path().join("backups");
         fs::create_dir_all(&out).unwrap();
-        fs::set_permissions(&out, fs::Permissions::from_mode(0o755)).unwrap();
-        let stale = [
-            "daily-20251231.sqlite3.hub.partial",
-            "daily-20251231.sqlite3.hub.partial-journal",
-            "daily-20251231-files.tar.hub.partial",
-        ];
-        for n in stale {
-            fs::write(out.join(n), "half").unwrap();
-        }
-        fs::write(out.join("notes.hub.partial"), "not a copy's").unwrap();
-        make(t.path(), &db, "20260102").unwrap();
-        for n in stale {
-            assert!(!out.join(n).exists(), "{n}");
-        }
+        fs::write(out.join("notes.hub.partial"), "foreign").unwrap();
+        fs::create_dir(out.join("daily-interrupted.partial")).unwrap();
+        make(t.path(), &db, "today").unwrap();
         assert!(out.join("notes.hub.partial").exists());
-        // a directory made by something else is the owner's alone afterwards
-        assert!(owner_only(&out));
+        assert!(out.join("daily-interrupted.partial").exists());
     }
-
     #[test]
     fn a_home_with_nothing_but_the_database_has_no_tar() {
         let t = tempfile::tempdir().unwrap();
@@ -521,32 +326,21 @@ mod tests {
     }
 
     #[test]
-    fn only_old_daily_copies_are_removed() {
-        let t = tempfile::tempdir().unwrap();
-        let out = t.path();
-        let all = [
-            "daily-20260101.sqlite3",
-            "daily-20260101-files.tar",
-            "pre-0.2.9-20260101-000000.sqlite3",
-            "daily-notes.txt",
-        ];
-        for n in all {
-            fs::write(out.join(n), "x").unwrap();
-        }
-        assert_eq!(prune(out, SystemTime::now()), 0);
-        let later = SystemTime::now() + Duration::from_secs((KEEP_DAYS + 1) * 24 * 3600);
-        assert_eq!(prune(out, later), 2);
-        let mut left: Vec<_> = fs::read_dir(out)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .collect();
-        left.sort();
-        assert_eq!(
-            left,
-            ["daily-notes.txt", "pre-0.2.9-20260101-000000.sqlite3"]
-        );
+    fn only_completed_directories_participate_in_retention() {
+        let (t, db) = home();
+        let made = make(t.path(), &db, "today").unwrap();
+        let root = dir(t.path());
+        fs::write(root.join("daily-notes.txt"), "foreign").unwrap();
+        let removed = backup::prune_at(
+            &root,
+            &Reason::Daily,
+            backup::plan::now_ms() + (KEEP_DAYS + 1) * 86400000,
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!made.database.exists());
+        assert!(root.join("daily-notes.txt").exists());
     }
-
     #[test]
     fn status_names_the_places_and_the_newest_copy() {
         let (t, db) = home();
@@ -561,7 +355,7 @@ mod tests {
         make(t.path(), &db, "20260103").unwrap();
         let v = status(t.path(), &db, false);
         assert_eq!(v["daily"], false);
-        assert_eq!(v["last"]["name"], "daily-20260103.sqlite3");
+        assert!(v["last"]["name"].as_str().unwrap().starts_with("daily-"));
         assert!(v["last"]["bytes"].as_u64().unwrap() > 0 && v["last"]["at"].as_u64().unwrap() > 0);
     }
 }

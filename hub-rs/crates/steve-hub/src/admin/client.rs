@@ -1,4 +1,6 @@
 //! One-shot HTTP/1.1 over UDS. Only a failed connect permits offline fallback.
+#[path = "backup.rs"]
+pub(crate) mod backup;
 use crate::access::CliOutput;
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -33,6 +35,26 @@ pub(crate) fn try_command(home: &Path, args: &[String]) -> Result<Option<CliOutp
         .take_while(|a| !a.starts_with("--"))
         .collect();
     let (method, route, body) = match words.as_slice() {
+        ["backup"] => {
+            let reason = backup::reason(args)?;
+            (
+                "POST",
+                "/admin/v1/backup".into(),
+                serde_json::to_vec(&super::routes::BackupRequest {
+                    reason: Some(
+                        if matches!(
+                            reason,
+                            steve_store_sqlite::backup::Reason::PreUpgrade { .. }
+                        ) {
+                            "pre-upgrade"
+                        } else {
+                            "diagnostic"
+                        }
+                        .into(),
+                    ),
+                })?,
+            )
+        }
         ["token", "create"] => (
             "POST",
             "/admin/v1/access/tokens".into(),

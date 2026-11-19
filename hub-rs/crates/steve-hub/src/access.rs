@@ -529,6 +529,9 @@ pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
                     socket.display()
                 )
             })?;
+            if args.first().is_some_and(|s| s == "backup") {
+                return crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args);
+            }
             // Temporary offline direct-open: removed by W2a.8a part 2 after S1 unfreezes Store.
             let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {}))?;
             store.ensure_workspace()?;
@@ -542,7 +545,8 @@ const USAGE: &str =
        steve-hub --access token list [--json]
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
-       steve-hub --access client revoke ID";
+       steve-hub --access client revoke ID
+       steve-hub --admin backup [--reason pre-upgrade|diagnostic]";
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()

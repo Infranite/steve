@@ -39,6 +39,7 @@ pub(super) fn router(store: Store, limit: Duration) -> Router {
         .route("/admin/v1/access/clients", get(clients))
         .route("/admin/v1/access/clients/{id}", delete(revoke_client))
         .route("/admin/v1/storage/status", get(status))
+        .route("/admin/v1/backup", get(backups).post(make_backup))
         .with_state(store)
         .layer(middleware::from_fn_with_state(limit, deadline))
 }
@@ -158,5 +159,45 @@ mod tests {
         let reply: CliOutput = serde_json::from_slice(&body).unwrap();
         assert_eq!(reply.code, 2);
         assert!(reply.stderr.contains("deadline exceeded"));
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub(super) struct BackupRequest {
+    pub reason: Option<String>,
+}
+async fn make_backup(State(store): State<Store>, Json(input): Json<BackupRequest>) -> Response {
+    let args = vec![
+        "backup".into(),
+        "--reason".into(),
+        input.reason.unwrap_or_else(|| "diagnostic".into()),
+    ];
+    let result = tokio::task::spawn_blocking(move || {
+        let db = store.path();
+        super::client::backup::command(&super::client::backup::home(db), db, &args)
+    })
+    .await;
+    let output =
+        CliOutput::result(result.unwrap_or_else(|_| Err(anyhow::anyhow!("backup worker failed"))));
+    (
+        if output.code == 0 {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        },
+        Json(output),
+    )
+        .into_response()
+}
+async fn backups(State(store): State<Store>) -> Response {
+    let result = tokio::task::spawn_blocking(move || {
+        steve_store_sqlite::backup::usage(
+            &super::client::backup::home(store.path()).join("backups"),
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(usage)) => Json(usage).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
