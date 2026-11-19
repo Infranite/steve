@@ -8,8 +8,8 @@ use steve_store_sqlite::{
 fn candidate_matrix_is_the_same_rule_used_by_opens() {
     let caps = StorageCapabilities::compiled();
     let encoded = caps.encode_build_info_draft().unwrap();
-    assert_eq!(encoded["writable_layout"], 2);
-    assert_eq!(encoded["legacy_input"], 113);
+    assert_eq!(encoded["layout"]["target"], 2);
+    assert_eq!(encoded["legacy"]["min_read"], 113);
     assert_eq!(
         serde_json::from_value::<StorageCapabilities>(encoded.clone()).unwrap(),
         caps
@@ -72,7 +72,7 @@ fn candidate_matrix_is_the_same_rule_used_by_opens() {
     candidate.domains.remove("comms");
     assert!(candidate.can_open(&StorageState::Empty, false).is_err());
     candidate = caps;
-    candidate.contract_schema.target = candidate.contract_schema.max_read + 1;
+    candidate.layout.target = candidate.layout.max_read + 1;
     assert!(candidate.can_open(&current, false).is_err());
 }
 #[test]
@@ -83,6 +83,12 @@ fn malformed_metadata_is_rejected_before_persistent_pragmas() {
         "INSERT INTO domain_schema VALUES('unknown',1)",
         "DELETE FROM schema_compat",
         "UPDATE schema_compat SET min_reader=113",
+        "UPDATE schema_compat SET min_reader=114",
+        "UPDATE schema_compat SET min_reader=1001",
+        "INSERT INTO schema_compat(min_reader) VALUES(1000)",
+        "ALTER TABLE schema_compat ADD COLUMN unexpected TEXT",
+        "DROP TABLE schema_compat; CREATE TABLE schema_compat(min_reader INTEGER NOT NULL DEFAULT 1000); INSERT INTO schema_compat(min_reader) VALUES(1000)",
+        "CREATE TABLE schema_version(v); INSERT INTO schema_version VALUES(113)",
         "CREATE TABLE schema_version(v); INSERT INTO schema_version VALUES(112)",
         "UPDATE meta SET value='wrong' WHERE key='file_id' AND domain='core'",
     ] {
@@ -124,6 +130,77 @@ fn empty_partial_unknown_and_readonly_observation_never_guess_a_legacy_database(
         if !sql.is_empty() {
             assert!(open::open_runtime(dir.path()).is_err());
         }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn candidate_declarations_are_independent_of_the_inspecting_binary() {
+    use steve_store_sqlite::compat::LegacyCapabilities;
+    let mut candidate = StorageCapabilities::compiled();
+    candidate.legacy = LegacyCapabilities {
+        min_read: 114,
+        max_read: 115,
+        convert: true,
+    };
+    for (version, allowed) in [(113, false), (114, true), (115, true), (116, false)] {
+        assert_eq!(
+            candidate
+                .can_open(
+                    &StorageState::Legacy {
+                        schema_version: version
+                    },
+                    false
+                )
+                .is_ok(),
+            allowed
+        );
+    }
+    candidate.legacy.convert = false;
+    assert!(
+        candidate
+            .can_open(
+                &StorageState::Legacy {
+                    schema_version: 114
+                },
+                false
+            )
+            .is_err()
+    );
+    let mut conn = Connection::open_in_memory().unwrap();
+    migrate::initialize(&mut conn, &Layout::single_file()).unwrap();
+    conn.execute(
+        "UPDATE meta SET value='3' WHERE key IN ('layout','min_reader')",
+        [],
+    )
+    .unwrap();
+    candidate.layout.min_read = 3;
+    candidate.layout.max_read = 3;
+    candidate.layout.target = 3;
+    let state = open::inspect(&conn).unwrap();
+    assert!(candidate.can_open(&state, true).is_ok());
+    assert!(
+        StorageCapabilities::compiled()
+            .can_open(&state, false)
+            .is_err()
+    );
+}
+#[test]
+fn future_legacy_version_and_reader_request_a_newer_program_without_writing() {
+    for sql in [
+        "UPDATE schema_version SET v=114",
+        "UPDATE schema_compat SET min_reader=1000",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CORE_FILE);
+        let c = Connection::open(&path).unwrap();
+        steve_store_sqlite::legacy::final_structure(&c).unwrap();
+        c.execute_batch(sql).unwrap();
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+        let e = open::open_runtime(dir.path()).err().unwrap();
+        assert!(e.safe_detail.contains("需要更新的程序"));
+        assert!(!e.safe_detail.contains("先升级到上一个发布版"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

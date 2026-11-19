@@ -165,3 +165,99 @@ fn read_services_accept_an_explicit_handle_outside_its_runtime_context() {
     drop(s);
     drop(runtime);
 }
+
+#[test]
+fn failed_guard_rollback_permanently_rejects_the_writer() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    fn refuse_rollback(c: &rusqlite::Connection) {
+        c.execute_batch("BEGIN IMMEDIATE; CREATE TABLE engine_failed_rollback(x)")
+            .unwrap();
+        c.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Transaction {
+                operation: TransactionOperation::Rollback,
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+    }
+    for callback in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path(), false);
+        if callback {
+            let result = s.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                refuse_rollback(c);
+                Ok(())
+            });
+            assert!(matches!(
+                result,
+                Err(steve_storage_api::CommitError::Fatal(_))
+            ));
+        } else {
+            let g = s.root_guard(Domain::Core, Lane::Interactive).unwrap();
+            refuse_rollback(&g);
+            drop(g);
+        }
+        for _ in 0..2 {
+            let error = s.root_guard(Domain::Core, Lane::Admin).err().unwrap();
+            assert!(matches!(error, steve_storage_api::CommitError::Fatal(_)));
+            assert!(error.to_string().contains("unusable"));
+        }
+    }
+}
+#[test]
+fn root_panic_does_not_reuse_reserved_revisions_even_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path(), false);
+    let (tx, rx) = mpsc::channel();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.with_root(
+            Domain::Core,
+            Lane::Interactive,
+            |c, _, rev| -> Result<(), steve_storage_api::CommitError> {
+                tx.send(rev.rev().0).unwrap();
+                c.execute_batch("BEGIN IMMEDIATE").unwrap();
+                panic!("rollback root after revision issuance");
+            },
+        )
+        .unwrap();
+    }));
+    let issued = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let next = s
+        .with_root(Domain::Core, Lane::Interactive, |_, _, rev| Ok(rev.rev().0))
+        .unwrap();
+    assert!(next > issued);
+    // This panic escapes the guard itself (not with_root's catch boundary),
+    // poisoning the writer while the same runner still has buffered revisions.
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let g = s.root_guard(Domain::Core, Lane::Interactive).unwrap();
+        g.execute_batch("BEGIN IMMEDIATE").unwrap();
+        panic!("poison writer with live revision reservation");
+    }));
+    assert!(panic.is_err());
+    let after_poison = s
+        .with_root(Domain::Core, Lane::Interactive, |_, _, rev| Ok(rev.rev().0))
+        .unwrap();
+    assert!(after_poison > next);
+    drop(s);
+    // Old executor teardown releases storage.lock asynchronously; wait for its
+    // actual ownership condition rather than sleeping or introducing a runtime.
+    let reopened = loop {
+        match open::open_admin(dir.path()) {
+            Ok(e) => break e,
+            Err(e) if e.code == steve_types::Code::Busy => std::thread::yield_now(),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let s = SqliteStore::new_sync(
+        vec![reopened],
+        Arc::new(Registry::verification().unwrap()),
+        Arc::new(SystemWallClock),
+        Arc::new(|_, _: Vec<()>| {}),
+        || false,
+    )
+    .unwrap();
+    let after = s
+        .with_root(Domain::Core, Lane::Admin, |_, _, rev| Ok(rev.rev().0))
+        .unwrap();
+    assert!(after > after_poison);
+}

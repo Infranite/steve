@@ -95,11 +95,12 @@ fn assert_current(conn: &Connection) {
     migrate::check_versions(conn, true).unwrap();
     Layout::read(conn).unwrap();
     assert!(has(conn, "schema_compat"));
+    assert!(!has(conn, "schema_version"));
     assert_eq!(
         conn.query_row("SELECT min_reader FROM schema_compat", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        114
+        steve_store_sqlite::compat::LEGACY_READER_FENCE
     );
     assert!(matches!(
         steve_store_sqlite::open::inspect(conn).unwrap(),
@@ -177,7 +178,7 @@ fn converts_released_prefix_and_head_preserving_data_and_all_owners() {
 }
 
 #[test]
-fn restarts_after_the_legacy_transaction_without_a_log() {
+fn retries_after_readonly_legacy_inspection_without_a_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steve.sqlite3");
     let conn = Connection::open(&path).unwrap();
@@ -186,7 +187,7 @@ fn restarts_after_the_legacy_transaction_without_a_log() {
     let mut before = counts(&conn);
     before[1] -= 2;
     before[2] -= 2;
-    assert_eq!(convert::migrate_legacy(&conn).unwrap(), 113);
+    assert_eq!(legacy::version(&conn).unwrap(), 113);
     let head = legacy::version(&conn).unwrap();
     assert!(head == 113);
     assert!(!has(&conn, "meta"));
@@ -286,8 +287,8 @@ fn a_failure_after_contract_creation_rolls_back_and_can_be_retried() {
     data(&conn);
     let before = counts(&conn);
     conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-        AuthAction::Delete {
-            table_name: "schema_compat",
+        AuthAction::DropTable {
+            table_name: "schema_version",
         } => Authorization::Deny,
         _ => Authorization::Allow,
     }))
@@ -577,4 +578,49 @@ fn final_commit_failure_preserves_legacy_input_credentials_and_references_for_re
             ..
         }
     ));
+}
+
+#[test]
+fn fresh_and_converted_metadata_have_the_same_current_shape() {
+    let mut fresh = Connection::open_in_memory().unwrap();
+    migrate::initialize(&mut fresh, &Layout::single_file()).unwrap();
+    let mut converted = Connection::open_in_memory().unwrap();
+    old(&converted, Some(113));
+    data(&converted);
+    convert::convert(&mut converted).unwrap();
+    for table in [
+        "schema_version",
+        "schema_compat",
+        "meta",
+        "domain_schema",
+        "uow_applied",
+        "cursor",
+    ] {
+        let objects = |c: &Connection| {
+            c.prepare(
+                "SELECT type,name,sql FROM sqlite_schema WHERE tbl_name=?1 ORDER BY type,name",
+            )
+            .unwrap()
+            .query_map([table], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        assert_eq!(objects(&fresh), objects(&converted), "{table}");
+    }
+    let meta = |c: &Connection| {
+        c.prepare("SELECT domain,key,value FROM meta WHERE key NOT IN ('file_id','store_generation') ORDER BY domain,key").unwrap()
+        .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    assert_eq!(meta(&fresh), meta(&converted));
+    for c in [&fresh, &converted] {
+        assert_current(c);
+    }
 }

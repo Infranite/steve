@@ -362,12 +362,17 @@ impl<E: Send + 'static> SqliteStore<E> {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&c, &w.runner, &rev)));
         let leaked = !c.is_autocommit();
-        if leaked {
-            let _ = c.execute_batch("ROLLBACK");
-        }
+        let cleanup = if leaked {
+            c.engine.rollback_root(&c)
+        } else {
+            Ok(())
+        };
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);
+        if outcome.is_ok() {
+            cleanup.map_err(CommitError::Fatal)?;
+        }
         match outcome {
             Ok(Ok(_)) if leaked => Err(crate::domains::invalid(
                 "root callback left an open transaction; rolled back",
@@ -394,6 +399,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         }
         let connection = w.engine.writer_conn().map_err(CommitError::Fatal)?;
         Ok(RootGuard {
+            engine: &w.engine,
             connection,
             _grant: grant,
         })
@@ -414,6 +420,7 @@ impl<E: Send + 'static> SqliteStore<E> {
 /// leaked transaction, releases the mutex, then returns the executor's lease.
 /// Kept thread-bound by RootGrant, and must never be held across await.
 pub struct RootGuard<'a, E: Send + 'static = ()> {
+    engine: &'a Engine,
     connection: std::sync::MutexGuard<'a, rusqlite::Connection>,
     _grant: RootGrant<Arc<Engine>, EngineRunner<E>>,
 }
@@ -431,7 +438,7 @@ impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
 impl<E: Send + 'static> Drop for RootGuard<'_, E> {
     fn drop(&mut self) {
         if !self.connection.is_autocommit() {
-            let _ = self.connection.execute_batch("ROLLBACK");
+            let _ = self.engine.rollback_root(&self.connection);
         }
     }
 }
