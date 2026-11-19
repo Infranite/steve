@@ -263,3 +263,58 @@ fn admin_last_close_preserves_existing_database_and_wal_bytes() {
     assert_eq!(std::fs::read(&path).unwrap(), before[0]);
     assert_eq!(std::fs::read(&wal).unwrap(), before[1]);
 }
+
+#[test]
+fn observed_runtime_open_reports_one_conversion_and_migration_stream_under_lock() {
+    use std::sync::{Arc, Mutex};
+    use steve_store_sqlite::migrate::Phase;
+    for has_owner in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CORE_FILE);
+        let c = Connection::open(&path).unwrap();
+        steve_store_sqlite::legacy::final_structure(&c).unwrap();
+        if has_owner {
+            c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','o','o','owner',0)").unwrap();
+        }
+        drop(c);
+        let before = std::fs::read(&path).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let log = events.clone();
+        let data_dir = dir.path().to_owned();
+        let result = open::open_runtime_observed(
+            dir.path(),
+            Arc::new(move |p| {
+                // Each event is emitted with the very same lifetime lock still held.
+                assert_eq!(open::open_admin(&data_dir).err().unwrap().code, Code::Busy);
+                log.lock().unwrap().push(p);
+            }),
+        );
+        let log = events.lock().unwrap();
+        assert!(
+            log.windows(2)
+                .all(|pair| pair[0].phase <= pair[1].phase && pair[0].vm_steps <= pair[1].vm_steps)
+        );
+        if has_owner {
+            let e = result.unwrap();
+            for phase in [
+                Phase::LegacyReplay,
+                Phase::Validation,
+                Phase::InstallContract,
+                Phase::DomainMigration,
+            ] {
+                assert!(log.iter().any(|p| p.phase == phase));
+            }
+            assert_eq!(log.iter().filter(|p| p.complete).count(), 1);
+            assert!(log.last().unwrap().complete);
+            assert_eq!(log.last().unwrap().phase, Phase::DomainMigration);
+            assert!(matches!(
+                open::inspect(&e.read_conn().unwrap()).unwrap(),
+                steve_store_sqlite::compat::StorageState::Current { .. }
+            ));
+        } else {
+            assert!(result.is_err());
+            assert!(log.iter().all(|p| !p.complete));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+}
