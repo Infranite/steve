@@ -1645,9 +1645,10 @@ async fn a_failed_journal_window_stops_a_quiet_research_backend_before_storage_r
     let pid = pgid().unwrap();
     // The peer emits text once and then stays quiet until cancelled. The failed 200 ms window
     // must stop it without relying on another producer callback to return the journal error.
-    eventually_sync("quiet research process stopped after journal failure", || {
-        !alive(pid as i32)
-    })
+    eventually_sync(
+        "quiet research process stopped after journal failure",
+        || !alive(pid as i32),
+    )
     .await;
     db.execute_batch("DROP TRIGGER reject_text").unwrap();
     let completion = t.end_of(&n, "journal_stop").await;
