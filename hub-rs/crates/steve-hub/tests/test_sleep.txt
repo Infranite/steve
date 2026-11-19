@@ -19,7 +19,6 @@ steve-channels/tests/capi_channels.rs	2
 steve-channels/tests/ext_ws.rs	2
 steve-channels/tests/fake_feishu_user.rs	3
 steve-channels/tests/feishu_f1.rs	1
-steve-channels/tests/feishu_f5.rs	1
 steve-channels/tests/feishu_f6.rs	1
 steve-channels/tests/feishu_f8.rs	1
 steve-channels/tests/feishu_registration.rs	9
@@ -118,7 +117,6 @@ steve-knowledge/src/extract_text.rs	1
 steve-knowledge/tests/folder.rs	1
 steve-knowledge/tests/folder_node.rs	4
 steve-knowledge/tests/k5.rs	1
-steve-knowledge/tests/kb.rs	1
 steve-mail/src/fake/imap/mod.rs	1
 steve-mail/src/fake/smtp.rs	1
 steve-mail/tests/e1_imap.rs	1
@@ -149,7 +147,6 @@ steve-node/tests/jobs.rs	5
 steve-node/tests/local.rs	31
 steve-node/tests/research.rs	9
 steve-node/tests/usage.rs	10
-steve-runtime/tests/clock.rs	7
 steve-store/src/diagnostics.rs	1
 steve-store/tests/diagnostics.rs	1
 steve-store/tests/migration_092.rs	1

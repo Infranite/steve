@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use steve_runtime::{FakeClock, FirstRun, every, spawn};
+use steve_runtime::{Clock, FakeClock, FirstRun, every, spawn};
 
 async fn settle() {
     for _ in 0..100 {
@@ -280,7 +280,7 @@ async fn a_slow_pass_keeps_the_full_delay_and_cancellation_stops_it() {
             let (c, n) = (c.clone(), n.clone());
             async move {
                 n.fetch_add(1, Ordering::SeqCst);
-                steve_runtime::Clock::sleep(&*c, Duration::from_secs(8)).await;
+                c.sleep(Duration::from_secs(8)).await;
             }
         },
     );

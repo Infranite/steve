@@ -14,14 +14,18 @@ const HEADER: &str = "# Existing test sleep calls; only shrinks.\n# file under h
 
 // Rust tokenization discards comments and treats strings as one token. Macro bodies still count,
 // including select!/assert! arguments, without mistaking a quoted counterexample for a sleep.
+// A method call `.sleep(` is the injected `Clock::sleep` (virtual in tests, the rule product code
+// follows too), so only free-function sleeps (std::thread, tokio::time, `use … sleep`) count.
 fn tokens(input: ParseStream<'_>) -> syn::Result<usize> {
     let mut n = 0;
+    let mut after_dot = false;
     while !input.is_empty() {
         if input.peek(syn::Ident) {
             let name: syn::Ident = input.parse()?;
-            if name == "sleep" && input.peek(syn::token::Paren) {
+            if name == "sleep" && input.peek(syn::token::Paren) && !after_dot {
                 n += 1;
             }
+            after_dot = false;
         } else if input.peek(syn::token::Brace) {
             let inner;
             syn::braced!(inner in input);
@@ -35,12 +39,15 @@ fn tokens(input: ParseStream<'_>) -> syn::Result<usize> {
             syn::bracketed!(inner in input);
             n += tokens(&inner)?;
         } else {
+            after_dot = input.peek(syn::Token![.]);
             input.step(|c| {
                 c.token_tree()
                     .map(|(_, next)| ((), next))
                     .ok_or_else(|| c.error("token"))
             })?;
+            continue;
         }
+        after_dot = false;
     }
     Ok(n)
 }
@@ -117,12 +124,6 @@ impl<'ast> Visit<'ast> for Scan {
             self.count += 1;
         }
         visit::visit_expr_call(self, call);
-    }
-    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if self.test && call.method == "sleep" {
-            self.count += 1;
-        }
-        visit::visit_expr_method_call(self, call);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
         if self.test {
@@ -287,6 +288,11 @@ fn added_sleep_fails_but_comments_and_quoted_examples_do_not_count() {
         tokio::select! { _=tokio::time::sleep(d)=>{}, _=f()=>{std::thread::sleep(d);} }
     "#;
     assert_eq!(tokens.parse_str(source).unwrap(), 2);
+    // the injected clock's method is virtual time, not a wall-clock wait
+    assert_eq!(
+        tokens.parse_str("tokio::join!(clock.sleep(d), x)").unwrap(),
+        0
+    );
     let old = ratchet::Counts::from([(vec!["fixture.rs".into()], 1)]);
     let added = ratchet::Counts::from([(vec!["fixture.rs".into()], 2)]);
     assert!(
