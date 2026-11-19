@@ -313,7 +313,7 @@ pub async fn dial_url_as(
     node: &NodeId,
     serve: Arc<dyn Node>,
     incarnation: u64,
-    proto: (u16, u16),
+    proto: u32,
 ) -> Result<Linked, handshake::Refused> {
     let (mut sink, mut stream) = tls::connect(url, &Trust::LoopbackPlaintext).await.unwrap();
     let (_, w) = handshake::dial_as(
@@ -323,8 +323,6 @@ pub async fn dial_url_as(
             node,
             identity: id,
             incarnation,
-            heads: vec![],
-            caps: None,
             hub_id: Some(hub_id),
             hub_key: None,
         },
@@ -338,6 +336,7 @@ pub async fn dial_url_as(
         NodeServer::new(serve),
         ConnOptions {
             side: "n",
+            mode: w.mode,
             ..Default::default()
         },
     );
