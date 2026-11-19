@@ -121,17 +121,19 @@ impl CronExpr {
 
     /// First run strictly after `after`, computed on the wall clock of `tz`.
     pub fn next_after(&self, tz: &Zone, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let mut wall = tz.search_start(after.timestamp_millis());
+        let mut wall = tz.search_start(after.timestamp_millis()).ok()?;
         let mut best: Option<DateTime<Utc>> = None;
         for _ in 0..MAX_SKIPPED_CANDIDATES {
             let candidate = match self.cron.find_next_occurrence(&wall, false) {
                 Ok(c) => c,
                 Err(_) => return best,
             };
-            if best.is_some_and(|b| candidate >= tz.local(b.timestamp_millis())) {
-                return best;
+            if let Some(b) = best {
+                if candidate >= tz.local(b.timestamp_millis()).ok()? {
+                    return best;
+                }
             }
-            let at = DateTime::from_timestamp_millis(tz.instant(candidate))?;
+            let at = DateTime::from_timestamp_millis(tz.instant(candidate).ok()?)?;
             if at > after && best.is_none_or(|b| at < b) {
                 best = Some(at);
             }

@@ -1,4 +1,6 @@
 //! Replaces retry, window/bucket and trailing-throttle shapes in W2b §1.2–1.3.
+//! Limiter::check scans the entire key table to evict recovered entries (O(number of keys)).
+//! Callers should periodically prune even when requests stop; no background task is started.
 //! Durations use monotonic Tokio time; persisted deadlines use Backoff::delay plus Clock::now.
 use backon::Retryable;
 use rand::RngExt;

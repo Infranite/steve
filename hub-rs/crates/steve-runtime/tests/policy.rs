@@ -1,5 +1,5 @@
 #![cfg(feature = "policy")]
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -70,7 +70,14 @@ fn existing_backoff_sequences_and_jitter_bounds() {
             };
             for _ in 0..100 {
                 let d = p.delay(n, &mut rng);
-                assert!(d >= lower && d <= upper);
+                assert!(
+                    d >= lower
+                        && if matches!(jitter, Jitter::Equal) {
+                            d < upper
+                        } else {
+                            d <= upper
+                        }
+                );
             }
         }
     }
@@ -192,4 +199,71 @@ async fn fixed_sliding_windows_bucket_eviction_and_trailing_stats() {
     assert_eq!(t.offer(4, now + sec(6)), None);
     assert_eq!(t.offer(5, now + sec(10)), Some(5));
     assert_eq!(t.deadline(), None);
+}
+
+// Deterministic endpoints exercise inclusive Full and half-open Equal distributions.
+struct EdgeRng(u64);
+impl rand::TryRng for EdgeRng {
+    type Error = std::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.0 as u32)
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.0)
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        dst.fill(self.0 as u8);
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn ext_ws_retry_after_extra_jitter_table_and_budget() {
+    // provider.rs:308: retry_after_ms + uniform(0..=floor(ms/5)), then Retry::After.
+    #[rustfmt::skip]
+    let cases = [(0,0,0),(1,1,1),(4,4,4),(5,5,6),(999,999,1198),(1000,1000,1200),(120000,120000,144000)];
+    for (server_ms, low, high) in cases {
+        for (word, expected) in [(0, low), (u64::MAX, high)] {
+            let mut rng = EdgeRng(word);
+            let extra = rng.random_range(0..=server_ms / 5);
+            let wait = Duration::from_millis(server_ms + extra);
+            assert_eq!(wait, Duration::from_millis(expected));
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let w = waits.clone();
+            let mut calls = 0;
+            let p = Backoff {
+                attempts: Some(3),
+                ..policy(sec(1), sec(60))
+            };
+            let result: Result<(), u32> = p
+                .retry_with(
+                    || {
+                        calls += 1;
+                        std::future::ready(Err(calls))
+                    },
+                    |_| Retry::After(wait),
+                    move |d| {
+                        w.lock().unwrap().push(d);
+                        std::future::ready(())
+                    },
+                )
+                .await;
+            assert_eq!(result, Err(4));
+            assert_eq!(*waits.lock().unwrap(), [wait; 3]); // server wait can exceed max; budget still applies
+        }
+    }
+    let full = Backoff {
+        jitter: Jitter::Full,
+        ..policy(Duration::from_nanos(10), sec(1))
+    };
+    assert_eq!(full.delay(0, &mut EdgeRng(0)), Duration::ZERO);
+    assert_eq!(
+        full.delay(0, &mut EdgeRng(u64::MAX)),
+        Duration::from_nanos(10)
+    );
+    let p = Backoff {
+        jitter: Jitter::Equal,
+        ..policy(Duration::from_nanos(10), sec(1))
+    };
+    assert_eq!(p.delay(0, &mut EdgeRng(0)), Duration::from_nanos(5));
+    assert_eq!(p.delay(0, &mut EdgeRng(u64::MAX)), Duration::from_nanos(9));
 }
