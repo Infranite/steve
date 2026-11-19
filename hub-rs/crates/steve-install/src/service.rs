@@ -503,7 +503,9 @@ impl Service {
         );
         ensure!(
             record["label"].is_null() || record["label"].as_str() == Some(&label),
-            "this home already uses another service label"
+            "service registration {} uses label {:?}, not {label}; use this home's original --label",
+            record_path.display(),
+            record["label"]
         );
         let config = if system == System::Darwin {
             user_home
@@ -871,7 +873,34 @@ impl Service {
         )
     }
 
+    fn require_registration(&self, action: &str) -> Result<()> {
+        // Re-read before any manager query: a cached receipt or a default-label unit
+        // elsewhere in the user's account does not authorize acting on this home.
+        let context = || {
+            format!(
+                "cannot {action} {}: matching service registration required at {}; run steve setup {} --home {} with the original service label",
+                self.component,
+                self.record_path.display(),
+                self.component,
+                self.home.display()
+            )
+        };
+        let bytes = maintenance_file(&self.record_path).with_context(context)?;
+        let record: Value = serde_json::from_slice(&bytes).with_context(context)?;
+        ensure!(
+            record["component"] == self.component && record["label"].as_str() == Some(&self.label),
+            "{}; expected component {} and label {}, found component {:?} and label {:?}",
+            context(),
+            self.component,
+            self.label,
+            record["component"],
+            record["label"]
+        );
+        Ok(())
+    }
+
     fn action(&self, action: &str) -> Result<Value> {
+        self.require_registration(action)?;
         let state = self.state()?;
         if action == "stop" && state["running"] == false && state["loaded"] == false {
             if self.component == "hub" {
@@ -1029,6 +1058,7 @@ impl Service {
     }
 
     fn uninstall(&mut self) -> Result<Value> {
+        self.require_registration("uninstall")?;
         let present = exists(&self.config);
         let definition = if present {
             Some(regular(&self.config)?)
@@ -1524,6 +1554,98 @@ esac
     }
 
     #[test]
+    fn unregistered_or_mismatched_services_never_reach_the_manager() {
+        for system in [System::Darwin, System::Linux] {
+            for component in ["hub", "node"] {
+                for condition in ["missing", "removed", "label", "component", "symlink"] {
+                    let f = Fixture::new();
+                    let (mut s, manager) = f.service(system, component);
+                    fs::create_dir_all(s.config.parent().unwrap()).unwrap();
+                    let definition = s.definition(&f.release).unwrap();
+                    fs::write(&s.config, &definition).unwrap();
+                    if condition != "missing" {
+                        atomic(
+                            &s.record_path,
+                            &json_bytes(&json!({"component":component,"label":s.label})).unwrap(),
+                        )
+                        .unwrap();
+                        // Keep a cached matching receipt, then change it before dispatch.
+                        s.record = object(&s.record_path).unwrap();
+                        match condition {
+                            "removed" => fs::remove_file(&s.record_path).unwrap(),
+                            "label" | "component" => {
+                                let mut record = s.record.clone();
+                                record[condition] = "another".into();
+                                atomic(&s.record_path, &json_bytes(&record).unwrap()).unwrap();
+                            }
+                            "symlink" => {
+                                let target = f.root.join("foreign-record.json");
+                                fs::rename(&s.record_path, &target).unwrap();
+                                symlink(target, &s.record_path).unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    for action in ["start", "stop", "restart", "uninstall"] {
+                        let error = s.dispatch(action, None, 0).unwrap_err();
+                        assert!(
+                            format!("{error:#}").contains(s.record_path.to_str().unwrap()),
+                            "{system:?} {component} {condition} {action}: {error:#}"
+                        );
+                        assert!(manager.lock().unwrap().calls.is_empty());
+                        assert_eq!(fs::read(&s.config).unwrap(), definition);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registered_hub_and_node_actions_keep_using_their_own_label() {
+        for system in [System::Darwin, System::Linux] {
+            for component in ["hub", "node"] {
+                let f = Fixture::new();
+                if component == "hub" {
+                    f.maintenance_tools(system);
+                }
+                let (mut s, manager) = f.service(system, component);
+                s.dispatch("install", Some(&f.release), 0).unwrap();
+                manager.lock().unwrap().calls.clear();
+                for action in ["start", "restart", "stop"] {
+                    s.dispatch(action, None, 0).unwrap();
+                    assert_eq!(manager.lock().unwrap().running, action != "stop");
+                }
+                s.dispatch("uninstall", None, 0).unwrap();
+                assert!(s.record["uninstalled"].as_bool().unwrap());
+                let calls = &manager.lock().unwrap().calls;
+                if system == System::Darwin {
+                    let target = format!("gui/{}/{}", unsafe { libc::getuid() }, s.label);
+                    assert!(
+                        calls
+                            .iter()
+                            .any(|call| call == &["launchctl", "bootout", &target])
+                    );
+                    assert!(calls.iter().any(|call| call
+                        == &[
+                            "launchctl",
+                            "bootstrap",
+                            &format!("gui/{}", unsafe { libc::getuid() }),
+                            s.config.to_str().unwrap()
+                        ]));
+                } else {
+                    for action in ["start", "restart", "stop", "disable"] {
+                        assert!(
+                            calls
+                                .iter()
+                                .any(|call| call == &["systemctl", "--user", action, &s.unit()])
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reconfiguration_uses_current_release_without_touching_the_service() {
         for system in [System::Darwin, System::Linux] {
             let f = Fixture::new();
@@ -1870,12 +1992,17 @@ esac
             m.lock().unwrap().calls.clear();
             let (mut foreign, _) = f.service_at(system, "node", &f.root.join("foreign"), None);
             for action in ["stop", "status", "uninstall"] {
+                let expected = if action == "status" {
+                    "another or unknown home"
+                } else {
+                    "matching service registration required"
+                };
                 assert!(
                     foreign
                         .dispatch(action, None, 0)
                         .unwrap_err()
                         .to_string()
-                        .contains("another or unknown home")
+                        .contains(expected)
                 );
             }
             let original = fs::read(&s.config).unwrap();
@@ -2065,7 +2192,8 @@ esac
     fn failed_systemd_query_is_unknown_even_if_its_output_says_inactive() {
         let f = Fixture::new();
         let (mut s, m) = f.service(System::Linux, "node");
-        assert_eq!(s.dispatch("uninstall", None, 0).unwrap()["changed"], false);
+        assert!(s.dispatch("uninstall", None, 0).is_err());
+        assert!(m.lock().unwrap().calls.is_empty());
         s.dispatch("install", Some(&f.release), 0).unwrap();
         m.lock().unwrap().show_failure = true;
         assert!(
@@ -2078,7 +2206,7 @@ esac
     }
 
     #[test]
-    fn legacy_signed_default_home_is_accepted_only_with_its_exact_command() {
+    fn legacy_signed_home_inspection_checks_its_command_but_uninstall_requires_registration() {
         let f = Fixture::new();
         let home = f.root.join(".steve");
         fs::create_dir_all(home.join("signing")).unwrap();
@@ -2120,7 +2248,14 @@ esac
         write(&original);
         m.lock().unwrap().calls.clear();
         let identity = fs::read(home.join("signing/identity.json")).unwrap();
-        s.uninstall().unwrap();
+        assert!(
+            s.uninstall()
+                .unwrap_err()
+                .to_string()
+                .contains("matching service registration required")
+        );
+        assert!(m.lock().unwrap().calls.is_empty());
+        assert!(s.config.is_file());
         assert_eq!(
             fs::read(home.join("signing/identity.json")).unwrap(),
             identity

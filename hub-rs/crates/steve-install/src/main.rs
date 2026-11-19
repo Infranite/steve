@@ -32,15 +32,7 @@ fn flag(args: &mut Vec<String>, name: &str) -> Result<bool> {
 }
 
 fn role_home(role: &str, selected: Option<String>) -> Result<PathBuf> {
-    common::canonical(
-        &selected
-            .map(PathBuf::from)
-            .unwrap_or(common::user_home()?.join(if role == "hub" {
-                ".steve"
-            } else {
-                ".steve-node"
-            })),
-    )
+    common::role_home(role, selected.as_deref().map(Path::new))
 }
 
 fn bundle() -> Result<PathBuf> {

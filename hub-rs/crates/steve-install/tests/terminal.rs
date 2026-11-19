@@ -228,6 +228,55 @@ fn manager(bin: &Path, calls: &Path, running: bool) {
 }
 
 #[test]
+fn setup_selects_the_environment_home_unless_overridden() {
+    for role in ["hub", "node"] {
+        for override_home in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let account = root.join("account");
+            let environment = root.join("environment");
+            let explicit = root.join("explicit");
+            fs::create_dir(&account).unwrap();
+            let cli = installer(&root);
+            let mut command = Command::new(&cli);
+            command
+                .args(["setup", role])
+                .env_clear()
+                .env("HOME", &account)
+                .env("STEVE_HOME", &environment)
+                .env("PATH", root.join("no-executables"))
+                .stdin(Stdio::null());
+            if override_home {
+                command.arg("--home").arg(&explicit);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                !output.status.success(),
+                "setup must stop at the unanswered prompt"
+            );
+            let selected = if override_home {
+                &explicit
+            } else {
+                &environment
+            };
+            let receipt: Value =
+                serde_json::from_slice(&fs::read(selected.join("setup.json")).unwrap_or_else(
+                    |error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)),
+                ))
+                .unwrap();
+            assert_eq!(receipt["home"], selected.to_str().unwrap());
+            assert_eq!(receipt["component"], role);
+            assert!(!selected.join("services").exists());
+            assert!(!account.join(".steve").exists());
+            assert!(!account.join(".steve-node").exists());
+            if override_home {
+                assert!(!environment.exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
@@ -600,6 +649,15 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     }))
     .unwrap();
     private_fixture_file(&home.join("setup.json"), &receipt);
+    // --fresh may stop/unregister only an installation with its own service receipt.
+    fs::create_dir(home.join("services")).unwrap();
+    private_fixture_file(
+        &home.join("services/hub.json"),
+        serde_json::to_vec(&json!({
+            "component":"hub", "label":"io.github.infranite.steve.hub"
+        }))
+        .unwrap(),
+    );
     private_fixture_file(
         &home.join("data/steve.sqlite3"),
         b"the database of the installation in use",

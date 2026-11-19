@@ -20,6 +20,22 @@ pub fn user_home() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The CLI and setup share the Hub/Node home precedence; HOME is only a fallback.
+pub fn role_home(role: &str, selected: Option<&Path>) -> Result<PathBuf> {
+    let home = selected
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("STEVE_HOME").map(PathBuf::from));
+    let home = match home {
+        Some(home) => home,
+        None => user_home()?.join(match role {
+            "hub" => ".steve",
+            "node" => ".steve-node",
+            _ => bail!("role must be hub or node"),
+        }),
+    };
+    canonical(&home)
+}
+
 pub fn canonical(path: &Path) -> Result<PathBuf> {
     let expanded = if let Ok(p) = path.strip_prefix("~") {
         user_home()?.join(p)

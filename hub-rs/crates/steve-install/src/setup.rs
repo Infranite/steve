@@ -1636,17 +1636,8 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             |value| setup_role(value, &options),
         )?,
     };
-    let default_home = options.home.is_none();
-    let home = canonical(
-        &options
-            .home
-            .clone()
-            .unwrap_or(user_home()?.join(if role == "hub" {
-                ".steve"
-            } else {
-                ".steve-node"
-            })),
-    )?;
+    let default_home = options.home.is_none() && std::env::var_os("STEVE_HOME").is_none();
+    let home = role_home(&role, options.home.as_deref())?;
     /* how the commands setup names reach this installation */
     let mut flags = String::new();
     if !default_home {

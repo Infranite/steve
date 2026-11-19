@@ -909,7 +909,7 @@ fn run_with(
         "{}",
         t!("install.reconfigure.hub_only")
     );
-    let home = canonical(&options.home.clone().unwrap_or(user_home()?.join(".steve")))?;
+    let home = role_home("hub", options.home.as_deref())?;
     owned(&home, true).context(t!("install.reconfigure.no_home"))?;
     if exists(&pending_path(&home)) {
         let pending = Pending::load(&home)?;
