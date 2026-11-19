@@ -324,7 +324,7 @@ async fn one_message_drafts_several_settings_and_their_cards_remember_what_happe
         if p.starts_with("You are the router") {
             Ok(r#"{"kind":"config","title":"x"}"#.into())
         } else if p.starts_with("Which Steve configuration") {
-            assert!(p.contains("settings:notify — 免打扰时段、每天汇报时间"));
+            assert!(p.contains("settings:notify — 免打扰时段"));
             Ok(r#"{"targets":["settings:notify","bot:dev","bot:dev","nope:x"]}"#.into())
         } else if p.contains("Steve settings · notify") {
             Ok(r#"{"changes":[{"key":"quiet","value":"22:00 – 09:00"}]}"#.into())
@@ -438,7 +438,7 @@ async fn asking_how_a_setting_is_set_shows_it_without_drafting() {
     let ms = settle(&k, 2).await;
     assert_eq!(
         ms[1].text,
-        "「设置 · 通知」现在是：\n- 免打扰：23:00 – 08:00\n- 每天汇报：08:30\n\n要改的话直接说改成什么，我起草好给你确认。"
+        "「设置 · 通知」现在是：\n- 免打扰：23:00 – 08:00\n\n要改的话直接说改成什么，我起草好给你确认。"
     );
     assert!(ms[1].meta.get("proposal").is_none());
 }

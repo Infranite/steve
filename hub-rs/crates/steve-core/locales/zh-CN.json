@@ -177,7 +177,6 @@
   "core.draft.setting.handoff": "交接阈值",
   "core.draft.setting.archDays": "完成后自动归档",
   "core.draft.setting.quiet": "免打扰",
-  "core.draft.setting.digestAt": "每天汇报",
   "core.draft.setting.fontSize": "字号",
   "core.draft.setting.reduceMotion": "减弱动态效果",
   "core.draft.setting.keepSess": "会话记录保留",

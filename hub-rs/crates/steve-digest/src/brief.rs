@@ -22,7 +22,7 @@
 //! brief planned before it (then it is kept in the feed only). One brief per member and local day
 //! (`briefings`); each writes a run on its schedule.
 
-use chrono::{Datelike, Days, NaiveDate, NaiveTime, Timelike};
+use chrono::{Datelike, Days, NaiveDate, NaiveTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,23 +41,9 @@ type Result<T> = std::result::Result<T, StoreError>;
 
 /// The alarm family (`brief:<schedule id>`).
 pub const FAMILY: &str = "brief";
-/// The workspace’s configured report time, restricted to weekdays.
-pub fn cron_at(setting: &str) -> Option<String> {
-    let t = NaiveTime::parse_from_str(setting, "%H:%M").ok()?;
-    Some(format!("{} {} * * 1-5", t.minute(), t.hour()))
-}
-
-fn digest_at(c: &Connection, ws: &str) -> rusqlite::Result<Option<String>> {
-    let value: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'digestAt'",
-            [ws],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(value.and_then(|v| serde_json::from_str(&v).ok()))
-}
+/// A new brief's time: workdays 08:30. The brief's own plan (its cron, editable on the Automations page)
+/// is the only source of its time afterwards.
+pub const DEFAULT_CRON: &str = "30 8 * * 1-5";
 /// How the new brief's time is said (what the Automations page shows as typed).
 pub const DEFAULT_WHEN: &str = "工作日 08:30";
 /// A brief planned before this local minute (12:00) and coming after it is kept in the feed only.
@@ -111,15 +97,11 @@ pub fn ensure(tx: &Tx, ws: &str, user: &str, now: i64) -> Result<Option<String>>
     if user.starts_with("svc:") || brief_row(tx, ws, user, false)?.is_some() {
         return Ok(None);
     }
-    let at = digest_at(tx, ws)?.unwrap_or_else(|| "08:30".into());
-    let Some(cron) = cron_at(&at) else {
-        return Ok(None);
-    };
     let zone = Zone::of(tx, ws, user)?;
     let spec = Spec {
         requester: Some(user.into()),
-        when: format!("工作日 {at}"),
-        cron,
+        when: DEFAULT_WHEN.into(),
+        cron: DEFAULT_CRON.into(),
         tz: zone.name().into(),
         what: String::new(),
         bot: String::new(),
@@ -224,16 +206,7 @@ impl AlarmSource for BriefAlarms {
             return Ok(Vec::new());
         };
         let zone = Zone::of(c, ws, &owner)?;
-        let expr = match digest_at(c, ws)? {
-            Some(at) => {
-                let Some(cron) = cron_at(&at) else {
-                    return Ok(Vec::new());
-                };
-                CronExpr::parse(&cron).map_err(|e| ApiError::Internal(e.to_string()))?
-            }
-            None => s.spec.expr()?,
-        };
-        Ok(wants(&expr, zone, &owner, now))
+        Ok(wants(&s.spec.expr()?, zone, &owner, now))
     }
 
     fn line(
@@ -865,13 +838,6 @@ pub fn today(c: &Connection, ws: &str, user: &str, now: i64) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn digest_at_settings() {
-        assert_eq!(cron_at("08:30").as_deref(), Some("30 8 * * 1-5"));
-        assert_eq!(cron_at("09:00").as_deref(), Some("0 9 * * 1-5"));
-        assert_eq!(cron_at("不发"), None);
-    }
-
     use super::*;
     use chrono::{TimeZone, Utc};
 
@@ -887,7 +853,7 @@ mod tests {
 
     #[test]
     fn a_week_of_workday_briefs_ahead_whose_day_is_not_over() {
-        let cron = CronExpr::parse(&cron_at("08:30").unwrap()).unwrap();
+        let cron = CronExpr::parse(DEFAULT_CRON).unwrap();
         // Wednesday 2026-11-18 07:00 Shanghai = 23:00 UTC the day before
         let now = ms(2026, 11, 17, 23, 0);
         let w = wants(&cron, shanghai(), "me", now);
