@@ -155,24 +155,40 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, FeishuError>>,
 {
-    let mut n = 0;
-    loop {
-        match call().await {
-            Err(FeishuError::RateLimited { code, reset }) if n < retries => {
-                let wait = reset.unwrap_or(DEFAULT_BACKOFF).min(cap);
-                n += 1;
-                tracing::info!(
-                    code,
-                    what,
-                    attempt = n,
-                    wait_ms = wait.as_millis() as u64,
-                    "feishu: rate limited, retrying the same request"
-                );
-                tokio::time::sleep(wait).await;
-            }
-            r => return r.map(|v| (v, n)),
-        }
-    }
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use steve_runtime::policy::{Backoff, Jitter, Retry};
+    let calls = AtomicU32::new(0);
+    let policy = Backoff {
+        base: DEFAULT_BACKOFF,
+        max: cap,
+        factor: 1,
+        jitter: Jitter::None,
+        attempts: Some(retries),
+        reset_after: None,
+    };
+    let result = policy
+        .retry(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                call()
+            },
+            |error| match error {
+                FeishuError::RateLimited { code, reset } => {
+                    let wait = reset.unwrap_or(DEFAULT_BACKOFF).min(cap);
+                    tracing::info!(
+                        code,
+                        what,
+                        attempt = calls.load(Ordering::Relaxed),
+                        wait_ms = wait.as_millis() as u64,
+                        "feishu: rate limited, retrying the same request"
+                    );
+                    Retry::After(wait)
+                }
+                _ => Retry::Stop,
+            },
+        )
+        .await;
+    result.map(|value| (value, calls.load(Ordering::Relaxed) - 1))
 }
 
 #[cfg(test)]

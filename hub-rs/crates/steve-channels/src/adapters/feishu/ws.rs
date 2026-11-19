@@ -755,20 +755,28 @@ impl<H: WsHandler> Inner<H> {
 }
 
 fn reconnect_wait(cfg: ClientConfig, attempts: u32) -> Duration {
-    if attempts == 0 {
-        random_below(cfg.reconnect_nonce)
+    use steve_runtime::policy::{Backoff, Jitter};
+    let initial = attempts == 0;
+    let max = if initial {
+        Duration::from_millis(cfg.reconnect_nonce.as_millis() as u64)
+            .saturating_sub(Duration::from_nanos(1))
     } else {
         cfg.reconnect_interval
+    };
+    let delay = Backoff {
+        base: max,
+        max,
+        factor: 1,
+        jitter: if initial { Jitter::Full } else { Jitter::None },
+        attempts: None,
+        reset_after: None,
     }
-}
-
-/// Uniform in `[0, d)`, millisecond resolution; zero for zero.
-fn random_below(d: Duration) -> Duration {
-    let ms = d.as_millis() as u64;
-    if ms == 0 {
-        return Duration::ZERO;
+    .delay(0, &mut rand::rng());
+    if initial {
+        Duration::from_millis(delay.as_millis() as u64)
+    } else {
+        delay
     }
-    Duration::from_millis(rand::random_range(0..ms))
 }
 
 #[cfg(test)]

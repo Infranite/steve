@@ -67,14 +67,14 @@ struct Bucket {
 }
 
 impl Bucket {
-    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> Duration {
+    fn take(&mut self, now: Instant, rate: f64, burst: f64) -> Option<Duration> {
         self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * rate).min(burst);
         self.at = now;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            Duration::ZERO
+            None
         } else {
-            Duration::from_secs_f64((1.0 - self.tokens) / rate)
+            Some(Duration::from_secs_f64((1.0 - self.tokens) / rate))
         }
     }
 }
@@ -262,9 +262,7 @@ impl ExtWs {
                 });
                 e.take(now, rate, burst)
             };
-            if wait.is_zero() {
-                return;
-            }
+            let Some(wait) = wait else { return };
             tokio::time::sleep(wait).await;
         }
     }
@@ -533,25 +531,38 @@ impl Drop for Use {
 }
 
 fn rpc_delay(base: Duration, max: Duration, attempt: u32) -> Duration {
-    (0..attempt).fold(base, |wait, _| (wait * 2).min(max))
-}
-
-/// `0..=max` ms.
-fn jitter(max: u64) -> u64 {
-    if max == 0 {
-        0
-    } else {
-        rand::random_range(0..=max)
+    steve_runtime::policy::Backoff {
+        base,
+        max,
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: Some(RETRIES as u32),
+        reset_after: None,
     }
+    .delay(attempt, &mut rand::rng())
 }
 
 fn hinted_wait(ms: u64) -> Duration {
-    Duration::from_millis(ms + jitter(ms / 5))
+    Duration::from_millis(ms) + full_jitter(Duration::from_millis(ms / 5))
 }
 
-/// Full jitter: anywhere in `0..=d`.
+/// Full jitter on the protocol's inclusive millisecond lattice. Runtime Jitter
+/// samples nanoseconds: one equally sized interval per possible old millisecond
+/// preserves both endpoints and the old uniform distribution after quantizing.
 pub(crate) fn full_jitter(d: Duration) -> Duration {
-    Duration::from_millis(jitter(d.as_millis() as u64))
+    let max = Duration::from_millis(d.as_millis() as u64)
+        .saturating_add(Duration::from_millis(1))
+        .saturating_sub(Duration::from_nanos(1));
+    let delay = steve_runtime::policy::Backoff {
+        base: max,
+        max,
+        factor: 1,
+        jitter: steve_runtime::policy::Jitter::Full,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay(0, &mut rand::rng());
+    Duration::from_millis(delay.as_millis() as u64)
 }
 
 /// Writes may go out: not read-only, the remote session usable (§3.6, §9.2).
@@ -1633,20 +1644,36 @@ mod pacing_sequence_tests {
             at: now,
         };
         for expected in [0, 0, 500, 500] {
-            assert_eq!(bucket.take(now, 2.0, 2.0), Duration::from_millis(expected));
+            assert_eq!(
+                bucket.take(now, 2.0, 2.0),
+                if expected == 0 {
+                    None
+                } else {
+                    Some(Duration::from_millis(expected))
+                }
+            );
         }
         assert_eq!(
             bucket.take(now + Duration::from_millis(250), 2.0, 2.0),
-            Duration::from_millis(250)
+            Some(Duration::from_millis(250))
         );
         assert_eq!(
             bucket.take(now + Duration::from_millis(500), 2.0, 2.0),
-            Duration::ZERO
+            None
         );
         // A new hello changes replenishment/burst without refilling the existing connection.
         assert_eq!(
             bucket.take(now + Duration::from_millis(500), 4.0, 8.0),
-            Duration::from_millis(250)
+            Some(Duration::from_millis(250))
+        );
+        let mut rounding = Bucket {
+            tokens: 1.0 - f64::EPSILON,
+            at: now,
+        };
+        assert_eq!(
+            rounding.take(now, 1.0, 1.0),
+            Some(Duration::ZERO),
+            "a rounded zero retry wait must not be mistaken for a consumed token"
         );
     }
 }

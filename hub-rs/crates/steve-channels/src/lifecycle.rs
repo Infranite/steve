@@ -771,7 +771,15 @@ async fn stop_run(inner: &Inner, id: &str, mut c: Current, grace: Duration) {
 // Returns this wait before advancing; reset remains tied to the run's lifetime/fingerprint.
 fn next_backoff(wait: &mut Duration, max: Duration) -> Duration {
     let delay = *wait;
-    *wait = (*wait * 2).min(max);
+    *wait = steve_runtime::policy::Backoff {
+        base: *wait,
+        max,
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .delay(1, &mut rand::rng());
     delay
 }
 

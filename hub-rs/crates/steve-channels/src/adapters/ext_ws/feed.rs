@@ -146,7 +146,15 @@ fn feed_wait(
         *wait = timing.backoff_min;
     }
     let delay = full_jitter(*wait);
-    *wait = (*wait * 2).min(timing.backoff_max);
+    *wait = steve_runtime::policy::Backoff {
+        base: *wait,
+        max: timing.backoff_max,
+        factor: 2,
+        jitter: steve_runtime::policy::Jitter::None,
+        attempts: None,
+        reset_after: Some(timing.stable),
+    }
+    .delay(1, &mut rand::rng());
     delay
 }
 
