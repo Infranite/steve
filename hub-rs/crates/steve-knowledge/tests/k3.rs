@@ -832,3 +832,50 @@ async fn an_expired_candidate_can_be_restored() {
         .await;
     assert_eq!((code, r["done"].clone()), (200, json!(1)));
 }
+
+#[tokio::test]
+async fn chat_failed_extraction_retries_and_catches_up_only_seven_days() {
+    use steve_runtime::clock::Clock;
+    let e = setup();
+    let zone = steve_runtime::tz::Zone::parse("UTC").unwrap();
+    let (start, _) = chat::day_bounds("2026-11-10", zone).unwrap();
+    let clock = steve_runtime::clock::FakeClock::new(start + 4 * 3_600_000);
+    e.env.clock.set(clock.now());
+    e.env.store().transaction(|tx| {
+        tx.execute("INSERT OR REPLACE INTO settings (workspace_id, key, value, updated) VALUES ('default', 'tz', '\"UTC\"', 0)", [])?;
+        for (day, id) in [("2026-11-09", "recent"), ("2026-11-03", "oldest"), ("2026-11-02", "too_old")] {
+            let at = chat::day_bounds(day, zone).unwrap().0 + 3_600_000;
+            tx.execute("INSERT INTO messages (id, workspace_id, space, author, text, created) VALUES (?, 'default', 'steve', 'me', '以后周五不部署', ?)", rusqlite::params![id, at])?;
+        }
+        Ok::<_, steve_modules::ApiError>(())
+    }).unwrap();
+    e.env.gateway.fail("unavailable");
+    assert!(
+        chat::extract_day(&e.env.modules, &e.kb, WS, "2026-11-09")
+            .await
+            .is_err()
+    );
+    let marked = |day: &str| {
+        e.env
+            .store()
+            .reader(|c| steve_knowledge::repo::mark(c, WS, &format!("extract:chat:{day}")))
+            .unwrap()
+            .is_some()
+    };
+    assert!(!marked("2026-11-09"));
+    e.env.gateway.script(
+        PROMPT_HEAD,
+        r#"{"items":[{"kind":"rule","text":"周五不部署","evidence":"以后周五不部署"}]}"#,
+    );
+    chat::tick(&e.env.modules, &e.kb, clock.now(), false)
+        .await
+        .unwrap();
+    assert!(marked("2026-11-03"));
+    assert!(marked("2026-11-09"));
+    assert!(!marked("2026-11-02"));
+    let calls = e.env.gateway.prompts.lock().unwrap().len();
+    chat::tick(&e.env.modules, &e.kb, clock.now(), false)
+        .await
+        .unwrap();
+    assert_eq!(e.env.gateway.prompts.lock().unwrap().len(), calls);
+}

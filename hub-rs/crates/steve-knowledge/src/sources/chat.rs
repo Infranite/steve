@@ -1,7 +1,7 @@
 //! The `chat` source: the main thread with Steve (`messages`, space `steve`), one
 //! document per local day (`ref = chat:2026-10-31`), text only — no draft-card JSON, which lives in
-//! `meta`. Today's document is refreshed hourly, yesterday's is finalized at 03:30, and yesterday's
-//! conversation is extracted into candidate memories at 03:40.
+//! `meta`. Today's document is refreshed hourly; yesterday is finalized at 03:30 and extracted
+//! at 03:40, with up to seven completed local days revisited after downtime.
 
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use steve_store::uid;
 
 use crate::candidates::{Origin, OriginKind};
 use crate::chunk::TextKind;
-use crate::extract::{self, MAX_INPUT, clip};
+use crate::extract;
 use crate::extract_text::{Extracted, FrontMatter};
 use crate::index::{self, BoxFuture, DocLoader, Loaded};
 use crate::repo::{self, DocRow, NewDoc, SourceRow};
@@ -156,9 +156,8 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
                 if repo::mark(tx, &w, &mark)?.is_some() {
                     return Ok::<_, ApiError>(None);
                 }
-                repo::set_mark(tx, &w, &mark, "done", now)?;
                 let user = extract::owner(tx, &w)?;
-                Ok(day_text(tx, &w, &d)?.map(|t| (user, t)))
+                Ok(Some((user, day_text(tx, &w, &d)?.unwrap_or_default())))
             })
         })
         .await?;
@@ -176,19 +175,37 @@ pub async fn extract_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> Ap
         item_id: None,
         session_id: None,
     };
-    extract::run(
-        m,
-        kb,
-        &origin,
-        &clip(&text, MAX_INPUT),
-        None,
-        extract::Task::default(),
-    )
-    .await
+    let prepared = extract::prepare(m, kb, &origin, &text, None, extract::Task::default()).await?;
+    let mark = format!("extract:chat:{day}");
+    m.blocking(move |m| commit_extraction(m, &origin, &prepared, &mark, now, || {}))
+        .await
 }
 
+fn commit_extraction(
+    m: &Modules,
+    origin: &Origin,
+    prepared: &extract::Prepared,
+    mark: &str,
+    now: i64,
+    before_mark: impl FnOnce(),
+) -> ApiResult<Vec<Mem>> {
+    m.store.transaction(|tx| {
+        // Serialize concurrent extractions of the same day after their model work completes.
+        if repo::mark(tx, &origin.ws, mark)?.is_some() {
+            return Ok(Vec::new());
+        }
+        let made = extract::commit_in(tx, origin, prepared)?;
+        before_mark();
+        repo::set_mark(tx, &origin.ws, mark, "done", now)?;
+        Ok(made)
+    })
+}
+
+/// Completed local days revisited after downtime, oldest first, bounded to seven days per tick.
+pub const CATCH_UP_DAYS: u64 = 7;
+
 /// One run of the job at `now`: today's document of every workspace (when `today` is set), and after
-/// 03:30 / 03:40 yesterday's final document / extraction if not done yet.
+/// 03:30 / 03:40 yesterday's final document / extraction, plus uncompleted days in the catch-up window.
 pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResult<()> {
     let wss: Vec<String> = m
         .blocking(|m| {
@@ -217,32 +234,34 @@ pub async fn tick(m: &Modules, kb: &Knowledge, now: i64, today: bool) -> ApiResu
             continue;
         };
         let hm = (local.hour(), local.minute());
-        let yesterday = local
-            .date()
-            .pred_opt()
-            .map(|d| d.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        // a day's document is rebuilt and chunked in one write: off the runtime
-        let (k, w, y) = (kb.clone(), ws.clone(), yesterday.clone());
-        m.blocking(move |m| {
-            if today {
-                sync_day(m, &k, &w, &day_of(now, zone))?;
+        if today {
+            let (k, w) = (kb.clone(), ws.clone());
+            m.blocking(move |m| sync_day(m, &k, &w, &day_of(now, zone)))
+                .await?;
+        }
+        for ago in (1..=CATCH_UP_DAYS).rev() {
+            let Some(day) = local.date().checked_sub_days(chrono::Days::new(ago)) else {
+                continue;
+            };
+            let day = day.format("%Y-%m-%d").to_string();
+            let (k, w, d) = (kb.clone(), ws.clone(), day.clone());
+            if ago > 1 || hm >= FINALIZE_AT {
+                m.blocking(move |m| {
+                    let mark = format!("sync:chat:{d}");
+                    if m.store.reader(|c| repo::mark(c, &w, &mark))?.is_none() {
+                        sync_day(m, &k, &w, &d)?;
+                        m.store
+                            .transaction(|tx| repo::set_mark(tx, &w, &mark, "final", now))?;
+                    }
+                    Ok::<_, ApiError>(())
+                })
+                .await?;
             }
-            if hm >= FINALIZE_AT {
-                let mark = format!("sync:chat:{y}");
-                if m.store.reader(|c| repo::mark(c, &w, &mark))?.is_none() {
-                    sync_day(m, &k, &w, &y)?;
-                    m.store
-                        .transaction(|tx| repo::set_mark(tx, &w, &mark, "final", now))?;
-                }
+            if (ago > 1 || hm >= EXTRACT_AT)
+                && let Err(e) = extract_day(m, kb, &ws, &day).await
+            {
+                tracing::warn!(ws = %ws, day, "kb.extract chat: {e}");
             }
-            Ok(())
-        })
-        .await?;
-        if hm >= EXTRACT_AT
-            && let Err(e) = extract_day(m, kb, &ws, &yesterday).await
-        {
-            tracing::warn!(ws = %ws, "kb.extract chat: {e}");
         }
     }
     Ok(())
@@ -311,6 +330,100 @@ mod tests {
     }
 
     use super::*;
+    use crate::candidates::{self, NewCandidate};
+
+    #[test]
+    fn extraction_crash_before_receipt_rolls_back_and_reopens_once() {
+        use steve_modules::testkit::{TestEnv, WS};
+        let mut env = TestEnv::new(|r| {
+            r.decision(candidates::SUBJECT, Box::new(candidates::MemDecisions));
+        });
+        let origin = Origin {
+            ws: WS.into(),
+            kind: OriginKind::Chat,
+            id: "chat:2026-10-31".into(),
+            label: "10-31 的对话".into(),
+            user: steve_modules::testkit::ME.into(),
+            writer: "steve".into(),
+            default_level: Level::Conclusion,
+            item_id: None,
+            session_id: None,
+        };
+        let candidate = NewCandidate {
+            kind: "rule".into(),
+            text: "周五不部署".into(),
+            evidence: "以后周五不部署".into(),
+            about: vec![],
+            level: Level::Conclusion,
+            supersedes: None,
+            why: String::new(),
+            scope: String::new(),
+            owner_said: false,
+        };
+        let prepared = extract::Prepared {
+            text: "我（10:00）：以后周五不部署".into(),
+            candidates: vec![candidate],
+        };
+        let mark = "extract:chat:2026-10-31";
+        let path = env.dir.path().join("steve.sqlite3");
+        let clock = steve_runtime::clock::FakeClock::new(1_793_491_200_000);
+        let now = steve_runtime::clock::Clock::now(&clock);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {
+                panic!("crash after candidates and notice, before receipt")
+            })
+        }));
+        assert!(crashed.is_err());
+        let reopened = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
+        let mut registry = steve_modules::Registry::new();
+        registry.decision(candidates::SUBJECT, Box::new(candidates::MemDecisions));
+        env.modules =
+            Modules::with_clock(reopened, env.gateway.clone(), registry, env.clock.clone());
+        assert!(
+            env.modules
+                .store
+                .reader(|c| repo::mark(c, WS, mark))
+                .unwrap()
+                .is_none()
+        );
+        let count = || {
+            env.modules
+                .store
+                .reader(|c| {
+                    Ok::<_, ApiError>(c.query_row(
+                        "SELECT count(*) FROM mem_candidates WHERE origin_id = 'chat:2026-10-31'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        assert_eq!(count(), 0);
+        assert_eq!(
+            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {})
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            commit_extraction(&env.modules, &origin, &prepared, mark, now, || {})
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(count(), 1);
+        let notices: i64 = env
+            .modules
+            .store
+            .reader(|c| {
+                Ok::<_, ApiError>(c.query_row(
+                    "SELECT count(*) FROM messages WHERE space = 'notify'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(notices, 1);
+    }
 
     #[test]
     fn days_round_trip() {
