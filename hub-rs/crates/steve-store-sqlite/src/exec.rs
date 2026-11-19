@@ -21,6 +21,7 @@ pub const INGEST_BATCH: usize = 128;
 pub const SLICE_TARGET: Duration = Duration::from_millis(20);
 static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
 
+/// Monotonic time since an arbitrary origin; implementations must not block.
 pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> Duration;
 }
@@ -127,6 +128,8 @@ struct Lease<C: Send + 'static, R: BatchRunner<C>> {
     connection: Option<C>,
     lane: Lane,
     started: Duration,
+    hold_metric: metrics::Histogram,
+    long_hold_metric: metrics::Counter,
     site: &'static Location<'static>,
 }
 impl<C: Send + 'static, R: BatchRunner<C>> Lease<C, R> {
@@ -136,8 +139,13 @@ impl<C: Send + 'static, R: BatchRunner<C>> Lease<C, R> {
         lane: Lane,
         site: &'static Location<'static>,
     ) -> Rc<Self> {
+        let hold_metric = metrics::histogram!("steve_store_hold_seconds", "file"=>shared.file.clone(), "lane"=>name(lane));
+        let long_hold_metric =
+            metrics::counter!("steve_store_long_hold_total", "site"=>site.to_string());
         let lease = Rc::new(Self {
             started: shared.clock.now(),
+            hold_metric,
+            long_hold_metric,
             shared,
             connection: Some(connection),
             lane,
@@ -150,12 +158,14 @@ impl<C: Send + 'static, R: BatchRunner<C>> Lease<C, R> {
 }
 impl<C: Send + 'static, R: BatchRunner<C>> Drop for Lease<C, R> {
     fn drop(&mut self) {
-        ACTIVE.with(|v| *v.borrow_mut() = None);
+        // A caller may store its grant in TLS. ACTIVE can already have been destroyed
+        // during thread teardown; the connection must still return to the executor.
+        let _ = ACTIVE.try_with(|v| *v.borrow_mut() = None);
         let elapsed = self.shared.clock.now().saturating_sub(self.started);
-        metrics::histogram!("steve_store_hold_seconds", "file"=>self.shared.file.clone(), "lane"=>name(self.lane)).record(elapsed.as_secs_f64());
+        // Cached handles avoid consulting metrics' thread-local recorder during TLS teardown.
+        self.hold_metric.record(elapsed.as_secs_f64());
         if elapsed > Duration::from_millis(50) {
-            metrics::counter!("steve_store_long_hold_total", "site"=>self.site.to_string())
-                .increment(1);
+            self.long_hold_metric.increment(1);
             self.shared.warn("long_hold", self.site);
         }
         let mut s = lock(&self.shared.state);
@@ -168,6 +178,7 @@ impl<C: Send + 'static, R: BatchRunner<C>> Drop for Lease<C, R> {
 }
 /// Thread-bound; may be dropped in any nesting order. Only the last lease releases the writer.
 /// Nested marks the caller's need for a SAVEPOINT; the executor never creates one.
+/// Keep the grant in synchronous code: thread ownership must not span an await.
 pub struct RootGrant<C: Send + 'static, R: BatchRunner<C>> {
     lease: Rc<Lease<C, R>>,
     nested: bool,
