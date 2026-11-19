@@ -3,11 +3,11 @@ name = "steve-store-sqlite"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
-description = "Steve's built-in SQLite implementation of the storage contract: engines, executor, schema, backup"
 
 [dependencies]
-steve-types = { path = "../steve-types" }
-steve-storage-api = { path = "../steve-storage-api" }
-rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "hooks"] }
-# Compressed backups (W2a backup).
-flate2 = "=1.1.10"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+sha2 = "=0.11.1"
+
+[dev-dependencies]
+# Temporary: only the legacy Store::open structural equivalence test; remove with the old runner.
+steve-store = { path = "../steve-store" }
