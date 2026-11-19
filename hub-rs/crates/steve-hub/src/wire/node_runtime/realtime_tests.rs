@@ -2,7 +2,11 @@
 //! network, Node worker or production state. Source and receipt times are deliberately different.
 use super::*;
 use steve_node_api::testkit::FakeNode;
+
+#[path = "../../../tests/node_runtime/clock.rs"]
+mod test_clock;
 use steve_stats::realtime::{Quality, Realtime, Scope};
+use test_clock::ManualClock;
 
 struct Noop;
 impl NodeDomain for Noop {
@@ -22,7 +26,10 @@ impl Collected {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let at = now().div_euclid(1000) * 1000;
+        // receipt times come from this clock, so a slow machine cannot push them past `at`
+        let clock = Arc::new(ManualClock::new());
+        let at = (clock.now_ms().div_euclid(1000) + 1) * 1000;
+        clock.advance_to(at);
         store.with_conn(|c| {
             c.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','running',?1,?1)",[at-70_000])?;
             c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s','n','{}','s','r','active','a',?)",[at-70_000])?;
@@ -31,7 +38,7 @@ impl Collected {
             c.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,created,updated) VALUES ('op','n','start_turn','{}','d','a','finished',?1,?1)",[at-70_000])?;
             Ok(())
         }).unwrap();
-        let rt = NodeRuntime::new(store.clone(), FakeNode::new("n"), Arc::new(Noop));
+        let rt = NodeRuntime::with_clock(store.clone(), FakeNode::new("n"), Arc::new(Noop), clock);
         Self {
             _dir: dir,
             store,
@@ -142,8 +149,8 @@ fn assert_bad_end_keeps_recent_output(relative: bool, source_at: i64) {
         source_at
     };
     f.ingest(source_at, stopped());
-    // Wait for the receipt's second to be visible without waiting on wall time.
-    let at = now().div_euclid(1_000) * 1_000 + 1_000;
+    // the receipt's second (the fixture clock stands at `f.at`) is visible a second later
+    let at = f.at + 1_000;
     let r = f.read(at);
     assert_eq!(
         (r.state, r.tps, r.output_sessions, r.estimated_tps),
