@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         loop {
             for event in events.env.take_events() {
-                let _ = tx.send(serde_json::to_value(event).unwrap()).await;
+                let _ = tx.send(steve_modules::testkit::notification(event)).await;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
