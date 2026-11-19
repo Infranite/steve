@@ -23,6 +23,7 @@ fn observer() -> (Arc<Mutex<Vec<Progress>>>, Observer) {
 fn assert_events(events: &[Progress], complete: bool) {
     assert!(!events.is_empty());
     assert!(events.windows(2).all(|p| p[1].vm_steps >= p[0].vm_steps));
+    assert!(events.windows(2).all(|p| p[1].phase >= p[0].phase));
     assert!(events[..events.len() - 1].iter().all(|p| !p.complete));
     assert_eq!(events.last().unwrap().complete, complete);
 }
