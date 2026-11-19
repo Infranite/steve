@@ -65,12 +65,15 @@ install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
                     .unwrap_or_default()
                     .to_string()
             };
+            // Transitional Value tap -> legacy subscriber bridge. The subscriber still accepts
+            // ChangeEvent until W1.3c; do not invent a ws for legacy Bot notices (they have none).
             let e = match s("type").as_str() {
                 "mm" => steve_store::ChangeEvent::Mm {
                     id: s("id"),
                     ws: s("ws"),
                 },
-                _ => steve_store::ChangeEvent::Bot { id: s("id") },
+                "bot" => steve_store::ChangeEvent::Bot { id: s("id") },
+                _ => continue,
             };
             let m = m.clone();
             match tokio::task::spawn_blocking(move || steve_knowledge::sync::on_event(&m, &e)).await

@@ -33,8 +33,9 @@ use tokio::sync::broadcast::{
 use tokio::time::{Instant, Interval, interval_at};
 
 use super::{AppState, Ctx};
-use crate::bus::{Bus, Cursor, Frame, HubEvent, Replay, Viewer};
+use crate::bus::{Bus, Cursor, Frame, Replay, Viewer};
 use crate::presence::Here;
+use steve_types::StreamControl;
 
 pub const PING_EVERY: Duration = Duration::from_secs(25);
 
@@ -251,10 +252,7 @@ impl Sub {
     }
 
     fn resync_frame(&self) -> Bytes {
-        let json = serde_json::to_string(&HubEvent::Workspace {
-            id: self.ws.ws.clone(),
-        })
-        .expect("workspace event serializes");
+        let json = serde_json::to_string(&StreamControl::Reset).expect("stream control serializes");
         Bytes::from(format!("data: {json}\n\n"))
     }
 
@@ -369,7 +367,7 @@ mod tests {
     use crate::bus::Scope;
 
     #[tokio::test]
-    async fn coalescing_lag_emits_workspace_resync_and_keeps_surviving_frames() {
+    async fn coalescing_lag_emits_reset_and_keeps_surviving_frames() {
         let (tx, rx) = tokio::sync::broadcast::channel(2);
         let frame = |scope| {
             Arc::new(Frame {
@@ -393,8 +391,7 @@ mod tests {
         }
         let out = sub.coalesce(first);
         let out = std::str::from_utf8(&out).unwrap();
-        assert!(out.contains("\"type\":\"workspace\""));
-        assert!(out.contains("private-a"));
+        assert!(out.contains("\"type\":\"stream.reset\""));
         assert!(sub.rx.try_recv().is_ok());
     }
 
@@ -428,6 +425,7 @@ mod tests {
 
     mod resume {
         use super::super::*;
+        use crate::bus::HubEvent;
         use serde_json::json;
 
         async fn sent(rx: &mut Receiver<Arc<Frame>>, n: usize) -> Vec<Arc<Frame>> {

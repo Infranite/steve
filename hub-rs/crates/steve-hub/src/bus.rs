@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steve_store::Published;
+use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
 
 /// One bus event; serialized it is exactly the SSE `data:` payload of the TS Hub.
@@ -96,6 +98,67 @@ mod double_option {
         d: D,
     ) -> Result<Option<Option<T>>, D::Error> {
         Option::<T>::deserialize(d).map(Some)
+    }
+}
+
+/// Input accepted while legacy producers are migrated crate by crate.
+pub enum Publication {
+    Legacy(HubEvent),
+    Event(Published),
+    Batch(Vec<DomainEvent>),
+}
+impl From<HubEvent> for Publication {
+    fn from(e: HubEvent) -> Self {
+        Self::Legacy(e)
+    }
+}
+impl From<Published> for Publication {
+    fn from(e: Published) -> Self {
+        Self::Event(e)
+    }
+}
+impl From<DomainEvent> for Publication {
+    fn from(e: DomainEvent) -> Self {
+        Self::Event(e.into())
+    }
+}
+impl From<LiveEvent> for Publication {
+    fn from(e: LiveEvent) -> Self {
+        Self::Event(e.into())
+    }
+}
+impl From<Vec<DomainEvent>> for Publication {
+    fn from(e: Vec<DomainEvent>) -> Self {
+        Self::Batch(e)
+    }
+}
+
+enum Queued {
+    Legacy(Value),
+    Domain(Envelope<DomainEvent>),
+    Live(Envelope<LiveEvent>),
+}
+
+/// Already encoded at the SSE edge, shared by live fan-out, throttling and replay.
+#[derive(Debug)]
+struct Encoded {
+    json: String,
+    scope: Scope,
+    ty: String,
+}
+impl Encoded {
+    fn typed<E: Scoped + Serialize>(e: Envelope<E>, ty: &str) -> Self {
+        let scope = match e.scope() {
+            steve_types::Scope::Ws(ws) => Scope::Ws(ws.to_string()),
+            steve_types::Scope::User(user) => Scope::User(user.to_string()),
+            steve_types::Scope::Hub => Scope::All,
+        };
+        let json = serde_json::to_string(&e).expect("typed event serializes");
+        Self {
+            ty: ty.into(),
+            json,
+            scope,
+        }
     }
 }
 
@@ -447,7 +510,8 @@ struct Inner {
     ws_generations: Mutex<HashMap<String, u64>>,
     /// bumped by every `stats` event before it is coalesced: cached statistics older than this are stale
     stats_generation: std::sync::atomic::AtomicU64,
-    tx: std::sync::mpsc::Sender<Value>,
+    tx: std::sync::mpsc::Sender<Queued>,
+    revision: Mutex<u64>,
     out: broadcast::Sender<Arc<Frame>>,
     taps: Taps,
     resolver: Arc<OnceLock<Resolver>>,
@@ -485,7 +549,7 @@ impl Bus {
 
     /// A Bus whose change log keeps at most `frames` frames and `bytes` bytes.
     pub(crate) fn with_window(frames: usize, bytes: usize) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Value>();
+        let (tx, rx) = std::sync::mpsc::channel::<Queued>();
         let out = broadcast::channel(Self::CAPACITY).0;
         let resolver: Arc<OnceLock<Resolver>> = Arc::new(OnceLock::new());
         let taps: Taps = Arc::default();
@@ -507,6 +571,7 @@ impl Bus {
             ws_generations: Mutex::new(HashMap::new()),
             stats_generation: std::sync::atomic::AtomicU64::new(0),
             tx,
+            revision: Mutex::new(0),
             out,
             taps,
             resolver,
@@ -535,9 +600,100 @@ impl Bus {
     }
 
     /// Delivers `e` to every current subscriber that may see it, in publish order.
-    pub fn publish(&self, e: HubEvent) {
-        if let Ok(v) = serde_json::to_value(e) {
-            self.publish_value(v);
+    pub fn publish(&self, e: impl Into<Publication>) {
+        match e.into() {
+            Publication::Legacy(e) => {
+                if let Ok(v) = serde_json::to_value(e) {
+                    self.publish_value(v);
+                }
+            }
+            Publication::Event(e) => self.publish_batch(vec![e]),
+            Publication::Batch(events) => {
+                self.publish_batch(events.into_iter().map(Published::Domain).collect())
+            }
+        }
+    }
+
+    pub fn live(&self, event: LiveEvent) {
+        self.publish_batch(vec![Published::Live(event)]);
+    }
+
+    /// Called synchronously under the store write lock, once per committed transaction.
+    /// Live-only batches reuse the current revision. The lock also keeps concurrent batches ordered.
+    pub fn publish_batch(&self, events: Vec<Published>) {
+        let mut revision = self.0.revision.lock().unwrap_or_else(|e| e.into_inner());
+        if events.iter().any(|e| matches!(e, Published::Domain(_))) {
+            *revision += 1;
+        }
+        for event in events {
+            let event = match event {
+                Published::Legacy(e) => {
+                    if let Ok(v) = serde_json::to_value(e) {
+                        self.publish_value(v);
+                    }
+                    continue;
+                }
+                Published::Domain(event) => {
+                    let stateless = matches!(
+                        &event,
+                        DomainEvent::Stats(_)
+                            | DomainEvent::Devices(steve_types::DevicesEvent::Client { .. })
+                    );
+                    self.invalidate_typed(&event.scope(), stateless);
+                    if matches!(&event, DomainEvent::Stats(_)) {
+                        self.0.stats_generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Queued::Domain(Envelope {
+                        event,
+                        rev: Rev(*revision),
+                    })
+                }
+                Published::Live(event) => {
+                    let stateless = !matches!(
+                        &event,
+                        LiveEvent::Work(steve_types::WorkLiveEvent::SteveThinking { .. })
+                    );
+                    self.invalidate_typed(&event.scope(), stateless);
+                    Queued::Live(Envelope {
+                        event,
+                        rev: Rev(*revision),
+                    })
+                }
+            };
+            let _ = self.0.tx.send(event);
+        }
+    }
+
+    fn invalidate_typed(&self, scope: &steve_types::Scope, stateless: bool) {
+        if stateless {
+            return;
+        }
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
+        match scope {
+            steve_types::Scope::Ws(ws) => self.invalidate_workspace(ws.as_str()),
+            steve_types::Scope::Hub | steve_types::Scope::User(_) => {
+                self.0.global_generation.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn invalidate_workspace(&self, ws: &str) {
+        let mut map = self
+            .0
+            .ws_generations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(g) = map.get_mut(ws) {
+            *g = g.wrapping_add(1);
+        } else {
+            if map.len() >= WS_GENERATION_MAX {
+                let max_evicted = map.values().copied().max().unwrap_or(0);
+                self.0
+                    .global_generation
+                    .fetch_add(max_evicted, Ordering::SeqCst);
+                map.clear();
+            }
+            map.insert(ws.into(), 1);
         }
     }
 
@@ -584,7 +740,7 @@ impl Bus {
                 .stats_generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        let _ = self.0.tx.send(v);
+        let _ = self.0.tx.send(Queued::Legacy(v));
     }
 
     /// How many events were published so far.
@@ -658,7 +814,7 @@ impl Bus {
 }
 
 fn dispatch(
-    rx: std::sync::mpsc::Receiver<Value>,
+    rx: std::sync::mpsc::Receiver<Queued>,
     out: broadcast::Sender<Arc<Frame>>,
     resolver: Arc<OnceLock<Resolver>>,
     taps: Taps,
@@ -686,7 +842,7 @@ fn dispatch(
                 .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
             Some(at) => rx.recv_timeout(at.saturating_duration_since(std::time::Instant::now())),
         };
-        let mut v = match next {
+        let queued = match next {
             Ok(v) => v,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 let now = std::time::Instant::now();
@@ -696,37 +852,54 @@ fn dispatch(
                     tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
                 }
                 for v in stats.due(now) {
-                    out.send(&v, Scope::Ws(ws_of(&v)));
+                    out.send(v);
                 }
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let mut v = match queued {
+            Queued::Domain(e) => {
+                let ty = e.event.wire_type();
+                let frame = Encoded::typed(e, ty);
+                deliver_taps(
+                    &taps,
+                    &frame.ty,
+                    serde_json::from_str(&frame.json).expect("event JSON"),
+                    &mut tap_overflow,
+                );
+                if frame.ty == "stats" {
+                    if let Some(frame) = stats.offer(frame, std::time::Instant::now()) {
+                        out.send(frame);
+                    }
+                } else {
+                    out.send(frame);
+                }
+                continue;
+            }
+            Queued::Live(e) => {
+                let ty = e.event.wire_type();
+                let frame = Encoded::typed(e, ty);
+                deliver_taps(
+                    &taps,
+                    &frame.ty,
+                    serde_json::from_str(&frame.json).expect("event JSON"),
+                    &mut tap_overflow,
+                );
+                out.send(frame);
+                continue;
+            }
+            Queued::Legacy(v) => v,
         };
         let ty = v
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        {
-            let now = std::time::Instant::now();
-            let mut t = taps.lock().unwrap_or_else(|e| e.into_inner());
-            t.retain_mut(|slot| {
-                if slot.matches(&ty) {
-                    slot.deliver(v.clone(), now)
-                } else {
-                    slot.flush()
-                }
-            });
-            tap_overflow = t.iter().any(|s| !s.overflow.is_empty());
-        }
-        if ty == "stats" {
-            // at most one per workspace every 5 s: the first at once, the rest merged into one at the window's end
-            if let Some(v) = stats.offer(v, std::time::Instant::now()) {
-                out.send(&v, Scope::Ws(ws_of(&v)));
-            }
-            continue;
-        }
-        let scope = if ty == "event" {
+        deliver_taps(&taps, &ty, v.clone(), &mut tap_overflow);
+        let scope = if ty == "stats" {
+            Scope::Ws(ws_of(&v))
+        } else if ty == "event" {
             let sid = v
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -764,8 +937,32 @@ fn dispatch(
                 None => Scope::All,
             }
         };
-        out.send(&v, scope);
+        let frame = Encoded {
+            json: serde_json::to_string(&v).expect("event JSON"),
+            scope,
+            ty,
+        };
+        if frame.ty == "stats" {
+            if let Some(frame) = stats.offer(frame, std::time::Instant::now()) {
+                out.send(frame);
+            }
+        } else {
+            out.send(frame);
+        }
     }
+}
+
+fn deliver_taps(taps: &Taps, ty: &str, value: Value, overflow: &mut bool) {
+    let now = std::time::Instant::now();
+    let mut taps = taps.lock().unwrap_or_else(|e| e.into_inner());
+    taps.retain_mut(|slot| {
+        if slot.matches(ty) {
+            slot.deliver(value.clone(), now)
+        } else {
+            slot.flush()
+        }
+    });
+    *overflow = taps.iter().any(|slot| !slot.overflow.is_empty());
 }
 
 /// The dispatcher's end: numbers, logs and broadcasts frames. Only the dispatcher thread holds it, so ids
@@ -777,10 +974,9 @@ struct Sender {
 }
 
 impl Sender {
-    fn send(&mut self, v: &Value, scope: Scope) {
-        let json = serde_json::to_string(v).unwrap_or_default();
-        let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
-        let kept = scope != Scope::Nobody && !TRANSIENT.contains(&ty);
+    fn send(&mut self, frame: Encoded) {
+        let Encoded { json, scope, ty } = frame;
+        let kept = scope != Scope::Nobody && !TRANSIENT.contains(&ty.as_str());
         let id = kept.then(|| {
             self.next_id += 1;
             self.next_id
@@ -809,18 +1005,42 @@ fn ws_of(v: &Value) -> String {
 /// `{type:"stats"}` events, coalesced per workspace: a quiet workspace's event goes out at
 /// once; within [`StatsThrottle::WINDOW`] of the last one sent, the latest is held and sent when the window
 /// ends. So a browser gets at most one every 5 seconds and never misses the last change.
-#[derive(Debug, Default)]
-struct StatsThrottle {
+#[derive(Debug)]
+struct StatsThrottle<T = Value> {
     last: HashMap<String, std::time::Instant>,
-    held: HashMap<String, Value>,
+    held: HashMap<String, T>,
 }
 
-impl StatsThrottle {
+trait WorkspaceKey {
+    fn workspace(&self) -> String;
+}
+impl WorkspaceKey for Value {
+    fn workspace(&self) -> String {
+        ws_of(self)
+    }
+}
+impl WorkspaceKey for Encoded {
+    fn workspace(&self) -> String {
+        match &self.scope {
+            Scope::Ws(ws) => ws.clone(),
+            _ => unreachable!("stats is workspace scoped"),
+        }
+    }
+}
+impl<T> Default for StatsThrottle<T> {
+    fn default() -> Self {
+        Self {
+            last: HashMap::new(),
+            held: HashMap::new(),
+        }
+    }
+}
+impl<T: WorkspaceKey> StatsThrottle<T> {
     const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// The event to send now, if any.
-    fn offer(&mut self, v: Value, now: std::time::Instant) -> Option<Value> {
-        let ws = ws_of(&v);
+    fn offer(&mut self, v: T, now: std::time::Instant) -> Option<T> {
+        let ws = v.workspace();
         match self.last.get(&ws) {
             Some(t) if now.duration_since(*t) < Self::WINDOW => {
                 self.held.insert(ws, v);
@@ -847,7 +1067,7 @@ impl StatsThrottle {
     }
 
     /// The held events whose window has ended.
-    fn due(&mut self, now: std::time::Instant) -> Vec<Value> {
+    fn due(&mut self, now: std::time::Instant) -> Vec<T> {
         let ready: Vec<String> = self
             .held
             .keys()
