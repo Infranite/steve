@@ -326,6 +326,47 @@ pub(crate) fn optimize(c: &Connection, at_open: bool) -> rusqlite::Result<()> {
     })
 }
 
+/// Administrative writer: existing files only, strict read-only header validation, no migration.
+/// Do not change journal mode or checkpoint on close: even a list must leave an existing WAL's
+/// pending frames alone, rather than copying them into the main database on the last close.
+pub(crate) fn open_admin_writer(path: &Path) -> Result<Connection> {
+    let c = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| StoreError::AdminSchema(e.to_string()))?;
+    c.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
+    let header = (|| -> rusqlite::Result<_> {
+        let schema: (i64, i64) =
+            c.query_row("SELECT min(v), count(*) FROM schema_version", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        let compat: (i64, i64) = c.query_row(
+            "SELECT min(min_reader), count(*) FROM schema_compat",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((schema, compat))
+    })()
+    .map_err(|e| StoreError::AdminSchema(e.to_string()))?;
+    let ((schema, versions), (min_reader, stamps)) = header;
+    if versions != 1
+        || stamps != 1
+        || schema != SCHEMA_VERSION
+        || !(1..=SCHEMA_VERSION).contains(&min_reader)
+    {
+        return Err(StoreError::AdminSchema(format!(
+            "schema v{schema}, min_reader v{min_reader}, rows {versions}/{stamps}; expected schema v{SCHEMA_VERSION}"
+        )));
+    }
+    // These pragmas affect this connection only. In particular there is no WAL switch or optimize.
+    pragmas(&c)?;
+    Ok(c)
+}
+
 /// Opens (creating if needed) the write connection and migrates it.
 pub(crate) fn open_writer(path: &Path, observer: Option<MigrationObserver>) -> Result<Connection> {
     let c = Connection::open_with_flags(

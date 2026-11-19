@@ -6,6 +6,7 @@
 //! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of read-only
 //! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
 //! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
+//! Offline administration uses one lazy reader instead.
 //! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
 //! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
 //!
@@ -81,6 +82,9 @@ pub enum StoreError {
         min_reader: i64,
         ours: i64,
     },
+    /// Offline administration must never initialize or upgrade a database.
+    #[error("离线管理需要本版本的数据库头部；请先启动或升级 Hub：{0}")]
+    AdminSchema(String),
     /// The write contradicts the item's lifecycle (a terminal status outside the lifecycle, a status
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
@@ -166,7 +170,15 @@ impl Store {
     /// Opens `path` (creating it), sets the pragmas, migrates, and starts the read pool.
     /// The TS Hub's path is `STEVE_HOME/data/steve.sqlite3`; the caller decides.
     pub fn open(path: impl AsRef<Path>, bus: impl Publisher + 'static) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, None)
+        Self::open_observed(path.as_ref(), bus, None, false)
+    }
+
+    /// Opens an existing database at exactly this build's schema head for offline administration.
+    /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
+    /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
+    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
+    pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_observed(path.as_ref(), NoPublisher, None, true)
     }
 
     /// Like [`Self::open`], with a callback for actual migration work (also within long statements).
@@ -176,26 +188,36 @@ impl Store {
         bus: impl Publisher + 'static,
         observer: db::MigrationObserver,
     ) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, Some(observer))
+        Self::open_observed(path.as_ref(), bus, Some(observer), false)
     }
 
     fn open_observed(
         path: &Path,
         bus: impl Publisher + 'static,
         observer: Option<db::MigrationObserver>,
+        admin: bool,
     ) -> Result<Self> {
         let path = path.to_path_buf();
-        let writer = db::open_writer(&path, observer)?;
+        let writer = if admin {
+            db::open_admin_writer(&path)?
+        } else {
+            db::open_writer(&path, observer)?
+        };
         let manager = SqliteConnectionManager::file(&path)
             .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_init(|c| db::pragmas(c));
         // a checkout test (an empty statement per `get`) finds nothing on a local file
         let readers = r2d2::Pool::builder()
-            .max_size(readers())
+            .max_size(if admin { 1 } else { readers() })
+            .min_idle(if admin { Some(0) } else { None })
             .test_on_check_out(false)
             .build(manager)?;
         let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
-        let diagnostic_until = diagnostics::active_until(&writer).unwrap_or(0);
+        let diagnostic_until = if admin {
+            0
+        } else {
+            diagnostics::active_until(&writer).unwrap_or(0)
+        };
         let store = Self {
             inner: Arc::new(Inner {
                 maintenance,
@@ -208,8 +230,9 @@ impl Store {
                 diagnostics: std::sync::OnceLock::new(),
             }),
         };
-        if let Some(recorder) =
-            diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
+        if !admin
+            && let Some(recorder) =
+                diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
         {
             let _ = store.inner.diagnostics.set(recorder);
         }

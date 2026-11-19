@@ -310,7 +310,7 @@ async fn token_list_finishes_during_back_to_back_in_process_write_transactions()
 }
 
 #[test]
-fn an_offline_cli_keeps_legacy_direct_open_but_a_live_instance_lock_forbids_it() {
+fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited() {
     let home = tempfile::tempdir().unwrap();
     let (cfg, _) = config(home.path());
     let lock = steve_hub::upgrades::instance_lock(&cfg).unwrap();
@@ -328,8 +328,38 @@ fn an_offline_cli_keeps_legacy_direct_open_but_a_live_instance_lock_forbids_it()
         "a locked CLI must not create/open the database"
     );
     drop(lock);
-    // The legacy CLI assumes the installation's data directory already exists.
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
+    steve_store::db::migrate(&c).unwrap();
+    c.execute_batch(&format!(
+        "DELETE FROM schema_version; INSERT INTO schema_version(rowid,v) VALUES(17,{});
+        DELETE FROM schema_compat; INSERT INTO schema_compat(rowid,min_reader) VALUES(29,{});",
+        steve_store::db::SCHEMA_VERSION,
+        steve_store::db::SCHEMA_VERSION - 1
+    ))
+    .unwrap();
+    drop(c);
+    let before_header = admin_header(&cfg.db_path());
+    let stamp = std::time::UNIX_EPOCH + Duration::from_secs(946684800);
+    std::fs::File::options()
+        .write(true)
+        .open(cfg.db_path())
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    let bytes = std::fs::read(cfg.db_path()).unwrap();
+    let listed = access::command(&cfg, &["token".into(), "list".into(), "--json".into()]);
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    assert_eq!(listed.stdout, "[]\n");
+    assert_eq!(admin_header(&cfg.db_path()), before_header);
+    assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(cfg.db_path())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        stamp
+    );
     let created = access::command(
         &cfg,
         &[
@@ -341,11 +371,66 @@ fn an_offline_cli_keeps_legacy_direct_open_but_a_live_instance_lock_forbids_it()
         ],
     );
     assert_eq!(created.code, 0, "{}", created.stderr);
-    let store = Store::open(cfg.db_path(), steve_store::NoPublisher).unwrap();
-    assert_eq!(store.access().tokens(None).unwrap().len(), 1);
+    let token: serde_json::Value = serde_json::from_str(&created.stdout).unwrap();
+    let id = token["id"].as_str().unwrap();
+    let revoked = access::command(&cfg, &["token".into(), "revoke".into(), id.into()]);
+    assert_eq!(revoked.code, 0, "{}", revoked.stderr);
+    let store = Store::open_admin(cfg.db_path()).unwrap();
+    assert!(store.access().token(id).unwrap().unwrap().revoked.is_some());
+    let actions: Vec<String> = store
+        .with_conn(|c| {
+            Ok(
+                c.prepare("SELECT action FROM audit WHERE action LIKE 'token.%' ORDER BY action")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?,
+            )
+        })
+        .unwrap();
+    assert_eq!(actions, ["token.create", "token.revoke"]);
+    assert_eq!(admin_header(&cfg.db_path()), before_header);
     let listed = access::command(&cfg, &args);
     assert_eq!(listed.code, 0);
     assert_eq!(listed.stdout, access::command_on(&store, &args).unwrap());
+}
+
+fn admin_header(path: &std::path::Path) -> Vec<(i64, i64)> {
+    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    c.prepare("SELECT rowid,v FROM schema_version UNION ALL SELECT rowid,min_reader FROM schema_compat ORDER BY 1")
+        .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+#[test]
+fn offline_access_rejects_old_schema_without_migrating_or_restamping_it() {
+    let home = tempfile::tempdir().unwrap();
+    let (cfg, _) = config(home.path());
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
+    c.execute_batch("CREATE TABLE schema_version(v); INSERT INTO schema_version(rowid,v) VALUES(17,50);
+        CREATE TABLE schema_compat(min_reader); INSERT INTO schema_compat(rowid,min_reader) VALUES(29,49);").unwrap();
+    drop(c);
+    let header = admin_header(&cfg.db_path());
+    let bytes = std::fs::read(cfg.db_path()).unwrap();
+    let modified = std::fs::metadata(cfg.db_path())
+        .unwrap()
+        .modified()
+        .unwrap();
+    let result = access::command(&cfg, &["token".into(), "list".into()]);
+    assert_eq!(result.code, 2);
+    assert!(
+        result.stderr.contains("请先启动或升级 Hub"),
+        "{}",
+        result.stderr
+    );
+    assert_eq!(admin_header(&cfg.db_path()), header);
+    assert_eq!(std::fs::read(cfg.db_path()).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(cfg.db_path())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
 }
 
 #[test]

@@ -515,8 +515,8 @@ impl CliOutput {
 pub use crate::admin::socket_path as admin_socket_path;
 
 /// Execute the CLI against this installation. Connected requests never fall back after
-/// an error: their writes may already have committed. Offline fallback is temporary
-/// until the S1-frozen Store can acquire a non-migrating administrative open mode.
+/// an error: their writes may already have committed. Offline access takes the instance lock
+/// and validates the existing schema without migrations or background recording.
 pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
     match crate::admin::client::try_command(&cfg.home, args) {
         Ok(Some(output)) => output,
@@ -532,9 +532,12 @@ pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
             if args.first().is_some_and(|s| s == "backup") {
                 return crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args);
             }
-            // Temporary offline direct-open: removed by W2a.8a part 2 after S1 unfreezes Store.
-            let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {}))?;
-            store.ensure_workspace()?;
+            let store = Store::open_admin(cfg.db_path())?;
+            if args.first().is_some_and(|a| a == "token")
+                && args.get(1).is_some_and(|a| a == "create")
+            {
+                store.ensure_workspace()?;
+            }
             command_on(&store, args)
         })()),
     }
@@ -657,7 +660,18 @@ pub(crate) fn command_with_default_user(
             }
         }
         ["token", "revoke", id] => {
+            let token = store
+                .access()
+                .token(id)?
+                .ok_or_else(|| anyhow::anyhow!("no live token {id}"))?;
             anyhow::ensure!(store.access().token_revoke(id)?, "no live token {id}");
+            store.audit(
+                &token.user_id,
+                "token.revoke",
+                id,
+                &json!({}),
+                steve_store::WS,
+            )?;
             writeln!(out, "revoked {id} and the clients signed in with it")?;
         }
         ["client", "list"] => {
