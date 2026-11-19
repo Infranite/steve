@@ -53,6 +53,11 @@ fn data(conn: &Connection) {
         ("prior", "member", Some(7)),
     ] {
         conn.execute("INSERT INTO access_tokens(id,user_id,name,hash,created,revoked) VALUES(?1,?2,?1,?1,0,?3)", rusqlite::params![id,user,revoked]).unwrap();
+        conn.execute(
+            "INSERT INTO auth_sessions(token_hash,user_id,created,expires) VALUES(?1,?2,0,?3)",
+            rusqlite::params![id, user, revoked.unwrap_or(i64::MAX)],
+        )
+        .unwrap();
         conn.execute("INSERT INTO clients(id,user_id,token_id,secret_hash,kind,name,created,revoked) VALUES(?1,?2,?1,?1,'web',?1,0,?3)", rusqlite::params![id,user,revoked]).unwrap();
     }
     conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -108,10 +113,19 @@ fn converts_released_prefix_and_head_preserving_data_and_all_owners() {
                 from_legacy_version: from,
                 revoked_tokens: 1,
                 revoked_clients: 1,
+                revoked_sessions: 2,
             }
         );
         assert_current(&conn);
         assert_eq!(counts(&conn), before);
+        let sessions = conn
+            .prepare("SELECT user_id FROM auth_sessions ORDER BY user_id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(sessions, ["owner", "second"]);
         for table in ["access_tokens", "clients"] {
             let revoked = |id| {
                 conn.query_row(
@@ -163,7 +177,8 @@ fn restarts_after_the_legacy_transaction_without_a_log() {
         Outcome::Converted {
             from_legacy_version: head,
             revoked_tokens: 1,
-            revoked_clients: 1
+            revoked_clients: 1,
+            revoked_sessions: 2,
         }
     );
     assert_current(&conn);
@@ -189,6 +204,7 @@ fn schema_drift_is_diagnostic_and_rejection_does_not_change_file_bytes() {
             let error = convert::convert(&mut conn).unwrap_err();
             assert_eq!(error.code, Code::Incompatible);
             assert!(error.to_string().contains(object));
+            assert!(!error.to_string().contains("Invalid parameter name"));
             assert!(!has(&conn, "meta"));
             drop(conn);
             assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), before);
@@ -294,13 +310,158 @@ fn initial_legacy_metadata_rolls_back_with_a_failed_migration() {
     );
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
+    // Empty conversions now refuse to install a layout without an instance owner.
+    // New installations will use initialize when the caller is wired in W2a.6a.
+    assert_eq!(
+        convert::convert(&mut conn).unwrap_err().code,
+        Code::Incompatible
+    );
+    assert!(!has(&conn, "meta"));
+    data(&conn);
+    assert!(matches!(
+        convert::convert(&mut conn).unwrap(),
+        Outcome::Converted { .. }
+    ));
+    assert_current(&conn);
+}
+
+#[test]
+fn already_current_accepts_older_domain_versions_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steve.sqlite3");
+    let mut conn = Connection::open(&path).unwrap();
+    migrate::initialize(&mut conn, &Layout::single_file()).unwrap();
+    conn.execute("UPDATE domain_schema SET version=0 WHERE domain='core'", [])
+        .unwrap();
+    assert!(migrate::check_versions(&conn, true).is_err());
+    drop(conn);
+    let before = Sha256::digest(std::fs::read(&path).unwrap());
+    let mut conn = Connection::open(&path).unwrap();
     assert_eq!(
         convert::convert(&mut conn).unwrap(),
-        Outcome::Converted {
-            from_legacy_version: 0,
-            revoked_tokens: 0,
-            revoked_clients: 0
-        }
+        Outcome::AlreadyCurrent
     );
-    assert_current(&conn);
+    assert_eq!(
+        conn.query_row(
+            "SELECT version FROM domain_schema WHERE domain='core'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), before);
+}
+
+fn credentials(conn: &Connection) -> Vec<Vec<(String, Option<i64>)>> {
+    [
+        ("access_tokens", "id", "revoked"),
+        ("clients", "id", "revoked"),
+        ("auth_sessions", "token_hash", "expires"),
+    ]
+    .into_iter()
+    .map(|(table, id, status)| {
+        conn.prepare(&format!("SELECT {id},{status} FROM {table} ORDER BY {id}"))
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+#[test]
+fn missing_instance_owner_preserves_all_credentials_and_legacy_layout() {
+    for version in [Some(112), None] {
+        let mut conn = Connection::open_in_memory().unwrap();
+        old(&conn, version);
+        data(&conn);
+        // A workspace owner does not satisfy instance ownership.
+        conn.execute("UPDATE users SET role='member'", []).unwrap();
+        let before = credentials(&conn);
+        let error = convert::convert(&mut conn).unwrap_err();
+        assert_eq!(error.code, Code::Incompatible);
+        assert!(error.to_string().contains("no instance owner"));
+        assert_eq!(credentials(&conn), before);
+        assert!(!has(&conn, "meta"));
+        assert!(has(&conn, "schema_version"));
+        assert!(conn.is_autocommit());
+        // Repairing ownership allows a retry without an operation log.
+        conn.execute(
+            "UPDATE users SET role='owner' WHERE id IN ('owner','second')",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            convert::convert(&mut conn).unwrap(),
+            Outcome::Converted {
+                revoked_sessions: 2,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn session_invalidation_failure_rolls_back_tokens_clients_and_layout() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    old(&conn, None);
+    data(&conn);
+    let before = credentials(&conn);
+    conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Delete {
+            table_name: "auth_sessions",
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    assert!(convert::convert(&mut conn).is_err());
+    assert_eq!(credentials(&conn), before);
+    assert!(!has(&conn, "meta"));
+    assert!(has(&conn, "schema_version"));
+    assert!(conn.is_autocommit());
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert!(matches!(
+        convert::convert(&mut conn).unwrap(),
+        Outcome::Converted {
+            revoked_tokens: 1,
+            revoked_clients: 1,
+            revoked_sessions: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn quick_check_failure_rolls_back_pending_migrations_before_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steve.sqlite3");
+    let conn = Connection::open(&path).unwrap();
+    old(&conn, Some(112));
+    data(&conn);
+    // Create an actual CHECK violation without changing schema or relying on sleeps.
+    conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO attention_meta(id,epoch) VALUES(2,'fixture'); PRAGMA ignore_check_constraints=OFF;").unwrap();
+    assert_ne!(
+        conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(conn);
+    let before = Sha256::digest(std::fs::read(&path).unwrap());
+    let mut conn = Connection::open(&path).unwrap();
+    let error = convert::convert(&mut conn).unwrap_err();
+    assert_eq!(error.code, Code::Incompatible);
+    assert_eq!(error.safe_detail, "legacy storage quick_check failed");
+    assert_eq!(legacy::version(&conn).unwrap(), 112);
+    assert!(!has(&conn, "meta"));
+    assert!(conn.is_autocommit());
+    assert!(
+        conn.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))
+            .unwrap()
+    );
+    drop(conn);
+    assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), before);
 }

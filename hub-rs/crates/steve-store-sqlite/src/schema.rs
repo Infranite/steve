@@ -8,6 +8,9 @@ pub const CONTRACT: &str = include_str!("../schema/contract/0001.sql");
 use rusqlite::{Connection, types::Value};
 use std::collections::BTreeMap;
 
+/// Maximum number of object diagnostics included in a conversion error.
+const MAX_DIFFERENCE_DIAGNOSTICS: usize = 8;
+
 pub const CONTRACT_TABLES: [&str; 4] = ["meta", "uow_applied", "cursor", "domain_schema"];
 pub const LEGACY_TABLES: [&str; 2] = ["schema_version", "schema_compat"];
 
@@ -122,7 +125,7 @@ pub fn verify_baseline(conn: &Connection) -> Result<(), steve_types::Error> {
             "legacy schema differs from baseline: {}",
             differences
                 .into_iter()
-                .take(8)
+                .take(MAX_DIFFERENCE_DIAGNOSTICS)
                 .collect::<Vec<_>>()
                 .join("; ")
         )))
