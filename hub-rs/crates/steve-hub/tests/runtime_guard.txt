@@ -23,6 +23,7 @@ steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::De
 steve-channels/src/adapters/feishu/ratelimit.rs	ttl-cache	adapters::feishu::ratelimit::Limiter::buckets	1
 steve-channels/src/adapters/feishu/self_poll.rs	timer-loop	adapters::feishu::self_poll::SelfPoller::run	1
 steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner::serve	1
+steve-channels/src/outbound.rs	ttl-cache	outbound::Outbox::deferred	1
 steve-core/src/judge.rs	timer-loop	judge::Core::run_judge_watch	1
 steve-core/src/stall.rs	timer-loop	stall::Core::stall_watch	1
 steve-core/src/workspace.rs	timer-loop	workspace::Core::run_workspace_watch	1
