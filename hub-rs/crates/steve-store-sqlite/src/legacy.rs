@@ -265,8 +265,9 @@ pub fn migrate_to_head(conn: &Connection) -> Result<()> {
     migrate(conn, version(conn)?, |_| Ok(()))
 }
 
-/// Conversion may validate structure before the existing migration transaction commits.
-/// A rejected older schema then retains its original bytes as well as its version.
+/// Conversion validates/replaces metadata after legacy stamping but before the
+/// existing migration transaction commits. No legacy writes follow this final
+/// hook; failure retains the original bytes/version, including all replay work.
 pub(crate) fn migrate_to_head_with<E: From<rusqlite::Error>>(
     conn: &Connection,
     check: impl FnOnce(&Connection) -> std::result::Result<(), E>,
@@ -398,7 +399,6 @@ fn run_pending<E: From<rusqlite::Error>>(
         ))
         .into());
     }
-    check(&tx)?;
     if cur == 0 {
         tx.execute(
             "INSERT INTO schema_version (v) VALUES (?)",
@@ -412,6 +412,65 @@ fn run_pending<E: From<rusqlite::Error>>(
     let stamp = minimum_reader(&tx, cur)?.max(SCHEMA_VERSION);
     tx.execute("DELETE FROM schema_compat", [])?;
     tx.execute("INSERT INTO schema_compat (min_reader) VALUES (?)", [stamp])?;
+    // Final hook sees the stamped head and may replace legacy metadata with
+    // the current contract/fence. Never touch legacy tables after this hook.
+    // A hook error still rolls back replay and stamps in this same transaction.
+    check(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod final_hook_tests {
+    use super::*;
+    #[test]
+    fn final_hook_sees_pending_replay_stamps_and_can_replace_them_atomically() {
+        for reject in [false, true] {
+            let c = Connection::open_in_memory().unwrap();
+            c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); CREATE TABLE schema_compat(min_reader INTEGER NOT NULL)").unwrap();
+            for sql in MIGRATIONS.iter().take(112) {
+                c.execute_batch(sql).unwrap();
+            }
+            c.execute_batch("INSERT INTO schema_version(v) VALUES(112); INSERT INTO schema_compat(min_reader) VALUES(112)").unwrap();
+            let result = migrate_to_head_with(&c, |tx| {
+                assert_eq!(version(tx).unwrap(), SCHEMA_VERSION);
+                assert_eq!(minimum_reader(tx, 0).unwrap(), SCHEMA_VERSION);
+                crate::compat::stamp_reader_fence(tx).unwrap();
+                if reject {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.is_err(), reject);
+            assert!(c.is_autocommit());
+            if reject {
+                assert_eq!(version(&c).unwrap(), 112);
+                assert_eq!(minimum_reader(&c, 0).unwrap(), 112);
+                assert_eq!(
+                    c.query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name='chan_ext_ws_dead_letters'",
+                        [],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+            } else {
+                assert_eq!(
+                    c.query_row(
+                        "SELECT count(*) FROM sqlite_schema WHERE name='schema_version'",
+                        [],
+                        |r| r.get::<_, u32>(0)
+                    )
+                    .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    minimum_reader(&c, 0).unwrap(),
+                    crate::compat::LEGACY_READER_FENCE
+                );
+            }
+        }
+    }
 }
