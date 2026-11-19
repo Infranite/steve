@@ -309,13 +309,14 @@ async fn http_reports_are_isolated_authorized_and_fenced_across_reconnects() {
     delayed.entered.notified().await;
     link.conn
         .close(None, steve_node_wire::close::GOODBYE, "test disconnect");
-    steve_runtime::testkit::eventually_sync("unlinked", || {
-        h.svc.registry.current(id.as_str()).is_none()
+    let _ = pending.await.unwrap();
+    // Registry removal precedes the awaited last-seen write and RemoteNode::detach.
+    // Observe the report itself: until detach, a closed-link probe can still report failed.
+    steve_runtime::testkit::eventually("offline harness report", || async {
+        read(id.to_string()).await["state"] == "offline"
     })
     .await;
-    let _ = pending.await.unwrap();
     let away = read(id.to_string()).await;
-    assert_eq!(away["state"], "offline");
     assert_eq!(away["stale"], true);
     assert_eq!(away["harnesses"], r["harnesses"]);
     remote.set_harnesses(vec![cap("new-cli", "new/model")]);
