@@ -74,138 +74,152 @@ pub(super) fn apply(
     }
     let request: SyncPendingMembership = op.decode()?;
     request.validate()?;
-    if request.source == Source::Receipt {
-        let (conv, id) = request.receipt_identity()?;
-        let key = (request.workspace_id.as_str().to_owned(), conv, id);
-        if !data
+    match request.source {
+        Source::Receipt => apply_receipt(data, &request)?,
+        Source::ChanMessage => apply_message(data, &request, "chan_message", "space:", rev)?,
+        Source::MailMessage => apply_message(data, &request, "mail_message", "mail_thread:", rev)?,
+    }
+    rebuild_conversations(data, rev);
+    Ok(())
+}
+fn apply_receipt(data: &mut Data, request: &SyncPendingMembership) -> Result<(), Error> {
+    let (conv, id) = request.receipt_identity()?;
+    let key = (request.workspace_id.as_str().to_owned(), conv, id);
+    if !data
+        .rows
+        .get(RECEIPT.name)
+        .into_iter()
+        .flatten()
+        .any(|(row, _)| identity(row) == key)
+    {
+        return Err(error(
+            steve_types::Code::Invalid,
+            "receipt must be inserted in the same work unit",
+        ));
+    }
+    if request.entry == EntryPoint::DequeueOnReceipt {
+        data.rows
+            .entry(PENDING.name.into())
+            .or_default()
+            .retain(|(row, _)| identity(row) != key);
+    }
+    Ok(())
+}
+fn apply_message(
+    data: &mut Data,
+    request: &SyncPendingMembership,
+    source: &str,
+    prefix: &str,
+    rev: Rev,
+) -> Result<(), Error> {
+    let source = data
+        .rows
+        .get(SOURCE.name)
+        .into_iter()
+        .flatten()
+        .find(|(row, _)| text(row, "source") == source && text(row, "id") == request.id)
+        .map(|(row, _)| row.clone());
+    let old_workspaces: Vec<_> = data
+        .rows
+        .get(PENDING.name)
+        .into_iter()
+        .flatten()
+        .filter(|(row, _)| {
+            text(row, "message_id") == request.id && text(row, "conv").starts_with(prefix)
+        })
+        .map(|(row, _)| text(row, "workspace_id"))
+        .collect();
+    if source
+        .as_ref()
+        .is_some_and(|row| text(row, "workspace_id") != request.workspace_id.as_str())
+        || (source.is_none()
+            && old_workspaces
+                .iter()
+                .any(|ws| ws != request.workspace_id.as_str()))
+    {
+        return Err(error(
+            steve_types::Code::Invalid,
+            "digest source workspace mismatch",
+        ));
+    }
+    if request.entry == EntryPoint::EnqueueDigestible {
+        sync_membership(data, request, prefix, source, rev)?;
+    }
+    Ok(())
+}
+fn sync_membership(
+    data: &mut Data,
+    request: &SyncPendingMembership,
+    prefix: &str,
+    source: Option<Row>,
+    rev: Rev,
+) -> Result<(), Error> {
+    let desired = source.filter(|row| {
+        text(row, "workspace_id") == request.workspace_id.as_str()
+            && text(row, "conv").starts_with(prefix)
+            && ["received", "sent"].contains(&text(row, "status").as_str())
+    });
+    let desired = desired.filter(|row| {
+        !data
             .rows
             .get(RECEIPT.name)
             .into_iter()
             .flatten()
-            .any(|(row, _)| identity(row) == key)
-        {
-            return Err(error(
-                steve_types::Code::Invalid,
-                "receipt must be inserted in the same work unit",
-            ));
-        }
-        if request.entry == EntryPoint::DequeueOnReceipt {
-            data.rows
-                .entry(PENDING.name.into())
-                .or_default()
-                .retain(|(row, _)| identity(row) != key);
-        }
-    } else {
-        let (source, prefix) = match request.source {
-            Source::ChanMessage => ("chan_message", "space:"),
-            Source::MailMessage => ("mail_message", "mail_thread:"),
-            Source::Receipt => {
-                return Err(error(
-                    steve_types::Code::Invalid,
-                    "receipt is not a message",
-                ));
-            }
-        };
-        let source = data
-            .rows
-            .get(SOURCE.name)
-            .into_iter()
-            .flatten()
-            .find(|(row, _)| text(row, "source") == source && text(row, "id") == request.id)
-            .map(|(row, _)| row.clone());
-        let old_workspaces: Vec<_> = data
-            .rows
-            .get(PENDING.name)
-            .into_iter()
-            .flatten()
-            .filter(|(row, _)| {
-                text(row, "message_id") == request.id && text(row, "conv").starts_with(prefix)
+            .any(|(receipt, _)| {
+                identity(receipt)
+                    == (
+                        text(row, "workspace_id"),
+                        text(row, "conv"),
+                        request.id.clone(),
+                    )
             })
-            .map(|(row, _)| text(row, "workspace_id"))
-            .collect();
-        if source
-            .as_ref()
-            .is_some_and(|row| text(row, "workspace_id") != request.workspace_id.as_str())
-            || (source.is_none()
-                && old_workspaces
-                    .iter()
-                    .any(|ws| ws != request.workspace_id.as_str()))
-        {
-            return Err(error(
-                steve_types::Code::Invalid,
-                "digest source workspace mismatch",
+    });
+    let pending = data.rows.entry(PENDING.name.into()).or_default();
+    pending.retain(|(row, _)| {
+        text(row, "message_id") != request.id
+            || !text(row, "conv").starts_with(prefix)
+            || desired.as_ref().is_some_and(|source| {
+                identity(row)
+                    == (
+                        text(source, "workspace_id"),
+                        text(source, "conv"),
+                        request.id.clone(),
+                    )
+            })
+    });
+    if let Some(source) = desired {
+        let key = (
+            text(&source, "workspace_id"),
+            text(&source, "conv"),
+            request.id.clone(),
+        );
+        if let Some((row, old_rev)) = pending.iter_mut().find(|(row, _)| identity(row) == key) {
+            super::entities::set(row, "at", Cell::Int(int(&source, "at")));
+            *old_rev = rev;
+        } else {
+            let next = data
+                .seqs
+                .entry((Domain::Comms, PENDING.name.into()))
+                .or_default();
+            *next = next
+                .checked_add(1)
+                .filter(|v| *v <= i64::MAX as u64)
+                .ok_or_else(|| error(steve_types::Code::Exhausted, "digest position exhausted"))?;
+            pending.push((
+                record(&[
+                    ("workspace_id", string(&key.0)),
+                    ("conv", string(&key.1)),
+                    ("message_id", string(&key.2)),
+                    ("at", Cell::Int(int(&source, "at"))),
+                    ("position", Cell::Int(*next as i64)),
+                ]),
+                rev,
             ));
-        }
-        if request.entry == EntryPoint::EnqueueDigestible {
-            let desired = source.filter(|row| {
-                text(row, "workspace_id") == request.workspace_id.as_str()
-                    && text(row, "conv").starts_with(prefix)
-                    && ["received", "sent"].contains(&text(row, "status").as_str())
-            });
-            let desired = desired.filter(|row| {
-                !data
-                    .rows
-                    .get(RECEIPT.name)
-                    .into_iter()
-                    .flatten()
-                    .any(|(receipt, _)| {
-                        identity(receipt)
-                            == (
-                                text(row, "workspace_id"),
-                                text(row, "conv"),
-                                request.id.clone(),
-                            )
-                    })
-            });
-            let pending = data.rows.entry(PENDING.name.into()).or_default();
-            pending.retain(|(row, _)| {
-                text(row, "message_id") != request.id
-                    || !text(row, "conv").starts_with(prefix)
-                    || desired.as_ref().is_some_and(|source| {
-                        identity(row)
-                            == (
-                                text(source, "workspace_id"),
-                                text(source, "conv"),
-                                request.id.clone(),
-                            )
-                    })
-            });
-            if let Some(source) = desired {
-                let key = (
-                    text(&source, "workspace_id"),
-                    text(&source, "conv"),
-                    request.id.clone(),
-                );
-                if let Some((row, old_rev)) =
-                    pending.iter_mut().find(|(row, _)| identity(row) == key)
-                {
-                    super::entities::set(row, "at", Cell::Int(int(&source, "at")));
-                    *old_rev = rev;
-                } else {
-                    let next = data
-                        .seqs
-                        .entry((Domain::Comms, PENDING.name.into()))
-                        .or_default();
-                    *next = next
-                        .checked_add(1)
-                        .filter(|v| *v <= i64::MAX as u64)
-                        .ok_or_else(|| {
-                            error(steve_types::Code::Exhausted, "digest position exhausted")
-                        })?;
-                    pending.push((
-                        record(&[
-                            ("workspace_id", string(&key.0)),
-                            ("conv", string(&key.1)),
-                            ("message_id", string(&key.2)),
-                            ("at", Cell::Int(int(&source, "at"))),
-                            ("position", Cell::Int(*next as i64)),
-                        ]),
-                        rev,
-                    ));
-                }
-            }
         }
     }
+    Ok(())
+}
+fn rebuild_conversations(data: &mut Data, rev: Rev) {
     let mut groups: BTreeMap<(String, String), (i64, i64, i64)> = BTreeMap::new();
     for (row, _) in data.rows.get(PENDING.name).into_iter().flatten() {
         let at = int(row, "at");
@@ -246,7 +260,6 @@ pub(super) fn apply(
         })
         .collect();
     data.rows.insert(CONVS.name.into(), rows);
-    Ok(())
 }
 
 /// Test-only fixture actions. Backends arrange source mutations and named operations in
@@ -502,8 +515,15 @@ fn rejected(result: Result<(), CommitError>) {
 }
 /// The sole assertion set for Mem, Loopback<Mem> and both SQLite physical layouts.
 pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
-    let f = h.digest_fixture(store).unwrap();
-    let f = f.as_ref();
+    let fixture = h.digest_fixture(store).unwrap();
+    let f = fixture.as_ref();
+    let (first, changed) = check_enqueue(f, h);
+    check_acknowledgement(f, h, changed);
+    let moved = check_movement(f, h, first);
+    let mail = check_mail(f, h, moved);
+    check_rollback(f, h, mail);
+}
+fn check_enqueue(f: &dyn Fixture, h: &dyn Harness) -> (State, State) {
     let source = Source::ChanMessage;
     for (id, at) in [("a", 30), ("b", 10), ("c", 20)] {
         transact(
@@ -557,6 +577,10 @@ pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
     );
     assert_eq!(int(conversation(&changed, "ws", "space:old"), "marker"), 73);
     assert_eq!(int(conversation(&changed, "ws", "space:old"), "newest"), 35);
+    (first, changed)
+}
+fn check_acknowledgement(f: &dyn Fixture, h: &dyn Harness, changed: State) {
+    let source = Source::ChanMessage;
     let ack = SyncPendingMembership::dequeue_on_receipt("space:old", "b", "ws".into()).unwrap();
     rejected(transact(
         f,
@@ -608,6 +632,9 @@ pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
         int(conversation(&acknowledged, "ws", "space:old"), "marker"),
         73
     );
+}
+fn check_movement(f: &dyn Fixture, h: &dyn Harness, first: State) -> State {
+    let source = Source::ChanMessage;
     transact(
         f,
         h,
@@ -656,6 +683,9 @@ pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
     .unwrap();
     let empty = f.state().unwrap();
     assert!(empty.pending.is_empty() && empty.conversations.is_empty());
+    moved
+}
+fn check_mail(f: &dyn Fixture, h: &dyn Harness, moved: State) -> State {
     let source = Source::MailMessage;
     transact(
         f,
@@ -704,11 +734,17 @@ pub fn check(h: &dyn Harness, store: Arc<dyn DomainStore>) {
                 workspace: "ws".into(),
                 conv: "mail_thread:t".into(),
             },
-            Change::Op(reconcile.clone()),
+            Change::Op(reconcile),
         ],
     )
     .unwrap();
     assert_eq!(f.state().unwrap(), mail);
+    mail
+}
+fn check_rollback(f: &dyn Fixture, h: &dyn Harness, mail: State) {
+    let source = Source::MailMessage;
+    let reconcile =
+        SyncPendingMembership::sync_pending_conversation(source, "mail".into(), "ws".into());
     for (id, entry) in [
         ("bad-ws-enqueue", EntryPoint::EnqueueDigestible),
         ("bad-ws-sync", EntryPoint::SyncPendingConversation),
