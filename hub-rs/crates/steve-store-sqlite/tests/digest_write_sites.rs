@@ -70,7 +70,8 @@ fn literals(source: &str) -> Vec<&str> {
     result
 }
 // Deliberately conservative: even body-only updates, SQL comments and table-name fragments
-// count. This protects format!/concat! paths without pretending to parse all of SQLite.
+// count. Verbs match whole identifiers, so updated/deleted columns are not writes.
+// This protects format!/concat! paths without pretending to parse all of SQLite.
 fn class(text: &str) -> Option<&'static str> {
     let s = text.to_ascii_lowercase();
     if !["chan_messages", "mail_messages", "digest_receipts"]
@@ -80,9 +81,8 @@ fn class(text: &str) -> Option<&'static str> {
         return None;
     }
     Some(
-        if ["insert", "update", "delete", "replace"]
-            .iter()
-            .any(|verb| s.contains(verb))
+        if s.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+            .any(|word| matches!(word, "insert" | "update" | "delete" | "replace"))
         {
             "write"
         } else {
@@ -274,7 +274,9 @@ fn workspace_writers_only_lose_files_and_sites() {
             .iter()
             .map(|((kind, file), count)| format!("{kind}\t{file}\t{count}\n"))
             .collect::<String>();
-        std::fs::write(list,format!("# Conservative workspace digest inventory: write/table; exact equality, only shrink.\n{rows}")).unwrap();
+        let header =
+            "# Conservative workspace digest inventory: write/table; exact equality, only shrink.";
+        std::fs::write(list, format!("{header}\n{rows}")).unwrap();
     }
 }
 #[test]
@@ -292,7 +294,10 @@ fn conservative_matching_covers_advisory_examples() {
     ] {
         assert_eq!(class(sql), Some("write"), "{sql}");
     }
-    assert_eq!(class("chan_messages"), Some("table"));
+    assert_eq!(
+        class("SELECT updated,deleted,inserted,replaced,update_count FROM chan_messages"),
+        Some("table")
+    );
     assert_eq!(class("DELETE FROM {table}"), None);
     let split = r###"concat!("UP","DATE main.","chan_","messages SET status=?"); let tables=["mail_messages","digest_receipts"];"###;
     assert_eq!(
@@ -426,8 +431,12 @@ fn integration_fixtures_cannot_bypass_teardown_audits() {
                             .unwrap()
                             .to_string_lossy()
                             .replace('\\', "/");
-                        assert!(owners.iter().any(|(fixture,owner)|target_name==*fixture && caller==*owner),
-                            "shared raw fixture needs an explicit audited owner: {target_name} via {caller}");
+                        assert!(
+                            owners.iter().any(|(fixture, owner)| {
+                                target_name == *fixture && caller == *owner
+                            }),
+                            "shared raw fixture needs an explicit audited owner: {target_name} via {caller}"
+                        );
                     }
                     pending.push(target);
                 }

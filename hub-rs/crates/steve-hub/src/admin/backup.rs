@@ -17,14 +17,6 @@ const PARTS: [&str; 6] = [
     "steve.env",
 ];
 const NOT_COPIED: &str = "keychain-pass";
-pub(crate) fn home(db: &Path) -> PathBuf {
-    let parent = db.parent().unwrap_or_else(|| Path::new("."));
-    if parent.file_name().is_some_and(|n| n == "data") {
-        parent.parent().unwrap_or(parent).to_owned()
-    } else {
-        parent.to_owned()
-    }
-}
 pub(crate) fn files(home: &Path) -> FileSet {
     FileSet {
         home: home.to_owned(),

@@ -1,7 +1,7 @@
 //! Management-only routes: never merged into the public Router.
 use crate::access::{self, CliOutput};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
@@ -9,7 +9,7 @@ use axum::{
     routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use steve_store::Store;
 
 #[derive(Deserialize, Serialize)]
@@ -32,7 +32,7 @@ async fn deadline(State(limit): State<Duration>, request: Request, next: Next) -
             "management request deadline exceeded; a write may already have completed; inspect before retrying"))))).into_response(),
     }
 }
-pub(super) fn router(store: Store, limit: Duration) -> Router {
+pub(super) fn router(store: Store, home: PathBuf, limit: Duration) -> Router {
     Router::new()
         .route("/admin/v1/access/tokens", get(tokens).post(create))
         .route("/admin/v1/access/tokens/{id}", delete(revoke_token))
@@ -41,6 +41,7 @@ pub(super) fn router(store: Store, limit: Duration) -> Router {
         .route("/admin/v1/storage/status", get(status))
         .route("/admin/v1/backup", get(backups).post(make_backup))
         .with_state(store)
+        .layer(Extension(home))
         .layer(middleware::from_fn_with_state(limit, deadline))
 }
 async fn command(store: Store, args: Vec<String>) -> Response {
@@ -133,7 +134,11 @@ async fn status(State(store): State<Store>) -> Response {
 pub(super) struct BackupRequest {
     pub reason: Option<String>,
 }
-async fn make_backup(State(store): State<Store>, input: Option<Json<BackupRequest>>) -> Response {
+async fn make_backup(
+    State(store): State<Store>,
+    Extension(home): Extension<PathBuf>,
+    input: Option<Json<BackupRequest>>,
+) -> Response {
     let input = input.map(|Json(input)| input).unwrap_or_default();
     let args = vec![
         "backup".into(),
@@ -142,7 +147,7 @@ async fn make_backup(State(store): State<Store>, input: Option<Json<BackupReques
     ];
     let result = tokio::task::spawn_blocking(move || {
         let db = store.path();
-        super::client::backup::command(&super::client::backup::home(db), db, &args)
+        super::client::backup::command(&home, db, &args)
     })
     .await;
     let output =
@@ -157,15 +162,9 @@ async fn make_backup(State(store): State<Store>, input: Option<Json<BackupReques
     )
         .into_response()
 }
-async fn backups(State(store): State<Store>) -> Response {
+async fn backups(Extension(home): Extension<PathBuf>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
-        steve_store_sqlite::backup::usage(
-            &crate::backup::plan(
-                &super::client::backup::home(store.path()),
-                steve_store_sqlite::backup::Reason::Diagnostic,
-            )
-            .dest_root,
-        )
+        steve_store_sqlite::backup::usage(&crate::backup::root(&home))
     })
     .await;
     match result {

@@ -18,7 +18,7 @@ struct FixtureBackup {
     fail: bool,
 }
 impl steve_channels::PreDestructiveBackup for FixtureBackup {
-    fn backup(&self, what: &str) -> steve_modules::ApiResult<PathBuf> {
+    fn backup(&self, what: &str) -> steve_channels::ChannelResult<PathBuf> {
         if self.fail {
             return Err(steve_modules::ApiError::Internal(
                 "fixture backup failed".into(),

@@ -4,7 +4,11 @@ mod paths;
 mod routes;
 
 pub use paths::socket_path;
-use std::{io, path::Path, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::net::{UnixListener, UnixStream};
 
 pub(crate) const DEADLINE: Duration = Duration::from_secs(30);
@@ -14,6 +18,7 @@ pub(crate) struct Server {
     listener: std::os::unix::net::UnixListener,
     cleanup: paths::Cleanup,
     store: steve_store::Store,
+    home: PathBuf,
 }
 pub(crate) fn bind(home: &Path, store: steve_store::Store) -> anyhow::Result<Server> {
     let (listener, cleanup) = paths::bind(home)?;
@@ -21,6 +26,7 @@ pub(crate) fn bind(home: &Path, store: steve_store::Store) -> anyhow::Result<Ser
         listener,
         cleanup,
         store,
+        home: home.to_owned(),
     })
 }
 impl Server {
@@ -29,10 +35,15 @@ impl Server {
             listener,
             cleanup,
             store,
+            home,
         } = self;
         let _cleanup = cleanup;
         let listener = UnixListener::from_std(listener)?;
-        axum::serve(PeerListener(listener), routes::router(store, DEADLINE)).await?;
+        axum::serve(
+            PeerListener(listener),
+            routes::router(store, home, DEADLINE),
+        )
+        .await?;
         Ok(())
     }
 }

@@ -13,7 +13,7 @@ const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(300);
 const RETRY_TICKS: u32 = 6;
 pub fn dir(home: &Path) -> PathBuf {
-    crate::backup::plan(home, Reason::Daily).dest_root
+    crate::backup::root(home)
 }
 /// The local day (`YYYYMMDD`) and minute of the day at `secs` since the epoch.
 fn local(secs: u64) -> (String, u32) {

@@ -40,7 +40,7 @@ pub fn write<T>(
     fn rows(c: &rusqlite::Connection) -> rusqlite::Result<Rows> {
         let mut rows = Rows::new();
         for (kind, source) in [(0, Source::ChanMessage), (1, Source::MailMessage)] {
-            for m in source.messages(c, "1", [])? {
+            for m in source.messages(c, steve_store_sqlite::digest::MessageFilter::All)? {
                 rows.insert((kind, m.id), (m.scope, m.status, m.at));
             }
         }

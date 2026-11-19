@@ -14,6 +14,8 @@ struct Env {
     http: reqwest::Client,
     cookie: String,
     worktrees: std::path::PathBuf,
+    store: steve_store::Store,
+    home: std::path::PathBuf,
 }
 
 impl Env {
@@ -80,6 +82,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().unwrap().store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -117,6 +120,8 @@ async fn start() -> Env {
         http,
         cookie,
         worktrees: cfg.worktrees.clone(),
+        store,
+        home: cfg.home.clone(),
     }
 }
 
@@ -143,4 +148,72 @@ async fn owner_http_backup_publishes_manifest_and_updates_purpose_usage() {
     assert_eq!(usage["purposes"]["diagnostic"]["count"], 1);
     assert!(usage["purposes"]["diagnostic"]["bytes"].as_u64().unwrap() > 0);
     assert!(e.worktrees.is_dir());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assembled_cleanup_route_receives_the_hub_backup_capability() {
+    let e = start().await;
+    let seed_sql = "INSERT INTO parties(id,workspace_id,type,name,source,created_by,created,updated)
+             VALUES('backup-owner','default','contact','Backup owner','manual','usr_dev',1,1);
+             INSERT INTO accounts(id,workspace_id,system_id,family,party_id,kind,handle,handle_display,source,created,updated)
+             VALUES('backup-account','default','test','test','backup-owner','personal','backup','Backup','connect',1,1);
+             INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,status,created,updated,account_id)
+             VALUES('backup-space','default','test','group','backup-space','Backup','left',1,1,'backup-account');
+             INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,text,created)
+             VALUES('backup-message','default','backup-space','in','received','before cleanup',1);";
+    e.store
+        .transaction(|tx| -> Result<(), steve_store::StoreError> {
+            tx.execute_batch(seed_sql)?;
+            steve_store_sqlite::digest::sync_message(
+                tx,
+                steve_store_sqlite::digest::Source::ChanMessage,
+                "backup-message",
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (status, summary) = e
+        .call(
+            "POST",
+            "/api/channels/cleanup",
+            Some(
+                serde_json::json!({"account_id":"backup-account", "level":"text", "confirm":true}),
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{summary}");
+    assert_eq!(summary["messages"], 1);
+    let relative = summary["backup"].as_str().unwrap();
+    let root = steve_hub::backup::root(&e.home);
+    assert!(root.join(relative).is_file());
+    let manifests = steve_store_sqlite::backup::list(&root).unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(
+        manifests[0].reason,
+        steve_store_sqlite::backup::Reason::PreDestructive {
+            what: "purge".into()
+        }
+    );
+    let snapshot = rusqlite::Connection::open(root.join(relative)).unwrap();
+    let before: String = snapshot
+        .query_row(
+            "SELECT text FROM chan_messages WHERE id='backup-message'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(before, "before cleanup");
+    e.store
+        .reader(|c| -> Result<(), steve_store::StoreError> {
+            let text: Option<String> = c.query_row(
+                "SELECT text FROM chan_messages WHERE id='backup-message'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(text, None);
+            assert!(steve_store_sqlite::digest::verify_pending(c, "default")?.is_empty());
+            Ok(())
+        })
+        .unwrap();
 }

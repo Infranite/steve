@@ -7,6 +7,14 @@ pub enum Source {
     ChanMessage,
     MailMessage,
 }
+/// Closed query shapes: values are bound parameters, never interpolated SQL.
+#[derive(Clone, Copy, Debug)]
+pub enum MessageFilter<'a> {
+    All,
+    Id(&'a str),
+    IdsJson(&'a str),
+    Connection(&'a str),
+}
 struct MessageShape {
     table: &'static str,
     conv_column: &'static str,
@@ -14,15 +22,16 @@ struct MessageShape {
     prefix: &'static str,
 }
 impl Source {
-    /// Read source rows using the shared message shape. The filter is trusted caller SQL.
-    pub fn messages(
-        self,
-        c: &Connection,
-        filter: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<Message>> {
-        c.prepare_cached(&format!("{} WHERE {filter}", self.select_sql()))?
-            .query_map(params, |r| {
+    /// Read source rows using the shared message shape and a fixed query predicate.
+    pub fn messages(self, c: &Connection, filter: MessageFilter<'_>) -> Result<Vec<Message>> {
+        let (predicate, value) = match filter {
+            MessageFilter::All => ("1", None),
+            MessageFilter::Id(id) => ("id=?1", Some(id)),
+            MessageFilter::IdsJson(ids) => ("id IN (SELECT value FROM json_each(?1))", Some(ids)),
+            MessageFilter::Connection(id) => ("connection_id=?1", Some(id)),
+        };
+        c.prepare_cached(&format!("{} WHERE {predicate}", self.select_sql()))?
+            .query_map(rusqlite::params_from_iter(value), |r| {
                 Ok(Message {
                     scope: scope_row(r)?,
                     id: r.get(2)?,
@@ -34,7 +43,7 @@ impl Source {
     }
     pub fn scope(self, c: &Connection, id: &str) -> Result<Option<Scope>> {
         Ok(self
-            .messages(c, "id=?1", [id])?
+            .messages(c, MessageFilter::Id(id))?
             .into_iter()
             .next()
             .map(|m| m.scope))

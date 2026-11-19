@@ -4,8 +4,12 @@ use steve_store_sqlite::backup::{self as storage, BackupPlan, CancelFlag, Reason
 
 /// All Hub backup purposes share this configured root. Callers retain their existing
 /// deadlines, file-archive and retention settings after obtaining the plan.
+pub fn root(home: &Path) -> PathBuf {
+    home.join("backups")
+}
+
 pub fn plan(home: &Path, reason: Reason) -> BackupPlan {
-    BackupPlan::new(home.join("backups"), reason)
+    BackupPlan::new(root(home), reason)
 }
 
 /// The channel cleanup adapter owns installation paths; it opens an independent snapshot,

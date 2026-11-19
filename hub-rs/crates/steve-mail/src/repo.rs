@@ -739,7 +739,10 @@ pub fn raw_paths(c: &Connection, conn: &str) -> MailResult<Vec<String>> {
 /// Deletes everything of a connection (disconnect), children first.
 pub fn delete_connection(tx: &Tx, conn: &str) -> MailResult<()> {
     let digest_messages = steve_store_sqlite::digest::Source::MailMessage
-        .messages(tx, "connection_id=?1", [conn])?
+        .messages(
+            tx,
+            steve_store_sqlite::digest::MessageFilter::Connection(conn),
+        )?
         .into_iter()
         .map(|m| (m.scope, m.id))
         .collect::<Vec<_>>();

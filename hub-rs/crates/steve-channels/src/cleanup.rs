@@ -42,7 +42,7 @@ use crate::{ChannelResult, Channels, spaces};
 /// The host must finish a durable backup before cleanup is allowed to mutate data.
 /// The returned location is opaque to channels and is echoed in the response/audit.
 pub trait PreDestructiveBackup: Send + Sync {
-    fn backup(&self, what: &str) -> ApiResult<PathBuf>;
+    fn backup(&self, what: &str) -> ChannelResult<PathBuf>;
 }
 
 /// What to clean.
@@ -642,7 +642,10 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
         [&spaces],
     )?;
     let digest_messages = steve_store_sqlite::digest::Source::ChanMessage
-        .messages(tx, "id IN (SELECT value FROM json_each(?1))", [&msgs])?
+        .messages(
+            tx,
+            steve_store_sqlite::digest::MessageFilter::IdsJson(&msgs),
+        )?
         .into_iter()
         .map(|m| (m.scope, m.id))
         .collect::<Vec<_>>();

@@ -411,7 +411,7 @@ impl Updates {
     fn backup(&self, op: &Operation) -> Value {
         if op.runner.is_some() {
             // ops/local-release.py backs up into $STEVE_HOME/backups and names the copy in the journal
-            return json!({"database": op.backup, "dir": self.home.join("backups").to_string_lossy()});
+            return json!({"database": op.backup, "dir": crate::backup::root(&self.home).to_string_lossy()});
         }
         let database = self.dir().join(format!("{}.sqlite3", op.id));
         json!({"database": database.exists().then(|| database.to_string_lossy().into_owned()), "dir": self.dir().to_string_lossy()})

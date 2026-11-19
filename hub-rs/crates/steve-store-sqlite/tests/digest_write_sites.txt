@@ -68,6 +68,7 @@ table	crates/steve-digest/src/window.rs	3
 table	crates/steve-digest/tests/base.rs	1
 table	crates/steve-hub/src/wire/chan.rs	1
 table	crates/steve-hub/src/wire/chan_tests.rs	1
+table	crates/steve-hub/tests/backup_api.rs	2
 table	crates/steve-hub/tests/outbox_wired.rs	3
 table	crates/steve-hub/tests/wired/connectors.rs	1
 table	crates/steve-hub/tests/wired/mod.rs	2
@@ -130,6 +131,7 @@ write	crates/steve-digest/tests/base.rs	10
 write	crates/steve-digest/tests/bot.rs	2
 write	crates/steve-digest/tests/intake_migration.rs	9
 write	crates/steve-digest/tests/todos.rs	1
+write	crates/steve-hub/tests/backup_api.rs	1
 write	crates/steve-hub/tests/modules.rs	1
 write	crates/steve-hub/tests/outbox_wired.rs	2
 write	crates/steve-hub/tests/wired/connectors.rs	1

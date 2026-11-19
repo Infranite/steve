@@ -47,6 +47,9 @@ fn config(home: &std::path::Path) -> (Arc<Config>, steve_hub::wire::Vars) {
 }
 impl Hub {
     fn start(long: bool) -> Self {
+        Self::start_with_data(long, false)
+    }
+    fn start_with_data(long: bool, detached: bool) -> Self {
         steve_modules::net::forbid_in_this_process();
         let temp = tempfile::tempdir().unwrap();
         let home = if long {
@@ -54,7 +57,10 @@ impl Hub {
         } else {
             temp.path().join("hub")
         };
-        let (cfg, vars) = config(&home);
+        let (mut cfg, vars) = config(&home);
+        if detached {
+            Arc::get_mut(&mut cfg).unwrap().data_dir = temp.path().join("separate-data");
+        }
         for dir in [&cfg.data_dir, &cfg.worktrees, &cfg.scratch] {
             std::fs::create_dir_all(dir).unwrap();
         }
@@ -683,4 +689,38 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn management_backup_uses_configured_home_with_a_detached_database() {
+    let hub = Hub::start_with_data(false, true);
+    assert!(!hub.store.path().starts_with(&hub.cfg.home));
+    let output = hub.cli(&["backup", "--reason", "diagnostic"]).await;
+    assert_eq!(output.code, 0, "{}", output.stderr);
+    let manifest: steve_store_sqlite::backup::Manifest =
+        serde_json::from_str(&output.stdout).unwrap();
+    let root = steve_hub::backup::root(&hub.cfg.home);
+    assert!(manifest.directory.starts_with(&root));
+    assert!(manifest.database_path().is_file());
+    assert!(!hub.cfg.data_dir.join("backups").exists());
+    // Also exercise the management listing route, which must use that same home.
+    let path = access::admin_socket_path(&hub.cfg.home).unwrap();
+    let usage = tokio::task::spawn_blocking(move || {
+        let mut socket = UnixStream::connect(path).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .write_all(b"GET /admin/v1/backup HTTP/1.0\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.0 200"), "{response}");
+        serde_json::from_str::<serde_json::Value>(response.split_once("\r\n\r\n").unwrap().1)
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(usage["diagnostic"]["count"], 1);
+    hub.stop().await;
 }
