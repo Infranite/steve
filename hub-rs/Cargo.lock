@@ -5807,6 +5807,7 @@ dependencies = [
  "steve-node-api",
  "steve-runtime",
  "steve-store",
+ "steve-types",
  "tempfile",
  "text-splitter",
  "thiserror 2.0.21",

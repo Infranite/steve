@@ -78,6 +78,7 @@ edge	steve-knowledge	steve-modules
 edge	steve-knowledge	steve-node-api
 edge	steve-knowledge	steve-runtime
 edge	steve-knowledge	steve-store
+edge	steve-knowledge	steve-types
 edge	steve-mail	steve-flow
 edge	steve-mail	steve-i18n
 edge	steve-mail	steve-knowledge

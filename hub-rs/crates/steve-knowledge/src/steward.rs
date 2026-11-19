@@ -27,7 +27,7 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Body, Caller, Modules};
 use steve_store::base::mems::{self, Mem, MemFilter, MemPatch};
 use steve_store::base::{self, Level, ObjRef, Viewer};
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::candidates::{self, NewCandidate, Origin, OriginKind};
 use crate::extract::Names;
@@ -435,10 +435,18 @@ fn level_rank(l: Level) -> u8 {
 /// Re-indexes a memory whose `about` or source changed, and tells the pages.
 fn touch(tx: &Tx, ws: &str, id: &str) -> ApiResult<()> {
     sync::sync_mem(tx, id, steve_store::now())?;
-    tx.publish(ChangeEvent::Mm {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Mm {
+            id: {
+                let value: String = id.into();
+                steve_types::MemoryId::from(value)
+            },
+            ws: {
+                let value: String = ws.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        },
+    ));
     Ok(())
 }
 
