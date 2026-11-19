@@ -15,11 +15,12 @@ pub enum MessageFilter<'a> {
     IdsJson(&'a str),
     Connection(&'a str),
 }
-struct MessageShape {
-    table: &'static str,
-    conv_column: &'static str,
-    time_column: &'static str,
-    prefix: &'static str,
+/// Closed schema identifiers for a message source, shared by reads and test fixtures.
+pub struct MessageShape {
+    pub table: &'static str,
+    pub conv_column: &'static str,
+    pub time_column: &'static str,
+    pub prefix: &'static str,
 }
 impl Source {
     /// Read source rows using the shared message shape and a fixed query predicate.
@@ -59,7 +60,7 @@ impl Source {
             "SELECT workspace_id,'{prefix}' || {conv_column} AS conv,id AS message_id,{time_column} AS at,status FROM {table}"
         )
     }
-    fn shape(self) -> MessageShape {
+    pub fn shape(self) -> MessageShape {
         match self {
             Self::ChanMessage => MessageShape {
                 table: "chan_messages",
@@ -139,6 +140,26 @@ pub fn sync_message(
     id: &str,
     old_scope: Option<&Scope>,
 ) -> Result<()> {
+    sync_message_scopes(c, source, id, old_scope.into_iter().cloned())
+}
+/// Contract adapters recover pre-change scopes from pending, even after source deletion.
+pub(crate) fn pending_scopes(c: &Connection, source: Source, id: &str) -> Result<Vec<Scope>> {
+    let prefix = source.shape().prefix;
+    c.prepare_cached(
+        "SELECT DISTINCT workspace_id,conv FROM digest_pending
+        WHERE message_id=?1 AND substr(conv,1,length(?2))=?2 ORDER BY workspace_id,conv",
+    )?
+    .query_map(params![id, prefix], scope_row)?
+    .collect()
+}
+/// Same implementation as legacy writes, accepting all recovered old scopes without
+/// deleting/reinserting a surviving membership or resetting conversation extension fields.
+pub(crate) fn sync_message_scopes(
+    c: &Connection,
+    source: Source,
+    id: &str,
+    old_scopes: impl IntoIterator<Item = Scope>,
+) -> Result<()> {
     transaction(c)?;
     let source_sql = source.select_sql();
     let added = c
@@ -157,16 +178,35 @@ pub fn sync_message(
     let mut affected = BTreeSet::new();
     // No intermediate projection cleanup: a same-scope update of the only queued message
     // must preserve retry/dead-letter state added by later migrations.
-    if let Some(scope) = old_scope {
-        if added.as_ref() != Some(scope) {
-            delete_membership(c, scope, id)?;
+    for scope in old_scopes {
+        if added.as_ref() != Some(&scope) {
+            delete_membership(c, &scope, id)?;
         }
-        affected.insert(scope.clone());
+        affected.insert(scope);
     }
     if let Some(scope) = added {
         affected.insert(scope);
     }
     for scope in affected {
+        sync_pending_conversation(c, &scope)?;
+    }
+    Ok(())
+}
+pub(crate) fn receipt_exists(c: &Connection, scope: &Scope, id: &str) -> Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM digest_receipts
+        WHERE workspace_id=?1 AND conv=?2 AND message_id=?3)",
+        params![scope.workspace, scope.conv, id],
+        |r| r.get(0),
+    )
+}
+/// Reconcile only identified conversations, preserving additive fields on surviving rows.
+pub(crate) fn reconcile_conversations(
+    c: &Connection,
+    scopes: impl IntoIterator<Item = Scope>,
+) -> Result<()> {
+    transaction(c)?;
+    for scope in scopes.into_iter().collect::<BTreeSet<_>>() {
         sync_pending_conversation(c, &scope)?;
     }
     Ok(())
