@@ -2,9 +2,9 @@ name: CI
 # Each platform runs the Rust tests in parallel shards, one runner each (RUST_TEST_SHARDS below); a last
 # job per platform proves that together they ran every test exactly once and it passed on its first try.
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
-# there instead of holding a runner for GitHub's six hours. GitHub counts the time a job waits for a
-# runner against its job limit, and macOS runners are few: macOS work therefore limits its steps, which
-# count only running time, and its job limit only stops a runaway queue.
+# there instead of holding a runner for GitHub's six hours. macOS work limits its heavy steps and keeps a
+# long job limit. When GitHub cannot give a macOS job a runner at all it cancels the job itself, with no
+# step run; the `CI rerun` workflow (ci-rerun.yml) reruns such a run on main.
 # A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
 # client they bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
 # and a merge queue run cover both platforms, with three macOS jobs: two Rust shards (the first also runs the
@@ -128,8 +128,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.rust-plan.outputs.shards) }}
     runs-on: ${{ matrix.runner }}
-    # Linux runners start at once; a macOS shard may queue for an hour, which GitHub counts against this
-    # limit, so there the steps below carry the limit on running time.
+    # A macOS shard keeps a long job limit; its heavy steps below carry the limits on running time.
     timeout-minutes: ${{ startsWith(matrix.runner, 'macos') && 240 || 45 }}
     # Linux builds without debug info: that halved compiling the workspace's tests (464 s with line
     # tables, 213 s without, on otherwise identical runners). Panic messages still carry file and line,
@@ -267,7 +266,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.changes.outputs.apple != 'false' }}
     runs-on: macos-15
-    # The queue for a macOS runner counts against the job limit; the steps limit the running time.
+    # A long job limit; the steps limit the running time.
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
