@@ -47,10 +47,11 @@ test("coverage rejects missing, unregistered and retired keys and undeclared par
 const source = ts.transpileModule(readFileSync(new URL("../src/api.ts", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 },
 }).outputText
-function client(status, body) {
+function client(status, body, reasonModule = () => ({ reasonText })) {
   const exports = {}
   runInNewContext(source, { exports, AbortSignal, URLSearchParams, require: (id) => {
     if (id === "@/i18n") return ui
+    if (id === "./i18n/reason.ts") return reasonModule()
     if (id === "./stream-cursor") return {}
     if (id === "./hub") return { hubUrl: path => path }
     throw new Error(id)
@@ -68,6 +69,13 @@ test("absent, unknown, malformed and untranslated reasons keep the safe detail a
         e instanceof api.HubError && e.message === body.error && e.status === status && e.code === body.code && e.reason === reason && e.params === body.params)
     }
   }
+})
+
+test("unavailable reason formatting preserves the original HTTP error", async () => {
+  const body = { error: "Safe detail", code: "stale", reason: "future.new", params: {} }
+  const api = client(409, body, () => { throw new Error("module unavailable") })
+  await assert.rejects(api.modReq("PATCH", "/test", {}), e =>
+    e instanceof api.HubError && e.message === body.error && e.status === 409 && e.code === body.code && e.reason === body.reason && e.params === body.params)
 })
 
 test("reason texts format dates and durations, preserve numeric count and flow through HubError", async () => {
@@ -101,4 +109,25 @@ test("reason texts format dates and durations, preserve numeric count and flow t
     i18n.addResourceBundle("en", "reason", en)
     await i18n.changeLanguage(oldLanguage)
   }
+})
+
+
+test("the i18n entry point and reason formatting have no static import cycle", () => {
+  const active = new Set(), visited = new Set()
+  function visit(file) {
+    assert.ok(!active.has(file.href), `circular i18n import: ${file.href}`)
+    if (visited.has(file.href)) return
+    active.add(file.href)
+    const code = ts.createSourceFile(file.href, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true)
+    for (const statement of code.statements) {
+      if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) continue
+      if (statement.isTypeOnly || statement.importClause?.isTypeOnly || !statement.moduleSpecifier) continue
+      const name = statement.moduleSpecifier.text
+      if (name.startsWith(".")) visit(new URL(name, file))
+    }
+    active.delete(file.href)
+    visited.add(file.href)
+  }
+  visit(new URL("../src/i18n/index.ts", import.meta.url))
+  visit(new URL("../src/i18n/reason.ts", import.meta.url))
 })

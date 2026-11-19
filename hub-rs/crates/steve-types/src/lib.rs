@@ -14,6 +14,8 @@
 //! Published names, meanings and error codes never change. To retire a cause, remove its variant,
 //! keep its suffix in `retired { "old_code" }`, regenerate TS and remove both translations. Unknown
 //! and retired wire strings remain readable and display the stored safe detail as a fallback.
+//! Branch only with `r.is(..)` or `known()`, never by comparing strings or using `code` to distinguish
+//! reasons. Adding a reason needs no minor release; a new prefix requires a contract change request.
 //!
 //! `Reason` belongs only in `Error`, for display and branches that need no data. `params` is only
 //! for display and diagnostics. Facts whose data drives logic belong in typed protocol fields

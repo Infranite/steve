@@ -1,7 +1,10 @@
 use steve_types::{error::check_registry, *};
 
 reasons! {
+    /// Reasons used to exercise the public declaration macro.
+    #[allow(clippy::enum_variant_names)]
     pub enum TestReason = "test" {
+        /// The caller's branch position is stale; `now` is only for display.
         Moved = moved [Stale] (branch, now),
         Wait = wait [Busy] (delay_ms),
         Lost = lost [OutcomeUnknown] (),
@@ -41,6 +44,60 @@ fn constructors_and_wire_values_round_trip() {
         after_ms: Some(250),
     };
     assert_eq!(error.clone().retry(retry), Error { retry, ..error });
+}
+
+#[test]
+fn borrowed_strings_and_lossless_integers_are_constructor_arguments() {
+    let branch = String::from("main");
+    let error = TestReason::moved(&branch, 42, "the branch moved");
+    assert_eq!(error.params.0["branch"], Param::Str(branch.clone()));
+    assert_eq!(error.params.0["now"], Param::Int(42));
+    assert_eq!(
+        TestReason::wait(u32::MAX, "busy").params.0["delay_ms"],
+        Param::Int(i64::from(u32::MAX))
+    );
+    macro_rules! check_int {
+        ($($value:expr),* $(,)?) => { $(
+            assert_eq!(Param::from($value), Param::Int(i64::from($value)));
+        )* };
+    }
+    check_int!(
+        i8::MIN,
+        i16::MIN,
+        i32::MIN,
+        i64::MIN,
+        u8::MAX,
+        u16::MAX,
+        u32::MAX
+    );
+}
+
+#[test]
+fn variant_definitions_come_from_the_registry_in_declaration_order() {
+    for (reason, def) in [TestReason::Moved, TestReason::Wait, TestReason::Lost]
+        .into_iter()
+        .zip(TestReason::SET.defs)
+    {
+        assert_eq!(reason.def().reason, def.reason);
+        assert_eq!(reason.def().code, def.code);
+        assert_eq!(reason.def().params, def.params);
+    }
+}
+
+#[test]
+fn detail_is_reserved_for_the_constructor_safe_detail() {
+    let error = check_registry(&[&[set(
+        "test",
+        &[ReasonDef {
+            reason: "test.invalid",
+            code: Code::Invalid,
+            params: &["detail"],
+        }],
+        &[],
+    )]])
+    .unwrap_err();
+    assert!(error.contains("reserved parameter"));
+    assert!(error.contains("detail"));
 }
 
 #[test]

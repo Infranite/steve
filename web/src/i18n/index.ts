@@ -88,7 +88,6 @@ export function setLang(l: Lang) {
 }
 
 export { t } from "i18next"
-export { reasonText } from "./reason.ts"
 /** `t` for a component: takes any "<ns>:<key>" and re-renders the component when the language changes */
 export const useT = () => useTranslation(NAMESPACES).t
 export default i18n

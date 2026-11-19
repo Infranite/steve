@@ -119,11 +119,23 @@ impl From<String> for Param {
     }
 }
 
-impl From<i64> for Param {
-    fn from(value: i64) -> Self {
-        Self::Int(value)
+impl From<&String> for Param {
+    fn from(value: &String) -> Self {
+        Self::Str(value.clone())
     }
 }
+
+// Only lossless integer conversions: wider unsigned values need an explicit checked conversion.
+macro_rules! param_int {
+    ($($ty:ty),* $(,)?) => { $(
+        impl From<$ty> for Param {
+            fn from(value: $ty) -> Self {
+                Self::Int(i64::from(value))
+            }
+        }
+    )* };
+}
+param_int!(i8, i16, i32, i64, u8, u16, u32);
 
 /// Ordered by key for stable wire output. Values are display arguments, never parsed messages.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +197,7 @@ pub trait ReasonCode: Copy + Eq + Into<Reason> + 'static {
 
 /// Declare stable reason codes, their error codes and display parameters in a domain file.
 /// Retired names are suffixes, kept only as tombstones to prevent reuse.
+/// The display parameter name `detail` is reserved for the final safe-detail argument.
 ///
 /// ```compile_fail
 /// steve_types::reasons! {
@@ -199,13 +212,15 @@ pub trait ReasonCode: Copy + Eq + Into<Reason> + 'static {
 #[macro_export]
 macro_rules! reasons {
     (
+        $(#[$meta:meta])*
         $vis:vis enum $name:ident = $domain:literal {
-            $($variant:ident = $constructor:ident [$code:ident] ($($param:ident),* $(,)?)),* $(,)?
+            $($(#[$variant_meta:meta])* $variant:ident = $constructor:ident [$code:ident] ($($param:ident),* $(,)?)),* $(,)?
         }
         retired { $($retired:literal),* $(,)? }
     ) => {
+        $(#[$meta])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-        $vis enum $name { $($variant),* }
+        $vis enum $name { $($(#[$variant_meta])* $variant),* }
 
         impl $crate::ReasonCode for $name {
             const SET: $crate::ReasonSet = $crate::ReasonSet {
@@ -220,11 +235,7 @@ macro_rules! reasons {
 
             fn def(self) -> &'static $crate::ReasonDef {
                 match self {
-                    $(Self::$variant => &$crate::ReasonDef {
-                        reason: concat!($domain, ".", stringify!($constructor)),
-                        code: $crate::Code::$code,
-                        params: &[$(stringify!($param)),*],
-                    }),*
+                    $(Self::$variant => &Self::SET.defs[Self::$variant as usize]),*
                 }
             }
 
@@ -317,6 +328,9 @@ pub fn check_registry(all: &[&[ReasonSet]]) -> Result<(), String> {
         for def in set.defs {
             let mut params = BTreeSet::new();
             for param in def.params {
+                if *param == "detail" {
+                    return Err(format!("reserved parameter in {}: {param}", def.reason));
+                }
                 if !param.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
                     || !valid_segment(param)
                     || !params.insert(param)

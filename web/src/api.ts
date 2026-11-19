@@ -1,7 +1,7 @@
 import type { Code, Reason, Params } from "./gen"
 import type { BusEvent, Envelope, StreamControl } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
-import { lang, t, reasonText } from "@/i18n"
+import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { ItemDispatch } from "./bot-dispatch"
@@ -273,14 +273,14 @@ export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
  * 404 / 405, or a JSON 404 / 405 without an `error`. Every module client throws `NotWired` for these, and its page
  * shows the module's Unwired placeholder instead — never sample data. */
 export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
-/** an error answer of a module route that exists; `status` tells 400 / 404 / 409 / 503 apart */
+/** An error answer of an existing module route; the request edge supplies the display message. */
 export class HubError extends Error {
   status: number
   code?: Code
   reason?: Reason | null
   params?: Params
   constructor(status: number, msg: string, code?: Code, reason?: Reason | null, params?: Params) {
-    super(reason ? reasonText({ error: msg, reason, params }) : msg)
+    super(msg)
     this.status = status
     this.code = code
     this.reason = reason
@@ -307,7 +307,16 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
     throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
   }
   if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
-  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code, j?.reason, j?.params)
+  if (!r.ok) {
+    let message = j?.error ?? t("shell:http.failed", { status: r.status })
+    if (j?.reason) {
+      try {
+        const { reasonText } = await import("./i18n/reason.ts")
+        message = reasonText({ error: message, reason: j.reason, params: j.params })
+      } catch { /* Display formatting must preserve the original HTTP error if its module cannot load. */ }
+    }
+    throw new HubError(r.status, message, j?.code, j?.reason, j?.params)
+  }
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }
