@@ -558,7 +558,7 @@ async fn memory_routes() {
     assert!(
         t.take_events()
             .iter()
-            .any(|e| matches!(e, steve_store::ChangeEvent::Mm { id, ws } if *id == mm && ws == WS))
+            .any(|e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm { id, ws })) if id.as_str() == mm.as_str() && ws.as_str() == WS))
     );
 
     // “我” and teams and organizations have memories too

@@ -11,7 +11,7 @@ use rusqlite::{Connection, params};
 use steve_modules::Modules;
 use steve_store::base::mems::{self, Mem};
 use steve_store::base::{Level, ObjRef};
-use steve_store::{ChangeEvent, Result, StoreError, Tx, sha};
+use steve_store::{BusEvent, Result, StoreError, Tx, sha};
 
 use crate::chunk::Chunk;
 use crate::index::{self, ChunkMeta};
@@ -127,7 +127,7 @@ pub fn sweep_mems(tx: &Tx, ws: &str, now: i64) -> Result<usize> {
     let mut n = 0;
     let mut mark = since;
     for (id, updated) in &changed {
-        sync_mem(tx, id, now)?;
+        sync_mem(tx, id.as_str(), now)?;
         mark = mark.max(*updated);
         n += 1;
     }
@@ -218,14 +218,18 @@ fn workspaces(c: &Connection) -> Result<Vec<String>> {
 }
 
 /// Reacts to a bus event: `mm` re-indexes that memory, `bot` re-compares the old Bot memories of
-/// every workspace (its event has no workspace).
-pub fn on_event(m: &Modules, e: &ChangeEvent) -> Result<()> {
+/// every workspace, preserving the full memory reconciliation.
+pub fn on_event(m: &Modules, e: &BusEvent) -> Result<()> {
     let now = m.clock.now();
     match e {
-        ChangeEvent::Mm { id, .. } => {
-            m.store.transaction(|tx| sync_mem(tx, id, now))?;
+        steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(
+            steve_types::ConfigEvent::Mm { id, .. },
+        )) => {
+            m.store.transaction(|tx| sync_mem(tx, id.as_str(), now))?;
         }
-        ChangeEvent::Bot { .. } => {
+        steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(
+            steve_types::ConfigEvent::Bot { .. },
+        )) => {
             let wss = m.store.reader(workspaces)?;
             m.store.transaction(|tx| {
                 for ws in &wss {

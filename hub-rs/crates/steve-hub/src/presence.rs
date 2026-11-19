@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 #[cfg(test)]
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 use steve_store::Store;
 use tokio::sync::watch;
 
@@ -264,7 +264,9 @@ mod tests {
             seen.lock()
                 .unwrap()
                 .iter()
-                .filter(|e| matches!(e, ChangeEvent::Client { id: i, user: u } if i == id && *u == user))
+                .filter(
+                    |e| matches!(e, steve_types::BusEvent::Domain(steve_types::DomainEvent::Devices(steve_types::DevicesEvent::Client { id: i, user: u })) if i.as_str() == id && u.as_str() == user.as_str()),
+                )
                 .count()
         };
         // signed in, came onto the stream, signed out, its stream ended

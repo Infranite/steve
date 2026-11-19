@@ -40,3 +40,14 @@ impl DevicesEvent {
         }
     }
 }
+
+impl DevicesEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::ReleaseHold { .. } => None,
+            Self::Device { id, .. } => Some(id.as_str()),
+            Self::Node { id, .. } => Some(id.as_str()),
+            Self::Client { id, .. } => Some(id.as_str()),
+        }
+    }
+}

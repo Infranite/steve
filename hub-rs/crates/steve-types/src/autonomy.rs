@@ -36,3 +36,12 @@ impl AutonomyEvent {
         }
     }
 }
+
+impl AutonomyEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Yolo { .. } => None,
+            Self::YoloAction { id, .. } => Some(id.as_str()),
+        }
+    }
+}

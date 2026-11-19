@@ -3,7 +3,7 @@
 //! into an item. The research executor is `FakeResearch`; the router is a fixed fake.
 
 use crate::error::msg;
-use crate::repo::{HubEvent, Message, WS};
+use crate::repo::{Message, WS};
 use crate::testkit::{FakeResearch, Kit, Step};
 use crate::thread::RerouteTo;
 use serde_json::{Value, json};
@@ -127,22 +127,41 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     let ev = k.events.lock().unwrap().clone();
     let stored = ev
         .iter()
-        .position(|e| *e == HubEvent::Message { id: a.id.clone() })
+        .position(|e| {
+            *e == steve_types::BusEvent::from(steve_types::DomainEvent::from(
+                steve_types::WorkEvent::Message {
+                    ws: steve_types::WorkspaceId::from(steve_store::WS),
+                    id: {
+                        let value: String = a.id.clone();
+                        steve_types::MessageId::from(value)
+                    },
+                },
+            ))
+        })
         .unwrap();
     let drafts = ev[..stored]
         .iter()
-        .filter(|e| matches!(e, HubEvent::SteveDraft { mid: m, .. } if *m == mid))
+        .filter(|e| matches!(e, steve_types::BusEvent::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::SteveDraft { mid: m, .. })) if m.as_str() == mid.as_str()))
         .count();
     assert!(drafts >= 2, "{drafts} drafts");
     assert!(
         ev.iter()
-            .any(|e| matches!(e, HubEvent::SteveTool { name, .. } if name == "Read"))
+            .any(|e| matches!(e, steve_types::BusEvent::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::SteveTool { name, .. })) if name == "Read"))
     );
-    assert!(ev.contains(&HubEvent::SteveThinking {
-        on: true,
-        ws: Some(WS.into()),
-        phase: Some("research".into())
-    }));
+    assert!(
+        ev.contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+            steve_types::WorkLiveEvent::SteveThinking {
+                on: true,
+                ws: {
+                    let value: Option<String> = Some(WS.into());
+                    value
+                        .map(Into::into)
+                        .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
+                },
+                phase: Some("research".into())
+            }
+        )))
+    );
     /* the request the executor got */
     let req = fr.seen.lock().unwrap()[0].clone();
     assert_eq!(
@@ -2296,14 +2315,18 @@ async fn a_tool_call_is_shown_while_it_runs() {
         .unwrap()
         .iter()
         .filter_map(|e| match e {
-            HubEvent::SteveTool {
-                mid: m,
-                name,
-                brief,
-                kind,
-                running,
-                ..
-            } if *m == mid => Some((name.clone(), kind.clone(), brief.clone(), *running)),
+            steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                steve_types::WorkLiveEvent::SteveTool {
+                    mid: m,
+                    name,
+                    brief,
+                    kind,
+                    running,
+                    ..
+                },
+            )) if m.as_str() == mid.as_str() => {
+                Some((name.clone(), kind.clone(), brief.clone(), *running))
+            }
             _ => None,
         })
         .collect();

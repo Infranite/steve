@@ -2,7 +2,7 @@
 
 use crate::Tier;
 use crate::error::msg;
-use crate::repo::{HubEvent, WS};
+use crate::repo::WS;
 use crate::testkit::Kit;
 use serde_json::json;
 use std::time::Duration;
@@ -56,11 +56,20 @@ async fn digest() {
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "现在：1 件等你，1 件在进行，今天完成 1 件。");
     let ev = k.events.lock().unwrap().clone();
-    assert!(ev.contains(&HubEvent::SteveThinking {
-        on: false,
-        ws: Some(WS.into()),
-        phase: None
-    }));
+    assert!(
+        ev.contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+            steve_types::WorkLiveEvent::SteveThinking {
+                on: false,
+                ws: {
+                    let value: Option<String> = Some(WS.into());
+                    value
+                        .map(Into::into)
+                        .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
+                },
+                phase: None
+            }
+        )))
+    );
 }
 
 #[tokio::test]
@@ -97,11 +106,21 @@ async fn an_explicit_target_supplements_the_item() {
     assert_eq!(ms[1].item_id.as_deref(), Some(i.as_str()));
     assert_eq!(k.rt.prompts_of(&s), vec!["补充信息：记得加测试"]);
     assert!(
-        k.events.lock().unwrap().contains(&HubEvent::SteveThinking {
-            on: true,
-            ws: Some(WS.into()),
-            phase: Some("supplement".into())
-        }),
+        k.events
+            .lock()
+            .unwrap()
+            .contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                steve_types::WorkLiveEvent::SteveThinking {
+                    on: true,
+                    ws: {
+                        let value: Option<String> = Some(WS.into());
+                        value
+                            .map(Into::into)
+                            .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
+                    },
+                    phase: Some("supplement".into())
+                }
+            ))),
         "steve.thinking carries the phase"
     );
     /* unknown references go through the router; with the router down that is an answer, never an item */
@@ -130,12 +149,25 @@ async fn chat_is_answered_with_history_and_can_be_promoted() {
     assert_eq!(st["answer"]["failed"], false);
     assert_eq!(st["tools"], json!([]));
     /* the answer went out as it was written, for the message it answers */
-    assert!(k.events.lock().unwrap().contains(&HubEvent::SteveDraft {
-        ws: WS.into(),
-        mid: ms[0].id.clone(),
-        thought: String::new(),
-        text: "你好呀  ".into(),
-    }));
+    assert!(
+        k.events
+            .lock()
+            .unwrap()
+            .contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                steve_types::WorkLiveEvent::SteveDraft {
+                    ws: {
+                        let value: String = WS.into();
+                        steve_types::WorkspaceId::from(value)
+                    },
+                    mid: {
+                        let value: String = ms[0].id.clone();
+                        steve_types::MessageId::from(value)
+                    },
+                    thought: String::new(),
+                    text: "你好呀  ".into()
+                }
+            )))
+    );
     k.core.say(WS, "再说一句", &[]).unwrap();
     settle(&k, 4).await;
     let calls = k.gw.calls.lock().unwrap().clone();

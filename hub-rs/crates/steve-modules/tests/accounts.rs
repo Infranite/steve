@@ -10,7 +10,7 @@ use steve_modules::changes::{self, Origin, Plan, Prepared};
 use steve_modules::contacts::{self, PartyHooks};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiError, Caller};
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 
 fn env() -> TestEnv {
     TestEnv::new(accounts::register)
@@ -570,14 +570,30 @@ async fn unknown_handle_creates_an_unconfirmed_contact() {
     assert_eq!(list[0]["id"], json!(got.party_id));
     assert_eq!(list[0]["accounts"], 1);
     let evs = t.take_events();
-    assert!(evs.contains(&ChangeEvent::Account {
-        id: got.account_id.clone(),
-        ws: WS.into()
-    }));
-    assert!(evs.contains(&ChangeEvent::Party {
-        id: got.party_id.clone(),
-        ws: WS.into()
-    }));
+    assert!(evs.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
+            id: {
+                let value: String = got.account_id.clone();
+                steve_types::AccountId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
+    assert!(evs.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = got.party_id.clone();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
 
     // no display name, no organization: named after the handle, no job
     let bare = ident(&t, "github", "Octocat", &Hints::default()).unwrap();
@@ -636,10 +652,18 @@ async fn record_list_and_get_accounts() {
     assert_eq!(mine["vault_items"], json!([]));
     assert_eq!(mine["revision"], 1);
     let evs = t.take_events();
-    assert!(evs.contains(&ChangeEvent::Account {
-        id: id(&mine),
-        ws: WS.into()
-    }));
+    assert!(evs.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
+            id: {
+                let value: String = id(&mine);
+                steve_types::AccountId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
 
     let org: String = scalar(&t, "SELECT id FROM parties WHERE org_kind = 'self'");
     let bot = ok(&r, "POST", "/accounts", json!({ "system_id": "feishu_app", "party_id": org, "kind": "app_bot", "handle": "cli_b81" })).await;
@@ -1004,14 +1028,30 @@ async fn patch_moves_and_verifies() {
     assert_eq!(patch["before"]["party_id"], json!(got.party_id));
     assert_eq!(patch["after"]["party_id"], json!(a.sarah));
     let evs = t.take_events();
-    assert!(evs.contains(&ChangeEvent::Party {
-        id: a.sarah.clone(),
-        ws: WS.into()
-    }));
-    assert!(evs.contains(&ChangeEvent::Party {
-        id: got.party_id.clone(),
-        ws: WS.into()
-    }));
+    assert!(evs.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = a.sarah.clone();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
+    assert!(evs.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = got.party_id.clone();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
 
     let b = ok(
         &r,
@@ -1220,10 +1260,18 @@ async fn deleting_a_contact_deletes_its_accounts() {
         "SELECT COUNT(*) FROM vault_items WHERE account_id IS NOT NULL",
     );
     assert_eq!((n, h, linked), (0, 0, 0));
-    assert!(t.take_events().contains(&ChangeEvent::Account {
-        id: a.sarah_mail.clone(),
-        ws: WS.into()
-    }));
+    assert!(t.take_events().contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
+            id: {
+                let value: String = a.sarah_mail.clone();
+                steve_types::AccountId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
     // the handle is free again
     ok(
         &r,
@@ -1289,10 +1337,18 @@ async fn accounts_follow_a_merge_and_come_back_on_split() {
     )
     .await;
     assert_eq!(on_sarah.as_array().unwrap().len(), 3);
-    assert!(t.take_events().contains(&ChangeEvent::Account {
-        id: got.account_id.clone(),
-        ws: WS.into()
-    }));
+    assert!(t.take_events().contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Account {
+            id: {
+                let value: String = got.account_id.clone();
+                steve_types::AccountId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
     // what the merge record will hold under moved.hooks.vault
     exec(
         &t,

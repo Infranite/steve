@@ -30,7 +30,7 @@ install! { install(reg, cx) [core, db, mode, model_node, mut node_jobs, workspac
                 None,
                 workspaces::configured(cfg),
             );
-            node_jobs.push(Box::pin(ws.clone().follow(bus.tap(&["project", "kb"]))));
+            node_jobs.push(Box::pin(ws.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_)))))));
             ws
         };
         adapter = adapter.on_node(crate::wire::research::NodeResearch {

@@ -55,40 +55,12 @@ install! { start(reg, _cx) [kb, modules] => [kb, modules] {
 install! { sync(reg, cx) [mut jobs, kb, modules] => [jobs, kb, modules] {
     let Env { bus, .. } = cx.clone();
     // memories and Bot memories are re-indexed when the store says they changed
-    let mut changes = bus.tap(&["mm", "bot"]);
+    let mut changes = bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm { .. } | steve_types::ConfigEvent::Bot { .. }))));
     let m = modules.clone();
     jobs.push(Box::pin(async move {
-        while let Some(v) = changes.recv().await {
-            let s = |k: &str| {
-                v.get(k)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let kind = s("type");
-            let id = s("id");
+        while let Some(event) = changes.recv().await {
             let m = m.clone();
-            // Preserve the subscriber's existing sync scope without reconstructing a legacy event.
-            match tokio::task::spawn_blocking(move || {
-                let now = m.clock.now();
-                match kind.as_str() {
-                    "mm" => {
-                        m.store.transaction(|tx| steve_knowledge::sync::sync_mem(tx, &id, now))?;
-                    }
-                    "bot" => {
-                        let mut workspaces = m.store.workspaces().ids()?;
-                        workspaces.sort();
-                        m.store.transaction(|tx| {
-                            for ws in &workspaces {
-                                steve_knowledge::sync::sync_bot_mems(tx, ws, "steve", now)?;
-                            }
-                            Ok::<_, steve_store::StoreError>(())
-                        })?;
-                    }
-                    _ => {}
-                }
-                Ok::<_, steve_store::StoreError>(())
-            }).await {
+            match tokio::task::spawn_blocking(move || steve_knowledge::sync::on_event(&m, &event.event)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("kb sync: {e}"),
                 Err(e) => tracing::warn!("kb sync: {e}"),

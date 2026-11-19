@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steve_modules::contacts::{self, Ports, SpacePort, TeamSync};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_modules::{ApiResult, Caller};
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 use steve_store::base::Viewer;
 
 const READONLY: &str = "组织架构团队跟随同步，不能改这一项";
@@ -88,7 +88,9 @@ fn party_events(t: &TestEnv) -> Vec<String> {
     t.take_events()
         .into_iter()
         .filter_map(|e| match e {
-            ChangeEvent::Party { id, .. } => Some(id),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::People(
+                steve_types::PeopleEvent::Party { id, .. },
+            )) => Some(id.to_string()),
             _ => None,
         })
         .collect()

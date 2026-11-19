@@ -385,7 +385,7 @@ mod tests {
             resume: None,
             pending: Pending::default(),
         };
-        tx.send(frame(Scope::All)).unwrap();
+        tx.send(frame(Scope::Hub)).unwrap();
         let first = sub.rx.recv().await.unwrap().bytes.clone();
         for _ in 0..4 {
             tx.send(frame(Scope::Ws("private-a".into()))).unwrap();
@@ -426,8 +426,6 @@ mod tests {
 
     mod resume {
         use super::super::*;
-        use crate::bus::HubEvent;
-        use serde_json::json;
 
         async fn sent(rx: &mut Receiver<Arc<Frame>>, n: usize) -> Vec<Arc<Frame>> {
             let mut out = vec![];
@@ -468,15 +466,20 @@ mod tests {
         }
 
         fn item(bus: &Bus, id: &str) {
-            bus.publish(HubEvent::Item { id: id.into() });
+            bus.publish(steve_types::WorkEvent::Item {
+                id: id.into(),
+                ws: "a".into(),
+            });
         }
-
         fn in_ws(bus: &Bus, id: &str, ws: &str) {
-            bus.publish_value(json!({"type": "project", "id": id, "ws": ws}));
+            bus.publish(steve_types::ConfigEvent::Project {
+                id: id.into(),
+                ws: ws.into(),
+            });
         }
 
         #[tokio::test]
-        async fn legacy_bytes_are_unchanged() {
+        async fn cursorless_frames_keep_scoped_payload_without_cursor_lines() {
             let bus = Bus::new();
             let mut sub = Sub {
                 ws: "a".into(),
@@ -492,7 +495,7 @@ mod tests {
             sent(&mut watch, 2).await;
             assert_eq!(
                 drain(&mut sub),
-                "data: {\"type\":\"item\",\"id\":\"ST-1\"}\n\n"
+                "data: {\"type\":\"item\",\"id\":\"ST-1\",\"ws\":\"a\",\"rev\":1}\n\n"
             );
         }
 
@@ -513,8 +516,8 @@ mod tests {
             assert_eq!(
                 out,
                 format!(
-                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-2\"}}\n\n\
-                     id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"mine\",\"ws\":\"a\"}}\n\n\
+                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-2\",\"ws\":\"a\",\"rev\":2}}\n\n\
+                     id: {e}:{}\ndata: {{\"type\":\"project\",\"id\":\"mine\",\"ws\":\"a\",\"rev\":4}}\n\n\
                      data: {{\"type\":\"stream.gap\"}}\n\n",
                     c.n + 1,
                     c.n + 3
@@ -522,13 +525,18 @@ mod tests {
             );
             // live frames carry their id; frames without one go out as they are
             item(&bus, "ST-3");
-            bus.publish_value(json!({"type": "steve.draft", "ws": "a", "mid": "m", "text": "x"}));
+            bus.publish(steve_types::WorkLiveEvent::SteveDraft {
+                ws: "a".into(),
+                mid: "m".into(),
+                thought: "".into(),
+                text: "x".into(),
+            });
             sent(&mut watch, 2).await;
             assert_eq!(
                 drain(&mut sub),
                 format!(
-                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-3\"}}\n\n\
-                     data: {{\"type\":\"steve.draft\",\"ws\":\"a\",\"mid\":\"m\",\"text\":\"x\"}}\n\n",
+                    "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-3\",\"ws\":\"a\",\"rev\":5}}\n\n\
+                     data: {{\"type\":\"steve.draft\",\"ws\":\"a\",\"mid\":\"m\",\"thought\":\"\",\"text\":\"x\",\"rev\":5}}\n\n",
                     c.n + 4
                 )
             );
@@ -582,7 +590,7 @@ mod tests {
                     assert_eq!(
                         out,
                         format!(
-                            "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-9\"}}\n\n",
+                            "id: {e}:{}\ndata: {{\"type\":\"item\",\"id\":\"ST-9\",\"ws\":\"a\",\"rev\":5}}\n\n",
                             head + 1
                         )
                     );

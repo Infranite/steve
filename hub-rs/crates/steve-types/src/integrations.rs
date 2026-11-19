@@ -32,3 +32,12 @@ impl IntegrationsEvent {
         }
     }
 }
+
+impl IntegrationsEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Gh { id, .. } => Some(id.as_str()),
+            Self::Mail { id, .. } => Some(id.as_str()),
+        }
+    }
+}

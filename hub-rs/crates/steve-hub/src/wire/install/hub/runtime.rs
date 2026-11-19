@@ -83,7 +83,7 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     if node_host.is_some() {
         // the local roots follow projects and knowledge folders, with no restart
         node_jobs.push(Box::pin(
-            workspaces.clone().follow(bus.tap(&["project", "kb"])),
+            workspaces.clone().follow(bus.tap(|event| matches!(event.as_domain(), Some(steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project { .. }) | steve_types::DomainEvent::Knowledge(_))))),
         ));
     }
     // whether a principal's Bot can run at all: what the Nodes said of its harness last (installed,

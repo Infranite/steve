@@ -426,10 +426,18 @@ async fn a_new_mailbox_syncs_on_its_connection_event() {
     h.inject("INBOX", t1);
     let conn = h.connect().await;
     assert!(h.messages(&conn).is_empty(), "nothing synced yet");
-    h.mail.on_event(&steve_store::ChangeEvent::Connection {
-        id: conn.clone(),
-        ws: WS.into(),
-    });
+    h.mail.on_event(&steve_types::BusEvent::from(
+        steve_types::DomainEvent::from(steve_types::ChannelsEvent::Connection {
+            id: {
+                let value: String = conn.clone();
+                steve_types::ConnectionId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            },
+        }),
+    ));
     let mut synced = false;
     for _ in 0..200 {
         if !h.messages(&conn).is_empty() {

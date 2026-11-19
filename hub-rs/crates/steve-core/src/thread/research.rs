@@ -1485,7 +1485,7 @@ mod mention_tests {
 #[cfg(test)]
 mod draft_tests {
     use super::*;
-    use crate::repo::HubEvent;
+    use crate::repo::BusEvent;
     use crate::repo::WS;
     use crate::testkit::Kit;
 
@@ -1518,12 +1518,20 @@ mod draft_tests {
             drained(&drafts.state).await;
             assert_eq!(
                 k.events.lock().unwrap().last(),
-                Some(&HubEvent::SteveDraft {
-                    ws: WS.into(),
-                    mid: "question".into(),
-                    thought: String::new(),
-                    text: format!("{head}{tail}"),
-                })
+                Some(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                    steve_types::WorkLiveEvent::SteveDraft {
+                        ws: {
+                            let value: String = WS.into();
+                            steve_types::WorkspaceId::from(value)
+                        },
+                        mid: {
+                            let value: String = "question".into();
+                            steve_types::MessageId::from(value)
+                        },
+                        thought: String::new(),
+                        text: format!("{head}{tail}")
+                    }
+                )))
             );
             let n = k.events.lock().unwrap().len();
             drafts.send("", &format!("{head}{tail}"));
@@ -1550,13 +1558,12 @@ mod draft_tests {
                 drop(drafts);
             }
             drained(&state).await;
-            assert!(
-                !k.events
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|e| matches!(e, HubEvent::SteveDraft { .. }))
-            );
+            assert!(!k.events.lock().unwrap().iter().any(|e| matches!(
+                e,
+                steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                    steve_types::WorkLiveEvent::SteveDraft { .. }
+                ))
+            )));
             assert_eq!(
                 lock(&state).text,
                 "尾字。",
@@ -1568,12 +1575,11 @@ mod draft_tests {
         let drafts = Drafts::new(&k.core, WS, "im", &stop, true);
         drafts.send("", "private reply");
         assert!(!lock(&drafts.state).pending);
-        assert!(
-            !k.events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, HubEvent::SteveDraft { .. }))
-        );
+        assert!(!k.events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+                steve_types::WorkLiveEvent::SteveDraft { .. }
+            ))
+        )));
     }
 }

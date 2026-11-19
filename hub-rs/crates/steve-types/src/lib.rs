@@ -27,7 +27,7 @@ pub mod vault;
 pub mod work;
 
 pub use error::{Code, Error, HttpErrorBody, NOW_MAX_ATTEMPTS, Param, Params, Reason, Retry};
-pub use event::{DomainEvent, Envelope, LiveEvent, Scope, Scoped};
+pub use event::{BusEvent, DomainEvent, Envelope, LiveEvent, Notification, Scope, Scoped};
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
 pub use raw::RawJson;
@@ -41,8 +41,6 @@ pub use autonomy::AutonomyEvent;
 pub use channels::ChannelsEvent;
 pub use config::ConfigEvent;
 pub use devices::DevicesEvent;
-#[allow(deprecated)]
-pub use event::ws_todo;
 pub use integrations::IntegrationsEvent;
 pub use knowledge::KnowledgeEvent;
 pub use people::PeopleEvent;
@@ -50,11 +48,3 @@ pub use stats::StatsEvent;
 pub use vault::VaultEvent;
 pub use work::WorkEvent;
 pub use work::WorkLiveEvent;
-
-/// Emit one deprecation warning at each unresolved workspace construction site.
-#[macro_export]
-macro_rules! ws_todo {
-    () => {
-        $crate::ws_todo()
-    };
-}

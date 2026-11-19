@@ -8,7 +8,7 @@ use serde_json::json;
 use steve_store::base::{
     self, Level, ObjRef, Viewer, Visibility, changesets, decisions, links, mems, tags,
 };
-use steve_store::{ChangeEvent, NewDecision, NoPublisher, Store, StoreError, db};
+use steve_store::{NewDecision, NoPublisher, Store, StoreError, db};
 
 const A: &str = "usr_a";
 const B: &str = "usr_b";
@@ -142,10 +142,18 @@ fn transaction_publishes_after_commit_and_rolls_back_on_error() {
     });
     assert_eq!(
         t.events.take(),
-        [ChangeEvent::Mm {
-            id: m.id.clone(),
-            ws: "default".into()
-        }]
+        [steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Mm {
+                id: {
+                    let value: String = m.id.clone();
+                    steve_types::MemoryId::from(value)
+                },
+                ws: {
+                    let value: String = "default".into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
     let r: Result<(), StoreError> = s.transaction(|tx| {
         mems::create(
@@ -660,10 +668,18 @@ fn changesets_apply_once_and_undo_within_24_hours() {
     assert_eq!((cs.status.as_str(), cs.before.as_ref()), ("draft", None));
     assert_eq!(
         t.events.take(),
-        [ChangeEvent::Changeset {
-            id: cs.id.clone(),
-            ws: "default".into()
-        }]
+        [steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Changeset {
+                id: {
+                    let value: String = cs.id.clone();
+                    steve_types::ChangesetId::from(value)
+                },
+                ws: {
+                    let value: String = "default".into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
     assert!(tx(s, |tx| changesets::mark_applied(
         tx,
@@ -718,10 +734,19 @@ fn confirm_decisions_without_an_item() {
     );
     assert_eq!(
         t.events.take(),
-        [ChangeEvent::Decision {
-            id: d.id.clone(),
-            item_id: Some(None)
-        }]
+        [steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+                id: {
+                    let value: String = d.id.clone();
+                    steve_types::DecisionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = Some(None);
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     // the old repository sees it (待处理 lists every open decision)
     assert_eq!(s.decisions().open("default").unwrap().len(), 1);

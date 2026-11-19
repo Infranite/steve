@@ -154,11 +154,24 @@ fn workspaces_users_auth() {
     let ev = t.events.take();
     assert_eq!(
         ev.last(),
-        Some(&ChangeEvent::Workspace { id: w.id.clone() })
+        Some(&steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Workspace {
+                id: {
+                    let value: String = w.id.clone();
+                    steve_types::WorkspaceId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        ))
     );
     assert_eq!(
         ev.iter()
-            .filter(|e| matches!(e, ChangeEvent::Tag { .. }))
+            .filter(|e| matches!(
+                e,
+                steve_types::BusEvent::Domain(steve_types::DomainEvent::Config(
+                    steve_types::ConfigEvent::Tag { .. }
+                ))
+            ))
             .count(),
         12
     );
@@ -186,7 +199,15 @@ fn workspaces_users_auth() {
     assert_eq!((p.name.as_str(), p.description.as_str()), ("工作", "d"));
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Workspace { id: w.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Workspace {
+                id: {
+                    let value: String = w.id.clone();
+                    steve_types::WorkspaceId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     let mut ids = s.workspaces().ids().unwrap();
     ids.sort();
@@ -240,7 +261,15 @@ fn settings() {
     s.settings().set(WS, &p, "me").unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Settings { id: WS.into() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Settings {
+                id: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     assert_eq!(
         s.settings().get(WS, "archDays", "30".to_string()).unwrap(),
@@ -316,7 +345,15 @@ fn bots_seed_create_patch() {
     assert!(!dev.main && dev.enabled && dev.id.starts_with("bot_"));
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Bot { id: dev.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Bot {
+                id: {
+                    let value: String = dev.id.clone();
+                    steve_types::BotId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     s.with_conn(|c| {
         Ok(assert_eq!(
@@ -352,7 +389,15 @@ fn bots_seed_create_patch() {
     );
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Bot { id: dev.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Bot {
+                id: {
+                    let value: String = dev.id.clone();
+                    steve_types::BotId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     s.with_conn(|c| {
         let (v, patch): (i64, String) = c.query_row("SELECT version, patch FROM revisions WHERE object_type = 'bot'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -471,13 +516,32 @@ fn memories() {
     s.memories().remove(&b).unwrap();
     s.memories().remove("mem_missing").unwrap();
     s.memories().edit("mem_missing", "x").unwrap();
-    let bot = ChangeEvent::Bot { id: "steve".into() };
+    let bot = steve_types::BusEvent::from(steve_types::DomainEvent::from(
+        steve_types::ConfigEvent::Bot {
+            ws: steve_types::WorkspaceId::from(steve_store::WS),
+            id: {
+                let value: String = "steve".into();
+                steve_types::BotId::from(value)
+            },
+        },
+    ));
     assert_eq!(
         t.events.take(),
         vec![bot.clone(), bot.clone(), bot.clone(), bot]
     );
     s.memories().clear(WS).unwrap();
-    assert_eq!(t.events.take(), vec![ChangeEvent::Bot { id: "*".into() }]);
+    assert_eq!(
+        t.events.take(),
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Bot {
+                id: {
+                    let value: String = "*".into();
+                    steve_types::BotId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
+    );
     s.memories().add("steve", WS, "三", "me").unwrap();
     s.memories().remove_of_bot("steve").unwrap();
     assert_eq!(s.memories().count("steve", WS).unwrap(), 0);
@@ -504,7 +568,15 @@ fn projects() {
     let p = s.projects().create(WS, &np).unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Project { id: p.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Project {
+                id: {
+                    let value: String = p.id.clone();
+                    steve_types::ProjectId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     let j = serde_json::to_value(&p).unwrap();
     assert_eq!(
@@ -586,13 +658,40 @@ fn tags() {
     assert_eq!(
         t.events.take(),
         vec![
-            ChangeEvent::Item { id: i1.clone() },
-            ChangeEvent::Item { id: i2.clone() }
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = i1.clone();
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Item {
+                    id: {
+                        let value: String = i2.clone();
+                        steve_types::ItemId::from(value)
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            ))
         ]
     );
     assert_eq!(s.tags().uses(WS).unwrap()[&b.id], 2);
     s.tags().merge(&b.id, &a.id).unwrap();
-    assert_eq!(t.events.take(), vec![ChangeEvent::Tag { id: a.id.clone() }]);
+    assert_eq!(
+        t.events.take(),
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Tag {
+                id: {
+                    let value: String = a.id.clone();
+                    steve_types::TagId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
+    );
     assert!(s.tags().get(&b.id).unwrap().is_none());
     assert_eq!(s.tags().of_item(&i2).unwrap(), [feat.clone(), a.id.clone()]);
     assert_eq!(s.tags().uses(WS).unwrap()[&a.id], 2);
@@ -665,7 +764,14 @@ fn devices_and_links() {
         .unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Device { id: "hub".into() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Devices(steve_types::DevicesEvent::Device {
+                id: {
+                    let value: String = "hub".into();
+                    steve_types::DeviceId::from(value)
+                }
+            })
+        )]
     );
     assert_eq!(s.devices().list().unwrap()[0].max_sessions, 8);
 

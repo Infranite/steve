@@ -27,8 +27,8 @@
 //!    `steve_flow::EventSink::ingest(ws, Some(connection_id), RawEvent { source: "github", .. })`
 //!    (field mapping on [`EventSink`]); register `github` as an event source with the types
 //!    `github.check_failed|check_passed|review_requested|review|pr_comment|pr_merged|pr_closed|issue_opened`;
-//! 6. SSE: add `ChangeEvent::Gh { id, ws }` (`{type:"gh", id, ws}`) and `"gh"` to
-//!    `steve_modules::sse::MODULE_TYPES`, then `gh.set_notifier(..)` publishing it;
+//! 6. SSE: add `IntegrationsEvent::Gh { id, ws }` (`{type:"gh", id, ws}`) and `"gh"` to
+//!    `steve_modules::the typed event contract`, then `gh.set_notifier(..)` publishing it;
 //! 7. `gh.spawn_jobs()` once the runtime is up (poll every 30 s what is due, prune deliveries).
 //!
 //! G3 (items, opening and merging PRs: [`link`], [`accept`], [`push`], [`flow`]):

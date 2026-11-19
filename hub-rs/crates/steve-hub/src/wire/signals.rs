@@ -170,8 +170,8 @@ impl EventAdapter for GithubSource {
     }
 }
 
-/// `{type, id, ws}` notices of the modules that have no `ChangeEvent` variant: they are scoped to
-/// their workspace by the bus (`sse::MODULE_TYPES`).
+/// `{type, id, ws}` notices of the modules that have no `BusEvent` variant: they are scoped to
+/// their workspace by the bus (`the typed event contract`).
 #[derive(Clone)]
 pub struct Notices {
     pub bus: Bus,
@@ -231,7 +231,7 @@ fn connections(flow: &FlowCx) -> Vec<(String, String, String, String, String)> {
 /// “邮件分诊” template (E4; idempotent). Channel connections are followed by the connection
 /// runtime (`steve_channels::lifecycle`).
 pub async fn watch_mailboxes(
-    mut changes: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    mut changes: tokio::sync::mpsc::Receiver<steve_types::Notification>,
     flow: Arc<FlowCx>,
     mail: steve_mail::Mail,
 ) {

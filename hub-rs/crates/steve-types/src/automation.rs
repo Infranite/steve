@@ -44,3 +44,14 @@ impl AutomationEvent {
         }
     }
 }
+
+impl AutomationEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Signal { id, .. } => Some(id.as_str()),
+            Self::Flow { id, .. } => Some(id.as_str()),
+            Self::Run { id, .. } => Some(id.as_str()),
+            Self::Calendar { id, .. } => Some(id.as_str()),
+        }
+    }
+}

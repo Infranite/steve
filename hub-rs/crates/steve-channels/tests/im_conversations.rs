@@ -4075,7 +4075,7 @@ async fn unclassified_research_keeps_its_result_and_an_explicit_eligibility_reas
     );
     h.env.take_events();
     assert_eq!(h.ch.conv_deliver(WS, &id).await.unwrap(), None);
-    assert!(h.env.take_events().iter().any(|event| matches!(event, steve_store::ChangeEvent::Message { id: changed } if changed == &id)), "eligibility reason is published to an already open conversation");
+    assert!(h.env.take_events().iter().any(|event| matches!(event, steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(steve_types::WorkEvent::Message { id: changed, .. })) if changed.as_str() == id.as_str())), "eligibility reason is published to an already open conversation");
     assert!(sent(&h).is_empty());
     let m = h.env.store().messages().get(&id).unwrap().unwrap();
     assert_eq!(m.text, text);

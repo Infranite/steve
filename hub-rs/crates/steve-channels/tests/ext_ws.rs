@@ -153,7 +153,7 @@ impl H {
     }
 
     /// The connection runtime with the feed, every event so far published.
-    fn runtime(&self) -> (ConnectionRuntime, mpsc::Sender<Value>) {
+    fn runtime(&self) -> (ConnectionRuntime, mpsc::Sender<steve_types::Notification>) {
         let rt = ConnectionRuntime::builder(self.ch.clone())
             .hook(
                 ext_ws::ADAPTER,
@@ -172,9 +172,9 @@ impl H {
         (rt, tx)
     }
 
-    fn publish(&self, tx: &mpsc::Sender<Value>) {
+    fn publish(&self, tx: &mpsc::Sender<steve_types::Notification>) {
         for e in self.env.take_events() {
-            let _ = tx.try_send(serde_json::to_value(e).expect("json"));
+            let _ = tx.try_send(steve_modules::testkit::notification(e));
         }
     }
 

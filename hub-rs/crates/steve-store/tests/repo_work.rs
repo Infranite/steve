@@ -146,7 +146,15 @@ fn item_numbers_are_global_per_prefix() {
     );
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Item { id: "ST-1".into() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Item {
+                id: {
+                    let value: String = "ST-1".into();
+                    steve_types::ItemId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     s.with_conn(|c| Ok(c.execute("INSERT INTO workspaces (id, name, item_prefix, created) VALUES ('w2', 'B', 'ST', 1), ('w3', 'C', 'XY', 1)", [])?)).unwrap();
     assert_eq!(
@@ -272,7 +280,15 @@ fn item_patch() {
     );
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Item { id: i.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Item {
+                id: {
+                    let value: String = i.id.clone();
+                    steve_types::ItemId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     // a stored decision undo applies as a patch; explicit null clears
     let undo: ItemPatch = serde_json::from_value(json!({"status": "wait", "now": "在等你回答", "stage": "交付与验收", "cwd": null, "snooze": null})).unwrap();
@@ -311,7 +327,15 @@ fn design_gate_is_off_by_default_and_only_its_own_write_switches_it() {
     assert!(on.design_gate);
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Item { id: i.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Item {
+                id: {
+                    let value: String = i.id.clone();
+                    steve_types::ItemId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     assert!(
         s.items()
@@ -390,7 +414,15 @@ fn goals_deps_timeline_artifacts_remove() {
     s.items().remove(&a.id).unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Item { id: a.id.clone() }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Item {
+                id: {
+                    let value: String = a.id.clone();
+                    steve_types::ItemId::from(value)
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     assert!(s.items().get(&a.id).unwrap().is_none());
     let ses = s.sessions().get(&ses.id).unwrap().unwrap();
@@ -422,18 +454,45 @@ fn sessions() {
     assert_eq!(
         t.events.take(),
         vec![
-            ChangeEvent::Session {
-                id: s1.id.clone(),
-                item_id: Some(Some(i.id.clone()))
-            },
-            ChangeEvent::Session {
-                id: s2.id.clone(),
-                item_id: Some(Some(i.id.clone()))
-            },
-            ChangeEvent::Session {
-                id: free.id.clone(),
-                item_id: Some(None)
-            },
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Session {
+                    id: {
+                        let value: String = s1.id.clone();
+                        steve_types::SessionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = Some(Some(i.id.clone()));
+                        value.map(|value| value.map(Into::into))
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Session {
+                    id: {
+                        let value: String = s2.id.clone();
+                        steve_types::SessionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = Some(Some(i.id.clone()));
+                        value.map(|value| value.map(Into::into))
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
+            steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                steve_types::WorkEvent::Session {
+                    id: {
+                        let value: String = free.id.clone();
+                        steve_types::SessionId::from(value)
+                    },
+                    item_id: {
+                        let value: Option<Option<String>> = Some(None);
+                        value.map(|value| value.map(Into::into))
+                    },
+                    ws: steve_types::WorkspaceId::from(steve_store::WS)
+                }
+            )),
         ]
     );
     assert_eq!(serde_json::to_value(&s1).unwrap()["readonly"], json!(0));
@@ -464,10 +523,19 @@ fn sessions() {
         .unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Session {
-            id: s1.id.clone(),
-            item_id: Some(Some(i.id.clone()))
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
+                id: {
+                    let value: String = s1.id.clone();
+                    steve_types::SessionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = Some(Some(i.id.clone()));
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     let got = s.sessions().get(&s1.id).unwrap().unwrap();
     assert_eq!(
@@ -529,12 +597,24 @@ fn events_paging_and_search() {
     assert_eq!(evs.len(), 5);
     assert_eq!(
         evs[0],
-        ChangeEvent::Event {
-            session_id: ses.id.clone(),
-            seq: first,
-            kind: "agent_message_chunk".into(),
-            data: data.clone()
-        }
+        steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+            steve_types::WorkLiveEvent::Event {
+                session_id: {
+                    let value: String = ses.id.clone();
+                    steve_types::SessionId::from(value)
+                },
+                seq: steve_types::Seq(first),
+                kind: "agent_message_chunk".into(),
+                data: {
+                    let value: serde_json::Value = data.clone();
+                    steve_types::RawJson::from_str(
+                        &serde_json::to_string(&value).expect("JSON value"),
+                    )
+                    .expect("validated JSON")
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            }
+        ))
     );
     // the stored text keeps key order (preserve_order)
     s.with_conn(|c| {
@@ -578,16 +658,34 @@ fn queued() {
     );
     s.queued().drop(&q[0].id).unwrap();
     s.queued().drop("q_missing").unwrap();
-    let ev = ChangeEvent::Session {
-        id: ses.id.clone(),
-        item_id: None,
-    };
+    let ev = steve_types::BusEvent::from(steve_types::DomainEvent::from(
+        steve_types::WorkEvent::Session {
+            ws: steve_types::WorkspaceId::from(steve_store::WS),
+            id: {
+                let value: String = ses.id.clone();
+                steve_types::SessionId::from(value)
+            },
+            item_id: {
+                let value: Option<Option<String>> = None;
+                value.map(|value| value.map(Into::into))
+            },
+        },
+    ));
     assert_eq!(t.events.take(), vec![ev.clone(), ev.clone(), ev]);
     assert_eq!(
-        serde_json::to_string(&ChangeEvent::Session {
-            id: "x".into(),
-            item_id: None
-        })
+        serde_json::to_string(&steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
+                id: {
+                    let value: String = "x".into();
+                    steve_types::SessionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = None;
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        ))
         .unwrap(),
         r#"{"type":"session","id":"x"}"#
     );
@@ -758,10 +856,19 @@ fn imported_sessions() {
     s.sessions().remove(&id).unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Session {
-            id: id.clone(),
-            item_id: None
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Session {
+                id: {
+                    let value: String = id.clone();
+                    steve_types::SessionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = None;
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     assert!(s.sessions().get(&id).unwrap().is_none());
     assert!(s.queued().list(&id).unwrap().is_empty());
@@ -804,10 +911,19 @@ fn decisions() {
     );
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Decision {
-            id: d.id.clone(),
-            item_id: Some(Some(i.id.clone()))
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+                id: {
+                    let value: String = d.id.clone();
+                    steve_types::DecisionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = Some(Some(i.id.clone()));
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     assert_eq!(s.decisions().open(WS).unwrap().len(), 1);
 
@@ -872,10 +988,19 @@ fn decisions() {
     let free = s.decisions().create(&nd(None)).unwrap().unwrap();
     assert_eq!(
         t.events.take(),
-        vec![ChangeEvent::Decision {
-            id: free.id.clone(),
-            item_id: Some(None)
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+                id: {
+                    let value: String = free.id.clone();
+                    steve_types::DecisionId::from(value)
+                },
+                item_id: {
+                    let value: Option<Option<String>> = Some(None);
+                    value.map(|value| value.map(Into::into))
+                },
+                ws: steve_types::WorkspaceId::from(steve_store::WS)
+            })
+        )]
     );
     s.decisions().reopen("dec_missing").unwrap();
     assert!(
@@ -906,7 +1031,17 @@ fn messages() {
     assert_eq!(
         t.events.take(),
         ids.iter()
-            .map(|id| ChangeEvent::Message { id: id.clone() })
+            .map(
+                |id| steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+                    steve_types::WorkEvent::Message {
+                        id: {
+                            let value: String = id.clone();
+                            steve_types::MessageId::from(value)
+                        },
+                        ws: steve_types::WorkspaceId::from(steve_store::WS)
+                    }
+                ))
+            )
             .collect::<Vec<_>>()
     );
     let last2 = s.messages().list(WS, "steve", 2).unwrap();

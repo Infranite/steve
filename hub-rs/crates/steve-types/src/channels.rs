@@ -52,3 +52,16 @@ impl ChannelsEvent {
         }
     }
 }
+
+impl ChannelsEvent {
+    pub fn entity_id(&self) -> Option<&str> {
+        match self {
+            Self::Connection { id, .. } => Some(id.as_str()),
+            Self::Space { id, .. } => Some(id.as_str()),
+            Self::ChanMessage { id, .. } => Some(id.as_str()),
+            Self::Persona { id, .. } => Some(id.as_str()),
+            Self::Digest { id, .. } => Some(id.as_str()),
+            Self::Channel { id, .. } => Some(id.as_str()),
+        }
+    }
+}

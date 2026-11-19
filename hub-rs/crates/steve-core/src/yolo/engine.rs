@@ -689,25 +689,25 @@ impl Engine {
     }
 
     /// Looks at every decision a `{type:"decision", id}` event names. Runs until the sender is gone.
-    pub async fn run_events(self, mut rx: tokio::sync::mpsc::Receiver<Value>) {
+    pub async fn run_events(self, mut rx: tokio::sync::mpsc::Receiver<steve_types::Notification>) {
         while let Some(v) = rx.recv().await {
-            if v["type"] == "yolo" {
-                // the switch or a scope changed: running sessions hear of it with their next message,
-                // and a tool request waiting meanwhile is looked at again now (not at the next tick)
-                if let Some(ws) = v["ws"].as_str().map(String::from) {
+            let id = match v.event.as_domain() {
+                Some(steve_types::DomainEvent::Autonomy(steve_types::AutonomyEvent::Yolo {
+                    ws,
+                })) => {
+                    let ws = ws.to_string();
                     let e = self.clone();
                     tokio::task::spawn_blocking(move || {
                         e.core().yolo_sync(&ws);
                         e.kick_waiting_tools(&ws);
                     });
+                    continue;
                 }
-                continue;
-            }
-            if v["type"] != "decision" {
-                continue;
-            }
-            let Some(id) = v["id"].as_str().map(String::from) else {
-                continue;
+                Some(steve_types::DomainEvent::Work(steve_types::WorkEvent::Decision {
+                    id,
+                    ..
+                })) => id.to_string(),
+                _ => continue,
             };
             // not awaited: a question waits up to a minute for the model, a tool call must not wait
             // behind it (each decision is claimed, so two looks at one never overlap)

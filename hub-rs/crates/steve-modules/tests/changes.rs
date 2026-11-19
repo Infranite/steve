@@ -10,7 +10,7 @@ use steve_modules::{ApiError, ApiResult, Registry};
 use steve_store::base::changesets::{self, UNDO_WINDOW_MS};
 use steve_store::base::links::{self, NewLink};
 use steve_store::base::{Change, ObjRef, Viewer};
-use steve_store::{ChangeEvent, Tx, now};
+use steve_store::{Tx, now};
 
 struct Contact;
 
@@ -118,10 +118,18 @@ impl ChangeOp for Rename {
             "UPDATE parties SET name = ?, revision = revision + 1 WHERE id = ?",
             params![op["name"].as_str(), id],
         )?;
-        tx.publish(ChangeEvent::Party {
-            id: id.into(),
-            ws: cx.ws.into(),
-        });
+        tx.publish(steve_types::BusEvent::from(steve_types::DomainEvent::from(
+            steve_types::PeopleEvent::Party {
+                id: {
+                    let value: String = id.into();
+                    steve_types::PartyId::from(value)
+                },
+                ws: {
+                    let value: String = cx.ws.into();
+                    steve_types::WorkspaceId::from(value)
+                },
+            },
+        )));
         Ok(json!({ "name": old }))
     }
     fn undo(&self, tx: &Tx, _: &OpCx, op: &Value, before: &Value) -> ApiResult<()> {
@@ -260,10 +268,18 @@ async fn draft_apply_undo_round_trip() {
     let ev = t.take_events();
     assert_eq!(
         ev,
-        [ChangeEvent::Changeset {
-            id: p.id.clone(),
-            ws: WS.into()
-        }]
+        [steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::Config(steve_types::ConfigEvent::Changeset {
+                id: {
+                    let value: String = p.id.clone();
+                    steve_types::ChangesetId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
 
     assert_eq!(
@@ -272,10 +288,18 @@ async fn draft_apply_undo_round_trip() {
     );
     assert_eq!(state(&t), ("Sarah Chen".into(), 2, 1, 1));
     let ev = t.take_events();
-    assert!(ev.contains(&ChangeEvent::Party {
-        id: "ct_s".into(),
-        ws: WS.into()
-    }));
+    assert!(ev.contains(&steve_types::BusEvent::Domain(
+        steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+            id: {
+                let value: String = "ct_s".into();
+                steve_types::PartyId::from(value)
+            },
+            ws: {
+                let value: String = WS.into();
+                steve_types::WorkspaceId::from(value)
+            }
+        })
+    )));
     // the bound org id reached job.open and is what undo will see
     let cs = t
         .store()

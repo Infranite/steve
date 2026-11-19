@@ -18,11 +18,12 @@
 //! Workspace operations that change things go through the ledger
 //! ([`super::node_runtime::NodeRuntime::submit`]) of [`Placement::runtime`].
 
+#[cfg(test)]
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::OptionalExtension;
-use serde_json::Value;
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
@@ -339,7 +340,10 @@ impl Workspaces {
 
     /// Keeps the local roots in step with projects and knowledge sources: `events` are the bus's
     /// `project` and `kb` events. A burst is one rebuild.
-    pub async fn follow(self: Arc<Self>, mut events: tokio::sync::mpsc::Receiver<Value>) {
+    pub async fn follow(
+        self: Arc<Self>,
+        mut events: tokio::sync::mpsc::Receiver<steve_types::Notification>,
+    ) {
         while events.recv().await.is_some() {
             while events.try_recv().is_ok() {}
             let me = self.clone();
@@ -958,8 +962,13 @@ mod tests {
             ErrorCode::Denied
         );
         // the project event rebuilds them
-        tx.try_send(serde_json::json!({"type": "project", "id": "p9"}))
-            .unwrap();
+        tx.try_send(steve_modules::testkit::notification(
+            steve_types::ConfigEvent::Project {
+                id: "p9".into(),
+                ws: steve_store::WS.into(),
+            },
+        ))
+        .unwrap();
         let mut taken = false;
         for i in 0..200 {
             if prepare(&t.node, &format!("op_b{i}"), at.clone())

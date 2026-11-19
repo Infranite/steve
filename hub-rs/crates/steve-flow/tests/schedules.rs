@@ -1235,7 +1235,7 @@ async fn events_are_scoped_to_the_workspace() {
     let ev = e.env.take_events();
     assert!(
         ev.iter()
-            .any(|x| matches!(x, steve_store::ChangeEvent::Flow { ws, .. } if ws == WS))
+            .any(|x| matches!(x, steve_types::BusEvent::Domain(steve_types::DomainEvent::Automation(steve_types::AutomationEvent::Flow { ws, .. })) if ws.as_str() == WS))
     );
 }
 

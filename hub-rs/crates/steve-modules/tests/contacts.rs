@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steve_modules::contacts::{self, HandleSearch, PartyHooks, Ports};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, call_raw, caller};
 use steve_modules::{ApiResult, Caller};
-use steve_store::ChangeEvent;
+use steve_store::BusEvent;
 use steve_store::Tx;
 use steve_store::base::mems::{self, NewMem};
 use steve_store::base::{ObjRef, Visibility};
@@ -245,10 +245,18 @@ async fn create_contact_with_job_and_validation() {
     let ev = t.take_events();
     assert_eq!(
         ev,
-        vec![ChangeEvent::Party {
-            id: id(&c),
-            ws: WS.into()
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+                id: {
+                    let value: String = id(&c);
+                    steve_types::PartyId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
     assert_eq!(
         count(
@@ -1532,10 +1540,18 @@ async fn organizations_domains_and_people() {
     assert_eq!(b["tags"], json!(["tag_a"]));
     assert_eq!(
         t.take_events(),
-        vec![ChangeEvent::Party {
-            id: id(&acme),
-            ws: WS.into()
-        }]
+        vec![steve_types::BusEvent::Domain(
+            steve_types::DomainEvent::People(steve_types::PeopleEvent::Party {
+                id: {
+                    let value: String = id(&acme);
+                    steve_types::PartyId::from(value)
+                },
+                ws: {
+                    let value: String = WS.into();
+                    steve_types::WorkspaceId::from(value)
+                }
+            })
+        )]
     );
     // acme.io is free again
     let (s, _) = req(

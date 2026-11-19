@@ -1,10 +1,7 @@
-//! Cache invalidation contract before S1, plus the explicitly pending S1 contract.
-//! These use only public Bus APIs; generation changes are synchronous, not dispatcher timing.
-use serde_json::{Value, json};
+//! Typed cache invalidation contract. Generation changes are synchronous.
 mod bus_cases;
 use bus_cases::typed;
-use steve_hub::bus::{Bus, HubEvent};
-
+use steve_hub::bus::Bus;
 #[derive(Clone, Copy, Debug)]
 enum Counter {
     Global,
@@ -13,25 +10,23 @@ enum Counter {
     Stats,
 }
 
-// All 36 ChangeEvent wire types plus the three plain-JSON integration notices.
-// The second column is the producer's current ws shape (not the dispatcher's inferred scope).
-// The third column pins the current cache behavior, including Thinking and Client exceptions.
+// All 39 typed wire tags, including the thinking/client cache exceptions.
 const CURRENT: &[(&str, bool, Counter)] = &[
-    ("item", false, Counter::Global),
-    ("decision", false, Counter::Global),
-    ("session", false, Counter::Global),
+    ("item", true, Counter::Workspace),
+    ("decision", true, Counter::Workspace),
+    ("session", true, Counter::Workspace),
     ("event", false, Counter::None),
-    ("message", false, Counter::Global),
+    ("message", true, Counter::Workspace),
     ("steve.thinking", true, Counter::Workspace),
     ("steve.draft", true, Counter::None),
     ("steve.tool", true, Counter::None),
     ("thread.run", true, Counter::Workspace),
     ("release.hold", false, Counter::Global),
-    ("bot", false, Counter::Global),
-    ("project", false, Counter::Global),
-    ("tag", false, Counter::Global),
-    ("workspace", false, Counter::Global),
-    ("settings", false, Counter::Global),
+    ("bot", true, Counter::Workspace),
+    ("project", true, Counter::Workspace),
+    ("tag", true, Counter::Workspace),
+    ("workspace", true, Counter::Workspace),
+    ("settings", true, Counter::Workspace),
     ("device", false, Counter::Global),
     ("node", false, Counter::Global),
     ("client", false, Counter::None),
@@ -58,17 +53,6 @@ const CURRENT: &[(&str, bool, Counter)] = &[
     ("mail", true, Counter::Workspace),
 ];
 
-fn frame(ty: &str, ws: bool) -> Value {
-    let mut value = json!({"type": ty, "id": "entity", "user": "user", "session_id": "session",
-        "seq": 1, "kind": "text", "data": {}, "on": true, "mid": "message", "run": "run",
-        "name": "tool", "brief": "test", "ok": true, "thought": "", "text": "test",
-        "hold": null, "flow_id": "flow", "space_id": "space", "decision_id": null});
-    if ws {
-        value["ws"] = json!("a");
-    }
-    value
-}
-
 fn counts(bus: &Bus) -> (u64, u64, u64, u64) {
     (
         bus.generation(),
@@ -88,90 +72,30 @@ fn expected(counter: Counter) -> (u64, u64, u64, u64) {
 }
 
 #[test]
-fn current_wire_type_generation_table() {
+fn typed_wire_type_generation_table() {
     assert_eq!(CURRENT.len(), 39);
     let mut unique = std::collections::BTreeSet::new();
-    for &(ty, ws, counter) in CURRENT {
-        assert!(unique.insert(ty), "duplicate row: {ty}");
+    for &(ty, _, counter) in CURRENT {
+        assert!(unique.insert(ty));
         let bus = Bus::new();
         assert_eq!(counts(&bus), (0, 0, 0, 0));
-        bus.publish_value(frame(ty, ws));
+        bus.publish(typed(ty, "a"));
         assert_eq!(counts(&bus), expected(counter), "{ty}");
     }
 }
-
 #[test]
-fn typed_publish_obeys_the_same_table_and_accumulates() {
+fn typed_publish_accumulates_workspace_and_global_generations() {
     let bus = Bus::new();
-    for (index, event) in [
-        HubEvent::Item { id: "i".into() },
-        HubEvent::Decision {
-            id: "d".into(),
-            item_id: Some(None),
-        },
-        HubEvent::Session {
-            id: "s".into(),
-            item_id: None,
-        },
-        HubEvent::Message { id: "m".into() },
-        HubEvent::Bot { id: "b".into() },
-        HubEvent::Project { id: "p".into() },
-        HubEvent::Tag { id: "t".into() },
-        HubEvent::Workspace { id: "a".into() },
-        HubEvent::Settings { id: "a".into() },
-        HubEvent::Device { id: "dev".into() },
-        HubEvent::Node {
-            id: "n".into(),
-            user: "u".into(),
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        bus.publish(event);
-        let n = index as u64 + 1;
-        assert_eq!(counts(&bus), (n, n, n, 0));
-    }
-    bus.publish(HubEvent::Client {
-        id: "c".into(),
-        user: "u".into(),
-    });
-    bus.publish(HubEvent::Event {
-        session_id: "s".into(),
-        seq: 1,
-        kind: "text".into(),
-        data: json!({}),
-    });
-    assert_eq!(counts(&bus), (11, 11, 11, 0));
-    bus.publish(HubEvent::Thinking {
-        on: true,
-        ws: Some("a".into()),
-        phase: None,
-    });
-    assert_eq!(counts(&bus), (12, 12, 11, 0));
-    // Optional ws=None currently increments the overall count, but invalidates no workspace.
-    bus.publish(HubEvent::Thinking {
-        on: false,
-        ws: None,
-        phase: None,
-    });
-    assert_eq!(counts(&bus), (13, 12, 11, 0));
+    bus.publish(typed("item", "a"));
+    bus.publish(typed("message", "b"));
+    bus.publish(typed("node", "a"));
+    assert_eq!(counts(&bus), (3, 2, 2, 0));
+    bus.publish(typed("client", "a"));
+    bus.publish(typed("event", "a"));
+    assert_eq!(counts(&bus), (3, 2, 2, 0));
+    bus.publish(typed("steve.thinking", "a"));
+    assert_eq!(counts(&bus), (4, 3, 2, 0));
 }
-
-#[test]
-fn current_invalid_ws_never_invalidates_a_state_cache() {
-    for ws in [json!(null), json!(""), json!(4)] {
-        let bus = Bus::new();
-        let mut value = frame("item", false);
-        value["ws"] = ws;
-        bus.publish_value(value);
-        assert_eq!(counts(&bus), (1, 0, 0, 0));
-    }
-    let bus = Bus::new();
-    bus.publish_value(frame("party", false));
-    assert_eq!(counts(&bus), (1, 0, 0, 0));
-}
-
 #[test]
 fn s1_workspace_events_only_invalidate_their_workspace() {
     for &(ty, _, _) in CURRENT {
