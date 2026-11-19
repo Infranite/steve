@@ -534,57 +534,40 @@ impl Drop for ProbeProcess {
         let _ = self.0.wait();
     }
 }
-fn private_backups(home: &Path) -> Result<()> {
-    fn restrict(path: &Path) -> Result<()> {
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() {
-            return Ok(());
-        }
-        if metadata.is_dir() {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-            for entry in fs::read_dir(path)? {
-                restrict(&entry?.path())?;
-            }
-        } else if metadata.is_file() {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    }
-    let directory = home.join("backups");
-    private_dir(&directory)?;
-    restrict(&directory)?;
-    for entry in fs::read_dir(home)? {
-        let path = entry?.path();
-        if path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with("steve.env"))
-        {
-            restrict(&path)?;
-        }
-    }
-    Ok(())
-}
-fn backup(db: &Path, destination: &Path) -> Result<()> {
-    ensure!(db.is_file(), "database missing; refusing an empty backup");
-    let file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(destination)?;
-    drop(file);
-    let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut target = Connection::open(destination)?;
-    rusqlite::backup::Backup::new(&source, &mut target)?.run_to_completion(
-        128,
-        Duration::from_millis(5),
-        None,
-    )?;
-    let checked: String = target.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-    ensure!(checked == "ok", "upgrade backup integrity check failed");
-    target.close().map_err(|(_, e)| e)?;
-    File::open(destination)?.sync_all()?;
-    File::open(destination.parent().unwrap())?.sync_all()?;
-    Ok(())
+/// Ask the verified candidate to use the same backup contract as a running Hub.
+fn backup(runtime: &Runtime, candidate: &Path) -> Result<(PathBuf, PathBuf)> {
+    let mut command = runtime.hub_command(candidate);
+    command
+        .args(["--admin", "backup", "--reason", "pre-upgrade"])
+        .env("STEVE_HOME", &runtime.home)
+        .stdin(Stdio::null());
+    let output = signing::output(&mut command, Duration::from_secs(120))?;
+    ensure!(
+        output.status.success(),
+        "candidate backup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&output.stdout).context("candidate returned no backup manifest")?;
+    ensure!(
+        manifest["completed"] == true && manifest["database"]["quick_check"] == "ok",
+        "candidate backup is incomplete or unverified"
+    );
+    let directory = PathBuf::from(
+        manifest["directory"]
+            .as_str()
+            .context("backup directory missing")?,
+    );
+    let name = manifest["database"]["name"]
+        .as_str()
+        .context("backup database missing")?;
+    ensure!(
+        Path::new(name).file_name().and_then(|n| n.to_str()) == Some(name),
+        "invalid backup database name"
+    );
+    let database = directory.join(name);
+    ensure!(database.is_file(), "backup database missing");
+    Ok((directory, database))
 }
 fn link(path: &Path, target: &Path) -> Result<()> {
     private_dir(path.parent().context("link parent missing")?)?;
@@ -791,16 +774,11 @@ fn deploy_with(
         changed.stopped = true;
         runtime.service("stop", &ident)?;
         journal.update("backing_up", None, None, json!({}))?;
-        private_backups(home)?;
-        let path = home.join("backups").join(format!(
-            "pre-{}-{stamp}.sqlite3",
-            candidate.file_name().unwrap().to_string_lossy()
-        ));
-        backup(&db, &path)?;
-        saved = Some(path.clone());
-        receipt["backup"] = json!(path);
+        let (directory, database) = backup(runtime, candidate)?;
+        saved = Some(database);
+        receipt["backup"] = json!(directory);
         atomic_json(&result_path, &receipt)?;
-        journal.update("backing_up", None, None, json!({"backup":path}))?;
+        journal.update("backing_up", None, None, json!({"backup":directory}))?;
         phase = "probe";
         changed.probed = true;
         journal.update("backing_up", None, Some("probing"), json!({}))?;
@@ -950,38 +928,6 @@ fn last_previous(home: &Path) -> Option<PathBuf> {
 }
 fn prune_unlocked(home: &Path, keep: &[PathBuf], dry_run: bool) -> Result<Vec<PathBuf>> {
     let mut remove = Vec::new();
-    let backup_pattern = regex::Regex::new(
-        r"^(pre-(\d+\.\d+\.\d+)-(?:local-[0-9a-f]{7}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-(\d{8}-\d{6})\.sqlite3)(?:-shm|-wal|-journal)?$",
-    )?;
-    let backups = home.join("backups");
-    if backups.is_dir() {
-        let mut groups: BTreeMap<String, (String, Vec<PathBuf>)> = BTreeMap::new();
-        for entry in fs::read_dir(&backups)? {
-            let path = entry?.path();
-            let name = path.file_name().unwrap().to_string_lossy();
-            if fs::symlink_metadata(&path)?.file_type().is_file() {
-                if let Some(caps) = backup_pattern.captures(&name) {
-                    groups
-                        .entry(caps[1].into())
-                        .or_insert_with(|| (caps[3].into(), Vec::new()))
-                        .1
-                        .push(path);
-                }
-            }
-        }
-        let mut whole: Vec<_> = groups
-            .iter()
-            .filter(|(name, (_, paths))| paths.contains(&backups.join(name)))
-            .map(|(name, (stamp, _))| (stamp.clone(), name.clone()))
-            .collect();
-        whole.sort_by(|a, b| b.cmp(a));
-        let preserve: HashSet<_> = whole.into_iter().take(8).map(|(_, name)| name).collect();
-        for (name, (_, paths)) in groups {
-            if !preserve.contains(&name) {
-                remove.extend(paths);
-            }
-        }
-    }
     let releases = home.join("releases");
     let release_root = fs::canonicalize(&releases)?;
     let mut protected = HashSet::new();
@@ -1126,6 +1072,31 @@ mod tests {
             return;
         }
         let home = PathBuf::from(std::env::var("STEVE_HOME").unwrap());
+        if std::env::var("STEVE_NATIVE_TEST_BACKUP").as_deref() == Ok("1") {
+            assert_ne!(
+                std::env::var("STEVE_NATIVE_TEST_BACKUP_FAIL").as_deref(),
+                Ok("1")
+            );
+            let directory = home.join("backups/pre-upgrade-fixture");
+            fs::create_dir_all(&directory).unwrap();
+            fs::copy(
+                home.join("data/steve.sqlite3"),
+                directory.join("steve.sqlite3"),
+            )
+            .unwrap();
+            fs::set_permissions(
+                directory.join("steve.sqlite3"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            atomic_json(
+                &home.join("fixture-manifest.json"),
+                &json!({"completed":true,
+                "directory":directory,"database":{"name":"steve.sqlite3","quick_check":"ok"}}),
+            )
+            .unwrap();
+            return;
+        }
         let db = Connection::open(home.join("data/steve.sqlite3")).unwrap();
         db.execute_batch("UPDATE schema_version SET v=54; UPDATE schema_compat SET min_reader=54; CREATE TABLE probe_write(v INTEGER); INSERT INTO probe_write VALUES(7);").unwrap();
         drop(db);
@@ -1255,7 +1226,19 @@ mod tests {
         executable(
             &candidate.join("bin/steve-hub"),
             &format!(
-                "#!/bin/sh\ncase \"${{1:-}}\" in --build-info) printf '%s\\n' '{{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54,\"check_config\":true}}'; exit 0;; --check-config) printf '%s\\n' '{{\"ok\":true}}'; exit 0;; esac\nexport STEVE_NATIVE_TEST_FIXTURE=1\nexec {quoted} --exact release::tests::fixture_process --nocapture\n"
+                r#"#!/bin/sh
+case "${{1:-}}" in
+    --build-info) printf '%s\n' '{{"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":54,"check_config":true}}'; exit 0;;
+    --check-config) printf '%s\n' '{{"ok":true}}'; exit 0;;
+    --admin)
+        [ "$2 $3 $4" = "backup --reason pre-upgrade" ] || exit 9
+        STEVE_NATIVE_TEST_BACKUP=1 STEVE_NATIVE_TEST_FIXTURE=1 {quoted} --exact release::tests::fixture_process --nocapture >/dev/null || exit 8
+        cat "$STEVE_HOME/fixture-manifest.json"
+        exit 0;;
+esac
+export STEVE_NATIVE_TEST_FIXTURE=1
+exec {quoted} --exact release::tests::fixture_process --nocapture
+"#
             ),
         );
         let manager = home.join("launchctl");
@@ -1317,12 +1300,32 @@ mod tests {
             schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
             54
         );
-        let backup = PathBuf::from(outcome.receipt["backup"].as_str().unwrap());
+        let backup =
+            PathBuf::from(outcome.receipt["backup"].as_str().unwrap()).join("steve.sqlite3");
         assert_eq!(schema_state(&backup).unwrap()["schema"], 53);
         assert_eq!(
             fs::metadata(backup).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+    #[test]
+    fn failed_candidate_backup_aborts_before_probe_or_switch() {
+        let (dir, candidate, mut runtime, _service, journal) = runtime_fixture(false, false);
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_BACKUP_FAIL".into(), "1".into());
+        let outcome = deploy_with(&runtime, &candidate, &journal, Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
+        assert_eq!(outcome.receipt["phase"], "backup");
+        assert_eq!(
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            53
+        );
+        assert_ne!(
+            fs::canonicalize(dir.path().join("current")).unwrap(),
+            candidate
+        );
+        assert!(!dir.path().join("fixture-manifest.json").exists());
     }
     #[test]
     fn failed_probe_restores_database_and_old_service_before_business_start() {

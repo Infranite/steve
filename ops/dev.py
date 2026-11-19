@@ -23,6 +23,8 @@ Harness state (CLAUDE_CONFIG_DIR, CODEX_HOME) is in `<dev home>/harness`, seeded
 """
 
 import argparse
+from contextlib import closing
+import json
 import os
 import shutil
 import signal
@@ -133,16 +135,29 @@ def fresh():
 
 
 def snapshot(src_home):
+    if src_home.resolve() == DEV.resolve():
+        die("snapshot source must differ from the development home")
     src = src_home / "data/steve.sqlite3"
     if not src.is_file():
         die(f"no database at {src}")
+    # Back up before replacing the development copy; failure leaves it intact.
+    result = subprocess.run([str(HUB_BIN), "--admin", "backup", "--reason", "diagnostic"],
+                            env={**os.environ, "STEVE_HOME": str(src_home.resolve())},
+                            capture_output=True, text=True, check=True, timeout=120)
+    manifest = json.loads(result.stdout)
+    name = manifest["database"]["name"]
+    if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
+            or Path(name).name != name):
+        die("Hub returned an incomplete backup")
+    saved = Path(manifest["directory"]) / name
+    if not saved.is_file():
+        die("Hub backup database is missing")
     clear_data()
     data = DEV / "data"
     data.mkdir(parents=True)
     dst = data / "steve.sqlite3"
-    # SQLite's online backup: a consistent copy while the installed Hub keeps writing
-    with sqlite3.connect(f"file:{src}?mode=ro", uri=True) as s, sqlite3.connect(dst) as d:
-        s.backup(d)
+    shutil.copy2(saved, dst)
+    with closing(sqlite3.connect(dst)) as d, d:
         # the copy's owner signs in with the one-click development login
         d.execute(
             "UPDATE users SET subject='dev:local' WHERE id=(SELECT id FROM users WHERE role='owner' ORDER BY created LIMIT 1)"

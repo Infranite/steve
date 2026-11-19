@@ -8,11 +8,12 @@ Missing screenshots or arbitrary paths are never reconstructed from prose.
 
 import argparse
 import hashlib
+import json
+import subprocess
 import os
 from pathlib import Path
 import sqlite3
 import sys
-from datetime import datetime, timezone
 
 
 def summary_reference(location):
@@ -115,19 +116,17 @@ def run(home, apply):
             print(f"  {item} {aid}: no saved full text", file=sys.stderr)
         if not apply or not pending:
             return
-        backup_dir = home / "backups"
-        real_dir(backup_dir)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = backup_dir / f"pre-delivery-recovery-{stamp}-{os.getpid()}.sqlite3"
-        dst = sqlite3.connect(backup)
-        try:
-            c.backup(dst)
-            if dst.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                raise RuntimeError("backup quick_check failed")
-        finally:
-            dst.close()
-        backup.chmod(0o600)
-        print(f"backup={backup}")
+        # The CLI currently exposes diagnostic/pre-upgrade only. Diagnostic has the same
+        # no-auto-prune policy as pre-destructive; do not implement another copier here.
+        result = subprocess.run([str(home / "current/bin/steve-hub"), "--admin", "backup", "--reason", "diagnostic"],
+                                env={**os.environ, "STEVE_HOME": str(home.resolve())},
+                                capture_output=True, text=True, check=True, timeout=120)
+        manifest = json.loads(result.stdout)
+        name = manifest["database"]["name"]
+        if (manifest.get("completed") is not True or manifest["database"].get("quick_check") != "ok"
+                or Path(name).name != name or not (Path(manifest["directory"]) / name).is_file()):
+            raise RuntimeError("Hub returned an incomplete backup")
+        print(f"backup={manifest['directory']}")
         paths = [(aid, location, str(save(home, item, body))) for aid, item, location, body in pending]
         c.execute("BEGIN IMMEDIATE")
         try:

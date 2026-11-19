@@ -42,8 +42,6 @@ LABEL=${STEVE_LABEL:-io.github.infranite.steve} PORT=${STEVE_PORT:-8440} DRAIN_S
 REL=$HOME_DIR/releases WEB=$HOME_DIR/web LOGS=$HOME_DIR/logs/release HIST=$HOME_DIR/releases/history.jsonl
 CARGO_TARGET=${STEVE_CARGO_TARGET_DIR:-$HOME_DIR/build/cargo-target} HEALTH_TRIES=${STEVE_HEALTH_TRIES:-40} DB=$HOME_DIR/data/steve.sqlite3
 mkdir -p $REL $WEB $LOGS $HOME_DIR/backups
-# backups are copies of the database (0600): the owner's alone, the ones from before this too
-chmod 700 $HOME_DIR/backups && chmod -R go-rwx $HOME_DIR/backups
 WEB_PREV_TARGET=$(readlink $WEB/current 2>/dev/null)
 PREV=$(basename "$(readlink $HOME_DIR/current 2>/dev/null)" 2>/dev/null) WEB_PREV=$(basename "$WEB_PREV_TARGET" 2>/dev/null)
 [[ $PREV == . ]] && PREV=""; [[ $WEB_PREV == . ]] && WEB_PREV=""
@@ -132,6 +130,18 @@ impl_of() { # dir
   local h; h=$(json_field $1/release.json hub)
   [[ -n $h ]] && { print -r -- $h; return }
   [[ -x $1/bin/steve-hub ]] && print rust || print ts
+}
+# The candidate speaks to the management socket, or takes the offline instance lock.
+hub_backup() {
+  local manifest
+  manifest=$(STEVE_HOME="$HOME_DIR" "$1" --admin backup --reason pre-upgrade) || return 1
+  print -r -- "$manifest" | python3 -c '
+import json,sys,pathlib
+m=json.load(sys.stdin); d=m["database"]; directory=pathlib.Path(m["directory"])
+if (m.get("completed") is not True or d.get("quick_check")!="ok"
+    or pathlib.Path(d["name"]).name!=d["name"] or not (directory/d["name"]).is_file()):
+    sys.exit("Hub returned an incomplete or unverified backup")
+print(directory)'
 }
 schema() { [[ -f $DB ]] && sqlite3 $DB "SELECT v FROM schema_version" 2>/dev/null | head -1 }
 # can the release open the database as it is now? (prints why not)
@@ -266,17 +276,9 @@ hub_release() {
   step "hub: backup the database"
   SCHEMA_BEFORE=$(schema) COMPAT_BEFORE=$(python3 $OPS/schema_gate.py state $DB)
   if [[ -f $DB ]]; then
-    # the first switch to the Rust Hub migrates the schema forward (3 → 11+): its backup is kept apart from the rotation
-    if [[ $HUB_IMPL == rust && $PREV_IMPL != rust ]]; then BACKUP=$HOME_DIR/backups/pre-rust-$VER.sqlite3; else BACKUP=$HOME_DIR/backups/pre-$VER.sqlite3; fi
-    print -r -- "   schema v${SCHEMA_BEFORE:-?}, backup to $BACKUP"
-    if (umask 077; run sqlite3 $DB ".backup '$BACKUP'") && chmod 600 $BACKUP && [[ $(sqlite3 $BACKUP "PRAGMA quick_check" 2>&1) == ok ]]; then
-      print -r -- "   backup ok ($(du -h $BACKUP | cut -f1))"
-    else
-      hub_fail "发布前数据库备份失败，没有切换"
-    fi
+    BACKUP=$(hub_backup "$DIR/bin/steve-hub") || { hub_fail "发布前数据库备份失败，没有切换"; return 1 }
+    print -r -- "   backup $BACKUP"
   else print "   no database yet"; fi
-  # keep the newest 10 pre-release backups (pre-rust-* stay)
-  for old in $HOME_DIR/backups/pre-2*.sqlite3(N.om[11,-1]); do print -r -- "   remove old backup $old"; rm -f -- $old; done
   step "hub: switch to $VER and restart"
   last false "发布进行中" true
   switch_to $VER
@@ -345,8 +347,8 @@ rollback_main() { # [version]
   step "rollback: backup the database"
   SCHEMA_BEFORE=$(schema)
   if [[ -f $DB ]]; then
-    BACKUP=$HOME_DIR/backups/rollback-$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS).sqlite3
-    if ! (umask 077; run sqlite3 $DB ".backup '$BACKUP'"); then
+    BACKUP=$(hub_backup "$HOME_DIR/current/bin/steve-hub")
+    if [[ $? != 0 ]]; then
       err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
       SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"; finish 1
     fi

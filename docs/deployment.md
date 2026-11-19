@@ -184,16 +184,18 @@ Backups and transaction records remain under `<home>/setup-reconfigure/`. If int
 
 A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. Copies are kept 14 days, and the directory and the files are readable by the owner only:
 
-- `daily-YYYYMMDD.sqlite3` is an online backup of the database, kept only after SQLite's `quick_check` passes.
-- `daily-YYYYMMDD-files.tar` holds what the database alone cannot bring back, as far as it is in the home: attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, without a keychain password file), the secret files (`secrets`) and `steve.env`.
+- Each `<reason>-<UTC time>-<id>/` directory holds `manifest.json` and the database named in its `database.name` field (normally `steve.sqlite3`). The manifest records size, SHA-256, schema and SQLite `quick_check`; only completed, verified database copies are published.
+- Optional `files.tar` holds attachments (`data/files`), item deliverables (`workspaces` and `deliveries`), the signing identity (`signing`, without `keychain-pass`), secret files (`secrets`) and `steve.env`. The manifest marks this archive as best effort and reports incomplete copies.
 
-**Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. The copies taken before each upgrade (in `<home>/updates`, or `pre-*.sqlite3` in `<home>/backups` for a local release) are separate and are made either way.
+**Settings → Data and privacy** shows the instance's owner where the database and the copies are and when the newest daily copy was made; `GET /api/system/backup` returns the same. Upgrade copies use `pre-upgrade-<UTC time>-<id>/` directories under `<home>/backups` and are made even when daily backups are disabled.
 
 The copies are on the same disk as the data: they protect against mistakes and a corrupt database, not against losing the machine or the disk. Copy `<home>/backups` elsewhere with your own tooling for that. A vault key directory outside the home (`--vault-dir`, `STEVE_VAULT_KEY_DIR`) and keys in the login keychain or Secret Service are not in the tar; without them the vault's secrets in a restored database cannot be read, so keep them with your off-machine copy.
 
-Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. A source-based installation's `ops/backup.sh` job writes the same file names, so where both run the day's copy is made once.
+Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example when the home is already covered by snapshots. Source installations use the same Hub scheduler; `ops/install.sh` no longer installs a separate backup launchd job. On an existing source installation, unload the old job (`launchctl bootout gui/$(id -u)/<backup-label>`) and remove its plist from `~/Library/LaunchAgents`; the default backup label was `io.github.infranite.steve-backup`, or `<custom Hub label>-backup`.
 
-To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, put the chosen `daily-YYYYMMDD.sqlite3` in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
+For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; diagnostic copies are not automatically removed. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
+
+To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
 
 ## Access tokens and clients
 
@@ -429,7 +431,7 @@ Login and workspace membership follow the normal API authentication. A delivery 
 
 Public reads return 404 for unknown, expired or revoked tokens. Successful responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; proxies must honor these headers and must not cache the API paths. Revocation and expiry stop subsequent requests, including CSS and images, without restarting the Hub. Bytes already downloaded, displayed or in an already-authorized in-flight response cannot be recalled. Keep share URLs private to their intended recipients: possession of an active token grants access to that entire delivery, including its original archive.
 
-At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-delivery-recovery-*.sqlite3` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
+At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-destructive-<UTC time>-<id>/` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
 
 ### Generic connector extension
 
@@ -542,7 +544,7 @@ To take a baseline without a running Hub on the data, print the same figures fro
 steve-hub --stats-snapshot --db <copy of the database> [--workspace <id>] [--from YYYY-MM-DD --to YYYY-MM-DD] [--scratch <dir>]
 ```
 
-It prints JSON with `workspace`, `schema`, `range`, `workflow`, `quality` and `throughput`, for the last 30 days of the workspace's statistics time zone unless a range (at most a year) is given; with several workspaces, name one. The file is opened read-only and never changed. A database from an older release is copied with SQLite's online backup into a temporary directory (`--scratch`, else the system's) and the copy migrated first, so the scratch location needs room for one copy; the copy is removed afterwards. Run it on a copy made with `sqlite3 <database> ".backup <copy>"` (or a daily backup) rather than on a live installation's file, and keep the output with the release it was taken on to compare later ranges against.
+It prints JSON with `workspace`, `schema`, `range`, `workflow`, `quality` and `throughput`, for the last 30 days of the workspace's statistics time zone unless a range (at most a year) is given; with several workspaces, name one. The file is opened read-only and never changed. A database from an older release is copied with SQLite's online backup into a temporary directory (`--scratch`, else the system's) and the copy migrated first, so the scratch location needs room for one copy; the copy is removed afterwards. Run it on the database named by `steve-hub --admin backup` (or a daily backup) rather than on a live installation's file, and keep the output with the release it was taken on to compare later ranges against.
 
 ## Plugins
 
