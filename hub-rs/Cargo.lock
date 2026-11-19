@@ -6181,9 +6181,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "steve-acp",
  "steve-node-api",
- "steve-transcript",
 ]
 
 [[package]]

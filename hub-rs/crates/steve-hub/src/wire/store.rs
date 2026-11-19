@@ -75,23 +75,6 @@ impl s::Publisher for BusPublisher {
 pub struct StoreBackend(pub s::Store, Arc<Mutex<Vec<rusqlite::Connection>>>);
 
 impl StoreBackend {
-    /// A transcript reader for a page of `session` from `after`: clients see Steve's own entries,
-    /// the old ACP rows read into them (with what the page's tool updates need from before it).
-    fn transcript(&self, session: &str, after: i64) -> BResult<steve_transcript::LegacyReader> {
-        let cwd = self
-            .0
-            .sessions()
-            .get(session)
-            .map_err(err)?
-            .map(|s| s.cwd)
-            .unwrap_or_default();
-        let mut reader = steve_transcript::LegacyReader::new(&cwd);
-        for e in self.0.events().tool_context(session, after).map_err(err)? {
-            reader.prime(&e.kind, &e.data);
-        }
-        Ok(reader)
-    }
-
     pub fn new(store: s::Store) -> BResult<Self> {
         let b = StoreBackend(store, Arc::new(Mutex::new(vec![])));
         // open one now so a broken path fails at boot, not on the first /api/state
@@ -293,21 +276,7 @@ impl Repo for StoreBackend {
         after: i64,
         each: &mut dyn FnMut(RawEvent),
     ) -> BResult<bool> {
-        let mut reader = self.transcript(session, after)?;
-        self.0
-            .events()
-            .visit_legacy_page(session, after, |e| {
-                // Value serialization is infallible; use the repository's transparent hydration.
-                let x = reader.read_row(&e.kind, &e.data);
-                each((
-                    e.seq,
-                    e.ts,
-                    x.kind,
-                    serde_json::to_string(&x.data).expect("JSON event"),
-                ));
-            })
-            .map_err(err)?;
-        Ok(true)
+        self.events_page_raw(session, after, each)
     }
 
     fn events_page_raw(
@@ -316,17 +285,15 @@ impl Repo for StoreBackend {
         after: i64,
         each: &mut dyn FnMut(RawEvent),
     ) -> BResult<bool> {
-        let mut reader = self.transcript(session, after)?;
         self.0
             .events()
             .visit_page(session, after, |e| {
                 // Value serialization is infallible; use the repository's transparent hydration.
-                let x = reader.read_row(&e.kind, &e.data);
                 each((
                     e.seq,
                     e.ts,
-                    x.kind,
-                    serde_json::to_string(&x.data).expect("JSON event"),
+                    e.kind,
+                    serde_json::to_string(&e.data).expect("JSON event"),
                 ));
             })
             .map_err(err)?;
@@ -782,17 +749,11 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
     fn events_after(&self, session: &str, after: i64) -> BResult<Vec<Obj>> {
-        let mut reader = self.transcript(session, after)?;
         let mut out = vec![];
-        for e in self.0.events().after(session, after, 5000).map_err(err)? {
-            let x = reader.read_row(&e.kind, &e.data);
-            out.push(steve_store::Event {
-                seq: e.seq,
-                ts: e.ts,
-                kind: x.kind,
-                data: x.data,
-            });
-        }
+        self.0
+            .events()
+            .visit_page(session, after, |e| out.push(e))
+            .map_err(err)?;
         objs(out)
     }
     fn queued_get(&self, id: &str) -> BResult<Option<Obj>> {
@@ -1038,7 +999,7 @@ mod event_page_tests {
     use serde_json::json;
 
     #[test]
-    fn normalized_events_are_transparent_and_bounded_pages_are_opt_in() {
+    fn transcript_entries_are_transparent_and_all_readers_use_bounded_pages() {
         let dir = tempfile::tempdir().unwrap();
         let store = s::Store::open(dir.path().join("test.sqlite3"), s::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
@@ -1057,13 +1018,17 @@ mod event_page_tests {
         for i in 0..501 {
             store
                 .events()
-                .add(&id, "agent_message_chunk", json!({"text":i.to_string()}))
+                .add(
+                    &id,
+                    "text",
+                    json!({"role":"assistant", "text":i.to_string()}),
+                )
                 .unwrap();
         }
         let backend = StoreBackend::new(store.clone()).unwrap();
-        let mut legacy = Vec::new();
-        assert!(backend.events_raw(&id, 0, &mut |e| legacy.push(e)).unwrap());
-        assert_eq!(legacy.len(), 501);
+        let mut raw = Vec::new();
+        assert!(backend.events_raw(&id, 0, &mut |e| raw.push(e)).unwrap());
+        assert_eq!(raw.len(), 500);
         let mut bounded = Vec::new();
         assert!(
             backend
@@ -1071,6 +1036,14 @@ mod event_page_tests {
                 .unwrap()
         );
         assert_eq!(bounded.len(), 500);
+        assert_eq!(raw, bounded);
+        let decoded = backend.events_after(&id, 0).unwrap();
+        assert_eq!(decoded.len(), bounded.len());
+        assert_eq!(decoded[0]["kind"], bounded[0].2);
+        assert_eq!(
+            decoded[0]["data"],
+            serde_json::from_str::<Value>(&bounded[0].3).unwrap()
+        );
         let mut tail = Vec::new();
         backend
             .events_page_raw(&id, bounded.last().unwrap().0, &mut |e| tail.push(e))
@@ -1089,7 +1062,7 @@ mod event_page_tests {
     }
 
     #[test]
-    fn old_acp_rows_read_as_transcript_entries_even_from_the_middle() {
+    fn unsupported_formats_are_visible_and_keep_the_page_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let store = s::Store::open(dir.path().join("test.sqlite3"), s::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
@@ -1097,54 +1070,43 @@ mod event_page_tests {
             .sessions()
             .create(&s::NewSession {
                 workspace_id: s::WS.into(),
-                harness: "claude-code".into(),
+                harness: "fake".into(),
                 cwd: "/w".into(),
-                title: "old".into(),
+                title: "formats".into(),
                 token: "t".into(),
                 ..Default::default()
             })
             .unwrap()
             .id;
-        let ev = |kind: &str, data: Value| store.events().add(&id, kind, data).unwrap();
-        ev("user", json!({"text": "hi", "via": "me"}));
-        ev(
-            "agent_message_chunk",
-            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}),
-        );
-        let call = ev(
-            "tool_call",
-            json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read /w/a.rs", "kind": "read", "status": "pending",
-                "rawInput": {"file_path": "/w/a.rs"}, "_meta": {"claudeCode": {"toolName": "Read"}}}),
-        );
-        ev(
-            "tool_call_update",
-            json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed"}),
-        );
-        let backend = StoreBackend::new(store.clone()).unwrap();
-        let read = |after: i64| {
-            let mut out = Vec::new();
-            backend
-                .events_raw(&id, after, &mut |e| out.push(e))
-                .unwrap();
-            out.into_iter()
-                .map(|(_, _, k, d)| (k, serde_json::from_str::<Value>(&d).unwrap()))
-                .collect::<Vec<_>>()
-        };
-        let all = read(0);
-        let kinds: Vec<&str> = all.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(kinds, ["user", "text", "tool", "tool"]);
-        assert_eq!(all[1].1["role"], "assistant");
-        assert_eq!(all[3].1["tool"]["name"], "Read");
-        assert_eq!(all[3].1["tool"]["target"], "a.rs");
-        assert!(
-            !all.iter()
-                .any(|(_, d)| d.to_string().contains("sessionUpdate"))
-        );
-        // a page that starts after the call still knows the tool
-        let tail = read(call);
+        store.transaction(|tx| {
+            for format in ["legacy.acp", "future.v2"] {
+                tx.execute("INSERT INTO events(session_id, ts, kind, data, format) VALUES (?, 1, 'agent_message_chunk', ?, ?)",
+                    rusqlite::params![id, r#"{"sessionUpdate":"agent_message_chunk","content":{"text":"not read"}}"#, format])?;
+            }
+            Ok::<_, s::StoreError>(())
+        }).unwrap();
+        let last = store
+            .events()
+            .add(&id, "text", json!({"role":"assistant", "text":"current"}))
+            .unwrap();
+        let backend = StoreBackend::new(store).unwrap();
+        let entries = backend.events_after(&id, 0).unwrap();
+        for (entry, format) in entries.iter().zip(["legacy.acp", "future.v2"]) {
+            assert_eq!(entry["kind"], "system");
+            assert_eq!(entry["data"]["code"], "unsupported_format");
+            assert_eq!(entry["data"]["format"], format);
+            assert!(!entry["data"].to_string().contains("not read"));
+        }
+        let mut tail = vec![];
+        backend
+            .events_page_raw(&id, entries[1]["seq"].as_i64().unwrap(), &mut |e| {
+                tail.push(e)
+            })
+            .unwrap();
         assert_eq!(tail.len(), 1);
-        assert_eq!(tail[0].1["tool"]["name"], "Read");
-        assert_eq!(tail[0].1["tool"]["phase"], "succeeded");
+        assert_eq!(tail[0].0, last);
+        assert_eq!(tail[0].2, "text");
+        assert!(backend.events_after(&id, last).unwrap().is_empty());
     }
 }
 

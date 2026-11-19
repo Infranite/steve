@@ -115,7 +115,6 @@ edge	steve-store	steve-node-api
 edge	steve-store	steve-types
 edge	steve-store-sqlite	steve-storage-api
 edge	steve-store-sqlite	steve-types
-edge	steve-transcript	steve-acp
 edge	steve-transcript	steve-node-api
 rusqlite	steve-calendar
 rusqlite	steve-channels

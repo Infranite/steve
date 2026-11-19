@@ -70,6 +70,8 @@ pub struct Inner {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<crate::wire::node_runtime::NodeRuntime>>,
+    /// Local history discovery, independent of whether agent sessions run here.
+    pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects' and items' files are (which Node); `None` reads the Hub's own disk.
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
     /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
@@ -108,6 +110,7 @@ impl AppState {
             modules: None,
             nodes: None,
             node: None,
+            history: None,
             workspaces: None,
             oidc: None,
             presence: Default::default(),
@@ -189,6 +192,16 @@ impl AppState {
                     inner.runtimes.set_node(n.node());
                 }
                 inner.node = node;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    pub fn with_history(self, history: Option<Arc<dyn steve_node_api::Discovery>>) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.history = history;
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),

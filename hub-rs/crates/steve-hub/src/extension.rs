@@ -719,6 +719,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_oidc(w.oidc.clone())
         .with_nodes(w.nodes)
         .with_node(w.node)
+        .with_history(w.history)
         .with_workspaces(Some(w.workspaces));
     st.runtimes.set_harnesses(w.harnesses);
     crate::app::boot(&st).await?;

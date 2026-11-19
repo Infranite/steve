@@ -86,6 +86,8 @@ pub struct Wired {
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The local Node's coordinator (`STEVE_NODE_MODE=local`), for `/healthz`.
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
+    /// Local history discovery: session Node when present, otherwise the jobs Node.
+    pub history: Option<Arc<dyn steve_node_api::Discovery>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,

@@ -1,22 +1,10 @@
-//! A session's transcript in Steve's own terms: what clients, the core and statistics read.
-//!
-//! Every row of `events` is one of two formats:
-//!
-//! - `steve.v1`: written by the Hub. Its kinds are the transcript's own ([`Entry`]); a reader takes
-//!   them as stored.
-//! - `legacy.acp`: rows the ACP runner wrote before (and, until the switch, still writes): an ACP
-//!   `session/update` object under its own kind. [`LegacyReader`] reads them into the same entries,
-//!   with the shared normalizer a Node's driver uses, and only on the read path: nothing new is
-//!   written in that format by the Node protocol, and nothing above this crate sees ACP.
-//!
-//! Kinds the Hub writes itself (`user`, `queued…`, `system`, `permission`, `turn_end`) are the same
-//! in both formats. The transcript's own kinds never collide with ACP's.
+//! A session's transcript in Steve's own terms (`steve.v1`): what clients, the core and
+//! statistics read. Node events are projected into entries before they are stored.
 
 use serde_json::{Value, json};
 use steve_node_api::{EventBody, Role};
 
 pub const V1: &str = "steve.v1";
-pub const LEGACY: &str = "legacy.acp";
 
 /// Text of one message: `{role, message, text}`; consecutive texts of a message are appended.
 pub const TEXT: &str = "text";
@@ -83,7 +71,7 @@ pub fn of_node(body: &EventBody, role: Option<Role>) -> Option<Entry> {
 
 /// The entries of an imported history (a Node's `import_page` events, in order), as the Hub stores
 /// them: a user's message is the Hub's own `user` row (`{text, via: "me"}`), the agent's texts,
-/// tools and plans are entries of their own. Message boundaries are not kept (as with old rows),
+/// tools and plans are entries of their own. Message boundaries are not kept,
 /// and nothing else of the events is (usage, attempts: history never counts as new work).
 pub fn of_history(events: &[steve_node_api::NodeEvent]) -> Vec<Entry> {
     let mut roles = std::collections::HashMap::new();
@@ -127,30 +115,15 @@ fn bound_strings(v: &mut Value) {
     }
 }
 
-/// A stored row with nothing to show (`{}`): it keeps its place, so a page of rows always yields
-/// entries and paging by seq goes on.
-pub const SKIP: &str = "skip";
-
-/// The assistant's text in a row of either format, if it is one.
+/// The assistant's text in a transcript entry, if it is one.
 pub fn assistant_text<'a>(kind: &str, data: &'a Value) -> Option<&'a str> {
     match kind {
         TEXT if data.get("role").and_then(Value::as_str) == Some("assistant") => {
             data.get("text").and_then(Value::as_str)
         }
-        "agent_message_chunk" => data.pointer("/content/text").and_then(Value::as_str),
         _ => None,
     }
 }
-
-/// Whether a row is one of the ACP runner's: an ACP update under its own kind.
-pub fn is_legacy(kind: &str, data: &Value) -> bool {
-    data.get("sessionUpdate").and_then(Value::as_str) == Some(kind)
-}
-
-#[cfg(feature = "legacy")]
-mod legacy;
-#[cfg(feature = "legacy")]
-pub use legacy::LegacyReader;
 
 #[cfg(test)]
 mod tests;

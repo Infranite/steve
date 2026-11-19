@@ -183,7 +183,7 @@ async fn malformed_bound_workspace_never_falls_back_to_the_hub_session_directory
 }
 
 #[tokio::test]
-async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_version() {
+async fn mcp_requires_a_node_and_retains_every_received_version() {
     for node in [false, true] {
         let e = start(node).await;
         let path = PathBuf::from(&e.session.cwd).join("report.md");
@@ -191,6 +191,25 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         let result = e
             .tool("steve_deliver_file", json!({"path":path,"title":"Report"}))
             .await;
+        if !node {
+            assert_eq!(result["result"]["isError"], true, "{result}");
+            assert!(
+                result["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("delivery Node unavailable"),
+                "{result}"
+            );
+            assert!(e.store.artifacts().list("ST-1").unwrap().is_empty());
+            let count: i64 = e
+                .store
+                .reader::<_, StoreError>(|c| {
+                    Ok(c.query_row("SELECT COUNT(*) FROM deliveries", [], |r| r.get(0))?)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+            continue;
+        }
         assert_ne!(result["result"]["isError"], true, "{result}");
         let meta: Value =
             serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -491,7 +510,7 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
 
 #[tokio::test]
 async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_checks_membership() {
-    let e = start(false).await;
+    let e = start(true).await;
     std::fs::write(PathBuf::from(&e.session.cwd).join("design.zip"), html_zip()).unwrap();
     let result = e
         .tool("steve_deliver_file", json!({"path":"design.zip"}))
@@ -1024,7 +1043,7 @@ async fn users_publish_and_interactive_frames_are_isolated_capabilities() {
 /// #205: steve_deliver_file works in a session outside an item, inside its own directory.
 #[tokio::test]
 async fn sessions_without_an_item_deliver_files() {
-    let e = start(false).await;
+    let e = start(true).await;
     let cwd = PathBuf::from(&e.session.cwd).parent().unwrap().join("chat");
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::write(cwd.join("notes.md"), "# Notes").unwrap();

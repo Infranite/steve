@@ -1,8 +1,7 @@
 //! What this machine is and what it can run (system.ts): the Hub registers itself as a device, reports the
-//! harnesses it finds, and imports local harness history (Claude Code, Codex) as read-only sessions.
-//! External commands run through `tokio::process` with the TS 8 s timeout; file scans run on the blocking pool.
+//! harnesses it finds, and imports local harness history through the Node as read-only sessions.
+//! Host commands run through `tokio::process` with an 8 s timeout.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BResult, BackendError, ImportedSession, Repo};
 use crate::bus::Bus;
-use crate::config::{Config, home_dir};
+use crate::config::Config;
 use crate::js;
 
 /// `uid(p)`: `p_` + 16 hex chars of a random UUID.
@@ -449,22 +448,6 @@ use steve_node_api::{
     OperationId, OperationResult, PageRequest, Timestamp,
 };
 
-/// Where this machine's harnesses keep their history, as the Hub reads it itself (the local Node off).
-fn homes(steve_home: &Path) -> steve_node::history::Homes {
-    let user_home = home_dir();
-    steve_node::history::Homes {
-        claude_dir: user_home.join(".claude"),
-        codex_home: user_home.join(".codex"),
-        user_home,
-        steve_home: steve_home.to_path_buf(),
-    }
-}
-
-/// `localSessions(limit)` without the `imported` flag: newest first, Steve's own runs skipped. Blocking.
-pub fn local_candidates(steve_home: &Path, limit: usize) -> Vec<LocalSession> {
-    steve_node::history::candidates(&homes(steve_home), limit)
-}
-
 /// The file side of `importLocal`, done before taking the write lock.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prepared {
@@ -474,13 +457,6 @@ pub enum Prepared {
     },
     /// A key the Node does not list (a path a client made up): nothing was read.
     NotListed,
-    /// Read by the Hub: ACP-shaped rows, read into Steve's terms when stored.
-    Ready {
-        key: String,
-        peek: LocalSession,
-        harness: String,
-        events: Vec<(String, Value)>,
-    },
     /// Read by the Node: already Steve's entries.
     Converted {
         key: String,
@@ -488,24 +464,6 @@ pub enum Prepared {
         harness: String,
         entries: Vec<steve_transcript::Entry>,
     },
-}
-
-/// Reads and converts a local session file (blocking).
-pub fn prepare_import(steve_home: &Path, key: &str) -> Prepared {
-    match steve_node::history::read(steve_home, key) {
-        steve_node::history::Read::Missing => Prepared::Missing,
-        steve_node::history::Read::Unreadable => Prepared::Unreadable { key: key.into() },
-        steve_node::history::Read::Ready {
-            peek,
-            harness,
-            rows,
-        } => Prepared::Ready {
-            key: key.into(),
-            peek,
-            harness,
-            events: rows,
-        },
-    }
 }
 
 /// The entries of the Node's history an import looks through for its keys: first as many as the
@@ -550,7 +508,7 @@ async fn node_history(node: &dyn Discovery, max: usize) -> Result<Vec<HistoryEnt
     Ok(out)
 }
 
-/// What the Hub's own device's Node lists for import (the local Node on): `limit` newest.
+/// What the Hub's jobs Node lists for import, including when session execution is off.
 pub async fn node_candidates(
     node: &dyn Discovery,
     limit: usize,
@@ -659,28 +617,12 @@ pub fn import_prepared(r: &dyn Repo, bus: &Bus, ws: &str, p: Prepared) -> BResul
         Prepared::NotListed => {
             return Err(BackendError::msg(steve_i18n::t!("hub.import.not_listed")));
         }
-        Prepared::Unreadable { key }
-        | Prepared::Ready { key, .. }
-        | Prepared::Converted { key, .. } => key.clone(),
+        Prepared::Unreadable { key } | Prepared::Converted { key, .. } => key.clone(),
     };
     if r.import_keys()?.contains(&key) {
         return Err(BackendError::msg(steve_i18n::t!("hub.import.already")));
     }
     let (peek, harness, rows) = match p {
-        Prepared::Ready {
-            peek,
-            harness,
-            events,
-            ..
-        } => {
-            // stored in Steve's own terms, like everything written now
-            let mut reader = steve_transcript::LegacyReader::new(&peek.cwd);
-            let rows: Vec<steve_transcript::Entry> = events
-                .iter()
-                .flat_map(|(kind, data)| reader.read(kind, data))
-                .collect();
-            (peek, harness, rows)
-        }
         Prepared::Converted {
             peek,
             harness,
@@ -735,9 +677,7 @@ pub fn remove_imported(r: &dyn Repo, id: &str) -> BResult<()> {
 mod tests {
     use super::*;
     use regex::Regex;
-    use steve_node::history::{
-        claude_rows as claude_events, codex_rows as codex_events, peek_claude,
-    };
+    use steve_node::history::{claude_rows as claude_events, codex_rows as codex_events};
 
     mod setup_node {
         include!(concat!(
@@ -986,34 +926,6 @@ mod tests {
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].1, json!({"text": "hello there", "via": "me"}));
         assert_eq!(ev[1].1["title"], json!("shell {\"cmd\":\"ls\"}"));
-    }
-
-    #[test]
-    fn peek_and_prepare() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let f = dir.path().join("a.jsonl");
-        std::fs::write(
-            &f,
-            "{\"type\":\"user\",\"cwd\":\"/proj\",\"message\":{\"content\":\"hi\"}}\n",
-        )
-        .expect("write");
-        let steve_home = dir.path().join("steve");
-        let p = peek_claude(&steve_home, &f).expect("peek");
-        assert_eq!(
-            (p.title.as_str(), p.cwd.as_str(), p.harness.as_str()),
-            ("hi", "/proj", "Claude Code")
-        );
-        assert!(matches!(
-            prepare_import(&steve_home, &format!("cc:{}", f.display())),
-            Prepared::Ready { .. }
-        ));
-        assert_eq!(
-            prepare_import(&steve_home, "cc:/nonexistent/x.jsonl"),
-            Prepared::Missing
-        );
-        assert_eq!(prepare_import(&steve_home, "nocolon"), Prepared::Missing);
-        // runs inside STEVE_HOME are Steve's own
-        assert!(peek_claude(Path::new("/pro"), &f).is_none());
     }
 
     #[tokio::test]

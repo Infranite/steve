@@ -500,6 +500,26 @@ fn hydrate_event(c: &rusqlite::Connection, session: &str, e: &mut Event) -> Resu
     Ok(())
 }
 
+/// Decode a transcript page row, leaving unsupported formats visible at their stored cursor.
+fn transcript_row(c: &rusqlite::Connection, session: &str, row: &rusqlite::Row) -> Result<Event> {
+    let format: String = row.get(5)?;
+    if format != "steve.v1" {
+        return Ok(Event {
+            seq: row.get(0)?,
+            ts: row.get(1)?,
+            kind: "system".into(),
+            data: serde_json::json!({
+                "code": "unsupported_format",
+                "format": format,
+                "text": format!("Unsupported transcript format: {format}"),
+            }),
+        });
+    }
+    let mut event = event_row(row)?;
+    hydrate_event(c, session, &mut event)?;
+    Ok(event)
+}
+
 impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
@@ -560,78 +580,32 @@ impl Events<'_> {
         })
     }
 
-    /// The old ACP tool rows of the turn that is open at `after`: what a reader of those rows needs
-    /// to read a page that starts at `after` (an update carries only what changed, and tool
-    /// updates never cross a turn). Bounded by one turn; empty from the start.
-    pub fn tool_context(&self, session_id: &str, after: i64) -> Result<Vec<Event>> {
-        if after <= 0 {
-            return Ok(vec![]);
-        }
-        self.0.read(|c| {
-            crate::read_snapshot(c, |tx| {
-                let start: i64 = tx
-                    .query_row(
-                        "SELECT seq FROM events WHERE session_id = ? AND seq <= ? AND kind = 'user' ORDER BY seq DESC LIMIT 1",
-                        params![session_id, after],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(0);
-                let mut events: Vec<Event> = all(
-                    tx,
-                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq > ? AND seq <= ? AND kind IN ('tool_call', 'tool_call_update') ORDER BY seq",
-                    params![session_id, start, after],
-                    event_row,
-                )?;
-                for e in &mut events { hydrate_event(tx, session_id, e)?; }
-                Ok(events)
-            })
-        })
-    }
-
-    /// Visit a page in sequence order without retaining all decoded rows. The byte budget
+    /// Visit at most 500 rows in sequence order within a 2 MiB byte budget, without retaining
+    /// all decoded rows. The byte budget
     /// accounts for full referenced strings, not just previews. A single oversize row is
     /// returned alone to guarantee cursor progress; this is not a per-event size limit.
     /// Callers continue from the last returned seq until an empty page (never infer EOF
     /// from a short page). Internal `after`/`up_to` keep their complete-data semantics.
-    pub fn visit_page(&self, session_id: &str, after: i64, each: impl FnMut(Event)) -> Result<()> {
-        self.visit(session_id, after, 500, 2 * 1024 * 1024, each)
-    }
-
-    /// Compatibility reader for clients that still expect 5000-row pages. Streams
-    /// each decoded event but deliberately retains the old page-length contract.
-    pub fn visit_legacy_page(
+    pub fn visit_page(
         &self,
         session_id: &str,
         after: i64,
-        each: impl FnMut(Event),
-    ) -> Result<()> {
-        self.visit(session_id, after, 5000, usize::MAX, each)
-    }
-
-    fn visit(
-        &self,
-        session_id: &str,
-        after: i64,
-        max_rows: usize,
-        max_bytes: usize,
         mut each: impl FnMut(Event),
     ) -> Result<()> {
         self.0.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0) FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
+                "SELECT e.seq, e.ts, e.kind, e.data, length(CAST(e.data AS BLOB)) + COALESCE((SELECT SUM(length(CAST(p.data AS BLOB))) FROM event_payload_refs r JOIN event_payloads p ON p.session_id = r.session_id AND p.hash = r.hash WHERE r.event_seq = e.seq), 0), e.format FROM events e WHERE e.session_id = ? AND e.seq > ? ORDER BY e.seq LIMIT ?"
             )?;
-            let mut rows = st.query(params![session_id, after, max_rows as i64])?;
+            let mut rows = st.query(params![session_id, after, 500i64])?;
             let (mut count, mut bytes) = (0, 0usize);
             while let Some(row) = rows.next()? {
                 let size = row.get::<_, i64>(4)?.max(0) as usize;
-                if count > 0 && bytes.saturating_add(size) > max_bytes { break; }
-                let mut event = event_row(row)?;
-                hydrate_event(c, session_id, &mut event)?;
+                if count > 0 && bytes.saturating_add(size) > 2 * 1024 * 1024 { break; }
+                let event = transcript_row(c, session_id, row)?;
                 each(event);
                 bytes = bytes.saturating_add(size);
                 count += 1;
-                if bytes >= max_bytes { break; }
+                if bytes >= 2 * 1024 * 1024 { break; }
             }
             Ok(())
         })
