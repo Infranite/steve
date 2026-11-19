@@ -59,7 +59,6 @@ steve-hub/src/upgrades/supervisor.rs	timer-loop	upgrades::supervisor::drain	1
 steve-hub/src/upgrades/supervisor.rs	timer-loop	upgrades::supervisor::run	1
 steve-hub/src/upgrades/supervisor.rs	timer-loop	upgrades::supervisor::startup_gate	1
 steve-hub/src/upgrades/supervisor.rs	timer-loop	upgrades::supervisor::wait_health	1
-steve-hub/src/wire/digest_bot.rs	timer-loop	wire::digest_bot::run	1
 steve-hub/src/wire/flow_cmd.rs	timer-loop	wire::flow_cmd::FlowCmd as CmdNode::run	1
 steve-hub/src/wire/flow_cmd.rs	timer-loop	wire::flow_cmd::FlowCmd::stopped	1
 steve-hub/src/wire/flow_cmd.rs	timer-loop	wire::flow_cmd::prepare_dir	1
