@@ -80,13 +80,11 @@ fn engine_executor_domain_store_commit_and_legacy_bridge_in_both_layouts() {
             u
         };
         block_on(s.commit(comms)).unwrap();
-        assert!(
-            s.hello()
-                .domains
-                .iter()
-                .all(|d| d.features.contains("cas") && !d.features.contains("snapshot_read"))
-        );
-        assert!(block_on(s.begin_snapshot(Domain::Core, Lane::Admin)).is_err());
+        assert!(s.hello().domains.iter().all(|d| d.features.contains("cas")
+            && d.features.contains("snapshot_read")
+            && d.features.contains("export")));
+        let lease = block_on(s.begin_snapshot(Domain::Core, Lane::Admin)).unwrap();
+        block_on(s.lease_end(lease)).unwrap();
     }
 }
 
