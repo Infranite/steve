@@ -9,7 +9,17 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use steve_types::{Code, Error};
 
+/// Preserve validation errors across the frozen runner's transaction boundary.
+#[derive(Debug, thiserror::Error)]
+enum MigrationError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Validation(#[from] Error),
+}
+
 /// Newly revoked counts exclude credentials already carrying a revocation timestamp.
+/// Auth sessions have no revocation field: non-owner sessions are deleted and counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     AlreadyCurrent,
@@ -17,6 +27,7 @@ pub enum Outcome {
         from_legacy_version: i64,
         revoked_tokens: usize,
         revoked_clients: usize,
+        revoked_sessions: usize,
     },
 }
 
@@ -31,11 +42,12 @@ pub fn convert(conn: &mut Connection) -> Result<Outcome, Error> {
     }
     let from_legacy_version = migrate_legacy(conn)?;
     verify_legacy(conn)?;
-    let (revoked_tokens, revoked_clients) = install_layout(conn)?;
+    let (revoked_tokens, revoked_clients, revoked_sessions) = install_layout(conn)?;
     Ok(Outcome::Converted {
         from_legacy_version,
         revoked_tokens,
         revoked_clients,
+        revoked_sessions,
     })
 }
 
@@ -75,10 +87,15 @@ fn is_current(conn: &Connection) -> Result<bool, Error> {
             }
         }
         Layout::read(conn)?;
-        migrate::check_versions(conn, true)?;
+        migrate::check_versions(conn, false)?;
         return Ok(true);
     }
-    for table in schema::CONTRACT_TABLES.into_iter().skip(1) {
+    check_legacy_layout(conn)?;
+    Ok(false)
+}
+
+fn check_legacy_layout(conn: &Connection) -> Result<(), Error> {
+    for table in schema::CONTRACT_TABLES.into_iter().filter(|t| *t != "meta") {
         if object_kind(conn, table)?.is_some() {
             return Err(incompatible("storage contract metadata is incomplete"));
         }
@@ -101,15 +118,15 @@ fn is_current(conn: &Connection) -> Result<bool, Error> {
         }
         _ => return Err(incompatible("invalid legacy version metadata")),
     }
-    Ok(false)
+    Ok(())
 }
 
 /// Phase 1, also exposed for callers testing a restart between the two transactions.
 /// The returned version is the input to this invocation (a resumed call sees the head).
 /// A head database needs only read-only verification, so rejected head schemas remain
 /// byte-for-byte unchanged instead of having their old version rows rewritten first.
-/// Older inputs also validate structure before the old runner commits; the separate
-/// read-only phase still verifies the committed head and runs quick_check.
+/// Older inputs validate structure and quick_check before the old runner commits;
+/// the separate read-only phase repeats both checks on the committed head.
 pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
     require_autocommit(conn)?;
     if is_current(conn)? {
@@ -122,10 +139,12 @@ pub fn migrate_legacy(conn: &Connection) -> Result<i64, Error> {
         .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
     if version != legacy::SCHEMA_VERSION {
         legacy::migrate_to_head_with(conn, |tx| {
-            schema::verify_baseline(tx)
-                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))
+            verify_legacy(tx).map_err(MigrationError::Validation)
         })
-        .map_err(|e| incompatible(&format!("legacy migration failed: {e}")))?;
+        .map_err(|e| match e {
+            MigrationError::Sqlite(e) => incompatible(&format!("legacy migration failed: {e}")),
+            MigrationError::Validation(e) => e,
+        })?;
     }
     Ok(version)
 }
@@ -144,10 +163,22 @@ fn verify_legacy(conn: &Connection) -> Result<(), Error> {
     Ok(())
 }
 
-fn install_layout(conn: &mut Connection) -> Result<(usize, usize), Error> {
+fn install_layout(conn: &mut Connection) -> Result<(usize, usize, usize), Error> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(db_error)?;
+    let has_owner: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE role='owner')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(db_error)?;
+    if !has_owner {
+        return Err(incompatible(
+            "legacy storage has no instance owner; conversion refused",
+        ));
+    }
     tx.execute_batch(schema::CONTRACT).map_err(db_error)?;
     tx.execute_batch("DROP TABLE schema_version; DROP TABLE IF EXISTS schema_compat;")
         .map_err(db_error)?;
@@ -161,8 +192,18 @@ fn install_layout(conn: &mut Connection) -> Result<(usize, usize), Error> {
         )
         .map_err(db_error)?;
     // Instance ownership is users.role, not workspace membership or token ancestry.
-    let revoked_tokens = tx.execute("UPDATE access_tokens SET revoked=?1 WHERE revoked IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE users.id=access_tokens.user_id AND users.role='owner')", [now]).map_err(db_error)?;
-    let revoked_clients = tx.execute("UPDATE clients SET revoked=?1 WHERE revoked IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE users.id=clients.user_id AND users.role='owner')", [now]).map_err(db_error)?;
+    let mut revoked = [0; 2];
+    for (count, table) in revoked.iter_mut().zip(["access_tokens", "clients"]) {
+        *count = tx.execute(
+            &format!("UPDATE {table} SET revoked=?1 WHERE revoked IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE users.id={table}.user_id AND users.role='owner')"),
+            [now],
+        ).map_err(db_error)?;
+    }
+    // Match AuthSessions::drop: deleting the hash immediately invalidates the session.
+    let revoked_sessions = tx.execute(
+        "DELETE FROM auth_sessions WHERE NOT EXISTS (SELECT 1 FROM users WHERE users.id=auth_sessions.user_id AND users.role='owner')",
+        [],
+    ).map_err(db_error)?;
     tx.commit().map_err(db_error)?;
-    Ok((revoked_tokens, revoked_clients))
+    Ok((revoked[0], revoked[1], revoked_sessions))
 }

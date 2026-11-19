@@ -263,15 +263,15 @@ pub fn final_structure(conn: &Connection) -> Result<()> {
 /// Structural fingerprint verification belongs to the converter's following verification phase.
 /// No historical support window is imposed; an unstamped empty database starts at zero.
 pub fn migrate_to_head(conn: &Connection) -> Result<()> {
-    migrate_to_head_with(conn, |_| Ok(()))
+    migrate(conn, version(conn)?, |_| Ok(()))
 }
 
 /// Conversion may validate structure before the existing migration transaction commits.
 /// A rejected older schema then retains its original bytes as well as its version.
-pub(crate) fn migrate_to_head_with(
+pub(crate) fn migrate_to_head_with<E: From<rusqlite::Error>>(
     conn: &Connection,
-    check: impl FnOnce(&Connection) -> Result<()>,
-) -> Result<()> {
+    check: impl FnOnce(&Connection) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
     migrate(conn, version(conn)?, check)
 }
 
@@ -319,12 +319,17 @@ fn minimum_reader(c: &Connection, fallback: i64) -> Result<i64> {
     }
 }
 
-fn migrate(c: &Connection, cur: i64, check: impl FnOnce(&Connection) -> Result<()>) -> Result<()> {
+fn migrate<E: From<rusqlite::Error>>(
+    c: &Connection,
+    cur: i64,
+    check: impl FnOnce(&Connection) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
     // The caller must not already own a transaction: foreign_keys cannot change within one.
     if !c.is_autocommit() {
         return Err(rusqlite::Error::InvalidParameterName(
             "legacy migration requires autocommit".into(),
-        ));
+        )
+        .into());
     }
     let fks: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
     if cur != SCHEMA_VERSION {
@@ -333,14 +338,14 @@ fn migrate(c: &Connection, cur: i64, check: impl FnOnce(&Connection) -> Result<(
     let ran = run_pending(c, cur, check);
     let restored = c.pragma_update(None, "foreign_keys", fks);
     ran?;
-    restored
+    restored.map_err(Into::into)
 }
 
-fn run_pending(
+fn run_pending<E: From<rusqlite::Error>>(
     c: &Connection,
     cur: i64,
-    check: impl FnOnce(&Connection) -> Result<()>,
-) -> Result<()> {
+    check: impl FnOnce(&Connection) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
     let tx = Transaction::new_unchecked(c, TransactionBehavior::Immediate)?;
     // Metadata belongs to the same transaction as migrations, including on an empty DB.
     tx.execute_batch(
@@ -391,7 +396,8 @@ fn run_pending(
         return Err(rusqlite::Error::InvalidParameterName(format!(
             "foreign keys broken after migrating to v{SCHEMA_VERSION}: {}",
             broken.join(", ")
-        )));
+        ))
+        .into());
     }
     check(&tx)?;
     if cur == 0 {
