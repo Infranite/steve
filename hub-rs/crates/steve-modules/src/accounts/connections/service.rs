@@ -2703,32 +2703,122 @@ impl Connections {
         n
     }
 
-    /// Starts both jobs (every 5 and 15 minutes). The integrator calls this once the runtime is up.
+    /// Two independent deadline sources: a long health pass cannot delay token refresh.
     pub async fn run_jobs(self) {
-        let c = self.clone();
-
-        // two loops side by side: a long health pass must not delay a token refresh. A pass
-        // that overruns its period starts the next one a full period later, not in a burst.
-        let every = |mins: u64| {
-            let mut i = tokio::time::interval(Duration::from_secs(mins * 60));
-            i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            i
+        let source = |health| Arc::new(ConnectionJob::new(self.clone(), health));
+        let run = |source| {
+            steve_runtime::due::due_loop(
+                source,
+                self.0.m.clock.clone(),
+                Arc::new(tokio::sync::Notify::new()),
+                steve_runtime::policy::Backoff {
+                    base: std::time::Duration::from_secs(1),
+                    max: std::time::Duration::from_secs(60),
+                    factor: 2,
+                    jitter: steve_runtime::policy::Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                },
+            )
         };
-        let (mut refresh, mut health) = (every(5), every(15));
-        tokio::join!(
-            async {
-                loop {
-                    refresh.tick().await;
-                    c.refresh_due().await;
+        tokio::join!(run(source(false)), run(source(true)));
+    }
+}
+
+/// Successful rows retain the ordinary cadence; errors also honor persisted health.next_at.
+/// The in-memory cadence resets on restart, matching the former immediate first pass.
+struct ConnectionJob {
+    c: Connections,
+    health: bool,
+    next: Mutex<HashMap<String, i64>>,
+}
+const CONNECTION_BATCH: usize = 64;
+impl ConnectionJob {
+    fn new(c: Connections, health: bool) -> Self {
+        Self {
+            c,
+            health,
+            next: Mutex::default(),
+        }
+    }
+    fn due_rows(&self, rows: Vec<ConnRow>) -> Vec<(i64, ConnRow)> {
+        let mut next = lock(&self.next);
+        let live: HashSet<_> = rows.iter().map(|r| r.id.as_str()).collect();
+        next.retain(|id, _| live.contains(id.as_str()));
+        let mut due = Vec::new();
+        for r in rows {
+            let Some(p) = self.c.provider(&r.adapter) else {
+                continue;
+            };
+            let token_due = if self.health {
+                0
+            } else {
+                if p.token_kind() != TokenKind::Stored {
+                    continue;
                 }
-            },
-            async {
-                loop {
-                    health.tick().await;
-                    c.check_health().await;
-                }
-            },
-        );
+                let Some(expiry) = r.health.expires_at else {
+                    continue;
+                };
+                expiry.saturating_sub(JOB_MARGIN_MS)
+            };
+            let at = r
+                .health
+                .next_at
+                .max(token_due)
+                .max(*next.get(&r.id).unwrap_or(&0));
+            due.push((at, r));
+        }
+        due.sort_by(|(a, x), (b, y)| (a, &x.id).cmp(&(b, &y.id)));
+        due
+    }
+}
+impl steve_runtime::due::DueSource for ConnectionJob {
+    fn name(&self) -> &'static str {
+        if self.health {
+            "vault.health"
+        } else {
+            "vault.token_refresh"
+        }
+    }
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        // Pool reads run off the async executor.
+        let c = self.c.clone();
+        let rows =
+            c.0.m
+                .blocking(|m| Ok(m.store.reader(repo::live)?))
+                .await
+                .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+        // Reuse exactly the same eligibility calculation for both operations.
+        Ok(self.due_rows(rows).first().map(|(at, _)| *at))
+    }
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let rows = self
+            .c
+            .0
+            .m
+            .blocking(|m| Ok(m.store.reader(repo::live)?))
+            .await
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))?;
+        for (_, r) in self
+            .due_rows(rows)
+            .into_iter()
+            .filter(|(at, _)| *at <= now)
+            .take(CONNECTION_BATCH)
+        {
+            let period = if self.health { 15 } else { 5 } * MINUTE;
+            // Install a row-local floor even if reporting the provider error cannot be persisted.
+            lock(&self.next).insert(r.id.clone(), now.saturating_add(period));
+            if self.health {
+                let p = self.c.provider(&r.adapter).expect("eligible provider");
+                let h = tokio::time::timeout(HEALTH_TIMEOUT, p.health(&self.c.cx_of(&r)))
+                    .await
+                    .unwrap_or_else(|_| Health::Failed("health check timed out".into()));
+                self.c.record(&r.workspace_id, &r.id, h).await;
+            } else {
+                let _ = self.c.refresh(&r.workspace_id, &r.id, false).await;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2841,5 +2931,223 @@ mod runtime_policy_sequence {
         ] {
             assert_eq!(super::backoff(attempt), minutes * 60_000);
         }
+    }
+}
+
+#[cfg(test)]
+mod due_contract_tests {
+    use super::super::{AccountInfo, AuthKind, ConnCx, ConnectionProvider, OAuthClient, TokenSet};
+    use super::*;
+    use crate::ApiResult;
+    use crate::testkit::{ME, TestEnv, WS};
+    use steve_runtime::due::{DueSource, contract};
+
+    struct Provider;
+    #[async_trait::async_trait]
+    impl ConnectionProvider for Provider {
+        fn id(&self) -> &str {
+            "due-test"
+        }
+        fn system(&self) -> &str {
+            "feishu_app"
+        }
+        fn name(&self) -> &str {
+            "Due test"
+        }
+        fn caps(&self) -> &[&'static str] {
+            &[]
+        }
+        fn auth(&self) -> AuthKind {
+            AuthKind::OAuth
+        }
+        async fn verify(&self, _: &ConnCx) -> Result<AccountInfo, ProviderError> {
+            unreachable!()
+        }
+        async fn health(&self, cx: &ConnCx) -> Health {
+            if cx.id().starts_with("poison") {
+                Health::Failed("provider unavailable".into())
+            } else {
+                Health::Ok
+            }
+        }
+        async fn oauth_client(
+            &self,
+            _: &StartCx<'_>,
+        ) -> Result<Option<OAuthClient>, ProviderError> {
+            Ok(Some(OAuthClient {
+                id: "test".into(),
+                secret: Zeroizing::new("test".into()),
+            }))
+        }
+        async fn refresh_tokens_for(
+            &self,
+            cx: &ConnCx,
+            _: &reqwest::Client,
+            _: &OAuthClient,
+            _: &str,
+        ) -> Result<TokenSet, ProviderError> {
+            if cx.id().starts_with("poison") {
+                return Err(ProviderError::Transient("provider unavailable".into()));
+            }
+            Ok(TokenSet {
+                access_token: Zeroizing::new("test".into()),
+                refresh_token: None,
+                expires_in: Some(3600),
+                refresh_expires_in: None,
+                scope: None,
+            })
+        }
+    }
+    struct Fixture {
+        env: TestEnv,
+        source: ConnectionJob,
+    }
+    impl Fixture {
+        fn new(health: bool) -> Self {
+            let env = TestEnv::new(crate::accounts::register);
+            env.clock.set(1000);
+            let keys =
+                crate::vault::keystore::FileKeyStore::open(env.dir.path().join("keys")).unwrap();
+            let vault = Vault::new(env.store().clone(), Arc::new(keys));
+            vault.init(WS, ME).unwrap();
+            let c = Connections::builder(
+                env.modules.clone(),
+                vault,
+                ConnectionsConfig::new(vec![], false, |_| None),
+            )
+            .provider(Arc::new(Provider))
+            .build();
+            Self {
+                env,
+                source: ConnectionJob::new(c, health),
+            }
+        }
+    }
+    impl contract::Fixture for Fixture {
+        type Source = ConnectionJob;
+        fn source(&self) -> &Self::Source {
+            &self.source
+        }
+        fn batch(&self) -> usize {
+            CONNECTION_BATCH
+        }
+        fn dead_letters(&self) -> bool {
+            false
+        }
+        fn dead(&self) -> Vec<String> {
+            vec![]
+        }
+        fn add(&self, at: i64, poison: bool) -> String {
+            let id = format!(
+                "{}-{}",
+                if poison { "poison" } else { "ok" },
+                steve_store::uid("due")
+            );
+            let account = self
+                .env
+                .store()
+                .transaction(|tx| -> ApiResult<_> {
+                    let party = crate::contacts::service::ensure_self_org(tx, WS, ME)?;
+                    Ok(crate::accounts::repo::insert(
+                        tx,
+                        WS,
+                        &crate::accounts::repo::NewAccount {
+                            system_id: "feishu_app".into(),
+                            family: "feishu_app".into(),
+                            party_id: party.id,
+                            kind: "app_bot".into(),
+                            handle: id.clone(),
+                            handle_display: id.clone(),
+                            display_name: id.clone(),
+                            verified: true,
+                            confidence: 1.0,
+                            source: "test".into(),
+                            source_label: "test".into(),
+                        },
+                    )?)
+                })
+                .unwrap();
+            let expiry = at + JOB_MARGIN_MS;
+            let item = self
+                .source
+                .c
+                .vault()
+                .create_credential(
+                    WS,
+                    ME,
+                    "test",
+                    None,
+                    vec![
+                        (REFRESH_TOKEN.into(), Zeroizing::new("test".into())),
+                        (EXPIRES_AT.into(), Zeroizing::new(expiry.to_string())),
+                    ],
+                )
+                .unwrap();
+            self.env
+                .store()
+                .with_conn(|c| {
+                    repo::insert(
+                        c,
+                        &ConnRow {
+                            id: id.clone(),
+                            workspace_id: WS.into(),
+                            account_id: account.id,
+                            adapter: "due-test".into(),
+                            auth: "oauth".into(),
+                            granted_scopes: vec![],
+                            caps: vec![],
+                            credential_item: Some(item),
+                            status: "ok".into(),
+                            health: HealthState {
+                                next_at: at,
+                                expires_at: Some(expiry),
+                                ..Default::default()
+                            },
+                            config: json!({}),
+                            last_sync: None,
+                            created_by: ME.into(),
+                            revision: 1,
+                            created: 1,
+                            updated: 1,
+                        },
+                    )
+                })
+                .unwrap();
+            id
+        }
+        fn done(&self) -> Vec<String> {
+            self.env
+                .store()
+                .reader(|c| {
+                    Ok::<_, steve_store::StoreError>(
+                        repo::live(c)?
+                            .into_iter()
+                            .filter(|r| r.health.last_ok > 0 && r.health.fails == 0)
+                            .map(|r| r.id)
+                            .collect(),
+                    )
+                })
+                .unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn r7b_connection_health_meets_the_continuing_contract() {
+        contract::check(|| Fixture::new(true), 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7b_connection_refresh_meets_the_continuing_contract() {
+        contract::check(|| Fixture::new(false), 1000, 3).await;
+    }
+    #[tokio::test]
+    async fn r7b_connection_health_deadline_is_not_a_polling_grid() {
+        let f = Fixture::new(true);
+        let id = contract::Fixture::add(&f, 1123, false);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1123));
+        f.source.run_due(1122).await.unwrap();
+        assert!(contract::Fixture::done(&f).is_empty());
+        f.env.clock.set(1123);
+        f.source.run_due(1123).await.unwrap();
+        assert_eq!(contract::Fixture::done(&f), vec![id]);
+        assert_eq!(f.source.next_due().await.unwrap(), Some(1123 + 15 * MINUTE));
     }
 }

@@ -736,45 +736,61 @@ impl Core {
     /// At boot, then every ten minutes: a reclaim pass; when it leaves the disk below the floor, the
     /// workspaces hear of it once (again only after it was above `low` in between). Runs forever.
     pub async fn run_workspace_watch(self) {
-        let mut tick = tokio::time::interval(CHECK_EVERY);
+        let clock = self
+            .modules()
+            .map(|m| m.clock.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
         // what was said last in this episode: nothing, low, or the floor (F1: low is said too,
         // before anything is refused)
-        let mut warned = Pressure::Ok;
-        loop {
-            tick.tick().await;
-            let c = self.clone();
-            let r = match tokio::task::spawn_blocking(move || c.reclaim_workspaces()).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    tracing::error!("reclaim {e}");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("reclaim task {e}");
-                    continue;
-                }
-            };
-            if r.freed_bytes() > 0 {
-                tracing::info!("reclaimed {}", human(r.freed_bytes()));
-            }
-            let pol = self.config().disk;
-            match r.free_after.map(|f| pol.pressure(f)) {
-                Some(Pressure::Floor) if warned != Pressure::Floor => {
-                    warned = Pressure::Floor;
-                    if let Err(e) = self.warn_floor(r.free_after.unwrap_or(0)) {
-                        tracing::error!("disk notice {e}");
+        let warned = std::sync::Arc::new(std::sync::Mutex::new(Pressure::Ok));
+        steve_runtime::every(
+            "core.workspace",
+            clock,
+            CHECK_EVERY,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let this = self.clone();
+                let warned = warned.clone();
+                async move {
+                    let mut level = *warned.lock().unwrap_or_else(|e| e.into_inner());
+                    let c = this.clone();
+                    let r = match tokio::task::spawn_blocking(move || c.reclaim_workspaces()).await
+                    {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            tracing::error!("reclaim {e}");
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::error!("reclaim task {e}");
+                            return;
+                        }
+                    };
+                    if r.freed_bytes() > 0 {
+                        tracing::info!("reclaimed {}", human(r.freed_bytes()));
                     }
-                }
-                Some(Pressure::Low) if warned == Pressure::Ok => {
-                    warned = Pressure::Low;
-                    if let Err(e) = self.warn_low(r.free_after.unwrap_or(0)) {
-                        tracing::error!("disk notice {e}");
+                    let pol = this.config().disk;
+                    match r.free_after.map(|f| pol.pressure(f)) {
+                        Some(Pressure::Floor) if level != Pressure::Floor => {
+                            level = Pressure::Floor;
+                            if let Err(e) = this.warn_floor(r.free_after.unwrap_or(0)) {
+                                tracing::error!("disk notice {e}");
+                            }
+                        }
+                        Some(Pressure::Low) if level == Pressure::Ok => {
+                            level = Pressure::Low;
+                            if let Err(e) = this.warn_low(r.free_after.unwrap_or(0)) {
+                                tracing::error!("disk notice {e}");
+                            }
+                        }
+                        Some(Pressure::Ok) => level = Pressure::Ok,
+                        _ => {}
                     }
+                    *warned.lock().unwrap_or_else(|e| e.into_inner()) = level;
                 }
-                Some(Pressure::Ok) => warned = Pressure::Ok,
-                _ => {}
-            }
-        }
+            },
+        )
+        .await;
     }
 
     /// Below `low` but above the floor: nothing is refused yet; what Steve could give back it did.

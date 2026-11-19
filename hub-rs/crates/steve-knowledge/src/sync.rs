@@ -260,14 +260,22 @@ pub fn sweep(m: &Modules) -> Result<usize> {
 
 /// The `kb.sync_mems` job: a sweep now, then every [`SWEEP_EVERY`].
 pub async fn sweep_job(m: Modules) {
-    let mut tick = tokio::time::interval(SWEEP_EVERY);
-    loop {
-        tick.tick().await;
-        let mm = m.clone();
-        match tokio::task::spawn_blocking(move || sweep(&mm)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!("kb.sync_mems: {e}"),
-            Err(e) => tracing::warn!("kb.sync_mems: task failed: {e}"),
-        }
-    }
+    steve_runtime::every(
+        "kb.sync_mems",
+        m.clock.clone(),
+        SWEEP_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let m = m.clone();
+            async move {
+                let mm = m.clone();
+                match tokio::task::spawn_blocking(move || sweep(&mm)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!("kb.sync_mems: {e}"),
+                    Err(e) => tracing::warn!("kb.sync_mems: task failed: {e}"),
+                }
+            }
+        },
+    )
+    .await;
 }

@@ -22,6 +22,8 @@ const TENANT_FAMILY: &str = "feishu_tenant";
 const EXTERNAL_ORG: &str = "外部组织";
 /// The Feishu scope that names the own organization.
 pub const TENANT_SCOPE: &str = "tenant:tenant:readonly";
+/// Retry delays after a lookup that left gaps, by attempt (the last repeats).
+pub const RETRY_MS: [i64; 4] = [3_600_000, 6 * 3_600_000, 24 * 3_600_000, 72 * 3_600_000];
 /// Has a person (not a sync) ever set this party's name? A revision whose `after` names a `name`
 /// without `"source": "sync"`.
 pub fn name_edited(c: &Connection, ws: &str, party: &str) -> ApiResult<bool> {
@@ -621,28 +623,10 @@ pub fn valid_address_fact(key: &str, value: &str) -> bool {
 
 /// Profile lookups keep their explicit third wait; other attempts use a capped backoff.
 fn retry_after_ms(attempts: i64) -> i64 {
-    use steve_runtime::policy::Retry;
-    let attempt = u32::try_from(attempts).unwrap_or(u32::MAX).min(3);
-    let policy = steve_runtime::policy::Backoff {
-        base: std::time::Duration::from_millis((3_600_000) as u64),
-        max: std::time::Duration::from_millis((72 * 3_600_000) as u64),
-        factor: 6,
-        jitter: steve_runtime::policy::Jitter::None,
-        attempts: None,
-        reset_after: None,
-    };
-    // The third wait is explicitly 24 h rather than the exponential 36 h.
-    let retry = if attempt == 2 {
-        Retry::After(std::time::Duration::from_secs(24 * 3600))
-    } else {
-        Retry::Backoff
-    };
-    let delay = if let Retry::After(delay) = retry {
-        delay
-    } else {
-        policy.delay(attempt, &mut rand::rng())
-    };
-    delay.as_millis() as i64
+    // This domain's irregular sequence is clearer as a table than as an exponential plus override.
+    RETRY_MS[usize::try_from(attempts)
+        .unwrap_or(usize::MAX)
+        .min(RETRY_MS.len() - 1)]
 }
 
 #[cfg(test)]

@@ -1096,3 +1096,68 @@ async fn a_file_turned_into_a_dangling_link_is_deleted() {
     assert_eq!(e.doc_by_ref(&id, "a.md").status, "deleted");
     assert!(e.search(ME, "部署").await.is_empty());
 }
+
+#[tokio::test]
+async fn r7b_requested_scans_do_not_move_the_full_scan_deadline() {
+    let e = setup();
+    e.env.clock.set(1000);
+    for id in ["scan-a", "scan-b"] {
+        let root = e.wiki().join(id);
+        fs::create_dir_all(&root).unwrap();
+        e.env
+            .store()
+            .transaction(|tx| {
+                repo::insert_source(
+                    tx,
+                    id,
+                    WS,
+                    "folder",
+                    id,
+                    &json!({"path": root}),
+                    &Visibility::Workspace,
+                    steve_store::base::Level::Public,
+                    ME,
+                    1000,
+                )
+            })
+            .unwrap();
+    }
+    let synced = |id: &str| {
+        e.env
+            .store()
+            .reader(|c| repo::source(c, id))
+            .unwrap()
+            .unwrap()
+            .last_sync
+    };
+    let task = steve_runtime::spawn(
+        "test.folder.scans",
+        folder::scan_job(e.env.modules.clone(), e.kb.clone()),
+    );
+    async fn until(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !condition() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("folder scans made progress");
+    }
+    until(|| {
+        synced("scan-a") == Some(1000)
+            && synced("scan-b") == Some(1000)
+            && e.env.clock.observed(1000)
+    })
+    .await;
+    e.env.clock.advance(1000);
+    e.kb.request_scan("scan-a");
+    until(|| synced("scan-a") == Some(2000)).await;
+    assert_eq!(synced("scan-b"), Some(1000));
+    e.env.clock.advance(598_999);
+    until(|| e.env.clock.observed(600_999)).await;
+    assert_eq!(synced("scan-b"), Some(1000));
+    e.env.clock.advance(1);
+    until(|| synced("scan-a") == Some(601_000) && synced("scan-b") == Some(601_000)).await;
+    task.stop();
+    task.await;
+}

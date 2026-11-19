@@ -738,16 +738,24 @@ pub fn expire(m: &Modules, now: i64) -> ApiResult<usize> {
 
 /// Starts the hourly expiry job.
 pub async fn expire_job(m: Modules) {
-    let mut tick = tokio::time::interval(EXPIRE_EVERY);
-    loop {
-        tick.tick().await;
-        let now = m.clock.now();
-        match m.blocking(move |m| expire(m, now)).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
-            Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
-        }
-    }
+    steve_runtime::every(
+        "kb.candidates_expire",
+        m.clock.clone(),
+        EXPIRE_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let m = m.clone();
+            async move {
+                let now = m.clock.now();
+                match m.blocking(move |m| expire(m, now)).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("kb.candidates_expire: {n} expired"),
+                    Err(e) => tracing::warn!("kb.candidates_expire: {e}"),
+                }
+            }
+        },
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------- steve_remember

@@ -1625,3 +1625,64 @@ async fn unattributed_words_in_the_attempts_range_make_its_reply_unknown() {
         ("第一句，最后一句", "attempt")
     );
 }
+
+#[tokio::test]
+async fn r7b_judge_watch_rereads_the_delay_after_each_pass_and_owns_its_stop() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use steve_runtime::{Clock, FakeClock};
+    struct Observed {
+        clock: Arc<FakeClock>,
+        waits: tokio::sync::mpsc::UnboundedSender<(i64, Duration)>,
+    }
+    impl Clock for Observed {
+        fn now(&self) -> i64 {
+            self.clock.now()
+        }
+        fn sleep(
+            &self,
+            duration: Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let _ = self.waits.send((self.now(), duration));
+            self.clock.sleep(duration)
+        }
+    }
+    let k = Kit::new();
+    k.db()
+        .store()
+        .item_facts()
+        .set_policy("judge_every", 5000)
+        .unwrap();
+    let clock = Arc::new(FakeClock::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let m = steve_modules::Modules::with_clock(
+        k.db().store().clone(),
+        k.core.module_gateway(),
+        steve_modules::Registry::new(),
+        Arc::new(Observed {
+            clock: clock.clone(),
+            waits: tx,
+        }),
+    );
+    k.core.attach_modules(m);
+    let task = steve_runtime::spawn("test.judge.watch", k.core.clone().run_judge_watch());
+    assert_eq!(rx.recv().await.unwrap(), (0, Duration::from_secs(4)));
+    clock.advance(4000);
+    assert_eq!(rx.recv().await.unwrap(), (4000, Duration::from_secs(1)));
+    k.db()
+        .store()
+        .item_facts()
+        .set_policy("judge_every", 0)
+        .unwrap();
+    clock.advance(1000);
+    assert_eq!(rx.recv().await.unwrap(), (5000, Duration::ZERO));
+    assert_eq!(rx.recv().await.unwrap(), (5000, Duration::from_secs(1)));
+    task.stop();
+    task.await;
+    clock.advance(60_000);
+    tokio::task::yield_now().await;
+    assert!(
+        rx.try_recv().is_err(),
+        "the stopped watch cannot start another pass"
+    );
+}

@@ -744,25 +744,30 @@ pub async fn scan_job(m: Modules, kb: Knowledge) {
     if let Err(e) = m.store.transaction(repo::reset_syncing) {
         tracing::warn!("kb.folder_scan: {e}");
     }
-    let mut next = tokio::time::Instant::now();
-    loop {
-        let wait = next.saturating_duration_since(tokio::time::Instant::now());
-        // Woken early by `Knowledge::request_scan` (sources a draft created or resumed): scan
-        // just those. Their claim is a write, so it runs after the draft's transaction.
-        if tokio::time::timeout(wait, kb.scan_wake.notified())
-            .await
-            .is_ok()
-        {
+    let (all_m, all_kb) = (m.clone(), kb.clone());
+    let all = steve_runtime::every_after(
+        "kb.folder_scan_all",
+        m.clock.clone(),
+        SCAN_EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let (m, kb) = (all_m.clone(), all_kb.clone());
+            async move {
+                scan_all(&m, &kb).await;
+            }
+        },
+    );
+    let requested = async {
+        loop {
+            kb.scan_wake.notified().await;
             for id in kb.take_scan_requests() {
                 if let Err(e) = sync_now(&m, &kb, &id).await {
                     tracing::debug!(source = %id, "kb.folder_scan: {e}");
                 }
             }
-            continue;
         }
-        scan_all(&m, &kb).await;
-        next = tokio::time::Instant::now() + SCAN_EVERY;
-    }
+    };
+    tokio::join!(all, requested);
 }
 
 // ---- REST operations

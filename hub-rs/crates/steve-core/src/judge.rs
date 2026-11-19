@@ -1196,18 +1196,35 @@ impl Core {
     /// One pass at a time, `judge_every` after the last one ended, so passes never overlap and a
     /// slow pass is not followed by a burst. Runs forever.
     pub async fn run_judge_watch(self) {
-        loop {
-            if let Err(e) = self.check_judges().await {
-                tracing::warn!("judge pass {e}");
-            }
-            let c = self.clone();
-            let every = match tokio::task::spawn_blocking(move || c.tx().work_policy()).await {
-                Ok(Ok(p)) => p.judge_every(),
-                _ => WorkPolicy::default().judge_every(),
-            };
-            let every = Duration::from_millis(u64::try_from(every).unwrap_or(0));
-            tokio::time::sleep(every.max(PASS_GAP_FLOOR)).await;
-        }
+        let clock = self
+            .modules()
+            .map(|m| m.clock.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
+        steve_runtime::every_after(
+            "core.judge",
+            clock.clone(),
+            PASS_GAP_FLOOR,
+            steve_runtime::FirstRun::Immediate,
+            move || {
+                let (this, clock) = (self.clone(), clock.clone());
+                async move {
+                    if let Err(e) = this.check_judges().await {
+                        tracing::warn!("judge pass {e}");
+                    }
+                    let c = this.clone();
+                    let every =
+                        match tokio::task::spawn_blocking(move || c.tx().work_policy()).await {
+                            Ok(Ok(p)) => p.judge_every(),
+                            _ => WorkPolicy::default().judge_every(),
+                        };
+                    let every = Duration::from_millis(u64::try_from(every).unwrap_or(0));
+                    // every_after adds the floor after this callback. Keep the remainder dynamic:
+                    // policy is re-read after every pass, including a slow one.
+                    clock.sleep(every.saturating_sub(PASS_GAP_FLOOR)).await;
+                }
+            },
+        )
+        .await;
     }
 
     /// One judging pass (from [`Core::run_judge_watch`]): the facts and rules under the lock, the
