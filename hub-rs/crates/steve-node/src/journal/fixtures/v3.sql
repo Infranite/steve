@@ -1,0 +1,32 @@
+-- Schema captured from b159c312, before the v4 migration.
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ops (
+  id TEXT PRIMARY KEY, method TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL,
+  execution TEXT, workspace TEXT, session TEXT, cancel INTEGER NOT NULL DEFAULT 0,
+  accepted INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ops_session ON ops(session);
+CREATE TABLE IF NOT EXISTS attempts (attempt TEXT PRIMARY KEY, execution TEXT NOT NULL, op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS streams (
+  stream TEXT PRIMARY KEY, epoch TEXT NOT NULL, produced INTEGER NOT NULL, acknowledged INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS events (
+  stream TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (stream, seq));
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY, resource TEXT NOT NULL, spec TEXT NOT NULL, kind TEXT NOT NULL,
+  view TEXT NOT NULL, path TEXT NOT NULL, repo TEXT, incarnation INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY, open TEXT NOT NULL, view TEXT NOT NULL, incarnation INTEGER NOT NULL,
+  acp_id TEXT);
+CREATE TABLE IF NOT EXISTS waits (
+  id TEXT PRIMARY KEY, op TEXT NOT NULL, session TEXT NOT NULL, request TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS procs (
+  session TEXT PRIMARY KEY, pgid INTEGER NOT NULL, generation INTEGER NOT NULL,
+  incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0,
+  started INTEGER);
+CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS command_specs (op TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS harness_setups (harness TEXT PRIMARY KEY, op TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifact_grants (
+  attempt TEXT PRIMARY KEY, workspace TEXT NOT NULL, body TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS artifact_grants_workspace ON artifact_grants(workspace);
+CREATE TABLE IF NOT EXISTS answers (
+  op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);

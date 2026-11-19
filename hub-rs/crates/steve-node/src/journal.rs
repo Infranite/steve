@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 mod buffer;
+mod schema;
+use schema::{ReceiptWrite, VERSION};
 #[cfg(test)]
 mod tests;
 pub(crate) use buffer::{needs_budget, prepare};
@@ -27,44 +29,6 @@ pub(crate) use buffer::{needs_budget, prepare};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use steve_node_api::*;
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS ops (
-  id TEXT PRIMARY KEY, method TEXT NOT NULL, digest TEXT NOT NULL, receipt TEXT NOT NULL,
-  execution TEXT, workspace TEXT, session TEXT, cancel INTEGER NOT NULL DEFAULT 0,
-  accepted INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS ops_session ON ops(session);
-CREATE TABLE IF NOT EXISTS attempts (attempt TEXT PRIMARY KEY, execution TEXT NOT NULL, op TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS streams (
-  stream TEXT PRIMARY KEY, epoch TEXT NOT NULL, produced INTEGER NOT NULL, acknowledged INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS events (
-  stream TEXT NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL, PRIMARY KEY (stream, seq));
-CREATE TABLE IF NOT EXISTS workspaces (
-  id TEXT PRIMARY KEY, resource TEXT NOT NULL, spec TEXT NOT NULL, kind TEXT NOT NULL,
-  view TEXT NOT NULL, path TEXT NOT NULL, repo TEXT, incarnation INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY, open TEXT NOT NULL, view TEXT NOT NULL, incarnation INTEGER NOT NULL,
-  acp_id TEXT);
-CREATE TABLE IF NOT EXISTS waits (
-  id TEXT PRIMARY KEY, op TEXT NOT NULL, session TEXT NOT NULL, request TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS procs (
-  session TEXT PRIMARY KEY, pgid INTEGER NOT NULL, generation INTEGER NOT NULL,
-  incarnation INTEGER NOT NULL, meter TEXT NOT NULL, reports INTEGER NOT NULL DEFAULT 0,
-  started INTEGER);
-CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS command_specs (op TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS harness_setups (harness TEXT PRIMARY KEY, op TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS artifact_grants (
-  attempt TEXT PRIMARY KEY, workspace TEXT NOT NULL, body TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS artifact_grants_workspace ON artifact_grants(workspace);
-CREATE TABLE IF NOT EXISTS answers (
-  op TEXT PRIMARY KEY, permission TEXT NOT NULL, resolution TEXT NOT NULL);
-DROP TABLE IF EXISTS disk_observations;
-";
-
-/// The journal's schema version (`PRAGMA user_version`). 3: the journal has its own identity.
-const VERSION: i64 = 3;
 
 pub(crate) struct Journal {
     writer: Arc<Mutex<Writer>>,
@@ -457,7 +421,10 @@ impl Writer {
     /// Opens (or creates) the journal and begins a new incarnation: what was live is now unknown,
     /// sessions are released (their processes belong to the old incarnation).
     pub fn open(path: &Path) -> ApiResult<(Self, u64)> {
-        let c = Connection::open(path).map_err(internal)?;
+        Self::from_connection(path, Connection::open(path).map_err(internal)?)
+    }
+
+    fn from_connection(path: &Path, c: Connection) -> ApiResult<(Self, u64)> {
         c.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
         )
@@ -488,40 +455,19 @@ impl Writer {
             metrics: Arc::new(Metrics::default()),
             wake: None,
         };
-        let (incarnation, id) =
-            j.tx(|t| {
-                // Schema and recovery are one commit. A failed migration must not consume an
-                // incarnation or change any receipt. Version zero includes the original journal.
-                t.c().execute_batch(SCHEMA).map_err(internal)?;
-                let has_started: bool = t.c().query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('procs') WHERE name='started')",
-                [], |r| r.get(0)).map_err(internal)?;
-                if !has_started {
-                    t.c()
-                        .execute_batch("ALTER TABLE procs ADD COLUMN started INTEGER")
-                        .map_err(internal)?;
-                }
-                // v3: the journal's identity. Streams made before it keep their epoch ('e1'), so
-                // the positions the Hub holds for them stay valid.
-                t.c()
-                    .execute(
-                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('journal_id', random())",
-                        [],
-                    )
-                    .map_err(internal)?;
-                let id = t.journal_id()?;
-                t.c()
-                    .pragma_update(None, "user_version", VERSION)
-                    .map_err(internal)?;
-                let inc = t.bump("incarnation")?;
-                t.mark_unknown()?;
-                Ok((inc, id))
-            })?;
+        let (incarnation, id) = j.tx(|t| {
+            // Schema, version, incarnation and recovery either all commit or all roll back.
+            t.initialize(version)?;
+            let id = t.journal_id()?;
+            let inc = t.bump("incarnation")?;
+            t.mark_unknown()?;
+            Ok((inc, id))
+        })?;
         j.id = id;
         j.incarnation = incarnation;
         j.counters = j
             .read(|t| {
-                t.rows("SELECT key, value FROM meta WHERE key IN ('incarnation','event','revision','snapshot','workspace')", [], |r| {
+                t.rows("SELECT key, value FROM meta WHERE key IN ('incarnation','event','revision','snapshot','workspace','accept_floor')", [], |r| {
                     Ok((r.get(0)?, r.get::<_, i64>(1)? as u64))
                 })
             })?
@@ -916,25 +862,13 @@ impl Tx<'_> {
         self.limit
     }
 
+    /// Loaded once after the migration commits; command admission never probes meta for this.
+    pub(crate) fn accept_floor(&self) -> i64 {
+        self.counters.get("accept_floor").copied().unwrap_or(0) as i64
+    }
+
     pub(crate) fn mark_unknown(&self) -> ApiResult<()> {
-        let rows: Vec<(String, String)> = self.rows("SELECT id, receipt FROM ops", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
-        for (id, receipt) in rows {
-            let mut r: Receipt = from(&receipt).map_err(internal)?;
-            if r.state.is_finished() || matches!(r.state, Observed::Unknown { .. }) {
-                continue;
-            }
-            r.state = Observed::Unknown {
-                reason: steve_node_api::RESTARTED.into(),
-            };
-            self.c()
-                .execute(
-                    "UPDATE ops SET receipt = ?2 WHERE id = ?1",
-                    params![id, json(&r)],
-                )
-                .map_err(internal)?;
-        }
+        self.write_receipt(ReceiptWrite::Restart)?;
         // nobody waits for an answer of the old processes
         self.c()
             .execute("DELETE FROM waits", [])
@@ -1112,23 +1046,12 @@ impl Tx<'_> {
         session: Option<&SessionId>,
         now: i64,
     ) -> ApiResult<()> {
-        self.c()
-            .execute(
-                "INSERT INTO ops (id, method, digest, receipt, execution, workspace, session, cancel, accepted)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
-                params![
-                    id.as_str(),
-                    op.method,
-                    op.digest.as_str(),
-                    json(&op.receipt),
-                    op.execution.as_ref().map(json),
-                    op.workspace.as_ref().map(json),
-                    session.map(|s| s.as_str().to_string()),
-                    now
-                ],
-            )
-            .map_err(internal)?;
-        Ok(())
+        self.write_receipt(ReceiptWrite::Accept {
+            id,
+            op,
+            session,
+            at: now,
+        })
     }
 
     /// Sets the state, unless it is final already (a final state never changes). False: unchanged.
@@ -1140,12 +1063,10 @@ impl Tx<'_> {
             return Ok(false);
         }
         op.receipt.state = state.clone();
-        self.c()
-            .execute(
-                "UPDATE ops SET receipt = ?2 WHERE id = ?1",
-                params![id.as_str(), json(&op.receipt)],
-            )
-            .map_err(internal)?;
+        self.write_receipt(ReceiptWrite::Update {
+            id,
+            receipt: &op.receipt,
+        })?;
         Ok(true)
     }
 
@@ -1475,11 +1396,7 @@ impl Tx<'_> {
                     .map_err(internal)?;
                 self.head_changes.borrow_mut().insert(stream, None);
             }
-            for table in ["attempts", "command_specs", "reservations", "answers"] {
-                self.c()
-                    .execute(&format!("DELETE FROM {table} WHERE op=?1"), [op])
-                    .map_err(internal)?;
-            }
+            self.remove_op_dependents(Some(op))?;
             self.c()
                 .execute("DELETE FROM ops WHERE id=?1", [op])
                 .map_err(internal)?;
@@ -1488,6 +1405,33 @@ impl Tx<'_> {
         self.c().execute("INSERT INTO meta(key,value) VALUES ('prune_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [if done { 0 } else { rows.last().unwrap().0 }]).map_err(internal)?;
         self.c().execute("INSERT INTO meta(key,value) VALUES ('prune_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [if done { now.saturating_add(60*60_000) } else { 0 }]).map_err(internal)?;
         Ok(rows.len())
+    }
+
+    /// Retention removes one op's dependencies; the one-time upgrade removes the whole ledger's.
+    /// Session/workspace/process state is independent and remains available for recovery.
+    fn remove_op_dependents(&self, op: Option<&str>) -> ApiResult<()> {
+        let owners = if op.is_some() {
+            "SELECT id FROM ops WHERE id=?1"
+        } else {
+            "SELECT id FROM ops WHERE ?1 IS NULL"
+        };
+        self.c().execute(
+            &format!("DELETE FROM artifact_grants WHERE attempt IN (SELECT attempt FROM attempts WHERE op IN ({owners}))"),
+            [op],
+        ).map_err(internal)?;
+        for table in [
+            "attempts",
+            "command_specs",
+            "reservations",
+            "answers",
+            "waits",
+            "harness_setups",
+        ] {
+            self.c()
+                .execute(&format!("DELETE FROM {table} WHERE op IN ({owners})"), [op])
+                .map_err(internal)?;
+        }
+        Ok(())
     }
 
     pub fn replay(&self, from_mark: &Watermark, max_bytes: u32) -> ApiResult<EventBatch> {
@@ -1927,73 +1871,6 @@ impl Tx<'_> {
 }
 
 #[cfg(test)]
-mod migration_tests {
-    use super::*;
-    fn old(path: &Path) -> Connection {
-        let c = Connection::open(path).unwrap();
-        c.execute_batch(&SCHEMA.replace(
-            "reports INTEGER NOT NULL DEFAULT 0,\n  started INTEGER",
-            "reports INTEGER NOT NULL DEFAULT 0",
-        ))
-        .unwrap();
-        c.execute("INSERT INTO meta VALUES ('incarnation',7)", [])
-            .unwrap();
-        c.execute(
-            "INSERT INTO procs(session,pgid,generation,incarnation,meter) VALUES ('s',42,1,7,'m')",
-            [],
-        )
-        .unwrap();
-        c
-    }
-    #[test]
-    fn old_journal_is_upgraded_without_inventing_process_identity() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("node.db");
-        drop(old(&p));
-        let (j, inc) = Journal::open(&p).unwrap();
-        assert_eq!(inc, 8);
-        j.read(|t| {
-            let ps = t.procs()?;
-            assert_eq!(ps.len(), 1);
-            assert_eq!(ps[0].started, None);
-            Ok(())
-        })
-        .unwrap();
-        drop(j);
-        assert_eq!(Journal::open(&p).unwrap().1, 9);
-    }
-    #[test]
-    fn failed_recovery_rolls_back_schema_and_incarnation() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("node.db");
-        let c = old(&p);
-        c.execute("INSERT INTO ops(id,method,digest,receipt,accepted) VALUES ('bad','x','x','not-json',1)", []).unwrap();
-        assert!(Journal::open(&p).is_err());
-        assert_eq!(
-            c.query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .unwrap(),
-            7
-        );
-        assert_eq!(
-            c.query_row(
-                "SELECT count(*) FROM pragma_table_info('procs') WHERE name='started'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-}
-
-#[cfg(test)]
 mod answer_fence_tests {
     use super::*;
     use steve_node_api::testkit::build::{answer, permission};
@@ -2060,7 +1937,19 @@ mod retention_tests {
     ) -> ApiResult<Watermark> {
         let operation = OperationId::new(name).unwrap();
         let receipt: Receipt = from(&json(&serde_json::json!({"operation": name, "state": {"state": if finished { "finished" } else { "running" }, "outcome": "succeeded"}}))).unwrap();
-        t.c().execute("INSERT INTO ops(id,method,digest,receipt,execution,accepted) VALUES (?1,'test',?2,?3,?4,?5)", params![name,Digest::sha256(name.as_bytes()).as_str(),json(&receipt),execution.as_ref().map(json),accepted]).map_err(internal)?;
+        t.accept(
+            &operation,
+            &Op {
+                method: "test".into(),
+                digest: Digest::sha256(name.as_bytes()),
+                receipt: receipt.clone(),
+                execution: execution.clone(),
+                workspace: None,
+                cancel: false,
+            },
+            None,
+            accepted,
+        )?;
         let mut mark = None;
         for subject in std::iter::once(Subject::Operation {
             operation: operation.clone(),
@@ -2149,7 +2038,10 @@ mod retention_tests {
                 &OperationId::new("job_last").unwrap(),
             )?;
             t.c()
-                .execute("INSERT INTO reservations (key, op) VALUES ('owned','old')", [])
+                .execute(
+                    "INSERT INTO reservations (key, op) VALUES ('owned','old')",
+                    [],
+                )
                 .map_err(internal)?;
             t.set_installation("test", &OperationId::new("installation").unwrap())?;
             Ok(())

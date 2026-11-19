@@ -2744,7 +2744,7 @@ async fn a_v2_journal_keeps_its_e1_streams() {
     let version: i64 = db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     let ids: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM meta WHERE key='journal_id'",
@@ -2753,6 +2753,93 @@ async fn a_v2_journal_keeps_its_e1_streams() {
         )
         .unwrap();
     assert_eq!(ids, 1, "the upgrade gave the journal its identity");
+}
+
+/// Removing old deduplication records must never turn the same pre-upgrade envelope into new work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v3_upgrade_refuses_executed_envelopes_before_the_floor_across_restarts() {
+    let t = T::new(&[]);
+    let starts = || t.sent("session/new") + t.sent("session/load");
+    let n = t.node();
+    n.prepare_workspace(now_cmd("upgrade_prepare", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "upgrade_prepare").await));
+    let mut old = now_cmd("upgrade_open", open_body("s_1"));
+    old.issued_at = Timestamp(wall() - 1_000);
+    n.open_session(old.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "upgrade_open").await));
+    let executions = starts();
+    assert_eq!(executions, 1);
+    n.shutdown().await;
+    drop(n);
+    let path = t.home.join("node.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    // Keep the command that really ran, its workspace/session and events, in the actual v3 shape.
+    db.execute_batch("BEGIN; DROP INDEX ops_open; ALTER TABLE ops DROP COLUMN state; PRAGMA user_version=3; COMMIT;").unwrap();
+    drop(db);
+    let n = open_again(&t).await;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let floor: i64 = db
+        .query_row("SELECT value FROM meta WHERE key='accept_floor'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(old.issued_at.0 < floor);
+    assert!(
+        wall() < old.accept_before.0,
+        "replay must still be inside its original accept window"
+    );
+    for _ in 0..2 {
+        let e = n.open_session(old.clone()).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(e.retry, RetryClass::Never);
+        assert_eq!(e.operation, Some(old.id.clone()));
+    }
+    assert_eq!(starts(), executions, "pre-upgrade work must not run twice");
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM ops WHERE id='upgrade_open'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    // Equality is accepted: the barrier is strictly issued_at < floor, not <= floor.
+    let mut current = old.clone();
+    current.issued_at = Timestamp(floor);
+    current.accept_before = Timestamp(wall() + 60_000);
+    n.open_session(current.clone()).await.unwrap();
+    assert!(ok(&finished(&n, "upgrade_open").await));
+    assert_eq!(starts(), executions + 1);
+    // The floor takes precedence even when the id now has a post-upgrade deduplication record.
+    assert_eq!(
+        n.open_session(old.clone()).await.unwrap_err().retry,
+        RetryClass::Never
+    );
+    assert!(
+        n.open_session(current.clone())
+            .await
+            .unwrap()
+            .state
+            .is_finished()
+    );
+    assert_eq!(starts(), executions + 1);
+    n.shutdown().await;
+    drop(n);
+    let n = open_again(&t).await;
+    assert_eq!(
+        db.query_row("SELECT value FROM meta WHERE key='accept_floor'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        floor
+    );
+    let e = n.open_session(old).await.unwrap_err();
+    assert_eq!((e.code, e.retry), (ErrorCode::Stale, RetryClass::Never));
+    assert!(n.open_session(current).await.unwrap().state.is_finished());
+    assert_eq!(starts(), executions + 1);
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2764,7 +2851,7 @@ async fn a_journal_from_a_newer_node_is_refused() {
     let path = t.home.join("node.sqlite3");
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("PRAGMA user_version=4;")
+        .execute_batch("PRAGMA user_version=5;")
         .unwrap();
     let t0 = Instant::now();
     let e = loop {
@@ -2782,7 +2869,7 @@ async fn a_journal_from_a_newer_node_is_refused() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "left as it was");
+    assert_eq!(version, 5, "left as it was");
 }
 
 // ── disk quota (N1-4): a free-space high-water with hysteresis, compaction on the ack ──
@@ -5678,7 +5765,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
             },
         };
         db.execute(
-            "INSERT INTO ops(id,method,digest,receipt,accepted) VALUES (?1,'cancel',?2,?3,?4)",
+            "INSERT INTO ops(id,method,digest,receipt,accepted,state) VALUES (?1,'cancel',?2,?3,?4,'finished')",
             rusqlite::params![
                 command.id.as_str(),
                 command.digest("cancel").unwrap().as_str(),

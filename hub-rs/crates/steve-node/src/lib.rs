@@ -1466,9 +1466,10 @@ impl LocalNode {
         self.0.confine.state()
     }
 
-    /// Takes the home (one Node per journal), opens the journal (a new incarnation: what was running
-    /// is `unknown` now) and stops nothing: groups left by the old incarnation keep their sessions
-    /// held until the Hub abandons them.
+    /// Takes the home (one Node per journal) and opens a new incarnation. A normal v4 restart
+    /// stops nothing: groups left by the old incarnation keep their sessions held until the Hub
+    /// abandons them. The one-time v3 upgrade discards the old command and process ledgers; stop
+    /// the old Node and its subprocesses cleanly before upgrading, as their ownership is then lost.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
@@ -1838,7 +1839,8 @@ impl LocalNode {
         Ok(())
     }
 
-    /// The command inbox. Known id: same method and content → its receipt (even past the window),
+    /// The command inbox. Before the upgrade floor: stale, even for a known id.
+    /// Known id: same method and content → its receipt (even past the window),
     /// otherwise conflict. New: past the window → stale; a closed or faulted Node takes nothing new;
     /// `decide` checks against the journal and changes it, in the same transaction as the command
     /// and its events. Returns whether it was new.
@@ -1848,11 +1850,16 @@ impl LocalNode {
         c: &Command<T>,
         decide: impl FnOnce(&Tx) -> ApiResult<Decided> + Send,
     ) -> ApiResult<(Receipt, bool)> {
-        c.check_window()?;
         let digest = c.digest(method)?;
         let mut maintenance_guard = self.0.adapter_maintenance.lock().unwrap();
         let maintenance = &mut *maintenance_guard;
         let r = self.0.j.tx(|t| {
+            if c.issued_at.0 < t.accept_floor() {
+                return Err(
+                    ApiError::new(ErrorCode::Stale, "issued before journal upgrade").on(&c.id),
+                );
+            }
+            c.check_window()?;
             if let Some(op) = t.op(&c.id)? {
                 return if op.digest == digest && op.method == method {
                     Ok((op.receipt, false))
