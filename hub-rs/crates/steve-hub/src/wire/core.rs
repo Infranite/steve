@@ -682,7 +682,6 @@ impl RoutedRuntime {
             session_id,
             perm.as_deref(),
             target,
-            true,
         ) else {
             tracing::info!("{session_id}: not bound to the remote Node {target}");
             return false;

@@ -327,21 +327,15 @@ fn workspace_resource(
 /// The Node must be paired and active (a paused or revoked Node takes no new work), and take the
 /// workspace's work ([`remote_refusal`]: paired by its owner, who is its only member): the Node
 /// runs the session with its owner's own logins, unsandboxed, so it only ever runs its owner's work.
-/// `speaks_auto`: the Node is known to speak [`AUTO_MODE`]; a session in `auto` goes to it only
-/// then (an older Node would refuse to open it, for good), and otherwise stays where it would go.
 /// `perm`: as for [`binding_for`].
 pub fn remote_binding_for(
     store: &Store,
     session: &str,
     perm: Option<&str>,
     node: &NodeId,
-    speaks_auto: bool,
 ) -> Option<Binding> {
     // the Hub's directories are not planned there: the workspace is a fresh scratch one
     let mut b = binding_for(store, session, perm, &|_| true)?;
-    if b.policy.permissions == PermissionMode::Auto && !speaks_auto {
-        return None;
-    }
     let s = store.sessions().get(session).ok()??;
     let item = store.items().get(s.item_id.as_deref()?).ok()??;
     if item.project_id.is_some() {
@@ -697,41 +691,35 @@ mod remote_tests {
         );
         let a = NodeId::new("n_a").unwrap();
         // the Hub's directory is not the Node's: a fresh scratch workspace there
-        let b = remote_binding_for(&store, "s1", None, &a, true).unwrap();
+        let b = remote_binding_for(&store, "s1", None, &a).unwrap();
         assert!(matches!(b.prepare, PrepareKind::Scratch));
         assert!(matches!(
             binding_for(&store, "s1", None, &|_| true).unwrap().prepare,
             PrepareKind::Existing { .. }
         ));
         // a paused or unknown Node takes no new work
-        assert!(
-            remote_binding_for(&store, "s1", None, &NodeId::new("n_p").unwrap(), true).is_none()
-        );
-        assert!(
-            remote_binding_for(&store, "s1", None, &NodeId::new("n_none").unwrap(), true).is_none()
-        );
+        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_p").unwrap()).is_none());
+        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_none").unwrap()).is_none());
         // a Node a plain member paired never gets the workspace's sessions
-        assert!(
-            remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap(), true).is_none()
-        );
+        assert!(remote_binding_for(&store, "s1", None, &NodeId::new("n_m").unwrap()).is_none());
         // an earlier session of the item on the Hub keeps the item's work there
         exec(
             &store,
             "INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s0','default','i1','claude-code','','ended',0,0);",
         );
-        assert!(remote_binding_for(&store, "s1", None, &a, true).is_none());
+        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
         // unless it ran on that very Node
         exec(
             &store,
             "INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s0','n_a','{}','s0','r','released',0);",
         );
-        assert!(remote_binding_for(&store, "s1", None, &a, true).is_some());
+        assert!(remote_binding_for(&store, "s1", None, &a).is_some());
         // H1: another member in the workspace, and the run may be theirs: not on the owner's Node
         exec(
             &store,
             "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','m','member',2);",
         );
-        assert!(remote_binding_for(&store, "s1", None, &a, true).is_none());
+        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
         let why = |n: &str| store.reader(|c| remote_refusal(c, n, "default")).unwrap();
         assert_eq!(why("n_a"), Some(RemoteRefusal::Shared));
         assert_eq!(why("n_m"), Some(RemoteRefusal::NotOwner));
@@ -745,7 +733,7 @@ mod remote_tests {
             "INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','p','/tmp/p','git',1,1,1);
              UPDATE items SET project_id='p1' WHERE id='i1';",
         );
-        assert!(remote_binding_for(&store, "s1", None, &a, true).is_none());
+        assert!(remote_binding_for(&store, "s1", None, &a).is_none());
     }
 }
 
@@ -923,10 +911,10 @@ mod bot_tests {
         );
     }
 
-    /// A paired Node that does not speak `auto` (released before it, or not linked since the Hub
-    /// started) never gets an `auto` Bot's session: it would refuse the open and keep refusing.
+    /// An `auto` Bot's session binds to a paired remote Node with its `auto` permissions; other
+    /// modes keep theirs.
     #[test]
-    fn an_auto_bot_session_goes_to_a_remote_node_only_if_it_speaks_auto() {
+    fn an_auto_bot_session_binds_to_a_remote_node_in_auto() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
@@ -945,11 +933,8 @@ mod bot_tests {
             })
             .unwrap();
         let a = NodeId::new("n_a").unwrap();
-        assert!(remote_binding_for(&store, "s1", Some("auto"), &a, false).is_none());
-        // other modes are unaffected
-        assert!(remote_binding_for(&store, "s2", Some("default"), &a, false).is_some());
-        let b = remote_binding_for(&store, "s1", Some("auto"), &a, true)
-            .expect("a Node that speaks auto");
+        assert!(remote_binding_for(&store, "s2", Some("default"), &a).is_some());
+        let b = remote_binding_for(&store, "s1", Some("auto"), &a).expect("an auto session binds");
         assert_eq!(b.policy.permissions, PermissionMode::Auto);
     }
 }

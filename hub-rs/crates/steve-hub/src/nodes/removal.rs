@@ -2,8 +2,7 @@
 //! asks the Node over its own link, the Node removes itself.
 //!
 //! A Node can be asked when it is linked and its probe says [`FEATURE_NODE_REMOVE`] (a Node
-//! installed as a service, of protocol [`steve_node_api::NODE_REMOVAL`] or later). Any other — one
-//! offline, one of an earlier release, one run by hand — is removed on its machine with
+//! installed as a service). Any other — one offline, one run by hand — is removed on its machine with
 //! [`MANUAL_COMMAND`], which Devices shows instead.
 //!
 //! One removal, `node_removals` row by row (each phase written before it is taken):

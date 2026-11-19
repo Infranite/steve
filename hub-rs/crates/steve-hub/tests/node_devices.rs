@@ -113,31 +113,6 @@ async fn a_linked_node_says_how_it_came_what_it_is_and_how_far_it_is() {
     assert_eq!(v["host"]["hostname"], "Studio Mac");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_of_an_earlier_protocol_is_not_asked_what_it_is() {
-    let h = Hub::start().await;
-    let (id, node) = h.paired("u1").await;
-    let _l = dial_url_as(
-        &h.ws_url(),
-        &h.svc.hub_id,
-        &id,
-        &node,
-        FakeNode::new(node.as_str()),
-        1,
-        (0, 6),
-    )
-    .await
-    .unwrap();
-    until("linked", 5, || {
-        h.svc.registry.current(node.as_str()).is_some()
-    })
-    .await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let v = row(&h, node.as_str()).await;
-    assert!(v["host"].is_null(), "{v}");
-    assert_eq!(v["link"]["via"], "direct", "its link is still described");
-}
-
 /// A link through the tailcat tunnel's listener says so: its route is not the loopback peer the
 /// tunnel's end is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -311,7 +311,7 @@ pub struct NodeVitals {
     pub sessions: u32,
 }
 
-/// What the Node's machine is (H→N `node.host`, [`crate::HOST_INFO`]): fixed while the Node runs,
+/// What the Node's machine is (H→N `node.host`): fixed while the Node runs,
 /// so the Hub asks once per link and keeps the answer for when the Node is away. Every field is
 /// what the platform says of itself; one it cannot give is left out rather than guessed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
