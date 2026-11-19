@@ -6,6 +6,8 @@ use std::fmt;
 pub enum Class {
     Command,
     Observation,
+    /// An observation that ends, rejects or loses the operation being awaited.
+    Disruption,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -13,6 +15,8 @@ pub struct Row<S: 'static, K: 'static> {
     pub from: S,
     pub on: K,
     pub to: S,
+    /// Explains an exceptional self-loop or other special transition. Empty when unnecessary.
+    pub why: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +25,8 @@ pub struct Table<S: 'static, K: 'static> {
     pub states: &'static [S],
     pub inputs: &'static [(K, Class)],
     pub initial: &'static [S],
+    /// States awaiting progress; disruptions must leave them unless the row explains why not.
+    pub transient: &'static [S],
     pub terminal: &'static [S],
     pub rows: &'static [Row<S, K>],
 }
@@ -63,6 +69,7 @@ pub enum Violation {
     DuplicateInput { first: usize, second: usize },
     UnknownInitial { initial: usize },
     UnknownTerminal { terminal: usize },
+    UnknownTransient { transient: usize },
     UnknownFrom { row: usize },
     UnknownTo { row: usize },
     UnknownInput { row: usize },
@@ -71,6 +78,7 @@ pub enum Violation {
     Unreachable { state: usize },
     NoTerminalPath { state: usize },
     MissingObservation { state: usize, input: usize },
+    UnexplainedDisruptionSelfLoop { row: usize },
 }
 
 pub mod check {
@@ -88,9 +96,7 @@ pub mod check {
         seen
     }
 
-    /// Checks declarations, determinism, terminal behavior, reachability and observation totality.
-    /// Only rows with declared endpoints and inputs participate in the graph checks.
-    pub fn table<S: Copy + Eq, K: Copy + Eq>(t: &Table<S, K>) -> Vec<Violation> {
+    fn declarations<S: Eq, K: Eq>(t: &Table<S, K>) -> Vec<Violation> {
         use Violation::*;
         let mut errors = Vec::new();
         for (second, state) in t.states.iter().enumerate() {
@@ -113,6 +119,20 @@ pub mod check {
                 errors.push(UnknownTerminal { terminal });
             }
         }
+        for (transient, state) in t.transient.iter().enumerate() {
+            if !t.states.contains(state) {
+                errors.push(UnknownTransient { transient });
+            }
+        }
+        errors
+    }
+
+    /// Checks declarations, determinism, terminal behavior, reachability and observation totality.
+    /// Both observation classes must be total; transient disruption self-loops need a reason.
+    /// Only rows with declared endpoints and inputs participate in the graph checks.
+    pub fn table<S: Copy + Eq, K: Copy + Eq>(t: &Table<S, K>) -> Vec<Violation> {
+        use Violation::*;
+        let mut errors = declarations(t);
         let mut forward = vec![Vec::new(); t.states.len()];
         let mut backward = vec![Vec::new(); t.states.len()];
         for (row, r) in t.rows.iter().enumerate() {
@@ -134,9 +154,18 @@ pub mod check {
             {
                 errors.push(DuplicateTransition { first, second: row });
             }
-            if t.terminal.contains(&r.from) && (class != Some(Class::Observation) || r.to != r.from)
+            if t.terminal.contains(&r.from)
+                && (!matches!(class, Some(Class::Observation | Class::Disruption))
+                    || r.to != r.from)
             {
                 errors.push(TerminalTransition { row });
+            }
+            if t.transient.contains(&r.from)
+                && class == Some(Class::Disruption)
+                && r.to == r.from
+                && r.why.trim().is_empty()
+            {
+                errors.push(UnexplainedDisruptionSelfLoop { row });
             }
             if let (Some(from), Some(to), Some(_)) = (from, to, class) {
                 forward[from].push(to);
@@ -159,7 +188,7 @@ pub mod check {
                 errors.push(NoTerminalPath { state });
             }
             for (input, (k, class)) in t.inputs.iter().enumerate() {
-                if *class == Class::Observation
+                if matches!(class, Class::Observation | Class::Disruption)
                     && !t.rows.iter().any(|r| r.from == *s && r.on == *k)
                 {
                     errors.push(MissingObservation { state, input });
