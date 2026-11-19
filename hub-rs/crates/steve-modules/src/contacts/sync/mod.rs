@@ -24,9 +24,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{Local, NaiveTime, TimeZone};
+use chrono::NaiveTime;
 use rusqlite::Connection;
 use serde::Serialize;
+use steve_runtime::tz::Zone;
 use steve_store::{Tx, uid};
 use tokio::sync::mpsc;
 
@@ -38,7 +39,7 @@ pub use adapter::{
 };
 pub use apply::{EMPTY_SNAPSHOT, SyncReport};
 
-/// Hour of the daily run, local time.
+/// Hour of the daily run on each workspace's clock (`settings.tz`, else system).
 pub const DAILY_HOUR: u32 = 6;
 /// Directory change events are coalesced for this long before one sync.
 pub const DEBOUNCE_MS: i64 = 60_000;
@@ -195,7 +196,7 @@ struct State {
     targets: HashMap<String, Vec<DirConnection>>,
     /// `(ws, connection)` → when its debounced sync is due.
     pending: BTreeMap<(String, String), i64>,
-    next_daily: i64,
+    daily_since: i64,
     /// When the next catch-up of never-synced connections is due.
     next_catch_up: i64,
     /// Each connection's [`crate::accounts::connections::repo::change_signature`] when last seen.
@@ -231,28 +232,26 @@ pub struct DirectorySync {
     rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
-/// The first `hour:00` local time strictly after `now_ms` (a DST gap moves it an hour later).
+/// The first `hour:00` on the system clock strictly after `now_ms`.
 pub fn next_daily(now_ms: i64, hour: u32) -> i64 {
-    let Some(now) = Local.timestamp_millis_opt(now_ms).single() else {
-        return now_ms + 86_400_000;
+    next_daily_in(now_ms, hour, Zone::system())
+}
+
+/// The first `hour:00` on `zone`'s clock strictly after `now_ms`, using runtime DST rules.
+pub fn next_daily_in(now_ms: i64, hour: u32, zone: Zone) -> i64 {
+    let Some(mut day) = zone.local(now_ms).ok().map(|t| t.date()) else {
+        return now_ms.saturating_add(86_400_000);
     };
     let at = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or_default();
-    let mut day = now.date_naive();
     for _ in 0..3 {
-        let t = day.and_time(at);
-        let local = Local.from_local_datetime(&t).earliest().or_else(|| {
-            Local
-                .from_local_datetime(&(t + chrono::Duration::hours(1)))
-                .earliest()
-        });
-        if let Some(l) = local
-            && l.timestamp_millis() > now_ms
+        if let Ok(t) = zone.instant(day.and_time(at))
+            && t > now_ms
         {
-            return l.timestamp_millis();
+            return t;
         }
         day = day.succ_opt().unwrap_or(day);
     }
-    now_ms + 86_400_000
+    now_ms.saturating_add(86_400_000)
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -262,13 +261,13 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl DirectorySync {
     pub fn new(m: Modules, conns: Arc<dyn DirectoryConnections>) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let next = next_daily(m.clock.now(), DAILY_HOUR);
+        let daily_since = m.clock.now();
         let catch_up = m.clock.now() + CATCH_UP_FIRST_MS;
         Arc::new(Self {
             m,
             conns,
             state: Mutex::new(State {
-                next_daily: next,
+                daily_since,
                 next_catch_up: catch_up,
                 ..Default::default()
             }),
@@ -409,14 +408,27 @@ impl DirectorySync {
     /// Queues what is due at `now`: the daily run of every directory connection, and debounced change
     /// syncs. Returns the queued job ids.
     pub fn tick(&self, now: i64) -> ApiResult<Vec<String>> {
-        let (daily, catch_up, due) = {
-            let mut st = lock(&self.state);
-            let daily = now >= st.next_daily;
-            if daily {
-                st.next_daily = next_daily(now, DAILY_HOUR);
+        // Re-read workspace clocks so changing settings.tz takes effect on the next tick.
+        let since = lock(&self.state).daily_since;
+        let daily = self.m.store.reader(|c| -> ApiResult<_> {
+            let mut stmt = c.prepare("SELECT id FROM workspaces")?;
+            let workspaces = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut daily = std::collections::BTreeSet::new();
+            for ws in workspaces {
+                let ws = ws?;
+                let tz = crate::zone::workspace_tz(c, &ws)?;
+                let zone = Zone::parse(tz.name()).expect("workspace IANA zone");
+                if next_daily_in(since, DAILY_HOUR, zone) <= now {
+                    daily.insert(ws);
+                }
             }
-            let catch_up = !daily && now >= st.next_catch_up;
-            if catch_up || daily {
+            Ok(daily)
+        })?;
+        let (catch_up, due) = {
+            let mut st = lock(&self.state);
+            st.daily_since = now;
+            let catch_up = now >= st.next_catch_up;
+            if catch_up {
                 st.next_catch_up = now + CATCH_UP_MS;
             }
             let due: Vec<(String, String)> = st
@@ -428,26 +440,23 @@ impl DirectorySync {
             for k in &due {
                 st.pending.remove(k);
             }
-            (daily, catch_up, due)
+            (catch_up, due)
         };
-        if !daily && !catch_up && due.is_empty() {
+        if daily.is_empty() && !catch_up && due.is_empty() {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
         let (all, events) = self.m.store.reader(|c| {
-            let all = if daily {
-                self.conns.list(c, None)?
-            } else if catch_up {
-                let mut v = Vec::new();
+            let mut all = Vec::new();
+            if !daily.is_empty() || catch_up {
                 for x in self.conns.list(c, None)? {
-                    if repo::never_synced(c, &x.id)? && !self.queued_for(&x.id) {
-                        v.push(x);
+                    if daily.contains(&x.workspace_id)
+                        || (catch_up && repo::never_synced(c, &x.id)? && !self.queued_for(&x.id))
+                    {
+                        all.push(x);
                     }
                 }
-                v
-            } else {
-                Vec::new()
-            };
+            }
             let mut events = Vec::new();
             for (ws, id) in &due {
                 match self.conns.get(c, ws, id) {
@@ -463,7 +472,15 @@ impl DirectorySync {
             by_ws.entry(c.workspace_id.clone()).or_default().push(c);
         }
         for (ws, conns) in by_ws {
-            out.push(self.enqueue(&ws, if daily { "daily" } else { "catch_up" }, conns));
+            out.push(self.enqueue(
+                &ws,
+                if daily.contains(&ws) {
+                    "daily"
+                } else {
+                    "catch_up"
+                },
+                conns,
+            ));
         }
         for c in events {
             let ws = c.workspace_id.clone();

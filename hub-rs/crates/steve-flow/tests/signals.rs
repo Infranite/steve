@@ -451,6 +451,61 @@ async fn list_filters_and_stats() {
     assert_eq!(v["stats"]["total"], 3);
 }
 
+#[tokio::test]
+async fn list_day_boundary_prefers_personal_zone_then_workspace_then_system() {
+    use chrono::DateTime;
+
+    let (e, _) = polling();
+    let now = DateTime::parse_from_rfc3339("2026-11-18T23:30:00Z")
+        .unwrap()
+        .timestamp_millis();
+    e.env.clock.set(now);
+    let con = e.connection(WS, FakeEventAdapter::ID, None, ME);
+    e.flow
+        .ingest(
+            WS,
+            Some(&con),
+            FakeEventAdapter::event("mail.new", "a", "INBOX", "boundary"),
+        )
+        .await
+        .unwrap();
+    e.env.store().with_conn(|c| {
+        c.execute("UPDATE ext_events SET received = ?", [now - 12 * 3_600_000])?;
+        c.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, 'tz', '\"Europe/London\"',1)", [WS])?;
+        c.execute("INSERT INTO notification_policies (workspace_id,user_id,timezone,enabled,mode,consented_at,consent_since_seq,updated) VALUES (?,?,'Asia/Tokyo',1,'now',1,0,1)", params![WS, ME])?;
+        Ok(())
+    }).unwrap();
+    // Tokyo is already Nov 19: yesterday's signal is excluded, unlike London's Nov 18.
+    let path = "/signals?range=today";
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["stats"]["total"], 0);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM notification_policies", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["stats"]["total"], 1, "workspace London includes Nov 18");
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("DELETE FROM settings WHERE key = 'tz'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let since = signals::Range::Today.since(now, steve_runtime::tz::Zone::system().name());
+    let (st, v) = get(&e, ME, path).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["stats"]["total"],
+        i64::from(now - 12 * 3_600_000 >= since)
+    );
+}
+
 /// An enabled flow with an event trigger on `mail` taking `types`.
 fn flow_with_trigger(e: &FlowEnv, id: &str, types: Value, conns: Value) {
     e.env
