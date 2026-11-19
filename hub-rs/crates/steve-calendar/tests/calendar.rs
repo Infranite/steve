@@ -466,10 +466,7 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
                 .collect::<rusqlite::Result<_>>()?)
         })
         .unwrap();
-    assert_eq!(
-        cached_zones,
-        vec![steve_modules::zone::default_tz().name(); 2]
-    );
+    assert_eq!(cached_zones, vec!["Asia/Shanghai"; 2]);
     let (_, v) = h
         .call(
             "GET",
@@ -566,7 +563,7 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     )
     .unwrap();
     assert_eq!(titles(&out), ["Design review"]);
-    assert_eq!(out["range"]["tz"], steve_modules::zone::default_tz().name());
+    assert_eq!(out["range"]["tz"], "Asia/Shanghai");
     let out: Value = serde_json::from_str(
         &tools::call(&h.cal, &cx, tools::SEARCH, &json!({"query": "design"}))
             .await

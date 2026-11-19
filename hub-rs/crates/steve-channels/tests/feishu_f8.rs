@@ -662,7 +662,8 @@ fn set_setting(h: &H, key: &str, value: &str) {
 async fn quiet_hours_slow_the_pace() {
     let h = setup().await;
     let p = poller(&h);
-    // 02:00 and 12:00 in Asia/Taipei (UTC+8), the default zone; default quiet hours 23:00 – 08:00
+    // 02:00 and 12:00 in Asia/Taipei (UTC+8), the workspace's zone; default quiet hours 23:00 – 08:00
+    set_setting(&h, "tz", "Asia/Taipei");
     let night = 1_761_933_600_000; // 2025-11-01 02:00 +08:00
     let noon = night + 10 * 3_600_000;
     let r = Default::default();
