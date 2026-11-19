@@ -1,5 +1,2 @@
-//! Comms domain operation declarations.
-pub mod deliveries;
+//! Comms domain operations with implementations and semantic conformance tests.
 pub mod digest;
-pub mod notifications;
-pub mod todos;

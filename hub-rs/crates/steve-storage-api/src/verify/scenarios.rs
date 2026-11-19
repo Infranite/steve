@@ -165,11 +165,11 @@
 //!   and units rather than hardware-specific timing. Protect/before/action hooks
 //!   cannot silently succeed without executing; unsupported named hooks fail
 //!   explicitly. A row whose before hook fails must remain for a later retry.
-//! - named_registry [562/570 extension]: enumerate implemented named operations
-//!   and queries in the public registry and require an explicitly registered
-//!   semantic test for each name and domain. Fourth-wave declarations do not
-//!   require tests until marked implemented. A placeholder generic get/commit
-//!   test is not semantic coverage. Run registered tests through both stores.
+//! - named_registry [562/570 extension]: enumerate every named operation and query
+//!   in the public registry and require an explicitly registered semantic test
+//!   for each name, domain and kind. A contract entry, its implementation and
+//!   semantic test must land together in the same task. A placeholder generic
+//!   get/commit test is not semantic coverage. Run tests through both stores.
 //!
 //! # Test-only entity catalogue
 //!
@@ -231,7 +231,7 @@
 //! Loopback<MemStore>, asserting identical scenario inventories and no failures.
 //! Assert skip names/reasons explicitly so adding a broad skip cannot hide a
 //! regression. Test-only assertion failures/panics must become report failures.
-//! A registry-coverage negative control adds a missing implemented name and
+//! A registry-coverage negative control adds a name missing its semantic check and
 //! proves that coverage fails. Keep conformance code out of default builds.
 //! Reuse only the dependencies declared by the contract crate. Do not edit its
 //! manifest, root modules, or lockfile from this implementation task.

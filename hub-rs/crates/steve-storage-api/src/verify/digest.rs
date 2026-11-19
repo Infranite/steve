@@ -1,6 +1,6 @@
 //! Digest semantic fixture for the first named operation. These verify_* rows model source
-//! changes without depending on production schemas. The named check is enabled by the
-//! catalogue's implemented flag; MemStore tests exercise it even before that flag changes.
+//! changes without depending on production schemas. Every registry entry, including this
+//! operation, runs its semantic check through the full conformance suite.
 use super::{Harness, NamedCheck, block_on, entities::cell, mem::Data};
 use crate::{entity::*, ops::comms::digest::*, query::*, registry::EntryKind, uow::*, *};
 use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
@@ -199,7 +199,7 @@ pub(super) fn apply(
     data.rows.insert(CONVS.name.into(), rows);
     Ok(())
 }
-/// Registered semantic test; presently opt-in because the public catalogue is declaration-only.
+/// Semantic test for the registered digest operation, run by the full conformance suite.
 pub fn named_checks() -> Vec<NamedCheck> {
     vec![NamedCheck {
         name: SYNC_PENDING_MEMBERSHIP.name,

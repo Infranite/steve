@@ -160,8 +160,8 @@ impl Report {
     }
 }
 type Check = fn(&dyn Harness, Arc<dyn DomainStore>);
-/// Named coverage is explicit: adding an implemented catalogue entry requires a semantic
-/// function, not merely a declaration that the name exists.
+/// Every registry entry requires exactly one semantic conformance function.
+/// Add the contract, implementation and semantic test together in the same task.
 pub struct NamedCheck {
     pub name: &'static str,
     pub domain: Domain,
@@ -169,7 +169,7 @@ pub struct NamedCheck {
     pub check: Check,
 }
 pub fn check_registry(entries: &[RegistryEntry], checks: &[NamedCheck]) -> Result<(), String> {
-    for e in entries.iter().filter(|e| e.implemented) {
+    for e in entries {
         if checks
             .iter()
             .filter(|c| c.name == e.name && c.domain == e.domain && c.kind == e.kind)
@@ -331,18 +331,7 @@ fn fact(id: &str) -> crate::fact::FactRecord {
 /// Run every scenario in stable order. Panics become failures; unavailable lifecycle
 /// capabilities alone become skips. The result is intentionally not an activation decision.
 pub fn run(h: &dyn Harness) -> Report {
-    let named: Vec<_> = super::digest::named_checks()
-        .into_iter()
-        .filter(|check| {
-            ENTRIES.iter().any(|e| {
-                e.implemented
-                    && e.name == check.name
-                    && e.domain == check.domain
-                    && e.kind == check.kind
-            })
-        })
-        .collect();
-    run_with_named(h, &named)
+    run_with_named(h, &super::digest::named_checks())
 }
 pub fn run_with_named(h: &dyn Harness, named: &[NamedCheck]) -> Report {
     let cases: &[(&str, Option<Capability>, Check)] = &[

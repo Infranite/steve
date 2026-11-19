@@ -3,11 +3,22 @@ use steve_storage_api::verify::{MemHarness, Status, run};
 fn verify(loopback: bool) {
     let report = run(&MemHarness::new(loopback));
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
-    let implemented = steve_storage_api::registry::ENTRIES
-        .iter()
-        .filter(|entry| entry.implemented)
-        .count();
-    assert_eq!(report.items.len(), 25 + implemented);
+    let registered = steve_storage_api::registry::ENTRIES.len();
+    assert_eq!(report.items.len(), 25 + registered);
+    for entry in steve_storage_api::registry::ENTRIES {
+        let items: Vec<_> = report
+            .items
+            .iter()
+            .filter(|item| item.name == entry.name)
+            .collect();
+        assert_eq!(
+            items.len(),
+            1,
+            "missing or duplicate semantic report: {}",
+            entry.name
+        );
+        assert_eq!(items[0].status, Status::Passed);
+    }
     let skipped: Vec<_> = report
         .items
         .iter()
@@ -43,7 +54,7 @@ fn verify(loopback: bool) {
             .filter(|item| item.status == Status::Failed)
             .collect::<Vec<_>>()
     );
-    assert_eq!(report.passed(), 21 + implemented);
+    assert_eq!(report.passed(), 21 + registered);
     assert_eq!(report.skipped(), 4);
     assert!(!report.all_passed());
     assert_eq!(report.measurements.len(), 2);

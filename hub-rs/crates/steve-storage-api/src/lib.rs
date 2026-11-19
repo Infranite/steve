@@ -1,5 +1,6 @@
 //! Backend-neutral storage contracts. Only owned DTOs cross the DomainStore boundary.
 //! Events remain process-local attachments; storage commits contain durable facts only.
+//! Named contracts require an implementation and semantic conformance test in the same task.
 
 pub mod append;
 pub mod cursor;
@@ -851,54 +852,32 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_all_fifteen_unique_operations_within_domain_limits() {
+    fn registry_matches_implemented_operations_within_domain_limits() {
         let mut names = BTreeSet::new();
         for entry in ENTRIES {
             assert!(names.insert(entry.name));
             assert!(!entry.semantics.is_empty());
             assert!(!entry.parameter_type.is_empty());
-            assert_eq!(
-                lookup(entry.domain, entry.kind, entry.name).unwrap().name,
-                entry.name
-            );
-        }
-        let expected: BTreeSet<_> = [
-            "core.attention.adjust_unread_count",
-            "core.attention.sync_feed_entry",
-            "core.attention.sync_member_unread",
-            "core.attention.sync_feed_read",
-            "core.attention.record_final_reply",
-            "core.alarms.mark_dirty",
-            "stream.transcript.collect_unreferenced_payloads",
-            "core.gateway.sync_result_ready",
-            "core.items.validate_completion_dependencies",
-            "comms.notifications.purge_delivery_copy",
-            "comms.notifications.purge_source_copies",
-            "comms.notifications.publish_feed_fact",
-            "comms.deliveries.purge_message_intent",
-            "comms.todos.change_with_alarm_fact",
-            "comms.digest.sync_pending_membership",
-        ]
-        .into();
-        assert!(expected.is_subset(&names));
-        for name in expected {
-            let entry = ENTRIES.iter().find(|entry| entry.name == name).unwrap();
-            assert_eq!(entry.kind, EntryKind::Operation);
-            assert!(!entry.triggers.is_empty());
             let prefix = match entry.domain {
                 Domain::Core => "core.",
                 Domain::Stream => "stream.",
                 Domain::Comms => "comms.",
             };
-            assert!(name.starts_with(prefix));
+            assert!(entry.name.starts_with(prefix));
+            assert_eq!(
+                lookup(entry.domain, entry.kind, entry.name).unwrap().name,
+                entry.name
+            );
         }
-        assert_eq!(
-            ENTRIES
-                .iter()
-                .map(|entry| entry.triggers.len())
-                .sum::<usize>(),
-            42
-        );
+        let expected: BTreeSet<_> = [<SyncPendingMembership as Op>::NAME].into();
+        assert_eq!(names, expected);
+        let entry = lookup(
+            <SyncPendingMembership as Op>::DOMAIN,
+            EntryKind::Operation,
+            <SyncPendingMembership as Op>::NAME,
+        )
+        .unwrap();
+        assert_eq!(entry.parameter_type, "SyncPendingMembership");
         for domain in [Domain::Core, Domain::Stream, Domain::Comms] {
             assert!(ENTRIES.iter().filter(|e| e.domain == domain).count() <= DOMAIN_LIMIT);
         }

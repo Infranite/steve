@@ -40,24 +40,68 @@ fn query(id: &str) -> AnyQuery {
     .unwrap()
 }
 #[test]
-fn declared_names_do_not_need_coverage_but_implemented_names_do() {
-    assert!(check_registry(ENTRIES, &[]).is_ok());
-    let mut future = steve_storage_api::ops::comms::digest::SYNC_PENDING_MEMBERSHIP;
-    future.implemented = true;
+fn every_registered_name_requires_exactly_one_semantic_check() {
+    let entry = steve_storage_api::ops::comms::digest::SYNC_PENDING_MEMBERSHIP;
     assert!(
-        check_registry(&[future], &[])
+        check_registry(ENTRIES, &[])
+            .unwrap_err()
+            .contains(entry.name)
+    );
+    let checks = digest::named_checks();
+    assert!(check_registry(ENTRIES, &checks).is_ok());
+    let mut future = entry;
+    future.name = "verify.future_operation";
+    let mut entries = ENTRIES.to_vec();
+    entries.push(future);
+    assert!(
+        check_registry(&entries, &checks)
             .unwrap_err()
             .contains(future.name)
     );
-    let checks = digest::named_checks();
-    assert!(check_registry(&[future], &checks).is_ok());
     let mut wrong_domain = digest::named_checks();
     wrong_domain[0].domain = Domain::Core;
-    assert!(check_registry(&[future], &wrong_domain).is_err());
+    assert!(check_registry(ENTRIES, &wrong_domain).is_err());
+    let mut wrong_kind = digest::named_checks();
+    wrong_kind[0].kind = EntryKind::Query;
+    assert!(check_registry(ENTRIES, &wrong_kind).is_err());
     let mut duplicate = digest::named_checks();
     duplicate.extend(digest::named_checks());
-    assert!(check_registry(&[future], &duplicate).is_err());
+    assert!(check_registry(ENTRIES, &duplicate).is_err());
 }
+#[test]
+fn registry_matches_reference_backend_named_features() {
+    let store = MemStore::new();
+    for domain in [Domain::Core, Domain::Stream, Domain::Comms] {
+        let expected: std::collections::BTreeSet<_> = ENTRIES
+            .iter()
+            .filter(|entry| entry.domain == domain)
+            .map(|entry| {
+                format!(
+                    "{}:{}",
+                    match entry.kind {
+                        EntryKind::Operation => "op",
+                        EntryKind::Query => "query",
+                    },
+                    entry.name
+                )
+            })
+            .collect();
+        let offer = store
+            .hello()
+            .domains
+            .iter()
+            .find(|offer| offer.domain == domain)
+            .unwrap();
+        let actual: std::collections::BTreeSet<_> = offer
+            .features
+            .iter()
+            .filter(|feature| feature.starts_with("op:") || feature.starts_with("query:"))
+            .cloned()
+            .collect();
+        assert_eq!(actual, expected);
+    }
+}
+
 #[test]
 fn digest_semantics_on_memory_and_loopback() {
     for loopback in [false, true] {
