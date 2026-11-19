@@ -104,9 +104,12 @@ edge	steve-stats	steve-acp
 edge	steve-stats	steve-i18n
 edge	steve-stats	steve-runtime
 edge	steve-stats	steve-store
+edge	steve-storage-api	steve-types
 edge	steve-store	steve-i18n
 edge	steve-store	steve-node-api
 edge	steve-store	steve-types
+edge	steve-store-sqlite	steve-storage-api
+edge	steve-store-sqlite	steve-types
 edge	steve-transcript	steve-acp
 edge	steve-transcript	steve-node-api
 rusqlite	steve-calendar
@@ -123,3 +126,4 @@ rusqlite	steve-modules
 rusqlite	steve-node
 rusqlite	steve-stats
 rusqlite	steve-store
+rusqlite	steve-store-sqlite

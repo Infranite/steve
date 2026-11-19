@@ -5682,6 +5682,8 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "image",
  "jsonschema",
  "libc",
@@ -6060,6 +6062,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "steve-storage-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "steve-types",
+]
+
+[[package]]
 name = "steve-store"
 version = "0.1.0"
 dependencies = [
@@ -6079,6 +6090,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "steve-store-sqlite"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rusqlite",
+ "steve-storage-api",
+ "steve-types",
 ]
 
 [[package]]

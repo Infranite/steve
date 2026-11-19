@@ -1,0 +1,13 @@
+[package]
+name = "steve-storage-api"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+description = "Steve's storage contract: domain stores, data-only units of work, typed queries, cursors and retention"
+
+# No rusqlite, no tokio runtime and no serde_json::Value here: a plugin backend implements this
+# contract out of process (W2a §1).
+[dependencies]
+steve-types = { path = "../steve-types" }
+serde = { version = "=1.0.229", features = ["derive"] }
+async-trait = "=0.1.92"
