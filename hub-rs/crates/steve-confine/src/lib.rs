@@ -1,8 +1,9 @@
+//! Shared OS sandbox generation and probing for Node runs, Research, Vault and Hub capabilities.
 //! The OS sandbox around what a Node starts for a run: a session's harness, a job's harness, a
 //! command. This is the first stage of "every run in the OS sandbox" (path model S12). Steve's
 //! control plane stays out of the run's reach whatever the harness does with its own shell: the
 //! Hub's and the Node's secrets, keys, databases and journal cannot be read or written, and
-//! Steve's own programs cannot be changed (`steve_vault::harness::{PROTECTED, NODE_PROTECTED,
+//! Steve's own programs cannot be changed (`{PROTECTED, NODE_PROTECTED,
 //! NODE_FILES, SEALED}`). A deny-by-default profile built from the run's view comes later.
 //!
 //! macOS uses `sandbox-exec` (seatbelt) with deny rules, so everything else is as before. Linux
@@ -28,13 +29,25 @@ use std::ffi::OsString;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+mod control;
+mod probe;
+mod profile;
+pub use control::{BwrapPlan, NODE_FILES, NODE_PROTECTED, PROTECTED, RUN_DIRS, SEALED, bwrap_plan};
+pub use probe::{available, bwrap_path, bwrap_works, seatbelt_works};
+#[cfg(test)]
+use profile::*;
+pub use profile::{readonly_profile, seatbelt_rules};
+/// Home-relative secrets denied to read-only jobs, shared with Research's tool guard.
+pub const SENSITIVE_HOME_DIRS: [&str; 5] =
+    [".ssh", ".steve", ".aws", ".config/gh", "Library/Keychains"];
+
+pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 /// The sandbox of this Node's runs: which one, how far it isolates files, and the environment
 /// runs start from at level 2.
 #[derive(Debug, Clone)]
-pub(crate) struct Confine {
-    sandbox: Sandbox,
+pub struct Confine {
+    sandbox: Backend,
     /// Writes of a run in a workspace are kept to its own places (level 1 and up).
     files: bool,
     /// Level 2: the user's fresh login environment.
@@ -42,7 +55,7 @@ pub(crate) struct Confine {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Sandbox {
+enum Backend {
     /// Runs go unconfined: why.
     Off(String),
     /// macOS: the rules to append to a profile.
@@ -58,20 +71,20 @@ pub(crate) enum Sandbox {
 
 impl Confine {
     /// The sandbox for runs of a Node with these homes, tried once on `/usr/bin/true`.
-    pub(crate) fn open(steve_home: &Path, node_home: &Path) -> Confine {
+    pub fn open(steve_home: &Path, node_home: &Path) -> Confine {
         let c = Self::from_env(steve_home, node_home);
         let level = match (&c.sandbox, c.files, c.env.is_some()) {
-            (Sandbox::Off(_), ..) => 0,
+            (Backend::Off(_), ..) => 0,
             (_, _, true) => 2,
             (_, true, _) => 1,
             _ => 0,
         };
         match &c.sandbox {
-            Sandbox::Off(why) => tracing::warn!("node: runs are not confined: {why}"),
-            Sandbox::Seatbelt(_) => {
+            Backend::Off(why) => tracing::warn!("node: runs are not confined: {why}"),
+            Backend::Seatbelt(_) => {
                 tracing::info!("node: runs are confined (seatbelt, level {level})")
             }
-            Sandbox::Bwrap { .. } => {
+            Backend::Bwrap { .. } => {
                 tracing::info!("node: runs are confined (bubblewrap, level {level})")
             }
         }
@@ -79,7 +92,7 @@ impl Confine {
     }
 
     /// Level 2: the environment a run starts from (then what Steve sets for it).
-    pub(crate) fn fresh_env(&self) -> Option<&[(OsString, OsString)]> {
+    pub fn fresh_env(&self) -> Option<&[(OsString, OsString)]> {
         self.env.as_deref().map(Vec::as_slice)
     }
 
@@ -87,9 +100,9 @@ impl Confine {
         Self::choose(steve_home, node_home, std::env::var("STEVE_CONFINE").ok())
     }
 
-    pub(crate) fn choose(steve_home: &Path, node_home: &Path, mode: Option<String>) -> Confine {
+    pub fn choose(steve_home: &Path, node_home: &Path, mode: Option<String>) -> Confine {
         let off = |why: String| Confine {
-            sandbox: Sandbox::Off(why),
+            sandbox: Backend::Off(why),
             files: false,
             env: None,
         };
@@ -104,7 +117,7 @@ impl Confine {
             }
         };
         let sandbox = Self::sandbox(steve_home, node_home);
-        if matches!(sandbox, Sandbox::Off(_)) {
+        if matches!(sandbox, Backend::Off(_)) {
             return Confine {
                 sandbox,
                 files: false,
@@ -118,74 +131,29 @@ impl Confine {
         }
     }
 
-    fn sandbox(steve_home: &Path, node_home: &Path) -> Sandbox {
-        let c = if cfg!(target_os = "macos") {
-            if !Path::new(SANDBOX_EXEC).exists() {
-                return Sandbox::Off(format!("{SANDBOX_EXEC} is missing"));
-            }
-            match steve_vault::harness::seatbelt_rules(steve_home, node_home) {
-                Some(rules) => Sandbox::Seatbelt(rules),
-                None => return Sandbox::Off("a Steve path cannot be written in a profile".into()),
-            }
-        } else if cfg!(target_os = "linux") {
-            // bubblewrap, when installed (level 1 by default, as on macOS)
-            let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
-                .iter()
-                .map(PathBuf::from)
-                .find(|p| p.exists())
-            else {
-                return Sandbox::Off("bwrap (bubblewrap) is not installed".into());
-            };
-            Sandbox::Bwrap {
-                bwrap,
-                steve_home: steve_home.to_path_buf(),
-                node_home: node_home.to_path_buf(),
-            }
-        } else {
-            return Sandbox::Off("no sandbox on this platform".into());
-        };
-        let probe = Confine {
-            sandbox: c.clone(),
-            files: false,
-            env: None,
-        };
-        let (program, args) = probe.wrap("/usr/bin/true".into(), vec![], &[]);
-        match std::process::Command::new(&program)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-        {
-            Ok(o) if o.status.success() => c,
-            Ok(o) => Sandbox::Off(format!(
-                "the sandbox does not start here ({}: {})",
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => Sandbox::Off(format!("the sandbox does not start here ({e})")),
-        }
+    fn sandbox(steve_home: &Path, node_home: &Path) -> Backend {
+        probe::detect(Some((steve_home, node_home))).unwrap_or_else(Backend::Off)
     }
 
     /// Whether runs are confined.
     #[cfg(test)]
-    pub(crate) fn on(&self) -> bool {
-        !matches!(self.sandbox, Sandbox::Off(_))
+    pub fn on(&self) -> bool {
+        !matches!(self.sandbox, Backend::Off(_))
     }
 
     /// The sandbox runs get (`seatbelt`, `bubblewrap`), or why they get none.
-    pub(crate) fn state(&self) -> Result<&'static str, String> {
+    pub fn state(&self) -> Result<&'static str, String> {
         match &self.sandbox {
-            Sandbox::Off(why) => Err(why.clone()),
-            Sandbox::Seatbelt(_) => Ok("seatbelt"),
-            Sandbox::Bwrap { .. } => Ok("bubblewrap"),
+            Backend::Off(why) => Err(why.clone()),
+            Backend::Seatbelt(_) => Ok("seatbelt"),
+            Backend::Bwrap { .. } => Ok("bubblewrap"),
         }
     }
 
     /// The seatbelt rules, to append to a profile a run already has (a job's or research's own).
-    pub(crate) fn seatbelt_rules(&self) -> Option<&str> {
+    pub fn seatbelt_rules(&self) -> Option<&str> {
         match &self.sandbox {
-            Sandbox::Seatbelt(r) => Some(r),
+            Backend::Seatbelt(r) => Some(r),
             _ => None,
         }
     }
@@ -193,13 +161,13 @@ impl Confine {
     /// A principal uses linked credentials. Seatbelt can let the owner also renew them
     /// in place without making the rest of the directory writable. Bubblewrap's store
     /// mount masks other entries, so keep that mount for non-owner sessions only.
-    pub(crate) fn opens_principal_login_store(&self, hide_cli_creds: bool) -> bool {
-        hide_cli_creds || matches!(self.sandbox, Sandbox::Seatbelt(_))
+    pub fn opens_principal_login_store(&self, hide_cli_creds: bool) -> bool {
+        hide_cli_creds || matches!(self.sandbox, Backend::Seatbelt(_))
     }
 
     /// `program args` run in the sandbox; `readable`: directories it may read although they are
     /// under what is hidden (a command's own secret files).
-    pub(crate) fn wrap(
+    pub fn wrap(
         &self,
         program: PathBuf,
         args: Vec<OsString>,
@@ -212,7 +180,7 @@ impl Confine {
     /// directory the sandbox hides fails the start instead of leaving the run in `$HOME`.
     /// `writable`: directories it may read and write although they are under what is hidden (a
     /// session's own harness directory, under the Node's `state/`).
-    pub(crate) fn wrap_in(
+    pub fn wrap_in(
         &self,
         program: PathBuf,
         args: Vec<OsString>,
@@ -226,7 +194,7 @@ impl Confine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn wrap_in_mode(
+    pub fn wrap_in_mode(
         &self,
         program: PathBuf,
         args: Vec<OsString>,
@@ -251,60 +219,31 @@ impl Confine {
             Vec::new()
         };
         match &self.sandbox {
-            Sandbox::Off(_) => (program, args),
-            Sandbox::Seatbelt(rules) => {
-                let mut profile = String::from("(version 1)\n(allow default)\n");
-                if let Some(places) = &writes {
-                    profile.push_str(&seatbelt_writes(places));
-                }
-                profile.push_str(&seatbelt_hide_cli(&hidden_cli));
-                profile.push_str(rules);
-                let opened = readable
-                    .iter()
-                    .map(|r| (r, "file-read*"))
-                    .chain(writable.iter().map(|w| (w, "file-read* file-write*")));
-                for (r, ops) in opened {
-                    let real = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
-                    for r in [r, &real] {
-                        // realpath() walks each ancestor. A principal can inspect metadata on
-                        // the way to its explicitly opened directory, without listing or reading
-                        // the hidden state/cache roots or another principal's files. Otherwise
-                        // provider/config loaders that canonicalize their own directory fail.
-                        for parent in r.ancestors().skip(1) {
-                            let parent = parent.to_string_lossy();
-                            if !parent.is_empty() && !parent.contains(['"', '\\']) {
-                                profile.push_str(&format!(
-                                    "(allow file-read-metadata (literal \"{parent}\"))\n"
-                                ));
-                            }
-                        }
-                        let r = r.to_string_lossy();
-                        if !r.contains(['"', '\\']) {
-                            profile.push_str(&format!("(allow {ops} (subpath \"{r}\"))\n"));
-                        }
-                    }
-                }
-                if let Some(l) = login {
-                    profile.push_str(&seatbelt_login(l));
-                }
-                let mut a: Vec<OsString> = vec!["-p".into(), profile.into(), program.into()];
+            Backend::Off(_) => (program, args),
+            Backend::Seatbelt(rules) => {
+                let profile = profile::seatbelt_run(
+                    rules,
+                    writes.as_ref(),
+                    &hidden_cli,
+                    readable,
+                    writable,
+                    login,
+                );
+                let mut a = vec!["-p".into(), profile.into(), program.into()];
                 a.extend(args);
                 (SANDBOX_EXEC.into(), a)
             }
-            Sandbox::Bwrap {
+            Backend::Bwrap {
                 bwrap,
                 steve_home,
                 node_home,
             } => {
-                // what the Node makes for runs and later for itself (its secrets, pushes,
-                // attachments) exists first: open or hidden from the start
-                // the Hub's own home (its local Node lives in it): its run directories exist
                 if node_home.starts_with(steve_home.join("data")) {
-                    for d in steve_vault::harness::RUN_DIRS {
+                    for d in RUN_DIRS {
                         let _ = std::fs::create_dir_all(steve_home.join(d));
                     }
                 }
-                for d in steve_vault::harness::NODE_PROTECTED {
+                for d in NODE_PROTECTED {
                     if let Some(d) = d.strip_suffix('/') {
                         let _ = std::fs::DirBuilder::new()
                             .recursive(true)
@@ -312,62 +251,18 @@ impl Confine {
                             .create(node_home.join(d));
                     }
                 }
-                let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
-                let mut a: Vec<OsString> = match &writes {
-                    // read-only but for the run's own places
-                    Some(places) => {
-                        let mut a: Vec<OsString> = vec![
-                            "--ro-bind".into(),
-                            "/".into(),
-                            "/".into(),
-                            "--dev".into(),
-                            "/dev".into(),
-                            "--proc".into(),
-                            "/proc".into(),
-                        ];
-                        for w in places.dirs.iter().filter(|d| d.is_dir()) {
-                            a.extend(["--bind".into(), w.into(), w.into()]);
-                        }
-                        for f in places.files.iter().filter(|f| f.is_file()) {
-                            a.extend(["--bind".into(), f.into(), f.into()]);
-                        }
-                        a
-                    }
-                    None => vec!["--dev-bind".into(), "/".into(), "/".into()],
-                };
-                for d in &p.masked {
-                    a.extend(["--tmpfs".into(), d.into()]);
-                }
-                for d in &p.writable {
-                    a.extend(["--bind".into(), d.into(), d.into()]);
-                }
-                for d in &p.hidden_dirs {
-                    if d.is_dir() {
-                        a.extend(["--tmpfs".into(), d.into()]);
-                    }
-                }
-                for f in &p.hidden_files {
-                    a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
-                }
-                bwrap_hide_cli(&mut a, &hidden_cli);
-                if let Some(l) = login {
-                    bwrap_login(&mut a, l);
-                }
-                for r in readable {
-                    let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
-                    a.extend(["--ro-bind".into(), r.clone().into(), r.into()]);
-                }
-                for w in writable {
-                    let w = std::fs::canonicalize(w).unwrap_or_else(|_| w.clone());
-                    a.extend(["--bind".into(), w.clone().into(), w.into()]);
-                }
-                if let Some(cwd) = cwd {
-                    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-                    a.extend(["--chdir".into(), cwd.into()]);
-                }
-                a.push("--".into());
-                a.push(program.into());
-                a.extend(args);
+                let plan = bwrap_plan(steve_home, node_home);
+                let a = profile::bwrap_run(
+                    &plan,
+                    writes.as_ref(),
+                    &hidden_cli,
+                    readable,
+                    writable,
+                    cwd,
+                    login,
+                    program,
+                    args,
+                );
                 (bwrap.clone(), a)
             }
         }
@@ -376,7 +271,7 @@ impl Confine {
     /// Wraps a read-only job (`acp_think` or `research`) on Linux using Bubblewrap with
     /// `--ro-bind / /`, control-plane hiding, sensitive home masking, and `--bind` only on
     /// `writable` (the run's scratch dir and declared harness state dirs).
-    pub(crate) fn wrap_readonly(
+    pub fn wrap_readonly(
         &self,
         program: PathBuf,
         args: Vec<OsString>,
@@ -385,7 +280,7 @@ impl Confine {
         user_home: &Path,
     ) -> (PathBuf, Vec<OsString>) {
         match &self.sandbox {
-            Sandbox::Bwrap {
+            Backend::Bwrap {
                 bwrap,
                 steve_home,
                 node_home,
@@ -399,7 +294,7 @@ impl Confine {
                 user_home,
             ),
             _ => {
-                if let Some(bwrap) = steve_vault::harness::bwrap_path() {
+                if let Some(bwrap) = bwrap_path() {
                     bwrap_readonly_standalone(&bwrap, program, args, writable, chdir, user_home)
                 } else {
                     (program, args)
@@ -409,14 +304,11 @@ impl Confine {
     }
 }
 
-pub(crate) fn is_outer_sandbox_active(
-    has_readonly_sandbox: bool,
-    confine: Option<&Confine>,
-) -> bool {
-    has_readonly_sandbox || confine.is_some_and(|c| !matches!(c.sandbox, Sandbox::Off(_)))
+pub fn is_outer_sandbox_active(has_readonly_sandbox: bool, confine: Option<&Confine>) -> bool {
+    has_readonly_sandbox || confine.is_some_and(|c| !matches!(c.sandbox, Backend::Off(_)))
 }
 
-pub(crate) fn bwrap_readonly_standalone(
+pub fn bwrap_readonly_standalone(
     bwrap: &Path,
     program: PathBuf,
     args: Vec<OsString>,
@@ -436,57 +328,9 @@ fn bwrap_readonly_with_plan(
     chdir: Option<&Path>,
     user_home: &Path,
 ) -> (PathBuf, Vec<OsString>) {
-    let mut a: Vec<OsString> = vec![
-        "--ro-bind".into(),
-        "/".into(),
-        "/".into(),
-        "--dev".into(),
-        "/dev".into(),
-        "--proc".into(),
-        "/proc".into(),
-    ];
-    if let Some((steve_home, node_home)) = homes {
-        let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
-        for d in &p.masked {
-            a.extend(["--tmpfs".into(), d.into()]);
-        }
-        // Re-bind run directories read-only first so job scratch / worktree paths exist inside
-        // the masked STEVE_HOME without becoming broadly writable.
-        for d in &p.writable {
-            a.extend(["--ro-bind".into(), d.into(), d.into()]);
-        }
-        for d in &p.hidden_dirs {
-            if d.is_dir() {
-                a.extend(["--tmpfs".into(), d.into()]);
-            }
-        }
-        for f in &p.hidden_files {
-            a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
-        }
-    }
-    let sensitive_home: Vec<PathBuf> = steve_research::guard::SENSITIVE_HOME_DIRS
-        .iter()
-        .map(|rel| user_home.join(rel))
-        .collect();
-    bwrap_hide_cli(&mut a, &sensitive_home);
-    for w in writable {
-        let w = std::fs::canonicalize(w).unwrap_or_else(|_| w.clone());
-        if w.is_dir() {
-            a.extend(["--bind".into(), w.clone().into(), w.into()]);
-        } else if w.is_file() {
-            a.extend(["--bind".into(), w.clone().into(), w.into()]);
-        }
-    }
-    if let Some(cwd) = chdir {
-        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-        if cwd.is_dir() {
-            a.extend(["--chdir".into(), cwd.into()]);
-        }
-    }
-    a.push("--".into());
-    a.push(program.into());
-    a.extend(args);
-    (bwrap.to_path_buf(), a)
+    let plan = homes.map(|(steve, node)| bwrap_plan(steve, node));
+    let args = profile::bwrap_readonly(plan.as_ref(), program, args, writable, chdir, user_home);
+    (bwrap.to_path_buf(), args)
 }
 
 /// The built-in harnesses' own places under the owner's home (logins, tokens, history), hidden
@@ -500,11 +344,11 @@ fn cli_credential_paths(user_home: &Path) -> Vec<PathBuf> {
 }
 
 /// The Node's credential store of a harness a session uses although it may not see the Node's
-/// harness directory ([`steve_acp::Login`]): the directory, and the names in it the harness reads
+/// harness directory ([`steve_harness_spec::Login`]): the directory, and the names in it the harness reads
 /// and writes, renewing its sign-in included (a trailing `*` matches any rest of a name). So a
 /// renewal is never made and then lost, which would spend the Node's sign-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoginStore {
+pub struct LoginStore {
     pub dir: PathBuf,
     pub names: Vec<String>,
 }
@@ -518,110 +362,9 @@ impl LoginStore {
     }
 }
 
-/// Seatbelt: those names in the store, and whatever is under them (a lock directory), readable
-/// and writable after everything that hides the directory; the way to it may be looked at.
-fn seatbelt_login(l: &LoginStore) -> String {
-    let mut s = String::new();
-    let names: Vec<String> = l
-        .names
-        .iter()
-        .map(|n| match n.strip_suffix('*') {
-            Some(prefix) => format!("{}[^/]*", regex_escape(prefix)),
-            None => regex_escape(n),
-        })
-        .collect();
-    if names.is_empty() {
-        return s;
-    }
-    let real = std::fs::canonicalize(&l.dir).unwrap_or_else(|_| l.dir.clone());
-    let mut seen = std::collections::HashSet::new();
-    for d in [&l.dir, &real] {
-        let ds = d.to_string_lossy().into_owned();
-        if ds.contains(['"', '\\']) || ds.chars().any(char::is_control) || !seen.insert(ds.clone())
-        {
-            continue;
-        }
-        for p in d.ancestors() {
-            let p = p.to_string_lossy();
-            if !p.is_empty() && !p.contains(['"', '\\']) {
-                s.push_str(&format!("(allow file-read-metadata (literal \"{p}\"))\n"));
-            }
-        }
-        s.push_str(&format!(
-            "(allow file-read* file-write* (regex #\"^{}/({})(/.*)?$\"))\n",
-            regex_escape(&ds),
-            names.join("|")
-        ));
-    }
-    s
-}
-
-/// Bubblewrap: the store's own directory (it renames into it), with everything in it but those
-/// names hidden again.
-fn bwrap_login(a: &mut Vec<OsString>, l: &LoginStore) {
-    let Ok(dir) = std::fs::canonicalize(&l.dir) else {
-        return;
-    };
-    if !dir.is_dir() || l.names.is_empty() {
-        return;
-    }
-    a.extend(["--bind".into(), dir.clone().into(), dir.clone().into()]);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        if l.admits(&e.file_name().to_string_lossy()) {
-            continue;
-        }
-        // what a link in it leads to is hidden only when it is in the directory too
-        let Ok(real) = std::fs::canonicalize(e.path()) else {
-            continue;
-        };
-        if !real.starts_with(&dir) {
-            continue;
-        }
-        if real.is_dir() {
-            a.extend(["--tmpfs".into(), real.into()]);
-        } else if real.is_file() {
-            a.extend(["--ro-bind".into(), "/dev/null".into(), real.into()]);
-        }
-    }
-}
-
-fn seatbelt_hide_cli(paths: &[PathBuf]) -> String {
-    let mut s = String::new();
-    let mut seen = std::collections::HashSet::new();
-    for p in paths {
-        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        for cand in [p, &real] {
-            let cs = cand.to_string_lossy();
-            if cs.contains(['"', '\\']) || cs.chars().any(char::is_control) {
-                continue;
-            }
-            if seen.insert(cs.clone().into_owned()) {
-                s.push_str(&format!(
-                    "(deny file-read* file-write* (literal \"{cs}\") (subpath \"{cs}\"))\n"
-                ));
-            }
-        }
-    }
-    s
-}
-
-fn bwrap_hide_cli(a: &mut Vec<OsString>, paths: &[PathBuf]) {
-    for p in paths {
-        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        if real.is_dir() {
-            a.extend(["--tmpfs".into(), real.into()]);
-        } else if real.is_file() {
-            a.extend(["--ro-bind".into(), "/dev/null".into(), real.into()]);
-        }
-    }
-}
-
 /// Where a run in a workspace may write (level 1 and up).
 #[derive(Debug, Default)]
-pub(crate) struct Places {
+pub struct Places {
     pub dirs: Vec<PathBuf>,
     /// Single files (the harness's own settings file in the home).
     pub files: Vec<PathBuf>,
@@ -657,8 +400,8 @@ const HOME_AMBIENT: &[&str] = &[".local/state", ".config"];
 /// it (`StateDir::home_places`): directories, then single files, home-relative.
 fn harness_home_places() -> (Vec<String>, Vec<String>) {
     let (mut dirs, mut files) = (Vec::<String>::new(), Vec::<String>::new());
-    for id in steve_acp::adapters::builtin_ids() {
-        if let Some(sd) = &steve_acp::adapters::spec(id, None).properties.state {
+    for builtin in steve_harness_spec::builtins() {
+        if let Some(sd) = &builtin.properties.state {
             let (d, f) = sd.home_places();
             for x in d {
                 if !dirs.iter().any(|y| y == x) {
@@ -681,6 +424,18 @@ fn writable_places(
     isolated_state: bool,
     user_home: Option<&Path>,
 ) -> Places {
+    writable_places_with(cwd, writable, isolated_state, user_home, &|k| {
+        std::env::var_os(k)
+    })
+}
+
+fn writable_places_with(
+    cwd: &Path,
+    writable: &[PathBuf],
+    isolated_state: bool,
+    user_home: Option<&Path>,
+    var: &impl Fn(&str) -> Option<OsString>,
+) -> Places {
     let mut dirs: Vec<PathBuf> = vec![cwd.to_path_buf()];
     // a worktree's commits go into the repository it belongs to
     if let Some(common) = git_common_dir(cwd) {
@@ -690,13 +445,13 @@ fn writable_places(
     for t in ["/tmp", "/private/tmp", "/var/tmp", "/private/var/folders"] {
         dirs.push(PathBuf::from(t));
     }
-    if let Some(t) = std::env::var_os("TMPDIR") {
+    if let Some(t) = var("TMPDIR") {
         dirs.push(PathBuf::from(t));
     }
     let mut files = vec![];
     let home = user_home
         .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        .or_else(|| var("HOME").map(PathBuf::from));
     if let Some(home) = home {
         dirs.extend(HOME_CACHES.iter().map(|d| home.join(d)));
         if !isolated_state {
@@ -706,7 +461,7 @@ fn writable_places(
             files.extend(harness_files.iter().map(|f| home.join(f)));
         }
     }
-    if let Some(extra) = std::env::var_os("STEVE_CONFINE_WRITABLE") {
+    if let Some(extra) = var("STEVE_CONFINE_WRITABLE") {
         dirs.extend(std::env::split_paths(&extra).filter(|p| p.is_absolute()));
     }
     Places { dirs, files }
@@ -726,52 +481,6 @@ fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
         Err(_) => gitdir.parent()?.parent()?.to_path_buf(),
     };
     std::fs::canonicalize(&common).ok().or(Some(common))
-}
-
-/// Seatbelt rules for [`Places`]: no write anywhere, then each place again (both as named and
-/// resolved, `/tmp` being `/private/tmp`). Rules that come after (Steve's own denials, a run's
-/// own openings) still apply over these.
-fn seatbelt_writes(places: &Places) -> String {
-    let mut s = String::from(
-        "(deny file-write*)\n(allow file-write* (literal \"/dev/null\") (subpath \"/dev\"))\n",
-    );
-    let mut seen = std::collections::HashSet::new();
-    for (p, kind) in places
-        .dirs
-        .iter()
-        .map(|d| (d, "subpath"))
-        .chain(places.files.iter().map(|f| (f, "file")))
-    {
-        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-        for p in [p.clone(), real] {
-            let p = p.to_string_lossy().into_owned();
-            if p.contains(['"', '\\']) || !seen.insert((p.clone(), kind)) {
-                continue;
-            }
-            if kind == "subpath" {
-                s.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
-            } else {
-                // the file, and the temporary siblings it is written through
-                s.push_str(&format!(
-                    "(allow file-write* (regex #\"^{}\"))\n",
-                    regex_escape(&p)
-                ));
-            }
-        }
-    }
-    s
-}
-
-fn regex_escape(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            let special = ".^$*+?()[]{}|\\/".contains(c);
-            special
-                .then_some('\\')
-                .into_iter()
-                .chain(std::iter::once(c))
-        })
-        .collect()
 }
 
 /// What a new login shell of this user starts with (level 2): `$SHELL -l` from an empty
@@ -822,10 +531,165 @@ fn login_env() -> Vec<(OsString, OsString)> {
     }
     env
 }
+/// Whether runs use the system sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    /// Use it when the platform has it; otherwise rely on layers 1 and 2 (logged once at startup).
+    #[default]
+    Auto,
+    /// Refuse to run without it.
+    Required,
+    /// Never (tests of the other layers only).
+    Off,
+}
+
+/// Whether a run under `mode` is sandboxed; `None` when `Required` but unavailable.
+pub fn decide(mode: SandboxMode) -> Option<bool> {
+    match mode {
+        SandboxMode::Off => Some(false),
+        SandboxMode::Auto => Some(available()),
+        SandboxMode::Required => available().then_some(true),
+    }
+}
+
+/// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
+/// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
+pub fn confinement(
+    steve_home: &Path,
+    node_home: &Path,
+    mode: Option<String>,
+) -> Result<&'static str, String> {
+    Confine::choose(steve_home, node_home, mode).state()
+}
+
+/// A sandbox for programs the Hub itself starts outside any run (the library's stdio MCP servers it
+/// proxies): the same one this Node's runs get, so what such a program does cannot reach Steve's
+/// secrets, keys and databases either. Without a sandbox here, programs start as they are.
+#[derive(Clone)]
+pub struct Sandbox(Confine);
+
+impl Sandbox {
+    /// The sandbox for a Steve with these homes, tried once (`STEVE_CONFINE` as for runs).
+    pub fn open(steve_home: &Path, node_home: &Path) -> Sandbox {
+        Sandbox(Confine::open(steve_home, node_home))
+    }
+
+    /// Starts a local capability server with private temporary cwd, piped MCP stdio and this
+    /// sandbox (including the fresh level-2 environment). Dropping it stops its process group and
+    /// removes the scratch directory. The Hub owns protocol handling, never process construction.
+    pub fn spawn_capability(
+        sandbox: Option<&Self>,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        env: Vec<(String, String)>,
+    ) -> std::io::Result<CapabilityProcess> {
+        let cwd = tempfile::Builder::new().prefix("steve-mcp-").tempdir()?;
+        let (program, args) = match sandbox {
+            Some(s) => s.0.wrap_in(program, args, &[], &[], Some(cwd.path())),
+            None => (program, args),
+        };
+        let mut command = tokio::process::Command::new(program);
+        if let Some(fresh) = sandbox.and_then(|s| s.0.fresh_env()) {
+            command.env_clear().envs(fresh.iter().cloned());
+        }
+        let child = command
+            .args(args)
+            .current_dir(cwd.path())
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()?;
+        Ok(CapabilityProcess { child, _cwd: cwd })
+    }
+}
+
+/// A capability process owned by the Hub, started through the shared sandbox face.
+pub struct CapabilityProcess {
+    pub child: tokio::process::Child,
+    _cwd: tempfile::TempDir,
+}
+
+impl Drop for CapabilityProcess {
+    fn drop(&mut self) {
+        // The child has not been waited/reaped, so its id cannot have been reused. Stop wrapper
+        // descendants too (npx and similar launchers), not just the immediate child.
+        if let Some(pid) = self.child.id() {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shell reports readiness from inside its sandbox, then reads only after the parent
+    /// creates the file. Timeouts bound broken I/O; neither side guesses when the other ran.
+    async fn read_late_file(
+        confine: &Confine,
+        file: &Path,
+        cwd: Option<&Path>,
+    ) -> std::process::Output {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{Duration, timeout};
+
+        let (program, args) = confine.wrap_in(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "printf 'ready\\n'; IFS= read -r signal || exit 97; exec cat \"$1\"".into(),
+                "late-file-probe".into(),
+                file.as_os_str().to_owned(),
+            ],
+            &[],
+            &[],
+            cwd,
+        );
+        let mut child = tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = [0; 6];
+        timeout(
+            Duration::from_secs(5),
+            child.stdout.as_mut().unwrap().read_exact(&mut ready),
+        )
+        .await
+        .expect("sandbox readiness")
+        .unwrap();
+        assert_eq!(&ready, b"ready\n");
+        std::fs::write(file, "late").unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"go\n")
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .expect("late-file read completed")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_late_file_barrier_allows_a_read_without_confinement() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("late");
+        let confine = Confine::choose(t.path(), t.path(), Some("off".into()));
+        let output = read_late_file(&confine, &file, None).await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"late");
+    }
 
     #[test]
     fn off_when_asked_or_unknown() {
@@ -833,7 +697,7 @@ mod tests {
         assert!(!Confine::choose(h, h, Some("off".into())).on());
         let c = Confine::choose(h, h, Some("maybe".into()));
         assert!(
-            matches!(&c.sandbox, Sandbox::Off(why) if why.contains("maybe")),
+            matches!(&c.sandbox, Backend::Off(why) if why.contains("maybe")),
             "{c:?}"
         );
         let (p, a) = c.wrap("/bin/echo".into(), vec!["x".into()], &[]);
@@ -850,7 +714,7 @@ mod tests {
         std::fs::create_dir_all(home.join("signing")).unwrap();
         std::fs::write(home.join("steve.env"), "").unwrap();
         let c = Confine {
-            sandbox: Sandbox::Bwrap {
+            sandbox: Backend::Bwrap {
                 bwrap: "/usr/bin/bwrap".into(),
                 steve_home: home.clone(),
                 node_home: home.join("data/node"),
@@ -896,9 +760,9 @@ mod tests {
 
     /// On this Mac: a run cannot read the Node's secrets but reads what it was given.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn a_wrapped_command_cannot_read_the_control_plane() {
-        if !steve_vault::harness::seatbelt_works() {
+    #[tokio::test]
+    async fn a_wrapped_command_cannot_read_the_control_plane() {
+        if !seatbelt_works() {
             eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
             return;
         }
@@ -924,14 +788,17 @@ mod tests {
         let given = [node.join("secrets/op1")];
         assert!(run(format!("cat {}/secrets/op1/V", node.display()), &given));
         assert!(run("true".into(), &[]));
+        let output = read_late_file(&c, &home.join("steve.env.new"), None).await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
     }
 
     /// On a Linux machine with bubblewrap: the Hub's home is hidden whole, files the Hub writes
     /// there after the run started included, the run directories stay writable, a command's own
     /// secrets stay readable, and `/proc/<parent>/root` is no way around it.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn a_wrapped_command_cannot_reach_the_control_plane_on_linux() {
+    #[tokio::test]
+    async fn a_wrapped_command_cannot_reach_the_control_plane_on_linux() {
         let t = tempfile::tempdir().unwrap();
         let home = t.path().canonicalize().unwrap().join("home");
         let node = home.join("data/node");
@@ -985,33 +852,21 @@ mod tests {
             "v"
         );
         // a file the Hub writes after the run started is hidden too
-        let (p, a) = c.wrap_in(
-            "/bin/sh".into(),
-            vec![
-                "-c".into(),
-                format!("sleep 1; cat {h}/steve.env.new").into(),
-            ],
-            &[],
-            &[],
+        let output = read_late_file(
+            &c,
+            &home.join("steve.env.new"),
             Some(&home.join("worktrees/ST-1")),
-        );
-        let child = std::process::Command::new(p)
-            .args(a)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        std::fs::write(home.join("steve.env.new"), "late").unwrap();
-        let o = child.wait_with_output().unwrap();
-        assert!(!o.status.success(), "a late file was readable: {o:?}");
+        )
+        .await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
     }
 
     /// Level 1 on this Mac: a run writes in its own places and nowhere else; reads stay open.
     #[cfg(target_os = "macos")]
     #[test]
     fn level_one_keeps_writes_to_the_runs_places() {
-        if !steve_vault::harness::seatbelt_works() {
+        if !seatbelt_works() {
             eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
             return;
         }
@@ -1121,7 +976,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn non_owner_seatbelt_denies_ambient_cli_credentials() {
-        if !steve_vault::harness::seatbelt_works() {
+        if !seatbelt_works() {
             return;
         }
         let t = tempfile::tempdir().unwrap();
@@ -1221,7 +1076,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn owner_seatbelt_can_lock_pis_linked_auth_but_not_write_other_files_in_the_store() {
-        if !steve_vault::harness::seatbelt_works() {
+        if !seatbelt_works() {
             return;
         }
         let t = tempfile::tempdir().unwrap();
@@ -1236,7 +1091,7 @@ mod tests {
         std::os::unix::fs::symlink(&auth, &link).unwrap();
         let login = LoginStore {
             dir: store.clone(),
-            names: steve_acp::adapters::spec("pi", None)
+            names: steve_harness_spec::spec("pi", None)
                 .properties
                 .state
                 .unwrap()
@@ -1245,7 +1100,7 @@ mod tests {
         };
         let c = Confine {
             // The tempdir normally permits writes. Simulate a store outside it.
-            sandbox: Sandbox::Seatbelt(format!(
+            sandbox: Backend::Seatbelt(format!(
                 "(deny file-write* (subpath \"{}\"))\n",
                 store.display()
             )),
@@ -1287,7 +1142,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn non_owner_seatbelt_may_renew_the_nodes_sign_in_but_sees_nothing_else_there() {
-        if !steve_vault::harness::seatbelt_works() {
+        if !seatbelt_works() {
             return;
         }
         let t = tempfile::tempdir().unwrap();
@@ -1303,7 +1158,7 @@ mod tests {
         std::fs::create_dir_all(&principal_state).unwrap();
         let login = LoginStore {
             dir: store.clone(),
-            names: steve_acp::adapters::spec("claude-code", None)
+            names: steve_harness_spec::spec("claude-code", None)
                 .properties
                 .state
                 .unwrap()
@@ -1346,4 +1201,165 @@ mod tests {
         assert!(!run(format!("cat {d}/CLAUDE.md"), Some(&login)));
         assert!(!run(format!("printf x > {d}/other"), Some(&login)));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn pre_extraction_node_profiles_are_byte_identical() {
+    // Captured by nextest from the old implementations at c8af7504. Only fixture
+    // path parameters become $STEVE_HOME / $ROOT; all policy bytes and argument order are kept.
+    let c = Confine {
+        sandbox: Backend::Seatbelt(
+            seatbelt_rules(Path::new("/fixture/steve"), Path::new("/fixture/node")).unwrap(),
+        ),
+        files: false,
+        env: None,
+    };
+    let login = LoginStore {
+        dir: "/fixture/user/login".into(),
+        names: vec!["auth.json".into(), "auth.json.tmp*".into()],
+    };
+    let (_, args) = c.wrap_in_mode(
+        "/bin/tool".into(),
+        vec!["hello".into()],
+        &["/fixture/node/secrets/one".into()],
+        &["/fixture/node/state/one".into()],
+        Some(Path::new("/fixture/work")),
+        true,
+        true,
+        Some(Path::new("/fixture/user")),
+        Some(&login),
+    );
+    assert_eq!(
+        args[1].as_encoded_bytes(),
+        include_bytes!("../tests/fixtures/node.sbpl")
+    );
+    let writes = seatbelt_writes(&Places {
+        dirs: vec!["/fixture/work".into(), "/fixture/harness".into()],
+        files: vec!["/fixture/user/preferences".into()],
+    });
+    assert_eq!(
+        writes.as_bytes(),
+        include_bytes!("../tests/fixtures/writes.sbpl")
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let places = writable_places_with(
+            Path::new("/fixture/work"),
+            &["/fixture/node/state/one".into()],
+            true,
+            Some(Path::new("/fixture/user")),
+            &|key| (key == "TMPDIR").then(|| "/fixture/tmp".into()),
+        );
+        let profile = profile::seatbelt_run(
+            c.seatbelt_rules().unwrap(),
+            Some(&places),
+            &cli_credential_paths(Path::new("/fixture/user")),
+            &["/fixture/node/secrets/one".into()],
+            &["/fixture/node/state/one".into()],
+            Some(&login),
+        );
+        assert_eq!(
+            profile.as_bytes(),
+            include_bytes!("../tests/fixtures/node-level-one-macos.sbpl")
+        );
+    }
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let node = home.join("data/node");
+    let user = root.join("user");
+    for path in [
+        home.join("signing"),
+        home.join("worktrees"),
+        home.join("scratch"),
+        node.join("secrets/one"),
+        node.join("state/one"),
+        user.join(".ssh"),
+        user.join("login"),
+        root.join("work"),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(node.join("node.sqlite3"), "").unwrap();
+    std::fs::write(user.join("login/auth.json"), "").unwrap();
+    std::fs::write(user.join("login/other.json"), "").unwrap();
+    let c = Confine {
+        sandbox: Backend::Bwrap {
+            bwrap: "/usr/bin/bwrap".into(),
+            steve_home: home,
+            node_home: node.clone(),
+        },
+        files: false,
+        env: None,
+    };
+    let login = LoginStore {
+        dir: user.join("login"),
+        names: vec!["auth.json".into()],
+    };
+    let plans = [
+        c.wrap_in_mode(
+            "/bin/tool".into(),
+            vec!["hello".into()],
+            &[node.join("secrets/one")],
+            &[node.join("state/one")],
+            Some(&root.join("work")),
+            true,
+            true,
+            Some(&user),
+            Some(&login),
+        ),
+        c.wrap_readonly(
+            "/bin/tool".into(),
+            vec!["hello".into()],
+            &[node.join("state/one")],
+            Some(&root.join("work")),
+            &user,
+        ),
+        bwrap_readonly_standalone(
+            Path::new("/usr/bin/bwrap"),
+            "/bin/tool".into(),
+            vec!["hello".into()],
+            &[node.join("state/one")],
+            Some(&root.join("work")),
+            &user,
+        ),
+    ];
+    let plans: Vec<_> = plans
+        .into_iter()
+        .map(|(p, a)| {
+            let normalize = |s: &std::ffi::OsStr| {
+                s.to_string_lossy()
+                    .replace(root.join("home").to_str().unwrap(), "$STEVE_HOME")
+                    .replace(root.to_str().unwrap(), "$ROOT")
+            };
+            (
+                normalize(p.as_os_str()),
+                a.iter().map(|s| normalize(s)).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        serde_json::to_value(plans).unwrap(),
+        serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/bwrap.json"))
+            .unwrap()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn pre_extraction_research_and_control_profiles_are_byte_identical() {
+    // These are old Research/Vault outputs, never snapshots recorded by this renderer.
+    assert_eq!(
+        readonly_profile(&["/fixture/run".into(), "/fixture/user/state".into()])
+            .unwrap()
+            .as_bytes(),
+        include_bytes!("../tests/fixtures/research.sbpl")
+    );
+    assert_eq!(
+        seatbelt_rules(Path::new("/fixture/steve"), Path::new("/fixture/node"))
+            .unwrap()
+            .as_bytes(),
+        include_bytes!("../tests/fixtures/control.sbpl")
+    );
 }

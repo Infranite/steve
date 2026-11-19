@@ -1,0 +1,1475 @@
+[
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "install_hint": "@agentclientprotocol/claude-agent-acp",
+    "npm_package": "@agentclientprotocol/claude-agent-acp",
+    "cli_bin": "claude-agent-acp",
+    "detect_bins": [
+      "claude",
+      "claude-code-acp"
+    ],
+    "args": [],
+    "env": [],
+    "command_var": "STEVE_ADAPTER_CLAUDE",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "CLAUDE_CONFIG_DIR",
+        "default": ".claude",
+        "import": [
+          "settings.json"
+        ],
+        "context": [
+          "CLAUDE.md",
+          "skills/*",
+          "agents",
+          "commands",
+          "output-styles"
+        ],
+        "login": {
+          "files": [
+            ".credentials.json"
+          ],
+          "renew": [
+            ".storage-write.lock",
+            ".credentials.json.tmp.*"
+          ],
+          "store_env": "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+          "settings": "settings.json",
+          "entries": [
+            "apiKeyHelper",
+            "awsAuthRefresh",
+            "awsCredentialExport",
+            "forceLoginMethod",
+            "forceLoginOrgUUID",
+            "env.ANTHROPIC_*",
+            "env.CLAUDE_CODE_USE_*",
+            "env.AWS_*",
+            "env.CLOUD_ML_REGION",
+            "env.VERTEX_REGION_*"
+          ]
+        },
+        "home_files": [
+          ".claude.json"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "acceptEdits",
+        "auto": "auto",
+        "full_access": "bypassPermissions"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": "CLAUDE_CODE_EXECUTABLE",
+      "session_meta": "claude_settings",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": {
+        "claudeCode": {
+          "options": {
+            "tools": []
+          }
+        }
+      },
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "claude_transcript",
+      "fallback_models": [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5"
+      ],
+      "fallback_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "model_fallback": true,
+      "fast_models": [
+        "haiku"
+      ],
+      "skills": "skills",
+      "resume_cli": "claude --resume {id}",
+      "fork_cli": "claude --resume {id} --fork-session",
+      "local_transcript": true,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Claude Code",
+        "package": "@agentclientprotocol/claude-agent-acp",
+        "entry": "@agentclientprotocol/claude-agent-acp/dist/index.js",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "install_hint": "@agentclientprotocol/codex-acp",
+    "npm_package": "@agentclientprotocol/codex-acp",
+    "cli_bin": "codex-acp",
+    "detect_bins": [
+      "codex"
+    ],
+    "args": [],
+    "env": [],
+    "command_var": "STEVE_ADAPTER_CODEX",
+    "properties": {
+      "self_read_only": true,
+      "nested_sandbox": false,
+      "state": {
+        "env": "CODEX_HOME",
+        "default": ".codex",
+        "import": [
+          "config.toml"
+        ],
+        "context": [
+          "AGENTS.md",
+          "AGENTS.override.md",
+          "skills/*",
+          "prompts"
+        ],
+        "login": {
+          "files": [
+            "auth.json"
+          ],
+          "renew": [
+            "auth.json.lock",
+            ".auth-*"
+          ],
+          "settings": "config.toml",
+          "entries": [
+            "model_provider",
+            "model_providers",
+            "forced_login_method",
+            "forced_chatgpt_workspace_id",
+            "chatgpt_base_url",
+            "openai_base_url"
+          ]
+        }
+      },
+      "modes": {
+        "plan": "read-only",
+        "ask": "read-only",
+        "accept_edits": "workspace-write",
+        "auto": "agent",
+        "full_access": "agent-full-access"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "codex_rollout",
+      "fallback_models": [
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-luna"
+      ],
+      "fallback_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "model_fallback": false,
+      "fast_models": [
+        "luna",
+        "mini"
+      ],
+      "skills": "skills",
+      "resume_cli": "codex resume {id}",
+      "fork_cli": "codex fork {id}",
+      "local_transcript": true,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Codex",
+        "package": "@agentclientprotocol/codex-acp",
+        "entry": "@agentclientprotocol/codex-acp/dist/index.js",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "pi",
+    "name": "Pi",
+    "install_hint": "@openma/pi-acp",
+    "npm_package": "@openma/pi-acp",
+    "cli_bin": "openma-pi-acp",
+    "detect_bins": [
+      "pi"
+    ],
+    "args": [],
+    "env": [
+      [
+        "PI_ACP_QUIET_STARTUP",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_PI",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "PI_CODING_AGENT_DIR",
+        "default": ".pi/agent",
+        "import": [
+          "settings.json"
+        ],
+        "context": [
+          "AGENTS.md",
+          "skills/*",
+          "prompts"
+        ],
+        "login": {
+          "files": [
+            "auth.json",
+            "models.json"
+          ],
+          "renew": [
+            "auth.json.lock"
+          ],
+          "settings": "settings.json",
+          "entries": [
+            "defaultProvider"
+          ]
+        }
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "acceptEdits",
+        "auto": "auto",
+        "full_access": "bypassPermissions"
+      },
+      "blind_set_mode": false,
+      "native_execution": true,
+      "permission_policy": "full_access_only",
+      "require_mcp_http": true,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [],
+      "skills": "skills",
+      "resume_cli": "pi --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "pi",
+        "name": "Pi SDK",
+        "package": "@earendil-works/pi-coding-agent",
+        "entry": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+        "node_min": [
+          22,
+          19,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": "1.1.0"
+      },
+      {
+        "id": "adapter",
+        "name": "Pi",
+        "package": "@openma/pi-acp",
+        "entry": "@openma/pi-acp/dist/bin.js",
+        "node_min": [
+          22,
+          19,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "gemini",
+    "name": "Gemini CLI",
+    "install_hint": "@google/gemini-cli",
+    "npm_package": "@google/gemini-cli",
+    "cli_bin": "gemini",
+    "detect_bins": [],
+    "args": [
+      "--acp"
+    ],
+    "env": [
+      [
+        "GEMINI_CLI_TRUST_WORKSPACE",
+        "true"
+      ],
+      [
+        "GEMINI_CLI_NO_RELAUNCH",
+        "true"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_GEMINI",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "GEMINI_CLI_HOME",
+        "default": ".gemini",
+        "import": [
+          "settings.json"
+        ],
+        "context": [
+          "GEMINI.md",
+          "commands"
+        ],
+        "home_override": true
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "autoEdit",
+        "auto": "",
+        "full_access": "yolo"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": true,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "flash-lite",
+        "flash"
+      ],
+      "skills": null,
+      "resume_cli": "gemini --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Gemini CLI",
+        "package": "@google/gemini-cli",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "github-copilot-cli",
+    "name": "GitHub Copilot CLI",
+    "install_hint": "@github/copilot",
+    "npm_package": "@github/copilot",
+    "cli_bin": "copilot",
+    "detect_bins": [],
+    "args": [
+      "--acp",
+      "--no-auto-update"
+    ],
+    "env": [
+      [
+        "COPILOT_AUTO_UPDATE",
+        "false"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_COPILOT",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "COPILOT_HOME",
+        "default": ".copilot",
+        "import": [
+          "settings.json"
+        ],
+        "extra_dirs": [
+          ".config/github-copilot",
+          "Library/Application Support/github-copilot"
+        ]
+      },
+      "modes": {
+        "plan": "https://agentclientprotocol.com/protocol/session-modes#plan",
+        "ask": "https://agentclientprotocol.com/protocol/session-modes#agent",
+        "accept_edits": "",
+        "auto": "",
+        "full_access": "https://agentclientprotocol.com/protocol/session-modes#autopilot"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "flash",
+        "mini"
+      ],
+      "skills": null,
+      "resume_cli": "copilot --resume={id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": [
+        "--no-sandbox"
+      ]
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "GitHub Copilot CLI",
+        "package": "@github/copilot",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "install_hint": "@opencode/cli",
+    "npm_package": "@opencode/cli",
+    "cli_bin": "opencode",
+    "detect_bins": [],
+    "args": [
+      "acp"
+    ],
+    "env": [
+      [
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_OPENCODE",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "",
+        "default": ".local/share/opencode",
+        "import": [],
+        "xdg": true,
+        "extra_dirs": [
+          ".config/opencode",
+          ".local/state/opencode",
+          ".cache/opencode",
+          ".opencode"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "build",
+        "accept_edits": "build",
+        "auto": "build",
+        "full_access": "build"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "mini",
+        "flash",
+        "nano",
+        "lite"
+      ],
+      "skills": null,
+      "resume_cli": "opencode -s {id}",
+      "fork_cli": "opencode -s {id} --fork",
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "OpenCode",
+        "package": "@opencode/cli",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "qwen-code",
+    "name": "Qwen Code",
+    "install_hint": "@qwen-code/qwen-code",
+    "npm_package": "@qwen-code/qwen-code",
+    "cli_bin": "qwen",
+    "detect_bins": [],
+    "args": [
+      "--acp"
+    ],
+    "env": [
+      [
+        "QWEN_CODE_NO_RELAUNCH",
+        "true"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_QWEN",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "QWEN_HOME",
+        "default": ".qwen",
+        "import": [
+          "settings.json"
+        ],
+        "context": [
+          "QWEN.md",
+          "commands"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "auto-edit",
+        "auto": "auto",
+        "full_access": "yolo"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": true,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "flash",
+        "turbo",
+        "mini",
+        "haiku",
+        "lite"
+      ],
+      "skills": null,
+      "resume_cli": "qwen --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Qwen Code",
+        "package": "@qwen-code/qwen-code",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "goose",
+    "name": "goose",
+    "install_hint": "@aaif/goose-acp",
+    "npm_package": "@aaif/goose-acp",
+    "cli_bin": "goose",
+    "detect_bins": [],
+    "args": [
+      "acp"
+    ],
+    "env": [
+      [
+        "GOOSE_DISABLE_KEYRING",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_GOOSE",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "GOOSE_PATH_ROOT",
+        "default": ".config/goose",
+        "import": [
+          "config.yaml"
+        ],
+        "import_into": "config",
+        "extra_dirs": [
+          ".local/share/goose",
+          ".local/state/goose",
+          "Library/Application Support/goose"
+        ]
+      },
+      "modes": {
+        "plan": "",
+        "ask": "approve",
+        "accept_edits": "",
+        "auto": "smart_approve",
+        "full_access": "auto"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": true,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "mini",
+        "flash",
+        "nano",
+        "lite"
+      ],
+      "skills": null,
+      "resume_cli": "goose session --resume --session-id {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "goose",
+        "package": "@aaif/goose-acp",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "kimi-code",
+    "name": "Kimi Code",
+    "install_hint": "@moonshot-ai/kimi-code",
+    "npm_package": "@moonshot-ai/kimi-code",
+    "cli_bin": "kimi",
+    "detect_bins": [],
+    "args": [
+      "acp"
+    ],
+    "env": [
+      [
+        "KIMI_CODE_NO_AUTO_UPDATE",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_KIMI",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "KIMI_CODE_HOME",
+        "default": ".kimi-code",
+        "import": [
+          "config.toml",
+          "tui.toml"
+        ],
+        "extra_dirs": [
+          ".kimi"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "",
+        "auto": "yolo",
+        "full_access": "auto"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [],
+      "skills": null,
+      "resume_cli": "kimi --session {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Kimi Code",
+        "package": "@moonshot-ai/kimi-code",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "grok-build",
+    "name": "Grok Build",
+    "install_hint": "@xai-official/grok",
+    "npm_package": "@xai-official/grok",
+    "cli_bin": "grok",
+    "detect_bins": [],
+    "args": [
+      "agent",
+      "--no-leader",
+      "stdio"
+    ],
+    "env": [
+      [
+        "GROK_DISABLE_AUTOUPDATER",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_GROK",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "GROK_HOME",
+        "default": ".grok",
+        "import": [
+          "config.toml"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "",
+        "auto": "",
+        "full_access": ""
+      },
+      "blind_set_mode": true,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {
+        "auto": {
+          "autoMode": true
+        },
+        "full_access": {
+          "yoloMode": true
+        }
+      },
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": true,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [],
+      "skills": null,
+      "resume_cli": "grok --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Grok Build",
+        "package": "@xai-official/grok",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "kilo",
+    "name": "Kilo Code",
+    "install_hint": "@kilocode/cli",
+    "npm_package": "@kilocode/cli",
+    "cli_bin": "kilo",
+    "detect_bins": [],
+    "args": [
+      "acp"
+    ],
+    "env": [
+      [
+        "KILO_DISABLE_AUTOUPDATE",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_KILO",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "",
+        "default": ".local/share/kilo",
+        "import": [],
+        "xdg": true,
+        "extra_dirs": [
+          ".config/kilo",
+          ".cache/kilo",
+          ".local/state/kilo",
+          ".kilo",
+          ".kilocode"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "ask",
+        "accept_edits": "code",
+        "auto": "",
+        "full_access": ""
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "mini",
+        "flash",
+        "nano",
+        "lite",
+        "small",
+        "free"
+      ],
+      "skills": null,
+      "resume_cli": "kilo --session {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Kilo Code",
+        "package": "@kilocode/cli",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "factory-droid",
+    "name": "Factory Droid",
+    "install_hint": "droid",
+    "npm_package": "droid",
+    "cli_bin": "droid",
+    "detect_bins": [],
+    "args": [
+      "exec",
+      "--output-format",
+      "acp"
+    ],
+    "env": [
+      [
+        "DROID_DISABLE_AUTO_UPDATE",
+        "true"
+      ],
+      [
+        "FACTORY_DROID_AUTO_UPDATE_ENABLED",
+        "false"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_DROID",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "FACTORY_HOME_OVERRIDE",
+        "default": ".factory",
+        "import": [
+          "settings.json"
+        ],
+        "home_override": true
+      },
+      "modes": {
+        "plan": "spec",
+        "ask": "normal",
+        "accept_edits": "auto-low",
+        "auto": "auto-medium",
+        "full_access": "auto-high"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "luna",
+        "flash",
+        "mini"
+      ],
+      "skills": null,
+      "resume_cli": "droid --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "Factory Droid",
+        "package": "droid",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "codebuddy-code",
+    "name": "CodeBuddy Code",
+    "install_hint": "@tencent-ai/codebuddy-code",
+    "npm_package": "@tencent-ai/codebuddy-code",
+    "cli_bin": "codebuddy",
+    "detect_bins": [],
+    "args": [
+      "--acp"
+    ],
+    "env": [
+      [
+        "DISABLE_AUTOUPDATER",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_CODEBUDDY",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "CODEBUDDY_CONFIG_DIR",
+        "default": ".codebuddy",
+        "import": [
+          "settings.json"
+        ],
+        "extra_dirs": [
+          "Library/Application Support/CodeBuddyExtension",
+          ".local/share/CodeBuddyExtension"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "default",
+        "accept_edits": "acceptEdits",
+        "auto": "auto",
+        "full_access": "fullAccess"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "flash",
+        "fast"
+      ],
+      "skills": null,
+      "resume_cli": "codebuddy --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": [
+      {
+        "id": "adapter",
+        "name": "CodeBuddy Code",
+        "package": "@tencent-ai/codebuddy-code",
+        "entry": "",
+        "node_min": [
+          20,
+          0,
+          0
+        ],
+        "executable_env": null,
+        "required": [],
+        "minimum": null
+      }
+    ]
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "install_hint": "curl https://cursor.com/install -fsS | bash",
+    "npm_package": null,
+    "cli_bin": "cursor-agent",
+    "detect_bins": [
+      "cursor"
+    ],
+    "args": [
+      "--disable-auto-update",
+      "acp"
+    ],
+    "env": [],
+    "command_var": "STEVE_ADAPTER_CURSOR",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "CURSOR_CONFIG_DIR",
+        "default": ".cursor",
+        "import": [
+          "cli-config.json"
+        ],
+        "extra_dirs": [
+          "Library/Application Support/Cursor",
+          ".config/Cursor"
+        ]
+      },
+      "modes": {
+        "plan": "plan",
+        "ask": "ask",
+        "accept_edits": "agent",
+        "auto": "",
+        "full_access": ""
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "composer",
+        "flash",
+        "mini",
+        "nano",
+        "haiku",
+        "luna"
+      ],
+      "skills": null,
+      "resume_cli": "cursor-agent --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": []
+  },
+  {
+    "id": "kiro",
+    "name": "Kiro CLI",
+    "install_hint": "curl -fsSL https://cli.kiro.dev/install | bash",
+    "npm_package": null,
+    "cli_bin": "kiro-cli",
+    "detect_bins": [],
+    "args": [
+      "acp",
+      "--agent-engine=v3"
+    ],
+    "env": [
+      [
+        "KIRO_NO_AUTO_UPDATE",
+        "1"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_KIRO",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "KIRO_HOME",
+        "default": ".kiro",
+        "import": [
+          "settings/cli.json",
+          "settings/permissions.yaml"
+        ],
+        "extra_dirs": [
+          "Library/Application Support/kiro-cli",
+          ".local/share/kiro-cli",
+          ".config/Kiro",
+          ".config/kiro",
+          "Library/Application Support/Kiro"
+        ]
+      },
+      "modes": {
+        "plan": "planner",
+        "ask": "vibe",
+        "accept_edits": "",
+        "auto": "",
+        "full_access": ""
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "haiku",
+        "luna",
+        "qwen"
+      ],
+      "skills": null,
+      "resume_cli": "kiro-cli chat --resume-id {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": []
+  },
+  {
+    "id": "mistral-vibe",
+    "name": "Mistral Vibe",
+    "install_hint": "uv tool install mistral-vibe",
+    "npm_package": null,
+    "cli_bin": "vibe-acp",
+    "detect_bins": [
+      "vibe"
+    ],
+    "args": [],
+    "env": [
+      [
+        "VIBE_ENABLE_UPDATE_CHECKS",
+        "false"
+      ],
+      [
+        "VIBE_ENABLE_AUTO_UPDATE",
+        "false"
+      ],
+      [
+        "VIBE_ENABLE_TELEMETRY",
+        "false"
+      ],
+      [
+        "VIBE_EXPERIMENTS__ENABLE",
+        "false"
+      ]
+    ],
+    "command_var": "STEVE_ADAPTER_VIBE",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "VIBE_HOME",
+        "default": ".vibe",
+        "import": [
+          "config.toml"
+        ],
+        "extra_dirs": [
+          ".config/vibe"
+        ]
+      },
+      "modes": {
+        "plan": "",
+        "ask": "ask",
+        "accept_edits": "accept-edits",
+        "auto": "smart-approve",
+        "full_access": "auto-approve"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": true,
+      "usage_prompt_cumulative": true,
+      "usage_fallback": "none",
+      "fallback_models": [
+        "mistral-medium-3.5"
+      ],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "small",
+        "ministral",
+        "codestral",
+        "flash",
+        "mini",
+        "haiku"
+      ],
+      "skills": null,
+      "resume_cli": "vibe --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": []
+  },
+  {
+    "id": "qoder",
+    "name": "Qoder CLI",
+    "install_hint": "curl -fsSL https://qoder.com/install | bash",
+    "npm_package": null,
+    "cli_bin": "qodercli",
+    "detect_bins": [
+      "qoder"
+    ],
+    "args": [
+      "--settings",
+      "{\"general\":{\"enableAutoUpdate\":false}}",
+      "--acp"
+    ],
+    "env": [],
+    "command_var": "STEVE_ADAPTER_QODER",
+    "properties": {
+      "self_read_only": false,
+      "nested_sandbox": true,
+      "state": {
+        "env": "QODER_CONFIG_DIR",
+        "default": ".qoder",
+        "import": [
+          "settings.json"
+        ],
+        "extra_dirs": [
+          ".qoder-cn",
+          "Library/Application Support/Qoder",
+          ".config/Qoder"
+        ],
+        "home_files": [
+          ".qoder.json"
+        ]
+      },
+      "modes": {
+        "plan": "",
+        "ask": "default",
+        "accept_edits": "acceptEdits",
+        "auto": "auto",
+        "full_access": "yolo"
+      },
+      "blind_set_mode": false,
+      "native_execution": false,
+      "permission_policy": "acp",
+      "require_mcp_http": false,
+      "mode_meta": {},
+      "executable_env": null,
+      "session_meta": "none",
+      "launch_extra": "none",
+      "probe_initialize": true,
+      "tools_off_meta": null,
+      "usage_input_includes_cache": false,
+      "usage_prompt_cumulative": false,
+      "usage_fallback": "none",
+      "fallback_models": [],
+      "fallback_efforts": [],
+      "model_fallback": false,
+      "fast_models": [
+        "flash",
+        "turbo",
+        "mini",
+        "lite",
+        "haiku",
+        "small"
+      ],
+      "skills": null,
+      "resume_cli": "qodercli --resume {id}",
+      "fork_cli": null,
+      "local_transcript": false,
+      "outer_sandbox_args": []
+    },
+    "components": []
+  }
+]

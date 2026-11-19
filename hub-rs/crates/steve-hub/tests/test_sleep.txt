@@ -133,7 +133,6 @@ steve-node-cli/src/remove.rs	3
 steve-node-wire/tests/common/mod.rs	1
 steve-node-wire/tests/wire_faults.rs	12
 steve-node/src/adapter_setup/tests.rs	1
-steve-node/src/confine.rs	1
 steve-node/src/harness_login.rs	1
 steve-node/src/harness_updates/tests.rs	1
 steve-node/src/procs.rs	3

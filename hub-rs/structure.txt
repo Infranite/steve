@@ -1,7 +1,6 @@
 # Production Clippy structure inventory; only shrinks.
 # crate<TAB>workspace-relative file<TAB>lint<TAB>values, sorted largest first
 # Thresholds: too_many_lines 100, cognitive_complexity 25.
-steve-acp	crates/steve-acp/src/adapters.rs	cognitive_complexity	35
 steve-acp	crates/steve-acp/src/managed.rs	cognitive_complexity	37
 steve-acp	crates/steve-acp/src/managed.rs	too_many_lines	189
 steve-acp	crates/steve-acp/src/normalize.rs	cognitive_complexity	35
@@ -210,8 +209,6 @@ steve-modules	crates/steve-modules/src/vault/use.rs	too_many_lines	214
 steve-node	crates/steve-node/src/actor.rs	cognitive_complexity	44,40,35
 steve-node	crates/steve-node/src/actor.rs	too_many_lines	413,204,171,114,106
 steve-node	crates/steve-node/src/adapter_updates.rs	cognitive_complexity	35
-steve-node	crates/steve-node/src/confine.rs	cognitive_complexity	28
-steve-node	crates/steve-node/src/confine.rs	too_many_lines	124
 steve-node	crates/steve-node/src/exec.rs	too_many_lines	128
 steve-node	crates/steve-node/src/git.rs	too_many_lines	183
 steve-node	crates/steve-node/src/harness_updates.rs	too_many_lines	166

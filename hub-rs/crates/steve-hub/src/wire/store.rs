@@ -480,7 +480,7 @@ impl Repo for StoreBackend {
         let nb = s::NewBot {
             name: str_field(f, "name").unwrap_or_default(),
             harness: str_field(f, "harness")
-                .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into()),
+                .unwrap_or_else(|| steve_harness_spec::DEFAULT_ADAPTER.0.into()),
             role: str_field(f, "role"),
             model: str_field(f, "model"),
             reasoning_effort: str_field(f, "reasoning_effort"),

@@ -409,7 +409,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
         .iter()
         .map(|(id, path)| {
             let declared = cfg.declared_adapters.get(id);
-            let spec = steve_acp::adapters::spec(id, declared);
+            let spec = steve_harness_spec::spec(id, declared);
             let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
             let adapter = reported.and_then(|h| h.adapter.as_ref());
             let session = adapter.and_then(|a| a.session.as_ref()).filter(|_| {
@@ -442,9 +442,9 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 steve_core::harnesses::Harness::declared(id, declared).modes
             });
             let setup = reported.and_then(|h| h.setup.clone()).or_else(|| {
-                (reported.is_none() && !steve_acp::adapters::components(id).is_empty()).then(|| steve_node_api::HarnessSetup {
+                (reported.is_none() && !steve_harness_spec::components(id).is_empty()).then(|| steve_node_api::HarnessSetup {
                     state: steve_node_api::SetupState::Unknown,
-                    components: steve_acp::adapters::components(id).iter().map(|c| steve_node_api::HarnessComponent {
+                    components: steve_harness_spec::components(id).iter().map(|c| steve_node_api::HarnessComponent {
                         id: c.id.into(), name: c.name.into(), package: c.package.into(), installed: false, version: None, path: None, status: Some(steve_node_api::ComponentStatus::Unknown), detected: None,
                     }).collect(),
                     can_install: false,
@@ -1248,7 +1248,7 @@ mod tests {
         assert_eq!(native(&all)["modes"], json!(["full_access"]));
         assert_eq!(
             all.len(),
-            steve_acp::adapters::builtin_ids().count() + 1,
+            steve_harness_spec::builtin_ids().count() + 1,
             "the built-in ones and the declared one alike"
         );
         let mine = |rows: &[Value]| rows.iter().find(|r| r["id"] == "mine").unwrap().clone();

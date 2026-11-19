@@ -1,0 +1,5 @@
+(deny file-write*)
+(allow file-write* (literal "/dev/null") (subpath "/dev"))
+(allow file-write* (subpath "/fixture/work"))
+(allow file-write* (subpath "/fixture/harness"))
+(allow file-write* (regex #"^\/fixture\/user\/preferences"))

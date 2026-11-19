@@ -25,9 +25,11 @@ pub mod permission;
 mod rollout;
 pub mod rpc;
 pub mod session;
+mod state_dir;
 mod transcript;
 pub mod usage;
 mod util;
+pub use state_dir::StateDirRuntime;
 
 pub use adapters::{
     AdapterEntry, AdapterProperties, AdapterSpec, Declaration, Login, ModeMap, StateDir,

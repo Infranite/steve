@@ -4,7 +4,7 @@
 //! every [`FRESH`]) and runs a call on the session's behalf.
 //!
 //! - `stdio`: the Hub starts the server on its own machine, in the same OS sandbox a Node's runs get
-//!   ([`steve_node::Sandbox`]), one process per server shared by every session that uses it, stopped
+//!   ([`steve_confine::Sandbox`]), one process per server shared by every session that uses it, stopped
 //!   after [`IDLE`] without a call (and when the server is changed or deleted).
 //! - `http`: MCP streamable HTTP (JSON or an event stream per answer, `Mcp-Session-Id` kept).
 //! - `sse`: the older HTTP+SSE transport (an event stream names the endpoint messages are posted to).
@@ -93,7 +93,7 @@ static FAILURE_SPACE: steve_runtime::cache::CacheSpace<ListingKey, String> =
 /// The Hub's connections to the library's servers. One per Hub.
 pub struct LibraryMcp {
     caps: Capabilities,
-    sandbox: Option<steve_node::Sandbox>,
+    sandbox: Option<steve_confine::Sandbox>,
     http: reqwest::Client,
     conns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>>>,
     lists: steve_runtime::cache::Cached<ListingKey, ToolList>,
@@ -105,7 +105,7 @@ impl LibraryMcp {
     /// `sandbox`: what stdio servers start in (`None`: as they are, for tests).
     pub fn new(
         caps: Capabilities,
-        sandbox: Option<steve_node::Sandbox>,
+        sandbox: Option<steve_confine::Sandbox>,
         caches: Arc<steve_runtime::cache::Caches>,
     ) -> Arc<LibraryMcp> {
         let http = reqwest::Client::builder()
@@ -604,24 +604,26 @@ struct Stdio {
     pending: Pending,
     alive: Arc<AtomicBool>,
     stderr: Arc<Mutex<VecDeque<String>>>,
-    _child: steve_node::CapabilityProcess,
+    _child: steve_confine::CapabilityProcess,
 }
 
 impl Stdio {
     fn start(
-        sandbox: Option<&steve_node::Sandbox>,
+        sandbox: Option<&steve_confine::Sandbox>,
         server: &Server,
         env: Vec<(String, String)>,
     ) -> Result<Stdio, String> {
         let program = server.command.clone().unwrap_or_default();
         let args: Vec<std::ffi::OsString> = server.args.iter().map(Into::into).collect();
-        let mut process = steve_node::Sandbox::spawn_capability(sandbox, program.into(), args, env)
-            .map_err(|e| {
-                format!(
-                    "could not start {}: {e}",
-                    server.command.as_deref().unwrap_or("")
-                )
-            })?;
+        let mut process =
+            steve_confine::Sandbox::spawn_capability(sandbox, program.into(), args, env).map_err(
+                |e| {
+                    format!(
+                        "could not start {}: {e}",
+                        server.command.as_deref().unwrap_or("")
+                    )
+                },
+            )?;
         let child = &mut process.child;
         let stdin = Arc::new(tokio::sync::Mutex::new(
             child.stdin.take().ok_or("no stdin")?,

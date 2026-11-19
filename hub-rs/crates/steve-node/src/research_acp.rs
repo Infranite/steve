@@ -9,6 +9,7 @@ use std::time::Instant;
 use tokio::time::Instant as IdleInstant;
 
 use serde_json::{Value, json};
+use steve_acp::StateDirRuntime;
 use steve_acp::normalize::{CommandFact, ToolFact};
 
 use super::*;

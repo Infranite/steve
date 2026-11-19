@@ -222,13 +222,17 @@ use Until::{Hub, Later, Library, N0d, NoNode};
 /// Reasons and removal milestones for the count inventory in node_boundary.txt.
 #[rustfmt::skip]
 const RATIONALE: &[Entry] = &[
+    /* shared OS execution mechanism: Node runs and Hub-host capability servers */
+    e(Spawn, "steve-confine/src/lib.rs", Library, "fresh login environment and confined host capability process; callers never construct these processes"),
+    e(Spawn, "steve-confine/src/probe.rs", Library, "the single sandbox probe, with a minimal or control-plane policy on /usr/bin/true"),
+    e(Dir, "steve-confine/src/control.rs", Library, "protected filename prefixes in the shared bubblewrap control-plane plan"),
+    e(Dir, "steve-confine/src/profile.rs", Library, "hide other entries when explicitly opening a harness credential store"),
+    e(Fs, "steve-confine/src/lib.rs", Library, "sandbox mount directories and a worktree's gitdir/commondir for its writable policy"),
     /* the harness libraries: what they start is reached only through the Harness entries */
     e(Spawn, "steve-acp/src/rpc.rs", Library, "an ACP adapter process"),
     e(Spawn, "steve-acp/src/config.rs", Hub, "`npm root -g`, to find the adapters"),
     e(Fs, "steve-acp/src/config.rs", Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
     e(Fs, "steve-acp/src/adapters.rs", Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
-    e(Spawn, "steve-vault/src/harness.rs", Library, "whether seatbelt starts here (sandbox-exec on /usr/bin/true): the Node's sandbox and the pre-switch check"),
-    e(Dir, "steve-vault/src/harness.rs", Library, "the protected name prefixes the Node hides from a bubblewrap run"),
     e(Dir, "steve-toolchains/src/lib.rs", Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
     e(Dir, "steve-knowledge/src/scan.rs", Library, "the folder walk the Node's scan reuses"),
     e(Spawn, "steve-acp/src/managed.rs", Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),

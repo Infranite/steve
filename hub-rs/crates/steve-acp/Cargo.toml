@@ -11,6 +11,7 @@ publish.workspace = true
 testkit = []
 
 [dependencies]
+steve-harness-spec = { path = "../steve-harness-spec" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 # Steve's events: what the ACP updates are translated into (normalize.rs).

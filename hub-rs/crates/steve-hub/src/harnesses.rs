@@ -51,7 +51,7 @@ fn merge_cap_lists(
 
 pub struct HubHarnesses {
     ids: Vec<String>,
-    declared: BTreeMap<String, steve_acp::Declaration>,
+    declared: BTreeMap<String, steve_harness_spec::Declaration>,
     pub(crate) reports: Arc<crate::system::RuntimeReports>,
 }
 impl HubHarnesses {
@@ -299,7 +299,7 @@ pub struct NewHarness {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Declared properties ([`steve_acp::adapters::PropertiesPatch`]), checked key by key.
+    /// Declared properties ([`steve_harness_spec::PropertiesPatch`]), checked key by key.
     #[serde(default)]
     pub properties: Option<serde_json::Value>,
 }
@@ -322,7 +322,7 @@ pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
         return Err(steve_i18n::t!("hub.harness.bad_command"));
     }
     if let Some(p) = &h.properties {
-        let patch: steve_acp::adapters::PropertiesPatch = serde_json::from_value(p.clone())
+        let patch: steve_harness_spec::PropertiesPatch = serde_json::from_value(p.clone())
             .map_err(|e| steve_i18n::t!("hub.harness.bad_properties", error = e.to_string()))?;
         let _ = patch;
         // a key the adapter layer does not know is a mistake, not something to drop silently
@@ -331,7 +331,7 @@ pub fn declare(path: &std::path::Path, h: NewHarness) -> Result<(), String> {
             .ok_or_else(|| steve_i18n::t!("hub.harness.bad_properties", error = "not an object"))?;
         if let Some(k) = given
             .keys()
-            .find(|k| !steve_acp::adapters::PROPERTY_KEYS.contains(&k.as_str()))
+            .find(|k| !steve_harness_spec::PROPERTY_KEYS.contains(&k.as_str()))
         {
             return Err(steve_i18n::t!("hub.harness.unknown_property", key = k));
         }
@@ -407,7 +407,7 @@ fn edit_manifest(
 /// Adapter `id` as declared, with what its probe reported where it did.
 pub(crate) fn merge(
     id: &str,
-    declared: Option<&steve_acp::Declaration>,
+    declared: Option<&steve_harness_spec::Declaration>,
     reported: Option<&HarnessCapability>,
 ) -> Harness {
     let mut h = Harness::declared(id, declared);
@@ -522,16 +522,16 @@ mod tests {
         // the other entries and keys stay
         assert_eq!(doc["adapters"]["codex"], "/opt/codex-acp");
         assert_eq!(doc["node"], "/opt/node");
-        let entry: steve_acp::AdapterEntry =
+        let entry: steve_harness_spec::AdapterEntry =
             serde_json::from_value(doc["adapters"]["my-agent"].clone()).unwrap();
-        let (commands, declared) = steve_acp::adapters::split_entries([("my-agent".into(), entry)]);
+        let (commands, declared) = steve_harness_spec::split_entries([("my-agent".into(), entry)]);
         assert_eq!(
             commands["my-agent"],
             std::path::PathBuf::from("/opt/my-agent")
         );
         assert_eq!(declared["my-agent"].name.as_deref(), Some("My Agent"));
         assert_eq!(
-            steve_acp::adapters::spec("my-agent", declared.get("my-agent"))
+            steve_harness_spec::spec("my-agent", declared.get("my-agent"))
                 .properties
                 .modes
                 .ask,
@@ -587,7 +587,7 @@ mod tests {
             "an answered empty list is not a fallback"
         );
         // a declared name stays; no scratch session: not ready, the declared lists kept
-        let named: steve_acp::Declaration =
+        let named: steve_harness_spec::Declaration =
             serde_json::from_value(serde_json::json!({"name": "Named"})).unwrap();
         let h = merge("mine", Some(&named), Some(&reported("mine", None)));
         assert_eq!((h.name.as_str(), h.ready), ("Named", Some(false)));

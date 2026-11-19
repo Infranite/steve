@@ -1,11 +1,13 @@
 # Target architecture edges (tests/layering.rs). Reviewed contract, runtime and composition edges.
 # edge-or-rusqlite key<TAB>count. Change this target explicitly in review; BLESS never rewrites it.
+edge steve-acp steve-harness-spec	1
 edge steve-acp steve-node-api	1
 edge steve-calendar steve-runtime	1
 edge steve-calendar steve-types	1
 edge steve-channels steve-runtime	1
 edge steve-channels steve-types	1
 edge steve-channels steve-work-api	1
+edge steve-confine steve-harness-spec	1
 edge steve-core steve-node-api	1
 edge steve-core steve-runtime	1
 edge steve-core steve-types	1
@@ -17,9 +19,12 @@ edge steve-flow steve-types	1
 edge steve-flow steve-work-api	1
 edge steve-github steve-runtime	1
 edge steve-github steve-types	1
+edge steve-harness-spec steve-node-api	1
 edge steve-hub steve-auth	1
 edge steve-hub steve-channels	1
+edge steve-hub steve-confine	1
 edge steve-hub steve-flow	1
+edge steve-hub steve-harness-spec	1
 edge steve-hub steve-i18n	1
 edge steve-hub steve-knowledge	1
 edge steve-hub steve-node-api	1
@@ -34,6 +39,7 @@ edge steve-mail steve-types	1
 edge steve-modules steve-runtime	1
 edge steve-modules steve-types	1
 edge steve-node steve-acp	1
+edge steve-node steve-confine	1
 edge steve-node steve-node-api	1
 edge steve-node steve-research	1
 edge steve-node steve-toolchains	1
@@ -41,10 +47,11 @@ edge steve-node steve-vault	1
 edge steve-node-api steve-types	1
 edge steve-node-cli steve-node-api	1
 edge steve-node-wire steve-node-api	1
-edge steve-research steve-vault	1
+edge steve-research steve-confine	1
 edge steve-stats steve-runtime	1
 edge steve-storage-api steve-types	1
 edge steve-store-sqlite steve-storage-api	1
 edge steve-store-sqlite steve-types	1
 edge steve-transcript steve-node-api	1
+edge steve-vault steve-confine	1
 rusqlite steve-store-sqlite	1

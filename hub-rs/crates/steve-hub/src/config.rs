@@ -296,8 +296,8 @@ pub struct Config {
     /// Adapter entry point per harness id; a `.js` path runs with `node`.
     pub adapters: BTreeMap<String, String>,
     /// What the Hub's harness manifest declares about adapters beyond their command
-    /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_acp::adapters`]).
-    pub declared_adapters: BTreeMap<String, steve_acp::Declaration>,
+    /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_harness_spec`]).
+    pub declared_adapters: BTreeMap<String, steve_harness_spec::Declaration>,
     /// Adapter ids explicitly listed in the Hub's harness manifest (`harness.json`).
     pub manifest_adapters: std::collections::BTreeSet<String>,
     /// Where that manifest is (the runtimes page adds adapters to it).
@@ -435,12 +435,12 @@ fn harness_manifest(
     path: &Path,
 ) -> (
     std::collections::HashMap<String, PathBuf>,
-    BTreeMap<String, steve_acp::Declaration>,
+    BTreeMap<String, steve_harness_spec::Declaration>,
 ) {
     #[derive(serde::Deserialize)]
     struct Manifest {
         #[serde(default)]
-        adapters: std::collections::HashMap<String, steve_acp::AdapterEntry>,
+        adapters: std::collections::HashMap<String, steve_harness_spec::AdapterEntry>,
     }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -452,7 +452,7 @@ fn harness_manifest(
     };
     match serde_json::from_str::<Manifest>(&text) {
         Ok(m) => {
-            let (commands, declared) = steve_acp::adapters::split_entries(m.adapters);
+            let (commands, declared) = steve_harness_spec::split_entries(m.adapters);
             (commands, declared.into_iter().collect())
         }
         Err(e) => {
@@ -824,8 +824,8 @@ impl Config {
                 smart: split(env("STEVE_MODELS_SMART", "")),
             },
             // a new agent session's model only when set; else the harness's own default
-            default_models: steve_acp::adapters::builtin_commands(Path::new(""))
-                .filter_map(|(id, var, _)| {
+            default_models: steve_harness_spec::builtin_command_vars()
+                .filter_map(|(id, var)| {
                     let suffix = var.strip_prefix("STEVE_ADAPTER_")?;
                     let model = get(&format!("STEVE_DEFAULT_MODEL_{suffix}"))?
                         .trim()
@@ -894,7 +894,7 @@ mod tests {
             .or_insert("/x/claude.js".into());
         m.entry("STEVE_ADAPTER_CODEX".into())
             .or_insert("/x/codex".into());
-        for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+        for (_, var) in steve_harness_spec::builtin_command_vars() {
             m.entry(var.into()).or_insert("/x/adapter".into());
         }
         Config::from_vars(|k| m.get(k).cloned()).expect("config")

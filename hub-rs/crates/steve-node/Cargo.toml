@@ -6,6 +6,7 @@ publish.workspace = true
 description = "A Steve Node: hosts harnesses on this machine and runs what the Hub asks. No Hub store, no business decisions."
 
 [dependencies]
+steve-confine = { path = "../steve-confine" }
 async-trait = "=0.1.92"
 base64 = "=0.23.1"
 axum = "=0.8.9"

@@ -1,0 +1,17 @@
+[package]
+name = "steve-confine"
+description = "Shared OS sandbox policy generation, probing and confined host capabilities"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+steve-harness-spec = { path = "../steve-harness-spec" }
+tracing = "=0.1.44"
+tokio = { version = "=1.54.1", features = ["rt", "process"] }
+tempfile = "=3.27.0"
+libc = "=0.2.191"
+
+[dev-dependencies]
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+tokio = { version = "=1.54.1", features = ["macros", "time", "io-util"] }

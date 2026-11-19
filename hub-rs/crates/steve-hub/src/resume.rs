@@ -25,7 +25,7 @@ pub struct Homes {
     pub codex_home: PathBuf,
     /// Manifest declarations (`harness.json`), so custom or overridden `resume_cli` / `fork_cli` /
     /// `state` work on the resume page too.
-    pub declared: BTreeMap<String, steve_acp::Declaration>,
+    pub declared: BTreeMap<String, steve_harness_spec::Declaration>,
 }
 
 impl Homes {
@@ -99,7 +99,7 @@ fn sh(s: &str) -> String {
 
 fn render_cli(
     h: &Homes,
-    props: &steve_acp::AdapterProperties,
+    props: &steve_harness_spec::AdapterProperties,
     template: Option<&str>,
     id: &str,
     cwd: &str,
@@ -167,13 +167,13 @@ fn render_cli(
 
 /// `cd <cwd> && [VAR=dir] <harness command>`; the variable only when the Hub's agents use another one.
 pub fn command(h: &Homes, harness: &str, id: &str, cwd: &str) -> Option<String> {
-    let props = steve_acp::adapters::spec(harness, h.declared.get(harness)).properties;
+    let props = steve_harness_spec::spec(harness, h.declared.get(harness)).properties;
     render_cli(h, &props, props.resume_cli.as_deref(), id, cwd, None)
 }
 
 fn node_homes(
     h: &Homes,
-    props: &steve_acp::AdapterProperties,
+    props: &steve_harness_spec::AdapterProperties,
     principal_state_dir: Option<&Path>,
 ) -> steve_node::history::Homes {
     let mut nh = steve_node::history::Homes {
@@ -218,7 +218,7 @@ fn page(
     principal_state_dir: Option<&Path>,
     transcript_checked: bool,
 ) -> Value {
-    let props = steve_acp::adapters::spec(harness, h.declared.get(harness)).properties;
+    let props = steve_harness_spec::spec(harness, h.declared.get(harness)).properties;
     let cwd_exists = !cwd.is_empty() && Path::new(cwd).is_dir();
     let Some(id) = id else {
         return json!({
@@ -267,7 +267,7 @@ pub fn info_for_state(h: &Homes, s: &Obj, state: &SessionState) -> Value {
     let harness = text(s, "harness").unwrap_or_default();
     let cwd = text(s, "cwd").unwrap_or_default();
     let id = native_id(s);
-    let props = steve_acp::adapters::spec(harness, h.declared.get(harness)).properties;
+    let props = steve_harness_spec::spec(harness, h.declared.get(harness)).properties;
     let (pdir, check) = match state {
         SessionState::AmbientLocal => (None, props.local_transcript),
         SessionState::IsolatedLocal {
@@ -340,7 +340,7 @@ pub async fn info_on_state(
     let harness = text(s, "harness").unwrap_or_default();
     let cwd = text(s, "cwd").unwrap_or_default();
     let id = native_id(s);
-    let props = steve_acp::adapters::spec(harness, h.declared.get(harness)).properties;
+    let props = steve_harness_spec::spec(harness, h.declared.get(harness)).properties;
     let mut found = Value::Null;
     if props.local_transcript
         && let Some(id) = &id

@@ -6,4 +6,5 @@ publish.workspace = true
 description = "Accounts, connections and the secret vault"
 
 [dependencies]
+steve-confine = { path = "../steve-confine" }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }

@@ -1240,7 +1240,7 @@ pub async fn system_models(
 ) -> ApiResult {
     let h = q
         .harness
-        .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into());
+        .unwrap_or_else(|| steve_harness_spec::DEFAULT_ADAPTER.0.into());
     let harnesses = st.domain.harnesses(q.fresh.as_deref() == Some("1")).await?;
     let list = harnesses
         .iter()
@@ -1290,7 +1290,7 @@ pub async fn system_harness_install(
             "installation takes no package, command or destination parameters",
         ));
     }
-    if steve_acp::adapters::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
+    if steve_harness_spec::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
         return Err(ApiError::bad_request(
             "only registered built-in harness components can be installed",
         ));

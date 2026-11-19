@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use steve_acp::StateDirRuntime;
 use steve_acp::oneshot::{Image, OneShotError};
 use steve_node_api::*;
 use tokio::sync::Notify;
