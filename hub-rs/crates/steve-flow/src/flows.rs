@@ -6,7 +6,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
-use steve_store::{ChangeEvent, Tx, uid};
+use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 use crate::cron::{CronExpr, parse_tz};
@@ -118,10 +118,12 @@ pub struct NewFlow<'a> {
 }
 
 fn publish(tx: &Tx, ws: &str, id: &str) {
-    tx.publish(ChangeEvent::Flow {
-        id: id.into(),
-        ws: ws.into(),
-    });
+    tx.publish(steve_types::DomainEvent::from(
+        steve_types::AutomationEvent::Flow {
+            id: id.into(),
+            ws: ws.into(),
+        },
+    ));
 }
 
 /// Inserts a flow at version 1 with its triggers.

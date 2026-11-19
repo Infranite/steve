@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_modules::accounts::connections::{ConnCx, Connections, shown};
 use steve_modules::{ApiError, ApiResult, Caller};
-use steve_store::{ChangeEvent, Tx};
+use steve_store::Tx;
 
 use crate::adapter::{AdapterError, EventAdapter, EventTypeDef};
 use crate::{FlowCx, FlowResult};
@@ -533,10 +533,12 @@ pub fn patch_tx(
             }
         }
         save(tx, &s, now)?;
-        tx.publish(ChangeEvent::Connection {
-            id: conn.id.clone(),
-            ws: ws.into(),
-        });
+        tx.publish(steve_types::DomainEvent::from(
+            steve_types::ChannelsEvent::Connection {
+                id: conn.id.clone().into(),
+                ws: ws.into(),
+            },
+        ));
     }
     steve_store::base::audit(
         tx,
@@ -586,10 +588,12 @@ pub async fn refresh_scopes(cx: &FlowCx, who: &Caller, adapter: &str) -> FlowRes
                 })
                 .collect();
             save(tx, &s, now)?;
-            tx.publish(ChangeEvent::Connection {
-                id: id.clone(),
-                ws: who.ws.clone(),
-            });
+            tx.publish(steve_types::DomainEvent::from(
+                steve_types::ChannelsEvent::Connection {
+                    id: id.clone().into(),
+                    ws: who.ws.clone().into(),
+                },
+            ));
         }
         Ok(())
     })?;

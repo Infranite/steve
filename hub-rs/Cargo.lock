@@ -5618,6 +5618,7 @@ dependencies = [
  "steve-node",
  "steve-node-api",
  "steve-store",
+ "steve-types",
  "steve-work-api",
  "tempfile",
  "thiserror 2.0.21",
