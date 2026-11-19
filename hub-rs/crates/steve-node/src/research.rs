@@ -379,14 +379,6 @@ impl LocalNode {
         budget_epoch: u64,
     ) -> Option<Stop> {
         let inner = &self.0;
-        // Check the owner's atomic alarms before asking a failed owner for cancellation state.
-        // The epoch remembers a refused window even after space has recovered.
-        if inner.over_limit() || inner.j.budget_epoch() != budget_epoch {
-            return Some(Stop::JournalBudget);
-        }
-        if inner.faulted() {
-            return Some(Stop::JournalFailed);
-        }
         let now = now();
         if inner
             .j
@@ -406,6 +398,10 @@ impl LocalNode {
             Some(Stop::Offline)
         } else if output > limits.max_output_bytes {
             Some(Stop::Output)
+        } else if inner.over_limit() || inner.j.budget_epoch() != budget_epoch {
+            Some(Stop::JournalBudget)
+        } else if inner.faulted() {
+            Some(Stop::JournalFailed)
         } else {
             None
         }

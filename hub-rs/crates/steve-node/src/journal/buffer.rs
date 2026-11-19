@@ -98,7 +98,13 @@ impl Prepared {
         }
         // Text is the last field of this fixed wire variant. Reuse its already escaped JSON
         // contents: neither the old text nor the new text is serialized a second time.
+        debug_assert!(self.body_json.ends_with("\"}"));
+        debug_assert!(next.body_json.ends_with("\"}"));
         let start = next.body_json.len() - 2 - escaped_len(bt);
+        debug_assert!(next.body_json[..start].ends_with("\"text\":\""));
+        debug_assert!(
+            self.body_json[..self.body_json.len() - 2 - escaped_len(at)].ends_with("\"text\":\"")
+        );
         self.body_json.truncate(self.body_json.len() - 2);
         self.body_json.push_str(&next.body_json[start..]);
         at.push_str(bt);

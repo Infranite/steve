@@ -1,10 +1,10 @@
 //! The Node's execution journal: what it accepted, what it reported and
 //! where its streams stand, on disk. No business truth: the Hub keeps items, queues and decisions.
 //!
-//! One dedicated thread owns the connection, counters and pending stream data. State changes
+//! One mutex owns the connection, counters and pending stream data. A timer flushes due data. State changes
 //! ([`Journal::tx`]) commit immediately with pending data; streaming updates ([`Journal::events`])
 //! share one 200 ms / 64 input events / 256 KiB window. Numbering belongs to the committing
-//! transaction. Reads, including reconciliation snapshots, run on the owner and see committed
+//! transaction. Reads, including reconciliation snapshots, run under the same lock and see committed
 //! state and stream heads together. Polling readers never flush the window.
 //!
 //! On every start the Node is a new incarnation. What was accepted and had not finished is then
@@ -15,12 +15,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 mod buffer;
-mod dispatch;
 #[cfg(test)]
 mod tests;
 pub(crate) use buffer::{needs_budget, prepare};
@@ -68,7 +67,8 @@ DROP TABLE IF EXISTS disk_observations;
 const VERSION: i64 = 3;
 
 pub(crate) struct Journal {
-    sender: Option<mpsc::Sender<dispatch::Job>>,
+    writer: Arc<Mutex<Writer>>,
+    sender: Option<mpsc::SyncSender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
     metrics: Arc<Metrics>,
 }
@@ -77,10 +77,50 @@ pub(crate) struct Journal {
 struct Metrics {
     used: AtomicU64,
     limit: AtomicU64,
-    failed: AtomicBool,
-    full: AtomicBool,
-    budget_epoch: AtomicU64,
+    alarm: Alarm,
+    #[cfg(test)]
     commits: AtomicU64,
+}
+
+/// One journal alarm: low bits are capacity/failure, high bits count lost windows.
+/// Local admission failures never advance it; accepted windows do, even after recovery.
+#[derive(Default)]
+struct Alarm(AtomicU64);
+impl Alarm {
+    const FULL: u64 = 1;
+    const FAILED: u64 = 2;
+    fn full(&self) -> bool {
+        self.0.load(Ordering::Acquire) & Self::FULL != 0
+    }
+    fn failed(&self) -> bool {
+        self.0.load(Ordering::Acquire) & Self::FAILED != 0
+    }
+    fn epoch(&self) -> u64 {
+        self.0.load(Ordering::Acquire) >> 2
+    }
+    fn set_full(&self, full: bool) {
+        if full {
+            self.0.fetch_or(Self::FULL, Ordering::AcqRel);
+        } else {
+            self.0.fetch_and(!Self::FULL, Ordering::AcqRel);
+        }
+    }
+    fn fail(&self, error: &ApiError) {
+        match error.code {
+            ErrorCode::Exhausted => {
+                self.0
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                        Some((state + 4) | Self::FULL)
+                    })
+                    .ok();
+            }
+            ErrorCode::Internal => self.fault(),
+            _ => {}
+        }
+    }
+    fn fault(&self) {
+        self.0.fetch_or(Self::FAILED, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,10 +147,9 @@ struct Writer {
     limit: u64,
     storage: crate::Storage,
     home: std::path::PathBuf,
-    checked_space: Instant,
+    checked_space: Option<Instant>,
     free: Option<u64>,
     pending: buffer::Buffer,
-    pending_error: Option<ApiError>,
     metrics: Arc<Metrics>,
     wake: Option<Arc<tokio::sync::Notify>>,
 }
@@ -126,31 +165,64 @@ impl Drop for Journal {
 
 impl Journal {
     pub fn open(path: &Path) -> ApiResult<(Self, u64)> {
-        let (mut writer, incarnation) = Writer::open(path)?;
+        let (writer, incarnation) = Writer::open(path)?;
         let metrics = writer.metrics.clone();
-        let (sender, receiver) = mpsc::channel::<dispatch::Job>();
-        let failure = metrics.clone();
+        let writer = Arc::new(Mutex::new(writer));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let timer_writer = writer.clone();
         let thread = std::thread::Builder::new()
-            .name("node-journal".into())
+            .name("node-journal-flush".into())
             .spawn(move || {
-                struct Exit(Arc<Metrics>);
-                impl Drop for Exit {
-                    fn drop(&mut self) {
-                        self.0.failed.store(true, Ordering::Release);
-                    }
+                let alarm = timer_writer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .metrics
+                    .clone();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::run_timer(timer_writer, receiver)
+                }))
+                .is_err()
+                {
+                    alarm.alarm.fault();
                 }
-                let _exit = Exit(failure);
-                writer.run(receiver);
             })
             .map_err(internal)?;
         Ok((
             Self {
+                writer,
                 sender: Some(sender),
                 thread: Some(thread),
                 metrics,
             },
             incarnation,
         ))
+    }
+
+    fn run_timer(writer: Arc<Mutex<Writer>>, receiver: mpsc::Receiver<()>) {
+        let mut next_sample = Instant::now() + Duration::from_millis(500);
+        loop {
+            let due = {
+                let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
+                let now = Instant::now();
+                if w.pending.deadline().is_some_and(|due| due <= now) {
+                    let _ = w.flush(); // Window errors belong to the alarm, never the next caller.
+                }
+                if now >= next_sample {
+                    if let Err(error) = w.refresh() {
+                        w.fail(&error);
+                    }
+                    next_sample = Instant::now() + Duration::from_millis(500);
+                }
+                w.pending.deadline().unwrap_or(next_sample).min(next_sample)
+            };
+            match receiver.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = writer.lock().unwrap_or_else(|e| e.into_inner()).flush();
+                    return;
+                }
+            }
+        }
     }
 
     pub fn configure(
@@ -166,46 +238,39 @@ impl Journal {
     }
 
     fn call<R: Send>(&self, f: impl FnOnce(&mut Writer) -> ApiResult<R> + Send) -> ApiResult<R> {
-        let execute = || dispatch::call(self.sender.as_ref().expect("live journal"), f);
-        // A slow disk must not occupy every runtime worker while the connection owner waits.
-        // Synchronous use and current-thread runtimes remain supported, without block_in_place.
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(runtime)
-                if matches!(
-                    runtime.runtime_flavor(),
-                    tokio::runtime::RuntimeFlavor::MultiThread
-                ) =>
-            {
-                tokio::task::block_in_place(execute)
-            }
-            _ => execute(),
-        };
-        match result {
-            Ok(reply) => reply,
-            Err(error) => {
-                self.metrics.failed.store(true, Ordering::Release);
-                Err(error)
-            }
-        }
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        // An unwind drops this guard. SQLite rolls back and commit_buffered restores the tail;
+        // poison is deliberately recoverable, as with the original connection mutex.
+        let result = f(&mut writer);
+        drop(writer);
+        let _ = self.sender.as_ref().expect("live journal").try_send(());
+        result
     }
 
     pub fn failed(&self) -> bool {
-        self.metrics.failed.load(Ordering::Acquire)
+        self.metrics.alarm.failed()
     }
-
+    pub fn fault(&self) {
+        self.metrics.alarm.fault();
+    }
+    pub fn full(&self) -> bool {
+        self.metrics.alarm.full()
+    }
+    pub fn set_full(&self, full: bool) {
+        self.metrics.alarm.set_full(full);
+    }
     pub fn over_limit(&self) -> bool {
+        // Admission hysteresis can reject a large request while existing work still fits.
+        // Running attempts stop only for actual exhaustion or a lost-window epoch.
         self.metrics.used.load(Ordering::Acquire) >= self.metrics.limit.load(Ordering::Acquire)
-            || self.metrics.full.load(Ordering::Acquire)
     }
-
     pub fn budget_epoch(&self) -> u64 {
-        self.metrics.budget_epoch.load(Ordering::Acquire)
+        self.metrics.alarm.epoch()
     }
 
-    /// A dropped, refused window remains a failure of every attempt that was already running,
-    /// even if an ack frees space before its next 500 ms poll or before its terminal transaction.
+    /// A lost accepted window remains a failure even after capacity recovers.
     pub fn recorded_completion(&self, since: u64, mut completion: Completion) -> Completion {
-        if self.budget_epoch() != since {
+        if self.budget_epoch() != since && completion.outcome == Outcome::Succeeded {
             completion.outcome = Outcome::Cancelled;
             completion.stop_reason = "cancelled".into();
             completion.error = Some(NodeStop::JournalBudget.error());
@@ -276,21 +341,6 @@ impl Journal {
 /// The printed form of a journal id (the random value kept in meta).
 fn journal_tag(v: i64) -> String {
     format!("{:016x}", v as u64)
-}
-
-/// Free bytes on the filesystem of `dir` for an unprivileged writer; `None` if it cannot be read.
-/// Advisory: another process may take the space before the journal writes.
-pub(crate) fn free_bytes(dir: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `st` is written by statvfs before it is read.
-    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let st = unsafe { st.assume_init() };
-    #[allow(clippy::unnecessary_cast)] // the field types differ between platforms
-    Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
 }
 
 /// One transaction on the journal.
@@ -432,10 +482,9 @@ impl Writer {
             limit: u64::MAX,
             storage: crate::Storage::default(),
             home: path.parent().unwrap_or(Path::new(".")).into(),
-            checked_space: Instant::now() - Duration::from_secs(10),
+            checked_space: None,
             free: None,
             pending: Default::default(),
-            pending_error: None,
             metrics: Arc::new(Metrics::default()),
             wake: None,
         };
@@ -502,55 +551,35 @@ impl Writer {
         Ok((j, incarnation))
     }
 
-    fn run(&mut self, receiver: mpsc::Receiver<dispatch::Job>) {
-        let mut next_sample = Instant::now() + Duration::from_millis(500);
-        loop {
-            let now = Instant::now();
-            if self.pending.deadline().is_some_and(|due| due <= now) {
-                if let Err(e) = self.flush() {
-                    if !self.pending.events.is_empty() {
-                        self.pending.since = Some(Instant::now());
-                    }
-                    self.pending_error = Some(e);
-                }
-            }
-            if now >= next_sample {
-                if let Err(e) = self.refresh() {
-                    self.fail(&e);
-                }
-                next_sample = Instant::now() + Duration::from_millis(500);
-            }
-            let due = self
-                .pending
-                .deadline()
-                .unwrap_or(next_sample)
-                .min(next_sample);
-            match receiver.recv_timeout(due.saturating_duration_since(Instant::now())) {
-                Ok(job) => job.run(self),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = self.flush();
-                    return;
-                }
-            }
-        }
+    fn refresh(&mut self) -> ApiResult<()> {
+        self.sample_pages()?;
+        self.sample_space();
+        Ok(())
     }
 
-    fn refresh(&mut self) -> ApiResult<()> {
+    fn sample_pages(&mut self) -> ApiResult<()> {
         let (page, count, free): (u64, u64, u64) = self.db.query_row(
             "SELECT (SELECT page_size FROM pragma_page_size), (SELECT page_count FROM pragma_page_count), (SELECT freelist_count FROM pragma_freelist_count)",
             [], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64))).map_err(internal)?;
         let previous_used = self.used;
-        let previous_limit = self.limit;
         self.used = count.saturating_sub(free) * page;
         self.file = count * page;
-        // The injected observer deliberately stays synchronous, so fault fixtures can stop one
-        // real writer transaction. Production statvfs is sampled at most once per ten seconds.
+        self.publish_space(previous_used, self.limit);
+        Ok(())
+    }
+
+    fn sample_space(&mut self) {
+        let previous_limit = self.limit;
+        // The injected observer stays synchronous for admission/fault fixtures. Production
+        // statvfs is sampled at most once per ten seconds; neither path queries SQLite pages.
         if let Some(observer) = &self.storage.free_space {
             self.free = Some(observer());
-        } else if self.checked_space.elapsed() >= Duration::from_secs(10) {
-            self.free = free_bytes(&self.home);
-            self.checked_space = Instant::now();
+        } else if self
+            .checked_space
+            .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(10))
+        {
+            self.free = crate::space::free_bytes(&self.home);
+            self.checked_space = Some(Instant::now());
         }
         self.limit = match self.free {
             Some(free) => self.storage.quota.min(
@@ -560,39 +589,25 @@ impl Writer {
             ),
             None => self.storage.quota,
         };
+        self.publish_space(self.used, previous_limit);
+    }
+
+    fn publish_space(&self, previous_used: u64, previous_limit: u64) {
         self.metrics.used.store(self.used, Ordering::Release);
         self.metrics.limit.store(self.limit, Ordering::Release);
         if self.used < self.limit.saturating_mul(self.storage.low_water as u64) / 100
             && (self.used < previous_used || self.limit > previous_limit)
         {
-            self.metrics.full.store(false, Ordering::Release);
-            if self
-                .pending_error
-                .as_ref()
-                .is_some_and(|e| e.code == ErrorCode::Exhausted)
-            {
-                self.pending_error = None;
-            }
+            self.metrics.alarm.set_full(false);
         }
-        Ok(())
     }
 
     fn fail(&self, e: &ApiError) {
-        match e.code {
-            ErrorCode::Exhausted => {
-                self.metrics.full.store(true, Ordering::Release);
-                self.metrics.budget_epoch.fetch_add(1, Ordering::AcqRel);
-            }
-            ErrorCode::Internal => self.metrics.failed.store(true, Ordering::Release),
-            _ => {}
-        }
+        self.metrics.alarm.fail(e);
     }
 
     fn enqueue(&mut self, events: Vec<buffer::Prepared>) -> ApiResult<()> {
-        if let Some(e) = self.pending_error.take() {
-            return Err(e);
-        }
-        // Refuse before changing the buffer, so an exhausted update has no accepted prefix.
+        // Refusal is local: nothing in this update has transferred to the shared window yet.
         let incoming = events
             .iter()
             .filter(|event| event.data())
@@ -606,33 +621,31 @@ impl Writer {
                 self.limit,
             )
         {
-            let e = NodeStop::JournalBudget.error();
-            self.fail(&e);
-            return Err(e);
+            return Err(NodeStop::JournalBudget.error());
         }
-        let mut immediate = false;
-        for event in events {
-            // Budget-exempt closing facts stay with their caller on a failed immediate write.
-            // They must not sit behind refused data, or also survive in the writer's window.
-            if !event.data() {
-                let incarnation = self.incarnation;
-                self.write(|t| t.emit(&event, incarnation))?;
-                immediate = false;
-                continue;
+        // Any causal/closing fact makes this whole update caller-owned until one control commit.
+        // A failure cannot leave a committed prefix for the caller's terminal retry to duplicate.
+        if events.iter().any(|event| event.boundary() || !event.data()) {
+            let incarnation = self.incarnation;
+            let mut update = buffer::Buffer::default();
+            for event in events {
+                update.push(event);
             }
-            immediate |= event.boundary();
+            return self.write(|t| {
+                for event in &update.events {
+                    t.emit(event, incarnation)?;
+                }
+                Ok(())
+            });
+        }
+        for event in events {
             self.pending.push(event);
             if self.pending.ready() {
-                self.flush()?;
-                immediate = false;
+                // These events have transferred to the window. Errors are published by flush's
+                // alarm, never returned to a different producer or retried by this caller.
+                let _ = self.flush();
             }
         }
-        // Boundaries end coalescing immediately, while all events of this update can still share
-        // one commit. This avoids partially committing an ordinary multi-event actor update.
-        if immediate {
-            self.flush()?;
-        }
-
         Ok(())
     }
 
@@ -643,6 +656,9 @@ impl Writer {
         let result = self.commit_buffered(WriteMode::Window, |_| Ok(()));
         if let Err(error) = &result {
             self.fail(error);
+            if !self.pending.events.is_empty() {
+                self.pending.since = Some(Instant::now());
+            }
         }
         result
     }
@@ -656,13 +672,15 @@ impl Writer {
         mode: WriteMode,
         f: impl FnOnce(&Tx) -> ApiResult<R>,
     ) -> ApiResult<R> {
-        // Refresh once per state transaction, never once per event. The first sample also sees
-        // operator/fault-fixture writes made through a separate SQLite connection.
-        self.refresh()?;
+        // Capacity is sampled once before admission; pages once after COMMIT. Ordinary event
+        // enqueue and actor limit checks use the cached values without touching the connection.
+        self.sample_space();
         let mut pending = self.pending.take();
         if pending.over_budget(self.used, self.limit) {
             let error = NodeStop::JournalBudget.error();
-            self.fail(&error);
+            if mode == WriteMode::Control {
+                self.fail(&error);
+            }
             // As with the old refused Held text, data cannot block cancellation, permission
             // answers or terminal receipts. The epoch makes the lost window visible to its run.
             if mode == WriteMode::Window {
@@ -672,28 +690,34 @@ impl Writer {
         }
         let incarnation = self.incarnation;
         let mut data_failed = false;
-        let result = self.tx(|t| {
-            for event in &pending.events {
-                if let Err(e) = t.emit(event, incarnation) {
-                    data_failed = true;
-                    return Err(e);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.transaction(TransactionBehavior::Immediate, |t| {
+                for event in &pending.events {
+                    if let Err(e) = t.emit(event, incarnation) {
+                        data_failed = true;
+                        return Err(e);
+                    }
                 }
+                f(t)
+            })
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(panic) => {
+                self.pending = pending;
+                std::panic::resume_unwind(panic);
             }
-            f(t)
-        });
+        };
         if let Err(e) = &result {
             // An admission can be exhausted for its own request-size/policy limit. Only an
             // actual event-budget refusal (or IO failure) changes running actors' journal alarm.
-            if data_failed {
+            if data_failed && mode == WriteMode::Control {
                 self.fail(e);
             }
             if e.code != ErrorCode::Exhausted || !data_failed {
                 self.pending = pending;
-                // Admission/policy errors must preserve the original window and input budget.
-                // Only IO failures retry at a fresh cadence instead of busy-looping overdue.
-                if e.code == ErrorCode::Internal && !self.pending.events.is_empty() {
-                    self.pending.since = Some(Instant::now());
-                }
+                // Keep the original deadline/count. Only the timer's failed flush resets its
+                // retry cadence; rejected caller transactions cannot extend a data window.
             }
         }
         result
@@ -756,8 +780,9 @@ impl Writer {
         }
         self.counters.extend(counters);
         if matches!(behavior, TransactionBehavior::Immediate) {
+            #[cfg(test)]
             self.metrics.commits.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = self.refresh() {
+            if let Err(e) = self.sample_pages() {
                 self.fail(&e);
             }
             if let Some(wake) = &self.wake {

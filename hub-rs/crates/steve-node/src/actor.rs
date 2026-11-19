@@ -597,8 +597,8 @@ impl Actor {
                             _ => None,
                         })
                         .collect();
-                    if let Err(error) = self.inner.j.events(events, None) {
-                        self.update_failed(error, vec![], true);
+                    if self.inner.j.events(events.clone(), None).is_err() {
+                        self.later(Msg::Facts { events });
                     }
                 }
             }
@@ -2837,5 +2837,158 @@ mod state_import_tests {
         std::fs::write(own.join("real.json"), "{\"ok\":true}").unwrap();
         let real_segs = valid_rel_path("real.json").unwrap();
         assert!(read_owner_regular_file(&own, &real_segs).is_some());
+    }
+}
+
+#[cfg(test)]
+mod journal_regressions {
+    use super::*;
+    use crate::{LocalNode, NodeConfig, PolicyCeiling, Storage};
+    use std::sync::atomic::AtomicU64;
+
+    fn actor(dir: &std::path::Path) -> Actor {
+        let node = LocalNode::open(NodeConfig {
+            node: NodeId::new("hub").unwrap(),
+            home: dir.join("node"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: Default::default(),
+                node: "node".into(),
+                claude_executable: "claude".into(),
+                steve_home: dir.join("steve"),
+                codex_home: dir.join("codex"),
+                user_home: dir.into(),
+                version: "test".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+            ceiling: PolicyCeiling::unlimited(),
+        })
+        .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = mpsc::channel(64);
+        let mut actor = Actor {
+            inner: node.0,
+            session: SessionId::new("session").unwrap(),
+            rx,
+            tx,
+            data_tx,
+            data_rx,
+            gate: Arc::default(),
+            live: None,
+            run: None,
+            opening: None,
+            waits: HashMap::new(),
+            tokens: 0,
+            retry_armed: false,
+            children: tokio::task::JoinSet::new(),
+            pending: vec![],
+            sending: 0,
+            deferred_prompt: None,
+            stage_cancel: None,
+            stage_task: None,
+        };
+        let mut spec = steve_node_api::testkit::build::turn("session", "turn", "attempt", "hello");
+        spec.run.limits.deadline = Timestamp(now() + 60_000);
+        spec.run.limits.offline_until = Timestamp(now() + 60_000);
+        let exec = ExecutionRef::Turn {
+            session: spec.session.clone(),
+            turn: spec.turn.clone(),
+            attempt: spec.run.attempt.clone(),
+        };
+        actor.run = Some(Run {
+            token: 1,
+            budget_epoch: actor.inner.j.budget_epoch(),
+            exec,
+            op: OperationId::new("op").unwrap(),
+            spec: Box::new(spec),
+            norm: Normalizer::new(dir, "attempt", Epoch::new("meter").unwrap()),
+            phase: Phase::Starting,
+            acted: false,
+            cancel: false,
+            stopped: None,
+            ending: None,
+            closing: None,
+            final_usage: vec![],
+            usage_stop: None,
+            usage_task: None,
+            usage_pending: false,
+            unknown: None,
+            images: crate::inline_images::Images::for_replies(),
+            image_scope: crate::inline_images::Scope::new(dir.into(), vec![dir.into()], vec![]),
+        });
+        actor
+    }
+
+    #[tokio::test]
+    async fn usage_failure_retries_without_stopping_the_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut actor = actor(dir.path());
+        let db = rusqlite::Connection::open(actor.inner.cfg.home.join("node.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_usage BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'usage failure'); END;").unwrap();
+        let body: EventBody = serde_json::from_value(json!({"type":"usage", "report":{
+            "report_id":"final", "meter_epoch":"meter", "scope":"main", "measurement":"final", "tokens":{"input":3}
+        }})).unwrap();
+        actor
+            .handle(Msg::Usage {
+                token: 1,
+                facts: vec![Fact::Event(body.clone())],
+            })
+            .await;
+        assert!(actor.run.as_ref().unwrap().stopped.is_none());
+        assert!(!actor.inner.faulted());
+        assert_eq!(actor.pending.len(), 1);
+        db.execute_batch("DROP TRIGGER fail_usage").unwrap();
+        let retry = actor.pending.pop().unwrap();
+        actor.run = None; // Settlement must survive the attempt/token leaving the actor.
+        actor.handle(retry).await;
+        assert!(actor.pending.is_empty());
+        let events = actor
+            .inner
+            .j
+            .read(|t| t.unacked_past(&HashMap::new(), 1024))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].body, body);
+    }
+
+    #[tokio::test]
+    async fn check_limits_finishes_while_connection_is_locked_without_sampling_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut actor = actor(dir.path());
+        let samples = Arc::new(AtomicU64::new(0));
+        let counter = samples.clone();
+        let mut storage = Storage::default();
+        storage.free_space = Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            u64::MAX
+        }));
+        actor
+            .inner
+            .j
+            .configure(storage, actor.inner.wake.clone())
+            .unwrap();
+        let inner = actor.inner.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let hold = std::thread::spawn(move || {
+            inner.j.read(move |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let before = samples.load(Ordering::SeqCst);
+        actor.check_limits();
+        assert_eq!(samples.load(Ordering::SeqCst), before);
+        assert!(actor.run.as_ref().unwrap().stopped.is_none());
+        release_tx.send(()).unwrap();
+        hold.join().unwrap().unwrap();
     }
 }

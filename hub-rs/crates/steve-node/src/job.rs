@@ -149,6 +149,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             &on_message,
             &pending_usage,
             &stop_execution,
+            &broken,
         )
         .await)
     };
@@ -261,6 +262,7 @@ async fn acp_think(
     on_message: &(dyn Fn(u32, &str) + Send + Sync),
     pending_usage: &Mutex<Vec<UsageReport>>,
     stop_execution: &Notify,
+    broken: &AtomicBool,
 ) -> Ran {
     use crate::acp_job::OneShotError;
     use serde_json::json;
@@ -374,7 +376,7 @@ async fn acp_think(
                     .events(vec![(Subject::Execution(exec), diagnostic)], None)
                     .is_err()
                 {
-                    inner.fault();
+                    broken.store(true, Ordering::SeqCst);
                 }
                 inner.wake.notify_one();
             }
@@ -396,7 +398,7 @@ async fn acp_think(
                     )
                     .is_err()
                 {
-                    inner.fault();
+                    broken.store(true, Ordering::SeqCst);
                 } else if let Some(id) = final_id {
                     pending_usage.lock().unwrap().retain(|r| r.report_id != id);
                 }

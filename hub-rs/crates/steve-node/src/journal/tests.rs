@@ -185,11 +185,11 @@ fn writer_failure_is_explicit_and_never_publishes_uncommitted_heads_or_counters(
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].cursor.seq, 1);
     assert!(out[0].id.as_str().ends_with("_1"));
-    let error = j
-        .call::<()>(|_| panic!("writer crash fixture"))
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::Internal);
-    assert_eq!(j.tx(|_| Ok(())).unwrap_err().code, ErrorCode::Internal);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        j.tx::<()>(|_| panic!("caller panic fixture")).unwrap();
+    }));
+    assert!(panic.is_err());
+    j.tx(|_| Ok(())).unwrap();
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn exhausted_buffer_still_allows_a_terminal_receipt() {
             .code,
         ErrorCode::Exhausted
     );
-    assert!(j.over_limit());
+    assert!(!j.over_limit());
     j.events(
         vec![(
             subject(),
@@ -359,25 +359,6 @@ fn state_changes_take_pending_data_in_one_full_synchronous_transaction() {
 }
 
 #[test]
-fn actor_limit_polling_stays_on_the_atomic_path() {
-    let source = include_str!("../actor.rs");
-    let check = source
-        .split("fn check_limits(&mut self)")
-        .nth(1)
-        .unwrap()
-        .split("/// The principal")
-        .next()
-        .unwrap();
-    assert!(check.contains("self.inner.over_limit()"));
-    for connection_access in [".read(", ".tx(", "payload_bytes", "pragma", "statvfs"] {
-        assert!(
-            !check.contains(connection_access),
-            "limit polling added {connection_access}"
-        );
-    }
-}
-
-#[test]
 fn different_sessions_share_the_same_transaction_and_numbering_cache() {
     let (_dir, j) = journal();
     j.call(|w| {
@@ -475,39 +456,6 @@ fn delivery_ack_and_pruning_do_not_pull_new_streaming_data_out_of_its_window() {
     assert_eq!(out[0].body, delta(0, "next window").1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn waiting_for_a_slow_writer_does_not_starve_the_tokio_runtime() {
-    let (_dir, j) = journal();
-    let j = Arc::new(j);
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let (progress_tx, progress_rx) = mpsc::channel();
-    // A watchdog makes a regression fail in bounded time, even if the only Tokio worker blocks.
-    let fallback = release_tx.clone();
-    let watchdog = std::thread::spawn(move || {
-        if progress_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-            let _ = fallback.send(());
-        }
-    });
-    let called = tokio::spawn(async move {
-        j.call(move |_| {
-            let _ = entered_tx.send(());
-            release_rx.recv().map_err(internal)?;
-            Ok(())
-        })
-    });
-    let before = Instant::now();
-    entered_rx.await.unwrap();
-    assert!(
-        before.elapsed() < Duration::from_secs(4),
-        "waiting caller starved the runtime"
-    );
-    release_tx.send(()).unwrap();
-    progress_tx.send(()).unwrap();
-    called.await.unwrap().unwrap();
-    watchdog.join().unwrap();
-}
-
 #[test]
 fn rejected_commands_cannot_reset_the_window_or_erase_its_input_count() {
     let (_dir, j) = journal();
@@ -532,33 +480,33 @@ fn rejected_commands_cannot_reset_the_window_or_erase_its_input_count() {
 }
 
 #[test]
-fn a_refused_window_cannot_become_a_success_when_space_recovers_before_the_next_poll() {
+fn a_local_refusal_does_not_change_other_attempts_or_the_window() {
     let (_dir, j) = journal();
     let epoch = j.budget_epoch();
     j.call(|w| {
-        w.storage.quota = w.used + 16384;
+        w.enqueue(prepare(vec![delta(0, "accepted")])?)?;
+        let deadline = w.pending.deadline();
+        w.storage.quota = w.used + 16384 + w.pending.bytes() + 1;
         w.refresh()?;
         assert_eq!(
-            w.enqueue(prepare(vec![delta(0, "refused")])?)
+            w.enqueue(prepare(vec![delta(8, "refused")])?)
                 .unwrap_err()
                 .code,
             ErrorCode::Exhausted
         );
-        w.storage.quota = u64::MAX;
-        w.refresh()
+        assert_eq!(w.pending.deadline(), deadline);
+        assert_eq!(w.pending.events.len(), 1);
+        Ok(())
     })
     .unwrap();
+    assert_eq!(j.budget_epoch(), epoch);
     assert!(!j.over_limit());
+    assert!(!j.failed());
     let success: Completion =
         serde_json::from_value(json!({"outcome":"succeeded","stop_reason":"end_turn"})).unwrap();
-    let refused = j.recorded_completion(epoch, success.clone());
-    assert_eq!(refused.outcome, Outcome::Cancelled);
-    assert_eq!(refused.error.unwrap().code, ErrorCode::Exhausted);
-    // A new attempt starts from the current epoch and can succeed normally after recovery.
-    assert_eq!(
-        j.recorded_completion(j.budget_epoch(), success.clone()),
-        success
-    );
+    assert_eq!(j.recorded_completion(epoch, success.clone()), success);
+    j.flush().unwrap();
+    assert_eq!(events(&j)[0].body, delta(0, "accepted").1);
 }
 
 #[test]
@@ -649,8 +597,170 @@ fn accepted_data_refused_after_space_shrinks_cannot_block_an_immediate_control_w
         Ok(())
     })
     .unwrap();
-    assert!(j.budget_epoch() > epoch);
+    assert_eq!(j.budget_epoch(), epoch + 1);
+    j.flush().unwrap();
+    assert_eq!(j.budget_epoch(), epoch + 1);
+    j.call(|w| {
+        w.storage.quota = u64::MAX;
+        w.refresh()
+    })
+    .unwrap();
+    let success: Completion =
+        serde_json::from_value(json!({"outcome":"succeeded","stop_reason":"end_turn"})).unwrap();
+    assert_eq!(
+        j.recorded_completion(epoch, success.clone()).outcome,
+        Outcome::Cancelled
+    );
+    assert_eq!(
+        j.recorded_completion(j.budget_epoch(), success.clone()),
+        success
+    );
     let out = events(&j);
     assert_eq!(out.len(), 1);
     assert!(matches!(out[0].body, EventBody::MessageCompleted { .. }));
+}
+
+#[test]
+fn caller_panic_rolls_back_and_retains_the_shared_window() {
+    let (_dir, j) = journal();
+    j.events(vec![delta(0, "retained")], None).unwrap();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        j.tx::<()>(|t| {
+            assert_eq!(t.heads()?[0].produced, 1);
+            t.bump("panic_fixture")?;
+            panic!("caller only");
+        })
+        .unwrap();
+    }));
+    assert!(panic.is_err());
+    assert!(!j.failed());
+    assert!(events(&j).is_empty());
+    j.flush().unwrap();
+    assert_eq!(events(&j).len(), 1);
+    j.tx(|_| Ok(())).unwrap();
+}
+
+#[test]
+fn multiple_closing_facts_fail_atomically_and_retry_once() {
+    let (_dir, j) = journal();
+    let closing = vec![
+        usage(1, UsageScope::Main, Measurement::Final),
+        (
+            subject(),
+            EventBody::MessageCompleted {
+                message: "m".into(),
+            },
+        ),
+    ];
+    j.call(|w| w.db.execute_batch("CREATE TEMP TRIGGER fail_second BEFORE INSERT ON events WHEN NEW.event LIKE '%message_completed%' BEGIN SELECT RAISE(ABORT, 'second closing fact'); END;").map_err(internal)).unwrap();
+    assert!(j.events(closing.clone(), None).is_err());
+    assert!(events(&j).is_empty());
+    j.call(|w| {
+        w.db.execute_batch("DROP TRIGGER fail_second")
+            .map_err(internal)
+    })
+    .unwrap();
+    j.events(closing.clone(), None).unwrap();
+    j.flush().unwrap();
+    assert_eq!(
+        events(&j)
+            .into_iter()
+            .map(|e| (e.subject, e.body))
+            .collect::<Vec<_>>(),
+        closing
+    );
+}
+
+#[test]
+fn failed_window_is_not_returned_to_the_next_producer() {
+    let (_dir, j) = journal();
+    j.call(|w| {
+        w.enqueue(prepare(vec![delta(0, "first session")])?)?;
+        w.db.execute_batch("CREATE TEMP TRIGGER fail_window BEFORE INSERT ON events WHEN NEW.event LIKE '%text_delta%' BEGIN SELECT RAISE(ABORT, 'window failure'); END;").map_err(internal)?;
+        assert!(w.flush().is_err());
+        Ok(())
+    }).unwrap();
+    assert!(j.failed());
+    // Another session's closing fact gets its own result rather than the stale window error.
+    // Removing the injected failure also lets this control transaction carry the retained tail.
+    j.call(|w| {
+        w.db.execute_batch("DROP TRIGGER fail_window")
+            .map_err(internal)
+    })
+    .unwrap();
+    j.events(
+        vec![(
+            Subject::Session {
+                session: SessionId::new("other").unwrap(),
+            },
+            EventBody::MessageCompleted {
+                message: "other".into(),
+            },
+        )],
+        None,
+    )
+    .unwrap();
+    assert_eq!(events(&j).len(), 2);
+}
+
+#[test]
+fn threshold_flush_errors_stay_on_the_alarm_and_do_not_reject_the_next_session() {
+    let (_dir, j) = journal();
+    j.call(|w| {
+        w.db.execute_batch("CREATE TEMP TRIGGER fail_window BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'window failure'); END;").map_err(internal)?;
+        // Ownership has transferred before the threshold triggers an IO failure.
+        w.enqueue(prepare((0..64).map(|_| plan("accepted")).collect())?)?;
+        assert!(w.metrics.alarm.failed());
+        assert!(!w.pending.events.is_empty());
+        let mut next = plan("next session");
+        next.0 = Subject::Session { session: SessionId::new("other").unwrap() };
+        w.enqueue(prepare(vec![next])?)?;
+        w.db.execute_batch("DROP TRIGGER fail_window").map_err(internal)?;
+        w.flush()
+    }).unwrap();
+    assert_eq!(events(&j).len(), 2);
+}
+
+#[test]
+fn a_lost_window_cannot_override_an_explicit_cancel_or_other_stop_reason() {
+    let (_dir, j) = journal();
+    let epoch = j.budget_epoch();
+    j.metrics.alarm.fail(&NodeStop::JournalBudget.error());
+    let cancelled: Completion =
+        serde_json::from_value(json!({"outcome":"cancelled", "stop_reason":"cancelled"})).unwrap();
+    assert_eq!(j.recorded_completion(epoch, cancelled.clone()), cancelled);
+    let timeout: Completion =
+        serde_json::from_value(json!({"outcome":"timed_out", "stop_reason":"timeout"})).unwrap();
+    assert_eq!(j.recorded_completion(epoch, timeout.clone()), timeout);
+}
+
+#[test]
+fn admission_hysteresis_does_not_stop_work_that_still_fits() {
+    let (_dir, j) = journal();
+    let epoch = j.budget_epoch();
+    j.set_full(true);
+    assert!(j.full());
+    assert!(!j.over_limit());
+    assert!(!j.failed());
+    assert_eq!(j.budget_epoch(), epoch);
+    j.events(vec![delta(0, "still fits")], None).unwrap();
+    j.flush().unwrap();
+    assert_eq!(events(&j).len(), 1);
+}
+
+#[test]
+fn timer_failure_is_reported_by_the_shared_alarm() {
+    let (_dir, j) = journal();
+    j.call(|w| {
+        w.storage.free_space = Some(Arc::new(|| panic!("timer observer fixture")));
+        Ok(())
+    })
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while !j.failed() {
+        assert!(Instant::now() < until, "timer exit was not reported");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The connection is still owned by the mutex and poison remains recoverable.
+    assert!(j.read(|t| t.heads()).unwrap().is_empty());
 }

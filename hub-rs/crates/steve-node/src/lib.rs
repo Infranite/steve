@@ -19,6 +19,7 @@ mod adapter_updates;
 mod artifact;
 mod attachments;
 mod confine;
+mod space;
 
 mod bot_mcp;
 mod bot_skills;
@@ -479,10 +480,6 @@ pub(crate) struct Inner {
     wake: Arc<tokio::sync::Notify>,
     delivering: AtomicBool,
     closed: AtomicBool,
-    /// The journal failed: no new work until a restart.
-    faulted: AtomicBool,
-    /// The journal reached its limit: no new work until it is under the low-water mark.
-    full: AtomicBool,
     /// Since when the Hub does not take events (for the offline lease).
     hub_down_since: Mutex<Option<i64>>,
     /// What each session's harness sent during its running attempt (bytes, as it arrived).
@@ -549,10 +546,10 @@ impl Inner {
         self.roots.read().unwrap().clone()
     }
     pub(crate) fn fault(&self) {
-        self.faulted.store(true, Ordering::SeqCst);
+        self.j.fault();
     }
     pub(crate) fn faulted(&self) -> bool {
-        self.faulted.load(Ordering::SeqCst) || self.j.failed()
+        self.j.failed()
     }
     pub(crate) fn hub_down_since(&self) -> Option<i64> {
         *self.hub_down_since.lock().unwrap()
@@ -574,11 +571,7 @@ impl Inner {
 
     /// Limit checks never visit the journal connection or filesystem.
     pub(crate) fn over_limit(&self) -> bool {
-        let over = self.j.over_limit();
-        if over {
-            self.full.store(true, Ordering::SeqCst);
-        }
-        over
+        self.j.over_limit()
     }
 }
 
@@ -718,12 +711,7 @@ fn cut_strings(v: &mut Value, keep: usize) {
 /// Journal events in `t` (numbered in their streams as part of the transaction).
 pub(crate) fn emit_all(inner: &Inner, t: &Tx, evs: Vec<(Subject, EventBody)>) -> ApiResult<()> {
     for event in journal::prepare(evs)? {
-        if let Err(e) = t.emit(&event, inner.incarnation) {
-            if e.code == ErrorCode::Exhausted {
-                inner.full.store(true, Ordering::SeqCst);
-            }
-            return Err(e);
-        }
+        t.emit(&event, inner.incarnation)?;
     }
     Ok(())
 }
@@ -1529,8 +1517,6 @@ impl LocalNode {
             wake: Arc::new(tokio::sync::Notify::new()),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            faulted: AtomicBool::new(false),
-            full: AtomicBool::new(false),
             hub_down_since: Mutex::new(Some(now())),
             output: Mutex::new(HashMap::new()),
             tools: tools::Endpoint::new(Arc::new(CurrentOf(weak.clone()))),
@@ -1930,9 +1916,9 @@ impl LocalNode {
             let taken = if control {
                 used.saturating_add(bytes) < limit.saturating_add(CONTROL_MARGIN)
             } else {
-                let full = self.0.full.load(Ordering::SeqCst) || self.0.j.over_limit();
+                let full = self.0.j.full() || self.0.j.over_limit();
                 let (taken, full) = admit(full, used, bytes, limit, self.0.cfg.storage.low_water);
-                self.0.full.store(full, Ordering::SeqCst);
+                self.0.j.set_full(full);
                 taken
             };
             if bytes > 1 << 20 || !taken {
@@ -2082,7 +2068,7 @@ impl LocalNode {
             }
             None => {
                 let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-                Box::new(move || journal::free_bytes(&dir))
+                Box::new(move || space::free_bytes(&dir))
             }
         };
         Some((s.worktree_floor, free))
