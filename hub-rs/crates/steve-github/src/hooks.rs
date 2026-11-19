@@ -181,7 +181,6 @@ impl Queue {
     }
 }
 
-
 pub(crate) struct Limiter(steve_runtime::policy::Limiter<String>);
 impl Limiter {
     pub(crate) fn new(clock: Arc<dyn steve_modules::Clock>) -> Self {
