@@ -9,7 +9,6 @@ steve-acp	crates/steve-acp/src/oneshot.rs	too_many_lines	161
 steve-acp	crates/steve-acp/src/rpc.rs	too_many_lines	162
 steve-acp	crates/steve-acp/src/session.rs	too_many_lines	170
 steve-acp	crates/steve-acp/src/usage.rs	too_many_lines	142
-steve-calendar	crates/steve-calendar/src/merge.rs	too_many_lines	123
 steve-calendar	crates/steve-calendar/src/sources.rs	too_many_lines	132
 steve-calendar	crates/steve-calendar/src/sync.rs	too_many_lines	148,141,119
 steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	cognitive_complexity	38,26
@@ -139,7 +138,6 @@ steve-install	crates/steve-install/src/signing.rs	too_many_lines	154
 steve-knowledge	crates/steve-knowledge/src/candidates.rs	too_many_lines	105
 steve-knowledge	crates/steve-knowledge/src/drafts.rs	too_many_lines	109
 steve-knowledge	crates/steve-knowledge/src/index.rs	too_many_lines	105
-steve-mail	crates/steve-mail/src/mcp.rs	too_many_lines	118
 steve-mail	crates/steve-mail/src/store.rs	too_many_lines	149
 steve-modules	crates/steve-modules/src/accounts/connections/integration.rs	too_many_lines	108
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive_complexity	26
@@ -180,4 +178,3 @@ steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
 steve-store	crates/steve-store/src/repo/gateway_ledger.rs	too_many_lines	169
 steve-store	crates/steve-store/src/repo/workflows.rs	too_many_lines	116,115,108
-steve-types	crates/steve-types/src/fact.rs	too_many_lines	120

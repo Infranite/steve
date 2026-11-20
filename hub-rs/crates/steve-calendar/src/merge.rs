@@ -82,6 +82,27 @@ pub fn meetings(items: &[Item], not_same: &HashSet<(String, String)>) -> Vec<Mee
             }
         }
     };
+    join_uid_matches(items, &mut parent, &join);
+    join_organizer_matches(items, &mut parent, &join);
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().push(i);
+    }
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut out: Vec<Meeting> = groups
+        .into_values()
+        .map(|g| meeting_of_group(items, g, &mut taken))
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+fn join_uid_matches(
+    items: &[Item],
+    parent: &mut Vec<usize>,
+    join: &impl Fn(&mut Vec<usize>, usize, usize),
+) {
     // rule 2: the same uid and original start
     let mut by_uid: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -99,10 +120,17 @@ pub fn meetings(items: &[Item], not_same: &HashSet<(String, String)>) -> Vec<Mee
     for xs in by_uid.values() {
         for a in 0..xs.len() {
             for b in a + 1..xs.len() {
-                join(&mut parent, xs[a], xs[b]);
+                join(parent, xs[a], xs[b]);
             }
         }
     }
+}
+
+fn join_organizer_matches(
+    items: &[Item],
+    parent: &mut Vec<usize>,
+    join: &impl Fn(&mut Vec<usize>, usize, usize),
+) {
     // rule 3: organizer, a minute, title
     let mut by_org: BTreeMap<(String, String, String), Vec<usize>> = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -124,73 +152,63 @@ pub fn meetings(items: &[Item], not_same: &HashSet<(String, String)>) -> Vec<Mee
                 if items[xs[b]].start_ms - items[xs[a]].start_ms > 60_000 {
                     break;
                 }
-                join(&mut parent, xs[a], xs[b]);
+                join(parent, xs[a], xs[b]);
             }
         }
     }
-    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for i in 0..n {
-        let r = find(&mut parent, i);
-        groups.entry(r).or_default().push(i);
-    }
-    let mut taken: HashSet<String> = HashSet::new();
-    let mut out: Vec<Meeting> = groups
-        .into_values()
-        .map(|g| {
-            let primary = g
-                .iter()
-                .copied()
-                .min_by(|a, b| {
-                    let (x, y) = (&items[*a], &items[*b]);
-                    (!x.can_modify, !x.has_link, x.busy_only, &x.id).cmp(&(
-                        !y.can_modify,
-                        !y.has_link,
-                        y.busy_only,
-                        &y.id,
-                    ))
-                })
-                .expect("a group has a member");
-            let mut events: Vec<String> = g.iter().map(|i| items[*i].id.clone()).collect();
-            events.sort();
-            let p = &items[primary];
-            let key = match &p.ical_uid {
-                Some(uid) => format!(
-                    "uid:{uid}:{}",
-                    p.original_start
-                        .clone()
-                        .unwrap_or_else(|| p.start_ms.to_string())
-                ),
-                None => format!("event:{}", p.id),
-            };
-            let mut prior: Vec<&String> = std::iter::once(primary)
-                .chain(g.iter().copied())
-                .filter_map(|i| items[i].meeting.as_ref())
-                .collect();
-            prior.dedup();
-            let id = prior
-                .into_iter()
-                .find(|m| !taken.contains(*m))
-                .cloned()
-                .unwrap_or_else(|| {
-                    let mut parts: Vec<&str> = vec!["meeting"];
-                    parts.extend(events.iter().map(String::as_str));
-                    let mut id = format!("mtg_{}", crate::hash(&parts));
-                    while taken.contains(&id) {
-                        id = format!("mtg_{}", crate::hash(&[&id]));
-                    }
-                    id
-                });
-            taken.insert(id.clone());
-            Meeting {
-                id,
-                primary: p.id.clone(),
-                key,
-                events,
-            }
+}
+
+fn meeting_of_group(items: &[Item], g: Vec<usize>, taken: &mut HashSet<String>) -> Meeting {
+    let primary = g
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            let (x, y) = (&items[*a], &items[*b]);
+            (!x.can_modify, !x.has_link, x.busy_only, &x.id).cmp(&(
+                !y.can_modify,
+                !y.has_link,
+                y.busy_only,
+                &y.id,
+            ))
         })
+        .expect("a group has a member");
+    let mut events: Vec<String> = g.iter().map(|i| items[*i].id.clone()).collect();
+    events.sort();
+    let p = &items[primary];
+    let key = match &p.ical_uid {
+        Some(uid) => format!(
+            "uid:{uid}:{}",
+            p.original_start
+                .clone()
+                .unwrap_or_else(|| p.start_ms.to_string())
+        ),
+        None => format!("event:{}", p.id),
+    };
+    let mut prior: Vec<&String> = std::iter::once(primary)
+        .chain(g.iter().copied())
+        .filter_map(|i| items[i].meeting.as_ref())
         .collect();
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    prior.dedup();
+    let id = prior
+        .into_iter()
+        .find(|m| !taken.contains(*m))
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut parts: Vec<&str> = vec!["meeting"];
+            parts.extend(events.iter().map(String::as_str));
+            let mut id = format!("mtg_{}", crate::hash(&parts));
+            while taken.contains(&id) {
+                id = format!("mtg_{}", crate::hash(&[&id]));
+            }
+            id
+        });
+    taken.insert(id.clone());
+    Meeting {
+        id,
+        primary: p.id.clone(),
+        key,
+        events,
+    }
 }
 
 #[cfg(test)]
