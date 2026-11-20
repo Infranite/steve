@@ -1023,3 +1023,14 @@ impl Store {
         Ok(1)
     }
 }
+
+impl Sessions<'_> {
+    /// Whole-state read on the shared engine pool, reusing an active transaction if present.
+    pub fn queued_by_session(
+        &self,
+        ws: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<super::QueuedStateRead>>> {
+        self.0
+            .read(|c| crate::read_snapshot(c, |tx| Ok(super::state::queued_by_session(tx, ws)?)))
+    }
+}
