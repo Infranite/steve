@@ -172,7 +172,13 @@ fn statement_finished(event: TraceEvent<'_>) {
                     let mut changed = changed.lock().unwrap_or_else(|e| e.into_inner());
                     let candidate = std::mem::take(&mut changed.candidate);
                     changed.committed.extend(candidate);
-                    let effects = std::mem::take(&mut changed.candidate_effects);
+                    let mut effects = std::mem::take(&mut changed.candidate_effects);
+                    // A deferred transaction containing only attachments skips
+                    // commit_hook. SQLite's root rollback clears pending even
+                    // without writes (!db->autoCommit in sqlite3RollbackAll).
+                    // Thus surviving attachments at autocommit belong to this
+                    // completed commit, never the next transaction's candidate.
+                    effects.append(&mut changed.pending_effects);
                     if !effects.is_empty() {
                         changed
                             .confirmed_effects

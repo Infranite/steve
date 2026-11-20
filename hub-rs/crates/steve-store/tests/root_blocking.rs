@@ -612,25 +612,36 @@ fn r3_bundled_sqlite_read_only_commit_hook_observation() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    for (begin, expected) in [("BEGIN DEFERRED", 0), ("BEGIN IMMEDIATE", 1)] {
+    for (begin, end, commits, rollbacks) in [
+        ("BEGIN DEFERRED", "COMMIT", 0, 0),
+        ("BEGIN IMMEDIATE", "COMMIT", 1, 0),
+        ("BEGIN DEFERRED", "ROLLBACK", 0, 1),
+        ("BEGIN IMMEDIATE", "ROLLBACK", 0, 1),
+    ] {
         let c = rusqlite::Connection::open_in_memory().unwrap();
         let seen = Arc::new(AtomicUsize::new(0));
+        let undone = Arc::new(AtomicUsize::new(0));
         let hook = seen.clone();
         c.commit_hook(Some(move || {
             hook.fetch_add(1, Ordering::SeqCst);
             false
         }))
         .unwrap();
-        c.execute_batch(&format!(
-            "{begin}; SAVEPOINT s; SELECT 1; RELEASE s; COMMIT"
-        ))
+        let hook = undone.clone();
+        c.rollback_hook(Some(move || {
+            hook.fetch_add(1, Ordering::SeqCst);
+        }))
         .unwrap();
+        c.execute_batch(&format!("{begin}; SAVEPOINT s; SELECT 1; RELEASE s; {end}"))
+            .unwrap();
         println!(
-            "R3 SQLite {} {begin}: commit_hook={}",
+            "R3 SQLite {} {begin} {end}: commit_hook={} rollback_hook={}",
             rusqlite::version(),
-            seen.load(Ordering::SeqCst)
+            seen.load(Ordering::SeqCst),
+            undone.load(Ordering::SeqCst)
         );
-        assert_eq!(seen.load(Ordering::SeqCst), expected);
+        assert_eq!(seen.load(Ordering::SeqCst), commits);
+        assert_eq!(undone.load(Ordering::SeqCst), rollbacks);
     }
 }
 
