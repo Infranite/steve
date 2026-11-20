@@ -4,7 +4,8 @@ name: CI
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
 # A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
-# client they bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
+# client they bundle or this workflow), plus one macOS structure job for Rust changes. macOS runners
+# are scarce and were the queue every PR waited in. A push to main
 # and a merge queue run cover both platforms. Main pushes share one running and at most one pending run;
 # a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
 # cut-release.py releases the newest main commit whose own push run passed, with its release notes on top,
@@ -109,25 +110,59 @@ jobs:
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
       apple: ${{ steps.apple.outputs.apple }}
+      structure: ${{ steps.apple.outputs.structure }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Whether the Apple apps need building (always outside pull requests)
+      - name: Whether Apple apps and the structure guard need building
         id: apple
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then echo "apple=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[].filename' > files.txt; then
+          if [ "${{ github.event_name }}" != "pull_request" ]; then echo "apple=true" >> "$GITHUB_OUTPUT"; echo "structure=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > files.txt; then
             if grep -qE '^(apple/|web/|package(-lock)?\.json$|scripts/build-apple-client\.sh$|\.github/workflows/ci\.yml$)' files.txt; then echo "apple=true"; else echo "apple=false"; fi >> "$GITHUB_OUTPUT"
+            if grep -q '^hub-rs/' files.txt; then echo "structure=true"; else echo "structure=false"; fi >> "$GITHUB_OUTPUT"
           else
             echo "apple=true" >> "$GITHUB_OUTPUT"
+            echo "structure=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Skip the Rust jobs when only release notes changed and CI passed on the commit it stands on
         id: decide
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/skip-rust-jobs.py
+  # One macOS truth for structure, including PRs whose Rust tests otherwise run only on Linux.
+  structure:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.structure != 'false') }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1
+          components: clippy
+      # The trusted Rust cache contains dependencies only; workspace packages are removed before saving.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hub-rs/target/debug
+          key: rust-test-v1-macos-15-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml', 'hub-rs/crates/*/Cargo.toml', '.github/workflows/ci.yml') }}
+          restore-keys: ${{ github.event_name == 'pull_request' && format('rust-test-v1-macos-15-{0}-1.99.1-', runner.arch) || '' }}
+      - name: Guard production function structure
+        run: python3 scripts/structure_guard.py
   # The Rust tests of each platform run in parallel shards (`--partition hash:k/N`, N from RUST_TEST_SHARDS):
   # every shard compiles the workspace's tests from its own checkout and runs its share, and `rust` proves
   # from every shard's list and report that each test ran exactly once and passed on its first try.
@@ -184,7 +219,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
-          components: ${{ runner.os == 'macOS' && matrix.shard == 1 && 'rustfmt,clippy' || 'rustfmt' }}
+          components: rustfmt
       # Formatting needs no build, so one shard checks it before compiling and fails within seconds.
       - name: Rust formatting (cargo fmt --check)
         if: runner.os == 'Linux' && matrix.shard == 1
@@ -240,11 +275,6 @@ jobs:
           path: ci-artifacts/
           retention-days: 7
           if-no-files-found: error
-      # The inventory is measured on macOS. Preserve test reports even when this guard fails,
-      # and still check structure after test failures when compilation itself succeeded.
-      - name: Guard production function structure
-        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && runner.os == 'macOS' && matrix.shard == 1 }}
-        run: python3 scripts/structure_guard.py
       # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
       # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
       # A failing test does not keep a built dependency set from being cached. Every shard builds
@@ -315,7 +345,7 @@ jobs:
     # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check
     # as passed. A superseded run's failure stays on its own commit and never touches the newer one's.
     if: ${{ always() }}
-    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple]
+    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple, structure]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -326,9 +356,14 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple', 'structure'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
+          structure = results.pop('structure')
+          structure_skip = (os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+                            and changes['result'] == 'success'
+                            and changes['outputs'].get('structure') == 'false')
+          assert structure['result'] == 'success' or (structure_skip and structure['result'] == 'skipped'), structure
           # The Rust and Apple jobs may be skipped only on the word of `changes`; everything else must have passed.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
               for job in ('rust-test', 'rust', 'apple'):

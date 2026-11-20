@@ -94,6 +94,10 @@ def parse(path, text):
     return entries
 
 
+def key_text(key):
+    return "\t".join(key)
+
+
 def value_text(values):
     return ",".join(map(str, values))
 
@@ -101,7 +105,7 @@ def value_text(values):
 def describe(change):
     if change["kind"] == "removed":
         return "inventory file removed; retain an empty list or name its removal"
-    return (f"{' '.join(change['key'])} = {value_text(change['head'])} "
+    return (f"{key_text(change['key'])} = {value_text(change['head'])} "
             f"(baseline {value_text(change['before']) or 'absent'})")
 
 
@@ -153,7 +157,7 @@ def growth_markers(repo, base, head):
     for commit in git(repo, "rev-list", "--reverse", f"{base}..{head}").splitlines():
         message = git(repo, "show", "-s", "--format=%B", commit)
         trailers = git(repo, "interpret-trailers", "--parse", input_text=message)
-        for line in trailers.splitlines():
+        for line in trailers.split("\n"):
             key, separator, value = line.partition(":")
             if not separator or key.casefold() != "inventory-growth":
                 continue
@@ -214,7 +218,7 @@ def authorize(changes, markers):
             if change["kind"] == "removed":
                 prefix = f"{path}:"
             else:
-                prefix = f"{path} {' '.join(change['key'])} = {value_text(change['head'])}:"
+                prefix = f"{path} {key_text(change['key'])} = {value_text(change['head'])}:"
             if marker["text"].startswith(prefix):
                 reason = marker["text"][len(prefix):].strip()
                 if reason and not (change["kind"] == "removed" and reason.startswith("import ")):
@@ -331,7 +335,7 @@ def main(argv=None):
         elif marker["kind"] == "removed":
             detail = f"{marker['path']}: removal"
         else:
-            detail = f"{marker['path']} {' '.join(marker['key'])} = {value_text(marker['head'])}"
+            detail = f"{marker['path']} {key_text(marker['key'])} = {value_text(marker['head'])}"
         print(f"explicit Inventory-Growth marker {marker['commit']}: {detail}: {marker['reason']}")
     for path, counts in report["totals"].items():
         print(f"reference totals {path}: {counts['baseline']} -> {counts['head']}; counts can cancel, key budgets decide")

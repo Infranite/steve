@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Inventory comparison on constructed snapshots and isolated Git histories; no Cargo builds."""
+import ast
 import base64
 import hashlib
 import importlib.util
@@ -10,7 +11,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
+from unittest.mock import patch
 import zlib
 
 spec = importlib.util.spec_from_file_location("inventory_growth", Path(__file__).with_name("check-inventory-growth.py"))
@@ -286,7 +289,7 @@ class Histories(unittest.TestCase):
         self.commit("Import B later without a marker")
         report = self.report()
         self.assertEqual(report["unreviewed"], [other])
-        self.commit(f'Review the new path\n\nInventory-Growth: {other} src/a.ts "codex" = 1: explicit new key')
+        self.commit(f'Review the new path\n\nInventory-Growth: {other} src/a.ts\t"codex" = 1: explicit new key')
         self.assertFalse(self.report()["unreviewed"])
 
     def test_generic_path_marker_cannot_authorize_an_existing_key(self):
@@ -337,8 +340,8 @@ class Histories(unittest.TestCase):
         cases = [
             ("no marker", first, changed, None, True),
             ("import only", self.base, None, f"{STRUCTURE}: import {blob}: reviewed initial content", True),
-            ("partial result", self.base, None, f"{STRUCTURE} pkg x.rs too_many_lines = 110: not the complete result", True),
-            ("exact A result", self.base, None, f"{STRUCTURE} pkg x.rs too_many_lines = 120,110: review A", False),
+            ("partial result", self.base, None, f"{STRUCTURE} pkg\tx.rs\ttoo_many_lines = 110: not the complete result", True),
+            ("exact A result", self.base, None, f"{STRUCTURE} pkg\tx.rs\ttoo_many_lines = 120,110: review A", False),
             ("A changes again", self.base, larger, None, True),
         ]
         for label, base, body, marker, blocked in cases:
@@ -411,8 +414,20 @@ class Histories(unittest.TestCase):
         self.put(path, "file.rs\ttimer\timpl Runner::run\t1\n")
         self.base = self.commit("Original key")
         self.put(path, "file.rs\ttimer\timpl Runner::run\t2\n")
-        self.commit(f"Specific result\n\nInventory-Growth: {path} file.rs timer impl Runner::run = 2: reason = 7: still data")
+        self.commit(f"Specific result\n\nInventory-Growth: {path} file.rs\ttimer\timpl Runner::run = 2: reason = 7: still data")
         self.assertFalse(self.report()["unreviewed"])
+
+    def test_tab_separated_key_fields_do_not_share_a_space_join_authorization(self):
+        path = "web/test/harness-parity.txt"
+        self.put(path, "a b\tc\t1\na\tb c\t1\n")
+        self.base = self.commit("Two distinct keys that collide under space join")
+        self.put(path, "a b\tc\t2\na\tb c\t2\n")
+        self.commit(f"Space-joined key is not approval\n\nInventory-Growth: {path} a b c = 2: ambiguous old format")
+        self.assertEqual(len(self.report()["unreviewed_changes"]), 2)
+        self.commit(f"Only the first key reviewed\n\nInventory-Growth: {path} a b\tc = 2: first key only")
+        report = self.report()
+        self.assertEqual([marker["key"] for marker in report["markers"]], [("a b", "c")])
+        self.assertEqual(report["unreviewed_changes"], [f"{path}: a\tb c = 2 (baseline 1)"])
 
     def test_comparison_range_equals_reviewed_coverage_event_table(self):
         # One table pins the four integration modes. Rebase rewrites commit IDs, not path reviews.
@@ -513,22 +528,113 @@ class Histories(unittest.TestCase):
 
 
 class WorkflowWiring(unittest.TestCase):
-    def test_macos_guard_runs_after_test_reports_even_when_tests_fail(self):
-        workflow = (guard.ROOT / ".github/workflows/ci.yml").read_text()
-        steps = re.split(r"(?m)^      - ", workflow)
-        guards = [step for step in steps if "run: python3 scripts/structure_guard.py" in step]
-        self.assertEqual(len(guards), 1)
-        condition = next(line for line in guards[0].splitlines() if line.strip().startswith("if:"))
-        for required in ("!cancelled()", "steps.rust-build.outcome == 'success'", "runner.os == 'macOS'", "matrix.shard == 1"):
-            self.assertIn(required, condition)
-        position = workflow.index("run: python3 scripts/structure_guard.py")
-        self.assertLess(workflow.index("id: rust-tests"), position)
-        self.assertLess(workflow.index("python3 scripts/nextest-summary.py"), position)
-        self.assertLess(workflow.index("uses: actions/upload-artifact@"), position)
-        components = re.findall(r"(?m)^\s+components: (.+)$", workflow)
-        self.assertEqual(len(components), 1)
-        self.assertIn("runner.os == 'macOS' && matrix.shard == 1", components[0])
-        self.assertIn("rustfmt,clippy", components[0])
+    def setUp(self):
+        self.workflow = (guard.ROOT / ".github/workflows/ci.yml").read_text()
+
+    def job(self, name):
+        match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z][a-zA-Z0-9-]*:|\Z)", self.workflow)
+        self.assertIsNotNone(match, name)
+        return match[1]
+
+    def steps(self, job):
+        return re.split(r"(?m)^      - ", self.job(job))
+
+    def condition(self, event, changed, cancelled=False):
+        expression = next(line.split("if:", 1)[1].strip() for line in self.job("structure").splitlines() if line.strip().startswith("if:"))
+        expression = expression.removeprefix("${{").removesuffix("}}").strip()
+        expression = expression.replace("!cancelled()", "not cancelled").replace("github.event_name", "event").replace("needs.changes.outputs.structure", "changed").replace("&&", " and ").replace("||", " or ")
+        tree = ast.parse(expression, mode="eval")
+        allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+                   ast.Compare, ast.Eq, ast.NotEq, ast.Name, ast.Load, ast.Constant)
+        self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+        return eval(compile(tree, "structure-job-if", "eval"), {"__builtins__": {}},
+                    {"event": event, "changed": changed, "cancelled": cancelled})
+
+    def test_structure_is_an_independent_macos_pr_job_and_is_required_by_the_gate(self):
+        structure = self.job("structure")
+        self.assertIn("runs-on: macos-15", structure)
+        self.assertIn("needs: changes", structure)
+        commands = re.findall(r"(?m)^\s+run: (.+)$", structure)
+        self.assertEqual(commands, ["python3 scripts/structure_guard.py"])
+        self.assertIn("components: clippy", structure)
+        self.assertNotIn("structure_guard.py", self.job("rust-test"))
+        self.assertIn("components: rustfmt", self.job("rust-test"))
+        self.assertNotIn("clippy", self.job("rust-test"))
+        self.assertEqual(self.workflow.count("run: python3 scripts/structure_guard.py"), 1)
+        needs = re.search(r"needs: \[([^]]+)\]", self.job("test"))[1].split(", ")
+        self.assertIn("structure", needs)
+        for event, changed, included in [("pull_request", "true", True),
+                                         ("pull_request", "false", False),
+                                         ("pull_request", "", True),
+                                         ("push", "false", True),
+                                         ("merge_group", "", True)]:
+            with self.subTest(event=event, changed=changed):
+                self.assertEqual(self.condition(event, changed), included)
+        self.assertFalse(self.condition("push", "true", cancelled=True))
+
+    def test_changes_in_hub_rs_include_structure_for_prs_and_api_failure_is_conservative(self):
+        step = next(step for step in self.steps("changes") if "id: apple" in step)
+        self.assertIn(".previous_filename", step)
+        self.assertIn("structure: ${{ steps.apple.outputs.structure }}", self.job("changes"))
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        script = script.replace("${{ github.repository }}", "example/repo")
+        cases = [
+            ("pull_request", ["hub-rs/crates/example/src/lib.rs"], False, "true"),
+            ("pull_request", ["CONTRIBUTING.md"], False, "false"),
+            ("pull_request", ["notes/moved.txt", "hub-rs/structure.txt"], False, "true"),
+            ("pull_request", [], True, "true"),
+            ("push", [], False, "true"),
+        ]
+        for event, files, failed, expected in cases:
+            with self.subTest(event=event, files=files, failed=failed), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                fake = directory / "gh"
+                fake.write_text("#!/bin/sh\nexit 1\n" if failed else '#!/bin/sh\ncat "$FILE_LIST"\n')
+                fake.chmod(0o700)
+                listing = directory / "paths"
+                listing.write_text("\n".join(files) + "\n")
+                output = directory / "outputs"
+                env = dict(os.environ, PATH=str(directory) + os.pathsep + os.environ["PATH"],
+                           FILE_LIST=str(listing), GITHUB_OUTPUT=str(output), PR="1")
+                result = subprocess.run(["bash", "-e", "-c", script.replace("${{ github.event_name }}", event)],
+                                        cwd=directory, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(outputs["structure"], expected)
+                self.assertEqual(self.condition(event, outputs["structure"]), expected == "true")
+
+    def test_gate_only_allows_structure_skipping_for_a_pr_without_rust_changes(self):
+        job = self.job("test")
+        needs = re.search(r"needs: \[([^]]+)\]", job)[1].split(", ")
+        code = textwrap.dedent(job.split("python3 - <<'PY'\n", 1)[1].rsplit("\n          PY", 1)[0])
+        cases = [
+            ("pull_request", "true", "success", True),
+            ("pull_request", "true", "skipped", False),
+            ("pull_request", "true", "failure", False),
+            ("pull_request", "false", "skipped", True),
+            ("pull_request", "false", "failure", False),
+            ("push", "false", "skipped", False),
+            ("push", "false", "success", True),
+            ("merge_group", "false", "skipped", False),
+            ("merge_group", "false", "success", True),
+        ]
+        for event, changed, result, accepted in cases:
+            for rust_skip in (("false",) if event == "merge_group" else ("false", "true")):
+                with self.subTest(event=event, changed=changed, result=result, rust_skip=rust_skip):
+                    states = {name: {"result": "success", "outputs": {}} for name in needs}
+                    states["changes"]["outputs"] = {"skip": rust_skip, "apple": "true", "structure": changed}
+                    if event == "merge_group":
+                        states["changes"]["result"] = "skipped"
+                    if rust_skip == "true":
+                        for name in ("rust-test", "rust", "apple"):
+                            states[name]["result"] = "skipped"
+                    states["structure"]["result"] = result
+                    with patch.dict(os.environ, RESULTS=json.dumps(states), GITHUB_EVENT_NAME=event):
+                        if accepted:
+                            exec(compile(code, "CI gate", "exec"), {})
+                        else:
+                            with self.assertRaises(AssertionError):
+                                exec(compile(code, "CI gate", "exec"), {})
 
 
 if __name__ == "__main__":
