@@ -361,7 +361,7 @@ async fn legacy_generation_without_an_outbound_receipt_is_unconfirmed() {
     assert_eq!(f.sends(), 0);
 }
 
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+#[path = "../../steve-store/tests/support/digest_audit.rs"]
 mod digest_audit;
 impl Drop for Fixture {
     fn drop(&mut self) {
