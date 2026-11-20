@@ -76,17 +76,12 @@ install! { routes(reg, _cx) [flow, mut module_routes] => [flow, module_routes] {
     module_routes = module_routes.merge(steve_flow::routes(flow.clone()));
 }}
 
-install! { clocks(reg, cx) [flow, mut jobs] => [flow, jobs] {
-    let Env { bus, .. } = cx.clone();
+install! { clocks(reg, _cx) [flow, mut jobs] => [flow, jobs] {
     jobs.push(Job::new("flow.followups", flow.clone().followups_task()));
     jobs.push(Job::new("flow.triggers", steve_flow::scheduler::Triggers::new(flow.clone()).run()));
     jobs.push(Job::new("flow.waits", steve_flow::scheduler::Waits::new(flow.clone()).run()));
     jobs.push(Job::new("flow.retries", steve_flow::scheduler::Retries::new(flow.clone()).run()));
-    let changes = bus.tap(|event| matches!(event.as_domain(), Some(
-        steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Digest { .. }) |
-        steve_types::DomainEvent::Config(steve_types::ConfigEvent::Settings { .. })
-    )));
-    jobs.push(Job::new("flow.alarms", steve_flow::AlarmClock::new(flow.clone()).with_changes(changes).run()));
+    jobs.push(Job::new("flow.alarms", steve_flow::AlarmClock::new(flow.clone()).run()));
 }}
 
 install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {

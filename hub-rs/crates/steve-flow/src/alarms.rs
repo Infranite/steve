@@ -616,19 +616,10 @@ pub fn of_subject(c: &Connection, ws: &str, subject: &str) -> FlowResult<Vec<ser
 /// The alarm due source; dirty planning, stale deadlines and quiet-hour holds share one loop.
 pub struct AlarmClock {
     cx: Arc<FlowCx>,
-    changes: Option<tokio::sync::mpsc::Receiver<steve_types::Notification>>,
 }
 impl AlarmClock {
     pub fn new(cx: Arc<FlowCx>) -> Self {
-        Self { cx, changes: None }
-    }
-    /// The Hub supplies its already committed digest/settings publications, subscribed at assembly.
-    pub fn with_changes(
-        mut self,
-        changes: tokio::sync::mpsc::Receiver<steve_types::Notification>,
-    ) -> Self {
-        self.changes = Some(changes);
-        self
+        Self { cx }
     }
     async fn round_at(&self, now: i64) -> FlowResult<Claimed> {
         let _activity =
@@ -660,28 +651,25 @@ impl AlarmClock {
     pub async fn round(&self) -> FlowResult<Claimed> {
         self.round_at(self.cx.now()).await
     }
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         let cx = self.cx.clone();
         let clock = cx.modules.clock.clone();
         let wake = cx.alarm_wake.clone();
-        let changes = self.changes.take();
+        // Subscribe before the first due query. Dirty rows include todo/brief trigger
+        // writes; direct alarm edits must wake too. Their own commits only re-query.
+        let changed = cx.store().commit_wake(&["time_alarm_dirty", "time_alarms"]);
+        // Policy/timezone edits must also invalidate already stored quiet-hour holds,
+        // even when their timestamps equal the alarm's. Never do this on our own writes.
+        let policy = cx
+            .store()
+            .commit_wake(&["notification_policies", "settings"]);
         let observe = async move {
-            if let Some(mut changes) = changes {
-                while let Some(change) = changes.recv().await {
-                    if matches!(
-                        change.event.as_domain(),
-                        Some(steve_types::DomainEvent::Config(
-                            steve_types::ConfigEvent::Settings { .. }
-                        ))
-                    ) {
-                        cx.wake_alarms();
-                    } else {
-                        // Todo triggers already marked exactly their subject. Preserve unrelated holds.
-                        cx.alarm_wake.notify_one();
-                    }
+            loop {
+                tokio::select! {
+                    _ = changed.notified() => cx.alarm_wake.notify_one(),
+                    _ = policy.notified() => cx.wake_alarms(),
                 }
             }
-            std::future::pending::<()>().await;
         };
         tokio::join!(
             steve_runtime::due::due_loop(Arc::new(self), clock, wake, crate::scheduler::backoff()),

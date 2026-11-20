@@ -420,19 +420,6 @@ impl AlarmSource for TodoSource {
         }))
     }
 }
-async fn committed_changes(
-    env: &TestEnv,
-    tx: &tokio::sync::mpsc::Sender<steve_types::Notification>,
-) {
-    for event in env.take_events() {
-        tx.send(Arc::new(steve_types::Envelope {
-            event,
-            rev: steve_types::Rev(1),
-        }))
-        .await
-        .unwrap();
-    }
-}
 fn planned(env: &TestEnv, at: i64) -> bool {
     env.store().reader(|c| Ok::<_,steve_store::StoreError>(c.query_row("SELECT EXISTS(SELECT 1 FROM time_alarms WHERE subject='todo:change' AND state='planned' AND fire_at=?)",[at],|r|r.get(0))?)).unwrap()
 }
@@ -443,16 +430,13 @@ async fn committed_todo_changes_replan_within_one_second_without_advancing_the_c
     let env = TestEnv::new(|r| setup.register(r));
     env.clock.set(NOW);
     let cx = setup.build(env.modules.clone(), Arc::new(Claimed));
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
-    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx).with_changes(rx).run());
+    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx).run());
     until(|| env.clock.observed(NOW)).await;
     for at in [NOW + DAY, NOW + DAY + 37] {
         env.store().transaction(|t|->FlowResult<()> {
             t.execute("INSERT INTO todos(id,workspace_id,owner,text,state,source,writer,created,updated,remind_at) VALUES('change',?1,?2,'remind','open','you',?2,?3,?3,?4) ON CONFLICT(id) DO UPDATE SET remind_at=?4,updated=?3",params![WS,ME,NOW,at])?;
-            t.publish(steve_types::DomainEvent::Channels(steve_types::ChannelsEvent::Digest{id:"change".into(),ws:WS.into()}));
             Ok(())
         }).unwrap();
-        committed_changes(&env, &tx).await;
         until(|| planned(&env, at)).await;
         assert!(
             env.clock.now() - NOW < 1_000,
@@ -468,28 +452,41 @@ async fn committed_todo_changes_replan_within_one_second_without_advancing_the_c
 }
 
 #[tokio::test]
-async fn quiet_policy_wake_rechecks_an_existing_hold_immediately() {
-    let f = Alarms::new();
-    let id = f.add(NOW, false);
-    f.env
-        .store()
-        .with_conn(|c| {
-            Ok(c.execute(
-                "UPDATE time_alarms SET hold_until=? WHERE id=?",
-                params![NOW + DAY, id],
-            )?)
-        })
-        .unwrap();
-    // The quiet-hours writer outside flow calls this interface after committing its policy.
-    let cx = f.cx.clone();
-    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx.clone()).run());
-    until(|| f.env.clock.observed(NOW)).await;
-    assert!(f.done().is_empty());
-    cx.wake_alarms();
-    until(|| f.done().contains(&id)).await;
-    assert_eq!(f.env.clock.now(), NOW);
-    task.stop();
-    task.await;
+async fn committed_policy_or_timezone_changes_recheck_existing_holds_immediately() {
+    for table in ["notification_policies", "settings"] {
+        let f = Alarms::new();
+        let id = f.add(NOW, false);
+        f.env
+            .store()
+            .with_conn(|c| {
+                Ok(c.execute(
+                    "UPDATE time_alarms SET hold_until=?1,updated=?2 WHERE id=?3",
+                    params![NOW + DAY, NOW, id],
+                )?)
+            })
+            .unwrap();
+        let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
+        until(|| f.env.clock.observed(NOW)).await;
+        assert!(f.done().is_empty());
+        // No DomainEvent and no manual Notify; equal updated timestamps deliberately
+        // cannot satisfy CHANGED_POLICY's greater-than fallback predicate.
+        f.env.store().transaction(|tx| -> FlowResult<()> {
+            if table == "notification_policies" {
+                tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES(?1,?2,0,'now','UTC',1,0,?3)", params![WS,ME,NOW])?;
+            } else {
+                tx.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?1,'tz','\"UTC\"',?2) ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value,updated=excluded.updated", params![WS,NOW])?;
+            }
+            Ok(())
+        }).unwrap();
+        until(|| f.done().contains(&id)).await;
+        assert_eq!(
+            f.env.clock.now(),
+            NOW,
+            "{table} commit woke before fallback"
+        );
+        task.stop();
+        task.await;
+    }
 }
 
 #[tokio::test]
@@ -507,9 +504,10 @@ async fn a_missed_policy_wake_is_found_by_the_sixty_second_fallback() {
         .unwrap();
     let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
     until(|| f.env.clock.observed(NOW)).await;
-    // A writer committed a new policy but omitted its notify. The old hold is a day away.
-    f.env.store().with_conn(|c|Ok(c.execute(
-        "INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES(?1,?2,0,'now','UTC',1,0,?3)",params![WS,ME,NOW+1])?)).unwrap();
+    // An independent Store connection has no in-process subscription. The old hold is a day away.
+    let external = rusqlite::Connection::open(f.env.store().path()).unwrap();
+    external.execute(
+        "INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated) VALUES(?1,?2,0,'now','UTC',1,0,?3)",params![WS,ME,NOW+1]).unwrap();
     f.env
         .clock
         .advance(steve_runtime::due::FALLBACK.as_millis() as i64);
@@ -842,4 +840,103 @@ async fn source_jobs_are_spawnable_and_stop_after_the_recovery_gate() {
         job.stop();
         job.await;
     }
+}
+
+#[tokio::test]
+async fn committed_alarm_deadline_changes_wake_without_advancing_the_clock() {
+    let f = Alarms::new();
+    let id = f.add(NOW + DAY, false);
+    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(f.cx.clone()).run());
+    until(|| f.env.clock.observed(NOW)).await;
+    f.env
+        .store()
+        .transaction(|tx| -> FlowResult<()> {
+            tx.execute(
+                "UPDATE time_alarms SET fire_at=?1 WHERE id=?2",
+                params![NOW, id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    until(|| f.done().contains(&id)).await;
+    assert_eq!(
+        f.env.clock.now(),
+        NOW,
+        "a committed direct alarm edit must not wait for fallback"
+    );
+    task.stop();
+    task.await;
+}
+
+/// Every due query and round reads this clock; its count is an upper bound on rounds.
+struct CountedAlarmClock {
+    clock: Arc<steve_runtime::FakeClock>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl Clock for CountedAlarmClock {
+    fn now(&self) -> i64 {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.clock.now()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.clock.sleep(duration)
+    }
+}
+
+#[tokio::test]
+async fn alarm_hold_commits_do_not_self_wake_into_repeated_due_rounds() {
+    let setup = FlowSetup::new(Arc::new(FakeCore::default())).alarm_source(Arc::new(AlarmLines));
+    let env = TestEnv::new(|_| {});
+    env.clock.set(NOW);
+    let clock = Arc::new(CountedAlarmClock {
+        clock: env.clock.clone(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut registry = steve_modules::Registry::new();
+    setup.register(&mut registry);
+    let modules = steve_modules::Modules::with_clock(
+        env.store().clone(),
+        env.gateway.clone(),
+        registry,
+        clock.clone(),
+    );
+    let cx = setup.build(modules, Arc::new(Claimed));
+    env.store().transaction(|tx| -> FlowResult<()> {
+        tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,quiet_start,quiet_end,consented_at,consent_since_seq,updated) VALUES(?1,?2,1,'now','UTC',0,120,1,0,?3)",params![WS,ME,NOW])?;
+        tx.execute("INSERT INTO time_alarms(id,workspace_id,owner_user,kind,subject,planned_for,fire_at,created,updated) VALUES('held',?1,?2,'todo','contract:held',?3,?3,?3,?3)", params![WS,ME,NOW])?;
+        Ok(())
+    }).unwrap();
+    let state = || {
+        env.store()
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT state,hold_until FROM time_alarms WHERE id='held'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx).run());
+    until(|| state().1.is_some()).await;
+    until(|| env.clock.observed(NOW)).await;
+    let held_until = state().1.unwrap();
+    for at in [NOW + 1_000, NOW + 5_000, NOW + 10_000, NOW + 20_000] {
+        env.clock.set(at);
+        // Handshake with the actual injected wait after each step, not advance followed
+        // immediately by an absence assertion. Own hints may re-query but may not clear holds.
+        until(|| env.clock.observed(at)).await;
+        assert_eq!(state(), ("planned".into(), Some(held_until)));
+        assert!(
+            clock.reads.load(Ordering::SeqCst) <= 64,
+            "alarm source keeps running on its own commits: {} clock reads",
+            clock.reads.load(Ordering::SeqCst)
+        );
+    }
+    assert!(held_until > env.clock.now());
+    task.stop();
+    task.await;
 }
