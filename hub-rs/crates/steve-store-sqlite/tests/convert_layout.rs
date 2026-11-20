@@ -333,7 +333,7 @@ fn empty_and_older_prefixes_are_rejected_without_writes() {
 }
 
 #[test]
-fn already_current_accepts_older_domain_versions_without_writes() {
+fn current_below_catalog_reader_floor_is_rejected_without_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steve.sqlite3");
     let mut conn = Connection::open(&path).unwrap();
@@ -345,8 +345,8 @@ fn already_current_accepts_older_domain_versions_without_writes() {
     let before = Sha256::digest(std::fs::read(&path).unwrap());
     let mut conn = Connection::open(&path).unwrap();
     assert_eq!(
-        convert::convert(&mut conn).unwrap(),
-        Outcome::AlreadyCurrent
+        convert::convert(&mut conn).unwrap_err().code,
+        Code::Incompatible
     );
     assert_eq!(
         conn.query_row(
