@@ -111,12 +111,7 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
-    /// `before_upgrade`: see [`super::Journal::open_upgrading`].
-    pub(super) fn initialize(
-        &self,
-        version: i64,
-        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
-    ) -> ApiResult<()> {
+    pub(super) fn initialize(&self, version: i64) -> ApiResult<()> {
         if version == 0 && !self.table_exists("ops")? {
             self.c().execute_batch(BASE_SCHEMA).map_err(internal)?;
             self.c().execute_batch(PROCS_V4).map_err(internal)?;
@@ -129,7 +124,7 @@ impl Tx<'_> {
                 self.migrate_to_v3()?;
             }
             if version < 4 {
-                self.migrate_v3_to_v4(before_upgrade)?;
+                self.migrate_v3_to_v4()?;
             }
         }
         if version < VERSION {
@@ -160,10 +155,8 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
-    fn migrate_v3_to_v4(&self, before: &mut dyn FnMut() -> ApiResult<()>) -> ApiResult<()> {
-        self.require_legacy_processes_gone()?;
-        // past this point no older release can open the journal
-        before()?;
+    fn migrate_v3_to_v4(&self) -> ApiResult<()> {
+        require_legacy_processes_gone(self.c())?;
         // The old command ledger is intentionally discarded. Keep payloads the Hub has not
         // acknowledged: stream/event shapes did not change and their positions remain valid.
         // Clear whole dependent tables, including orphan rows whose op/attempt is already gone.
@@ -206,21 +199,6 @@ impl Tx<'_> {
         self.c()
             .execute_batch("DROP TABLE IF EXISTS disk_observations;")
             .map_err(internal)?;
-        Ok(())
-    }
-
-    fn require_legacy_processes_gone(&self) -> ApiResult<()> {
-        // Legacy tables may lack started. Group absence (ESRCH) is the only proof needed;
-        // alive, unsignalable, reused or invalid identities must retain their durable records.
-        let groups = self.rows("SELECT pgid FROM procs", [], |r| r.get::<_, i64>(0))?;
-        if groups.into_iter().any(|pgid| {
-            !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
-        }) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "stop the old Node's processes before upgrading the journal",
-            ));
-        }
         Ok(())
     }
 
@@ -267,3 +245,24 @@ impl Tx<'_> {
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn require_legacy_processes_gone(c: &Connection) -> ApiResult<()> {
+    // Legacy tables may lack started. Group absence (ESRCH) is the only proof needed;
+    // alive, unsignalable, reused or invalid identities must retain their durable records.
+    let groups: Vec<i64> = c
+        .prepare("SELECT pgid FROM procs")
+        .map_err(internal)?
+        .query_map([], |r| r.get(0))
+        .map_err(internal)?
+        .collect::<Result<_, _>>()
+        .map_err(internal)?;
+    if groups.into_iter().any(|pgid| {
+        !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
+    }) {
+        return Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "stop the old Node's processes before upgrading the journal",
+        ));
+    }
+    Ok(())
+}

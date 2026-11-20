@@ -228,12 +228,19 @@ pub async fn run(home: &Home) -> Result<()> {
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
-    // past a schema upgrade, going back to the release before cannot work
-    let node = LocalNode::open_upgrading(home.node_config(node_id)?, &mut || {
+    tokio::pin!(stopping);
+    // HomeLock is held while waiting; SIGTERM from the old helper can still stop us before
+    // anything opens the migratable journal. A timeout never decides that rollback is safe.
+    let opening = LocalNode::open_upgrading(home.node_config(node_id)?, async {
         crate::upgrade::claim_switch_before_journal_upgrade(&home.0)
+            .await
             .map_err(|e| ApiError::new(ErrorCode::Offline, format!("{e:#}")))
-    })
-    .map_err(|e| anyhow!("{e}"))?;
+    });
+    let node = tokio::select! {
+        biased;
+        stopped = &mut stopping => return stopped,
+        node = opening => node.map_err(|e| anyhow!("{e}"))?,
+    };
     // installed as a service from a release: its Hub may upgrade it
     if let Some(u) = crate::upgrade::ServiceUpgrader::detect(&home.0) {
         node.set_upgrader(u);

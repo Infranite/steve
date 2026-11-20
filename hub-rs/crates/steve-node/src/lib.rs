@@ -1472,25 +1472,36 @@ impl LocalNode {
     /// ledgers until every recorded process group is confirmed gone; stop the old Node and its
     /// subprocesses cleanly before upgrading.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
-        Self::open_upgrading(cfg, &mut || Ok(()))
+        let lock = Self::lock_home(&cfg)?;
+        Self::open_locked(cfg, lock)
     }
 
-    /// [`LocalNode::open`]; `before_upgrade` runs (holding the home) once the journal's schema
-    /// is about to move past what older releases can open, after the upgrade's own checks. An
-    /// error leaves the journal as it was and fails the open.
-    pub fn open_upgrading(
+    /// Holds the home while awaiting permission for an irreversible schema upgrade.
+    /// The preflight connection is read-only and closed before awaiting; no journal writer or
+    /// SQLite transaction exists during the wait. Dropping this future releases the home lock.
+    pub async fn open_upgrading(
         cfg: NodeConfig,
-        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+        before_upgrade: impl std::future::Future<Output = ApiResult<()>>,
     ) -> ApiResult<LocalNode> {
+        let lock = Self::lock_home(&cfg)?;
+        if Journal::needs_upgrade(&cfg.home.join("node.sqlite3"))? {
+            before_upgrade.await?;
+        }
+        Self::open_locked(cfg, lock)
+    }
+
+    fn lock_home(cfg: &NodeConfig) -> ApiResult<HomeLock> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
-        let lock = HomeLock::take(&cfg.home)?;
+        HomeLock::take(&cfg.home)
+    }
+
+    fn open_locked(cfg: NodeConfig, lock: HomeLock) -> ApiResult<LocalNode> {
         // a command's secret files a crash left behind
         secrets::cleanup(&cfg.home);
         // and the throwaway repositories of pushes
         git::cleanup(&cfg.home);
-        let (j, incarnation) =
-            Journal::open_upgrading(&cfg.home.join("node.sqlite3"), before_upgrade)?;
+        let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
             for p in t.procs()? {
