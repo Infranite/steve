@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use steve_hub::daily_backup;
+use steve_store_sqlite::backup::{Files, Manifest, SkippedDir};
 
 fn write(home: &Path, name: &str, value: &str) {
     let path = home.join(name);
@@ -33,6 +34,60 @@ impl io::Write for LogWriter {
     }
 }
 
+fn saved_files(database: &Path) -> Files {
+    let manifest: Manifest = serde_json::from_slice(
+        &fs::read(database.parent().unwrap().join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    manifest.files
+}
+
+fn archive_entries(path: &Path) -> BTreeMap<String, tar::EntryType> {
+    let mut archive = tar::Archive::new(fs::File::open(path).unwrap());
+    archive
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.path().unwrap().to_string_lossy().into_owned(),
+                entry.header().entry_type(),
+            )
+        })
+        .collect()
+}
+
+fn assert_skip_logs(logs: &str, expected: &[SkippedDir], total: u64) {
+    for entry in expected {
+        assert!(
+            logs.lines().any(|line| line.contains("DEBUG")
+                && line.contains(&format!("path={}", entry.path.display()))
+                && line.contains(&format!("bytes={}", entry.bytes))),
+            "{logs}"
+        );
+    }
+    assert!(
+        logs.lines().any(|line| line.contains("INFO")
+            && line.contains(&format!("skipped_dirs={}", expected.len()))),
+        "{logs}"
+    );
+    assert!(logs.contains(&format!("skipped_bytes={total}")), "{logs}");
+    assert!(!logs.contains("report.md"));
+}
+
+fn assert_live_bytes(home: &Path, db: &Path, made: &daily_backup::Made, archive: &Path) {
+    let database_bytes = fs::metadata(&made.database).unwrap().len();
+    let files_bytes = fs::metadata(archive).unwrap().len();
+    let status = daily_backup::status(home, db, true, 7);
+    assert!(status["last"].get("database_bytes").is_none());
+    assert_eq!(status["last"]["files_bytes"], files_bytes);
+    assert_eq!(status["last"]["bytes"], database_bytes);
+    fs::remove_file(archive).unwrap();
+    let status = daily_backup::status(home, db, true, 7);
+    assert_eq!(status["last"]["files_bytes"], 0);
+    assert_eq!(status["last"]["bytes"], database_bytes);
+}
+
 #[test]
 fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces() {
     use std::io::Read;
@@ -56,6 +111,9 @@ fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces()
     let db = home.path().join("database.sqlite3");
     current_database(&db, "CREATE TABLE evidence(v);");
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
+    let files = saved_files(&made.database);
+    assert!(files.skipped_dirs.is_empty());
+    assert_eq!(files.skipped_bytes, 0);
     let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
     let files: BTreeMap<_, _> = archive
         .entries()
@@ -136,20 +194,9 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     })
     .unwrap();
     assert!(made.database.is_file());
-    let archive_path = made.files.unwrap();
-    assert!(fs::metadata(&archive_path).unwrap().len() < 32 << 20);
-    let mut archive = tar::Archive::new(fs::File::open(&archive_path).unwrap());
-    let entries: BTreeMap<_, _> = archive
-        .entries()
-        .unwrap()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            (
-                entry.path().unwrap().to_string_lossy().into_owned(),
-                entry.header().entry_type(),
-            )
-        })
-        .collect();
+    let archive_path = made.files.as_ref().unwrap();
+    assert!(fs::metadata(archive_path).unwrap().len() < 32 << 20);
+    let entries = archive_entries(archive_path);
     let files = entries
         .iter()
         .filter(|(_, kind)| kind.is_file())
@@ -164,41 +211,24 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     );
     assert!(entries[&format!("{prefix}/cache-link")].is_symlink());
     let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-    for (path, bytes) in [
+    let mut expected: Vec<_> = [
         (&tagged, (32 << 20) + signature.len() as u64),
         (&named, 3),
         (&tool, 4),
-    ] {
-        assert!(
-            logs.lines().any(|line| line.contains("DEBUG")
-                && line.contains(&format!("path={path}"))
-                && line.contains(&format!("bytes={bytes}"))),
-            "{logs}"
-        );
-    }
-    assert!(
-        logs.lines()
-            .any(|line| line.contains("INFO") && line.contains("skipped_dirs=3")),
-        "{logs}"
-    );
-    assert!(
-        logs.contains(&format!(
-            "skipped_bytes={}",
-            (32 << 20) + signature.len() as u64 + 7
-        )),
-        "{logs}"
-    );
-    assert!(!logs.contains("report.md"));
-    let database_bytes = fs::metadata(&made.database).unwrap().len();
-    let files_bytes = fs::metadata(&archive_path).unwrap().len();
-    let status = daily_backup::status(home.path(), &db, true, 7);
-    assert!(status["last"].get("database_bytes").is_none());
-    assert_eq!(status["last"]["files_bytes"], files_bytes);
-    assert_eq!(status["last"]["bytes"], database_bytes);
-    fs::remove_file(archive_path).unwrap();
-    let status = daily_backup::status(home.path(), &db, true, 7);
-    assert_eq!(status["last"]["files_bytes"], 0);
-    assert_eq!(status["last"]["bytes"], database_bytes);
+    ]
+    .into_iter()
+    .map(|(path, bytes)| SkippedDir {
+        path: path.into(),
+        bytes,
+    })
+    .collect();
+    expected.sort_by(|a, b| a.path.cmp(&b.path));
+    let total = (32 << 20) + signature.len() as u64 + 7;
+    let files = saved_files(&made.database);
+    assert_eq!(files.skipped_dirs, expected);
+    assert_eq!(files.skipped_bytes, total);
+    assert_skip_logs(&logs, &expected, total);
+    assert_live_bytes(home.path(), &db, &made, archive_path);
 }
 
 #[test]
@@ -222,7 +252,17 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
     assert!(fs::read_dir(&cache).is_err(), "fixture must be unreadable");
     let made = daily_backup::make(home.path(), &db, "20261120");
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut archive = tar::Archive::new(fs::File::open(made.unwrap().files.unwrap()).unwrap());
+    let made = made.unwrap();
+    let files = saved_files(&made.database);
+    assert_eq!(
+        files.skipped_dirs,
+        vec![SkippedDir {
+            path: "workspaces/item/node_modules".into(),
+            bytes: 0,
+        }]
+    );
+    assert_eq!(files.skipped_bytes, 0);
+    let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
     let entries: BTreeMap<_, _> = archive
         .entries()
         .unwrap()
@@ -249,4 +289,19 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
             .any(|p| p.starts_with("workspaces/item/node_modules"))
     );
     assert!(!entries.contains_key("signing/keychain-pass"));
+}
+
+#[test]
+fn daily_backup_without_file_parts_records_no_skips() {
+    let home = tempfile::tempdir().unwrap();
+    let db = home.path().join("database.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE evidence(v);")
+        .unwrap();
+    let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
+    assert!(made.files.is_none());
+    let files = saved_files(&made.database);
+    assert!(files.complete && files.artifacts.is_empty() && files.skipped_dirs.is_empty());
+    assert_eq!(files.skipped_bytes, 0);
 }

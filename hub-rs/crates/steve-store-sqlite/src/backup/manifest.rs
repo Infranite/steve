@@ -10,12 +10,21 @@ pub struct Artifact {
     pub sha256: String,
     pub quick_check: Option<String>,
 }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SkippedDir {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Files {
     pub consistency: String,
     pub complete: bool,
     pub artifacts: Vec<Artifact>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub skipped_dirs: Vec<SkippedDir>,
+    #[serde(default)]
+    pub skipped_bytes: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {

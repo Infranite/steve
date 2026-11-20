@@ -1,7 +1,7 @@
 //! The single-file backup plan: verified database first, optional files best-effort,
 //! durable manifest last, then atomic publication of an exclusively owned partial directory.
 use super::{
-    manifest::{Artifact, Files, Manifest, Usage},
+    manifest::{Artifact, Files, Manifest, SkippedDir, Usage},
     offline::{self, BackupError, CancelFlag, CopyOptions, Progress},
 };
 use rusqlite::{Connection, OpenFlags};
@@ -120,12 +120,20 @@ impl Reason {
         }
     }
 }
+/// One archive attempt, including directories omitted by the host's traversal.
+#[derive(Default)]
+pub struct FileArchive {
+    /// An archive in the supplied output directory, or None when there are no files.
+    pub path: Option<PathBuf>,
+    pub skipped_dirs: Vec<SkippedDir>,
+}
 /// Archive implementation is supplied by the host, so storage has no mandatory tar/process
-/// dependency. The callback returns a path in the supplied output directory, or None.
+/// dependency. Only the last successful archive and artifact verification are recorded;
+/// failed attempts leave the manifest's skip records empty.
 #[derive(Clone)]
 pub struct FileSet {
     pub home: PathBuf,
-    pub archive: fn(&Path, &Path) -> io::Result<Option<PathBuf>>,
+    pub archive: fn(&Path, &Path) -> io::Result<FileArchive>,
 }
 pub struct BackupPlan {
     pub reason: Reason,
@@ -375,15 +383,22 @@ fn archive_files(
         complete: true,
         artifacts: vec![],
         error: None,
+        skipped_dirs: vec![],
+        skipped_bytes: 0,
     };
     if let Some(set) = &plan.with_files {
         for attempt in 0..3 {
             check(start, plan.deadline, cancel)?;
-            match (set.archive)(&set.home, partial)
-                .and_then(|path| path.map(|p| artifact(&p)).transpose())
-            {
-                Ok(file) => {
+            match (set.archive)(&set.home, partial).and_then(|archive| {
+                let file = archive.path.as_deref().map(artifact).transpose()?;
+                Ok((file, archive.skipped_dirs))
+            }) {
+                Ok((file, skipped_dirs)) => {
                     files.artifacts.extend(file);
+                    files.skipped_bytes = skipped_dirs
+                        .iter()
+                        .fold(0u64, |sum, entry| sum.saturating_add(entry.bytes));
+                    files.skipped_dirs = skipped_dirs;
                     files.error = None;
                     break;
                 }
@@ -895,6 +910,8 @@ mod retention_tests {
                 complete: true,
                 artifacts: vec![],
                 error: None,
+                skipped_dirs: vec![],
+                skipped_bytes: 0,
             },
             completed: true,
         };
