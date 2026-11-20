@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
@@ -44,7 +45,6 @@ fn choice() -> HarnessChoice {
 const OUTPUT_BUDGET: u64 = 256 << 10;
 /// The longest a test waits for something it observes (a live report, an attempt's end). It only
 /// bounds a failure: a loaded runner, not the code under test, decides how long these take.
-const EVENT_WAIT: Duration = Duration::from_secs(30);
 /// How far ahead of its start a deadline stop is set: time for the meter to start and report live
 /// usage before it (the test then persists its tail under a poll hold, not against this clock).
 const DEADLINE_AFTER_MS: i64 = 5_000;
@@ -103,27 +103,42 @@ impl Fixture {
         Self { dir, node, sink }
     }
     async fn finished(&self, op: &str) -> Observed {
-        let deadline = Instant::now() + EVENT_WAIT;
-        loop {
-            let state = self
-                .node
-                .operation(OperationId::new(op).unwrap())
-                .await
-                .unwrap()
-                .state;
-            if state.is_finished()
-                && (op.starts_with("prep-")
-                    || op.starts_with("open-")
-                    || self.sink.events().iter().any(|e| {
-                        matches!(&e.subject,Subject::Execution(x) if x.attempt().as_str()==op)
-                            && matches!(e.body, EventBody::AttemptEnded { .. })
-                    }))
-            {
-                return state;
-            }
-            assert!(Instant::now() < deadline, "{op}: {state:?}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let observed = std::sync::Mutex::new(None);
+        eventually(
+            on_timeout(|| async {
+                let state = self
+                    .node
+                    .operation(OperationId::new(op).unwrap())
+                    .await
+                    .map(|r| r.state);
+                format!("operation and terminal event finished: op={op}, state={state:?}")
+            }),
+            || async {
+                let state = self
+                    .node
+                    .operation(OperationId::new(op).unwrap())
+                    .await
+                    .unwrap()
+                    .state;
+                if state.is_finished()
+                    && (op.starts_with("prep-")
+                        || op.starts_with("open-")
+                        || self.sink.events().iter().any(|e| {
+                            matches!(&e.subject,Subject::Execution(x) if x.attempt().as_str()==op)
+                                && matches!(e.body, EventBody::AttemptEnded { .. })
+                        }))
+                {
+                    *observed.lock().unwrap() = Some(state);
+                    return true;
+                }
+                false
+            },
+        )
+        .await;
+        observed
+            .into_inner()
+            .unwrap()
+            .expect("terminal state snapshot")
     }
     fn workspace(sid: &str) -> WorkspaceRef {
         build::workspace("node", &format!("item:{sid}"))
@@ -223,18 +238,28 @@ impl Fixture {
             .collect()
     }
     async fn live(&self, attempt: &str) -> UsageReport {
-        let deadline = Instant::now() + EVENT_WAIT;
-        loop {
-            if let Some(r) = self
-                .reports(attempt)
-                .into_iter()
-                .find(|r| r.measurement == Measurement::Cumulative && r.tokens.input.is_some())
-            {
-                return r;
-            }
-            assert!(Instant::now() < deadline, "no live usage: {attempt}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let report = std::sync::Mutex::new(None);
+        eventually_sync(
+            on_timeout(|| async {
+                format!(
+                    "no live usage: {attempt}; reports={:?}",
+                    self.reports(attempt)
+                )
+            }),
+            || {
+                if let Some(r) = self
+                    .reports(attempt)
+                    .into_iter()
+                    .find(|r| r.measurement == Measurement::Cumulative && r.tokens.input.is_some())
+                {
+                    *report.lock().unwrap() = Some(r);
+                    return true;
+                }
+                false
+            },
+        )
+        .await;
+        report.into_inner().unwrap().expect("live usage snapshot")
     }
     fn final_report(&self, attempt: &str) -> UsageReport {
         self.reports(attempt)
@@ -469,20 +494,29 @@ async fn reconnect_replays_the_same_auditable_reports_without_new_token_bookings
         .cursor;
     f.sink.set_failing(true);
     f.turn("s", "a", "live").await;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if f.node
-            .operation(OperationId::new("a").unwrap())
-            .await
-            .unwrap()
-            .state
-            .is_finished()
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    eventually(
+        on_timeout(|| async {
+            let state = f
+                .node
+                .operation(OperationId::new("a").unwrap())
+                .await
+                .map(|r| r.state);
+            format!("offline-sink operation finished: op=a state={state:?}")
+        }),
+        || async {
+            if f.node
+                .operation(OperationId::new("a").unwrap())
+                .await
+                .unwrap()
+                .state
+                .is_finished()
+            {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     let from = Watermark {
         seq: cursor.seq,
         ..cursor
@@ -645,18 +679,29 @@ async fn claude_concurrent_principals_models_children_reconnect_and_next_attempt
     f.live("j").await;
     f.sink.set_failing(true);
     for a in ["a1", "a2", "j"] {
-        let until = Instant::now() + Duration::from_secs(12);
-        while !f
-            .node
-            .operation(OperationId::new(a).unwrap())
-            .await
-            .unwrap()
-            .state
-            .is_finished()
-        {
-            assert!(Instant::now() < until);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        eventually(
+            on_timeout(|| async {
+                let state = f
+                    .node
+                    .operation(OperationId::new(a).unwrap())
+                    .await
+                    .map(|r| r.state);
+                format!("concurrent operation finished: op={a}, state={state:?}")
+            }),
+            || async {
+                if f.node
+                    .operation(OperationId::new(a).unwrap())
+                    .await
+                    .unwrap()
+                    .state
+                    .is_finished()
+                {
+                    return true;
+                }
+                false
+            },
+        )
+        .await;
     }
     let mut batch = EventBatch::default();
     for head in f.node.streams().await.unwrap() {
@@ -1067,7 +1112,6 @@ async fn cancellation_kills_only_owned_term_resistant_groups_before_final_and_ne
         f.process_gone(&source).await;
         // macOS/Linux init may reap the reparented child shortly after the leader; wait only
         // on the exact PID started by this fixture. No process name or global cleanup is used.
-        let wait = Instant::now();
         let running = || {
             if unsafe { libc::kill(child, 0) } != 0 {
                 return false;
@@ -1086,13 +1130,13 @@ async fn cancellation_kills_only_owned_term_resistant_groups_before_final_and_ne
             }
             true
         };
-        while running() {
-            assert!(
-                wait.elapsed() < Duration::from_secs(3),
-                "owned child still alive: {child}"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        eventually_sync(format!("owned child still alive: {child}"), || {
+            if !running() {
+                return true;
+            }
+            false
+        })
+        .await;
     }
     f.node.shutdown().await;
 }
@@ -1162,11 +1206,21 @@ async fn shutdown_joins_deadline_kill_timer_and_rpc_continuations() {
         .unwrap();
     f.live("deadline-timer").await;
     let source = f.sources().into_iter().next().unwrap();
-    let wait = Instant::now();
-    while !source.with_extension("cancelled").exists() {
-        assert!(wait.elapsed() < Duration::from_secs(5));
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "adapter acknowledged deadline cancellation: {}",
+                source.with_extension("cancelled").display()
+            )
+        }),
+        || {
+            if source.with_extension("cancelled").exists() {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     // The adapter saw the deadline's cancel, so the actor's ten-second kill timer is pending.
     // Shutdown must join it now, alongside the sampler and RPC continuation, not wait ten seconds.
     let metrics = tokio::runtime::Handle::current().metrics();

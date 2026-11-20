@@ -2,6 +2,7 @@ use super::*;
 use crate::{LocalNode, NodeConfig, PolicyCeiling, Storage};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
+use steve_runtime::testkit::{eventually, on_timeout};
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -145,17 +146,23 @@ chmod +x "$p/.bin/pi"
 }
 
 async fn wait_finished(n: &LocalNode, op: &OperationId) -> Receipt {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
+    let receipt = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n.operation(op.clone()).await;
+            let maintenance_free = n.0.adapter_maintenance.lock().unwrap().is_none();
+            format!("installation finished: op={op}, receipt={state:?}, maintenance_free={maintenance_free}")
+        }),
+        || async {
             let r = n.operation(op.clone()).await.unwrap();
             if r.state.is_finished() && n.0.adapter_maintenance.lock().unwrap().is_none() {
-                return r;
+                *receipt.lock().unwrap() = Some(r);
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("installation finished")
+            false
+        },
+    ).await;
+    receipt.into_inner().unwrap().expect("installation receipt")
 }
 
 #[test]

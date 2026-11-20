@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
@@ -165,23 +166,36 @@ impl T {
 
     /// Opens the Node on the home. A process another test forks meanwhile shares the home's lock
     /// until it execs: a reopen right after a drop may have to wait for that.
-    fn open(&self, jobs: u32) -> LocalNode {
-        let t0 = Instant::now();
-        loop {
-            match LocalNode::open(self.config(jobs)) {
-                Ok(n) => return n,
-                Err(e)
-                    if e.code == ErrorCode::Conflict && t0.elapsed() < Duration::from_secs(5) =>
-                {
-                    std::thread::sleep(Duration::from_millis(20))
+    async fn open(&self, jobs: u32) -> LocalNode {
+        let opened = std::sync::Mutex::new(None);
+        let last_conflict = std::sync::Mutex::new(None);
+        eventually(
+            on_timeout(|| async {
+                format!(
+                    "Node home lock released: last conflict={:?}",
+                    last_conflict.lock().unwrap()
+                )
+            }),
+            || async {
+                match LocalNode::open(self.config(jobs)) {
+                    Ok(n) => {
+                        *opened.lock().unwrap() = Some(n);
+                        true
+                    }
+                    Err(e) if e.code == ErrorCode::Conflict => {
+                        *last_conflict.lock().unwrap() = Some(e);
+                        false
+                    }
+                    Err(e) => panic!("{e:?}"),
                 }
-                Err(e) => panic!("{e:?}"),
-            }
-        }
+            },
+        )
+        .await;
+        opened.into_inner().unwrap().expect("opened Node")
     }
 
-    fn node(&self) -> LocalNode {
-        let n = self.open(4);
+    async fn node(&self) -> LocalNode {
+        let n = self.open(4).await;
         n.connect(self.sink.clone(), Some(self.files.clone()));
         n
     }
@@ -306,19 +320,29 @@ fn exec(attempt: &str) -> ExecutionRef {
 }
 
 async fn finished(n: &LocalNode, op: &str) -> Observed {
-    let t0 = Instant::now();
-    loop {
-        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-        if r.state.is_finished() {
-            return r.state;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(15),
-            "{op}: {:?}",
-            r.state
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let observed = std::sync::Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .map(|r| r.state);
+            format!("operation finished: op={op}, state={state:?}")
+        }),
+        || async {
+            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if r.state.is_finished() {
+                *observed.lock().unwrap() = Some(r.state);
+                return true;
+            }
+            false
+        },
+    )
+    .await;
+    observed
+        .into_inner()
+        .unwrap()
+        .expect("finished receipt snapshot")
 }
 
 fn completion(s: Observed) -> Completion {
@@ -350,7 +374,7 @@ fn no_scratch(t: &T) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     let r = n
         .start_job(now_cmd("op_j", think("a_1", FAKE, "数数")))
         .await
@@ -442,7 +466,7 @@ async fn a_think_job_streams_its_draft_and_ends_with_its_answer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_attached_job_reads_its_file_and_nothing_else() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     let a = t.files.add("att_1", b"notes", "text/markdown");
     let mut j = think("a_1", FAKE, "@read 总结 .steve/attachments/att_1-notes.md");
     j.run.prompt.push(Part::File {
@@ -474,7 +498,7 @@ async fn a_read_attached_job_reads_its_file_and_nothing_else() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn images_go_as_acp_image_blocks() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     let png = t.files.add("img_1", b"\x89PNG-bytes", "image/png");
     let mut j = think("a_1", FAKE, "看图");
     j.run.prompt.push(Part::Image { artifact: png });
@@ -493,7 +517,7 @@ async fn images_go_as_acp_image_blocks() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_the_adapter_cut_short_fails_with_its_stop_reason() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@stop")))
         .await
         .unwrap();
@@ -509,7 +533,7 @@ async fn a_turn_the_adapter_cut_short_fails_with_its_stop_reason() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_custom_adapter_with_nothing_declared_runs_in_the_nodes_sandbox() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", "bare", "数数")))
         .await
         .unwrap();
@@ -531,7 +555,7 @@ async fn a_custom_adapter_with_nothing_declared_runs_in_the_nodes_sandbox() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failing_model_fails_once_and_nothing_tries_another() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@fail")))
         .await
         .unwrap();
@@ -555,7 +579,7 @@ async fn a_failing_model_fails_once_and_nothing_tries_another() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_stops_the_whole_group() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
@@ -592,7 +616,7 @@ async fn cancel_stops_the_whole_group() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_past_its_deadline_times_out() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     let mut j = think("a_1", FAKE, "@hang");
     j.run.limits.deadline = Timestamp(wall() + 1_000);
     n.start_job(now_cmd("op_j", j)).await.unwrap();
@@ -616,7 +640,7 @@ async fn a_job_past_its_deadline_times_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
@@ -626,7 +650,7 @@ async fn a_restart_leaves_the_job_unknown_until_it_is_abandoned() {
     n.shutdown().await;
     drop(n);
     assert!(gone(pid), "a shutdown stops the harness");
-    let n = t.node();
+    let n = t.node().await;
     let r = n
         .operation(OperationId::new("op_j").unwrap())
         .await
@@ -659,7 +683,7 @@ async fn child_job_node_process() {
         return;
     };
     let t = T::at(Path::new(&root));
-    let n = t.node();
+    let n = t.node().await;
     n.start_job(now_cmd("op_j", think("a_1", FAKE, "@hang")))
         .await
         .unwrap();
@@ -681,19 +705,21 @@ async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let t0 = Instant::now();
-    while !t.root.join("ready").exists() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "child never got ready"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async { format!("child never got ready: {}", t.root.display()) }),
+        || {
+            if t.root.join("ready").exists() {
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     child.kill().unwrap();
     child.wait().unwrap();
     let pid: i64 = t.read("pid").trim().parse().unwrap();
     assert!(!gone(pid), "the harness outlived the Node");
-    let n = t.node();
+    let n = t.node().await;
     assert!(n.incarnation() >= 2);
     let r = n
         .operation(OperationId::new("op_j").unwrap())
@@ -738,7 +764,7 @@ async fn a_killed_node_leaves_its_job_group_until_it_is_abandoned() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_command_runs_once_and_an_attempt_never_twice() {
     let t = T::new();
-    let n = t.node();
+    let n = t.node().await;
     let c = now_cmd("op_j", think("a_1", FAKE, "x"));
     let first = n.start_job(c.clone()).await.unwrap();
     assert_eq!(n.start_job(c.clone()).await.unwrap(), first);
@@ -756,7 +782,7 @@ async fn a_job_command_runs_once_and_an_attempt_never_twice() {
 async fn what_this_node_cannot_run_is_refused() {
     let t = T::new();
     // no job capacity: no jobs at all
-    let n = t.open(0);
+    let n = t.open(0).await;
     let e = n
         .start_job(now_cmd("op_1", think("a_1", FAKE, "x")))
         .await
@@ -767,7 +793,7 @@ async fn what_this_node_cannot_run_is_refused() {
     n.shutdown().await;
     drop(n);
 
-    let n = t.open(1);
+    let n = t.open(1).await;
     let caps = n.probe(false).await.unwrap();
     let jobs: Vec<&str> = caps
         .harnesses

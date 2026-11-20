@@ -1,5 +1,6 @@
 use super::*;
 use crate::{NodeConfig, PolicyCeiling, Storage};
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 #[path = "../../tests/fixtures/harness_updates.rs"]
 mod fixture;
@@ -27,13 +28,11 @@ async fn a_cli_change_while_requirements_run_cannot_create_a_false_success() {
         let cmd = cmd.clone();
         tokio::spawn(async move { n.upgrade_harness(cmd).await })
     };
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !started.exists() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
+    eventually_sync(
+        on_timeout(|| async { format!("requirements entered: {}", started.display()) }),
+        || started.exists(),
+    )
+    .await;
     let prefix = managed::prefix_lock(&f.home, true).unwrap();
     for c in adapters::components("pi") {
         std::fs::write(

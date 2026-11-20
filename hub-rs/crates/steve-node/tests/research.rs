@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 
 use serde_json::json;
 use steve_acp::AcpConfig;
@@ -204,33 +204,44 @@ impl T {
     }
 
     async fn end_of(&self, n: &LocalNode, op: &str) -> Completion {
-        let t0 = Instant::now();
-        loop {
-            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-            if let Observed::Finished {
-                result: Some(OperationResult::Execution(c)),
-                ..
-            } = r.state
-            {
-                // its events reach the Hub too
-                eventually_sync("AttemptEnded reaches the Hub", || {
-                    let ended = self.ended().contains(&c);
-                    assert!(
-                        ended || t0.elapsed() < Duration::from_secs(20),
-                        "no AttemptEnded"
-                    );
-                    ended
-                })
-                .await;
-                return c;
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(20),
-                "{op}: {:?}",
-                r.state
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let completion = Mutex::new(None);
+        eventually(
+            on_timeout(|| async {
+                let state = n
+                    .operation(OperationId::new(op).unwrap())
+                    .await
+                    .map(|r| r.state);
+                format!("research receipt finished: op={op}, state={state:?}")
+            }),
+            || async {
+                let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+                if let Observed::Finished {
+                    result: Some(OperationResult::Execution(c)),
+                    ..
+                } = r.state
+                {
+                    *completion.lock().unwrap() = Some(c);
+                    return true;
+                }
+                false
+            },
+        )
+        .await;
+        let c = completion
+            .into_inner()
+            .unwrap()
+            .expect("research completion snapshot");
+        // its events reach the Hub too
+        eventually_sync(
+            on_timeout(|| async { format!("no AttemptEnded for {op}: {:?}", self.ended()) }),
+            || {
+                let ended = self.ended().contains(&c);
+
+                ended
+            },
+        )
+        .await;
+        c
     }
 }
 
@@ -1439,23 +1450,33 @@ async fn shutdown_stops_a_running_job_and_says_so() {
 
 /// The completion an operation finished with (from its receipt only: no Hub needed).
 async fn finished(n: &LocalNode, op: &str) -> Completion {
-    let t0 = Instant::now();
-    loop {
-        let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
-        if let Observed::Finished {
-            result: Some(OperationResult::Execution(c)),
-            ..
-        } = r.state
-        {
-            return c;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(20),
-            "{op}: {:?}",
-            r.state
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let completion = Mutex::new(None);
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .map(|r| r.state);
+            format!("research finished: op={op}, state={state:?}")
+        }),
+        || async {
+            let r = n.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if let Observed::Finished {
+                result: Some(OperationResult::Execution(c)),
+                ..
+            } = r.state
+            {
+                *completion.lock().unwrap() = Some(c);
+                return true;
+            }
+            false
+        },
+    )
+    .await;
+    completion
+        .into_inner()
+        .unwrap()
+        .expect("research completion snapshot")
 }
 
 /// A job that writes a little, then (while `<log>.hold` exists) waits with a child whose pid goes
@@ -1545,29 +1566,37 @@ async fn a_job_left_unknown_by_a_crash_is_abandoned_and_frees_its_slot() {
         .await
         .unwrap();
     assert_eq!(ab.state, Observed::Accepted);
-    let t0 = Instant::now();
-    loop {
-        let r = n
-            .operation(OperationId::new("op_ab").unwrap())
-            .await
-            .unwrap();
-        if r.state.is_finished() {
-            assert!(
-                matches!(
-                    r.state,
-                    Observed::Finished {
-                        outcome: Outcome::Succeeded,
-                        ..
-                    }
-                ),
-                "{:?}",
-                r.state
-            );
-            break;
-        }
-        assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", r.state);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually(
+        on_timeout(|| async {
+            let state = n
+                .operation(OperationId::new("op_ab").unwrap())
+                .await
+                .map(|r| r.state);
+            format!("abandon finished: op_ab state={state:?}")
+        }),
+        || async {
+            let r = n
+                .operation(OperationId::new("op_ab").unwrap())
+                .await
+                .unwrap();
+            if r.state.is_finished() {
+                assert!(
+                    matches!(
+                        r.state,
+                        Observed::Finished {
+                            outcome: Outcome::Succeeded,
+                            ..
+                        }
+                    ),
+                    "{:?}",
+                    r.state
+                );
+                return true;
+            }
+            false
+        },
+    )
+    .await;
     assert!(!alive(harness_child));
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Interrupted);
@@ -1649,7 +1678,7 @@ async fn a_job_stops_at_its_output_cap() {
 }
 
 /// Attachments that come after `delay` (or never).
-struct Slow(Duration, Files);
+struct Slow(Duration, Files, tokio::sync::Notify);
 
 #[async_trait::async_trait]
 impl HubFiles for Slow {
@@ -1660,6 +1689,7 @@ impl HubFiles for Slow {
         offset: u64,
         max: u32,
     ) -> ApiResult<ReadChunk> {
+        self.2.notify_one();
         tokio::time::sleep(self.0).await;
         self.1.fetch(a, id, offset, max).await
     }
@@ -1682,7 +1712,7 @@ impl HubFiles for Slow {
 
 /// A holding job whose prompt has one file the Hub serves after `delay`.
 fn with_file(t: &T, delay: Duration) -> (Arc<Slow>, JobSpec) {
-    let files = Slow(delay, Files::default());
+    let files = Slow(delay, Files::default(), tokio::sync::Notify::new());
     let a = files.1.artifact("art_1", "text/plain", b"notes");
     let mut spec = holding(t, "a_1");
     spec.run.prompt.push(Part::File {
@@ -1718,9 +1748,11 @@ async fn a_stalled_attachment_fetch_yields_to_cancel_shutdown_and_deadline() {
     // a shutdown does not wait for the Hub
     let t = T::new();
     let (files, spec) = with_file(&t, hang);
-    let n = t.scripted_node(1, files);
+    let n = t.scripted_node(1, files.clone());
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), files.2.notified())
+        .await
+        .expect("stalled fetch entered before shutdown");
     tokio::time::timeout(Duration::from_secs(5), n.shutdown())
         .await
         .expect("shutdown waits for a stalled fetch");
