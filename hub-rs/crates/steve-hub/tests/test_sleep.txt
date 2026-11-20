@@ -35,7 +35,6 @@ steve-core/src/tests/sweep.rs	1
 steve-core/src/tests/thread.rs	4
 steve-core/src/thread/research.rs	1
 steve-core/src/util.rs	1
-steve-core/src/yolo/undo_tests.rs	1
 steve-flow/tests/code_nodes.rs	1
 steve-flow/tests/flows.rs	1
 steve-flow/tests/signals.rs	1
@@ -73,7 +72,6 @@ steve-hub/tests/node_devices.rs	1
 steve-hub/tests/node_e2e.rs	10
 steve-hub/tests/node_faults.rs	7
 steve-hub/tests/node_fencing.rs	2
-steve-hub/tests/node_harness/mod.rs	2
 steve-hub/tests/node_install.rs	5
 steve-hub/tests/node_ledger.rs	3
 steve-hub/tests/node_link.rs	3
