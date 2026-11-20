@@ -666,10 +666,9 @@ struct RootConnection {
 }
 impl RootConnection {
     fn drain_last(state: &Rc<Self>) {
-        if Rc::strong_count(state) != 1 {
-            return;
-        }
-        loop {
+        // A callback can retain a reentrant guard. Recheck ownership before
+        // rolling back again, so that guard keeps its transaction until release.
+        while Rc::strong_count(state) == 1 {
             let connection = state.connection.as_ref().expect("live connection");
             if !connection.is_autocommit() {
                 let _ = state.engine.rollback_root(connection);
