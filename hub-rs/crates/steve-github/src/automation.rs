@@ -109,6 +109,13 @@ impl Subject {
             }
     }
 
+    fn provenance(&self) -> String {
+        match (&self.base, &self.head) {
+            (Some(b), Some(h)) => format!("\nbase: {b}\nhead: {h}"),
+            _ => String::new(),
+        }
+    }
+
     fn label(&self) -> &'static str {
         match self.kind {
             Kind::PrReview => "PR 评审",
@@ -329,6 +336,18 @@ fn linked_result(cx: &mut RunCx<'_>, item: String) -> NodeOutcome {
     NodeOutcome::next(json!({"item_id": item}))
 }
 
+/// Each completed analysis task is a report. Its fixed category is independent of
+/// untrusted GitHub titles and model text.
+fn report_category(store: &steve_store::Store, ws: &str) -> ApiResult<String> {
+    store
+        .tags()
+        .kinds(ws)?
+        .into_iter()
+        .find(|tag| tag.name == "doc")
+        .map(|tag| tag.id)
+        .ok_or_else(|| ApiError::Internal("missing seeded doc category".into()))
+}
+
 #[async_trait]
 impl Action for Analyze {
     fn name(&self) -> &'static str {
@@ -506,27 +525,16 @@ impl Action for Analyze {
             }) else {
                 return Ok(None);
             };
-            let provenance = match (&subject.base, &subject.head) {
-                (Some(b), Some(h)) => format!("\nbase: {b}\nhead: {h}"),
-                _ => String::new(),
-            };
             let goal = format!(
-                "{} #{} · {}{provenance}\n\nBot：{} · {}\n\n{}",
+                "{} #{} · {}{}\n\nBot：{} · {}\n\n{}",
                 subject.label(),
                 subject.number,
                 subject.url(&current),
+                subject.provenance(),
                 bot.name,
                 answer.model,
                 quote_untrusted(&format!("\n{}\n", literal_report(&report)))
             );
-            // Each completed analysis task is a report. Its fixed category is independent
-            // of untrusted GitHub titles and model text.
-            let category = store
-                .tags()
-                .kinds(&ws)?
-                .into_iter()
-                .find(|tag| tag.name == "doc")
-                .ok_or_else(|| ApiError::Internal("missing seeded doc category".into()))?;
             let item = store
                 .items()
                 .create(
@@ -542,7 +550,7 @@ impl Action for Analyze {
                         status: Some("done".into()),
                         stage: Some("完成".into()),
                         source: Some(("GitHub".into(), "sig".into())),
-                        tags: vec![category.id],
+                        tags: vec![report_category(store, &ws)?],
                         ..Default::default()
                     },
                 )?

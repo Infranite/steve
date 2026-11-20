@@ -60,8 +60,6 @@ steve-core	crates/steve-core/src/derive.rs	too_many_lines	180
 steve-core	crates/steve-core/src/gateway.rs	cognitive_complexity	28,28,26
 steve-core	crates/steve-core/src/gateway.rs	too_many_lines	142,142,101
 steve-core	crates/steve-core/src/judge.rs	too_many_lines	102
-steve-core	crates/steve-core/src/kinds.rs	cognitive_complexity	27,27
-steve-core	crates/steve-core/src/kinds.rs	too_many_lines	111
 steve-core	crates/steve-core/src/node_git.rs	too_many_lines	138,112
 steve-core	crates/steve-core/src/orchestrator.rs	cognitive_complexity	35
 steve-core	crates/steve-core/src/orchestrator.rs	too_many_lines	584,389,180,146,144,138,121,107
@@ -115,7 +113,7 @@ steve-flow	crates/steve-flow/src/nodes/action.rs	too_many_lines	116
 steve-flow	crates/steve-flow/src/nodes/http.rs	too_many_lines	195,104
 steve-github	crates/steve-github/src/accept.rs	cognitive_complexity	38,37,27
 steve-github	crates/steve-github/src/accept.rs	too_many_lines	165,152,126
-steve-github	crates/steve-github/src/automation.rs	too_many_lines	246
+steve-github	crates/steve-github/src/automation.rs	too_many_lines	244
 steve-github	crates/steve-github/src/hooks.rs	cognitive_complexity	27
 steve-github	crates/steve-github/src/poll.rs	too_many_lines	117
 steve-github	crates/steve-github/src/repos.rs	cognitive_complexity	38
