@@ -568,3 +568,289 @@ fn one_raw_guard_preserves_separate_batches_for_each_physical_commit() {
         })
         .unwrap();
 }
+
+#[derive(Clone, Default)]
+struct R3Batches(std::sync::Arc<std::sync::Mutex<Vec<Vec<steve_store::BusEvent>>>>);
+impl steve_store::Publisher for R3Batches {
+    fn publish_batch(&self, events: Vec<steve_store::BusEvent>) {
+        self.0.lock().unwrap().push(events);
+    }
+}
+
+fn r3_fixture() -> (tempfile::TempDir, Store, R3Batches) {
+    let dir = tempfile::tempdir().unwrap();
+    let batches = R3Batches::default();
+    let store = Store::open(dir.path().join("steve.sqlite3"), batches.clone()).unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .with_conn(|c| {
+            println!(
+                "R3 bundled SQLite {} source={}",
+                rusqlite::version(),
+                c.query_row("SELECT sqlite_source_id()", [], |r| r.get::<_, String>(0))?
+            );
+            c.execute_batch("CREATE TABLE root_effects(id TEXT)")?;
+            Ok(())
+        })
+        .unwrap();
+    batches.0.lock().unwrap().clear();
+    (dir, store, batches)
+}
+
+fn r3_publish_only(store: &Store, id: &str) {
+    store
+        .transaction(|tx| {
+            tx.publish(effect_event(id));
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn r3_bundled_sqlite_read_only_commit_hook_observation() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for (begin, expected) in [("BEGIN DEFERRED", 0), ("BEGIN IMMEDIATE", 1)] {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let hook = seen.clone();
+        c.commit_hook(Some(move || {
+            hook.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
+        c.execute_batch(&format!(
+            "{begin}; SAVEPOINT s; SELECT 1; RELEASE s; COMMIT"
+        ))
+        .unwrap();
+        println!(
+            "R3 SQLite {} {begin}: commit_hook={}",
+            rusqlite::version(),
+            seen.load(Ordering::SeqCst)
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), expected);
+    }
+}
+
+#[test]
+fn r3_deferred_publish_only_commit_delivers_one_batch() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN DEFERRED").unwrap();
+    r3_publish_only(&store, "read-only-commit");
+    assert!(batches.0.lock().unwrap().is_empty());
+    guard.execute_batch("COMMIT").unwrap();
+    drop(guard);
+    println!(
+        "R3 publish-only COMMIT batches={:?}",
+        *batches.0.lock().unwrap()
+    );
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![vec![effect_event("read-only-commit")]]
+    );
+}
+
+#[test]
+fn r3_immediate_publish_only_commit_control() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+    r3_publish_only(&store, "read-only-commit");
+    assert!(batches.0.lock().unwrap().is_empty());
+    guard.execute_batch("COMMIT").unwrap();
+    drop(guard);
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![vec![effect_event("read-only-commit")]]
+    );
+}
+
+#[test]
+fn r3_deferred_publish_only_rollback_control() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN DEFERRED").unwrap();
+    r3_publish_only(&store, "rolled-back");
+    guard.execute_batch("ROLLBACK").unwrap();
+    drop(guard);
+    assert!(batches.0.lock().unwrap().is_empty());
+    assert!(!pending(&store.outbox_wake()));
+}
+
+#[test]
+fn r3_deferred_commit_then_write_commit_preserves_two_batches() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN DEFERRED").unwrap();
+    r3_publish_only(&store, "read-only-commit");
+    guard.execute_batch("COMMIT; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "write-commit");
+    guard.execute_batch("COMMIT").unwrap();
+    drop(guard);
+    println!("R3 two COMMIT batches={:?}", *batches.0.lock().unwrap());
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT group_concat(id) FROM root_effects", [], |r| r
+                    .get::<_, String>(0))?,
+                "write-commit"
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![
+            vec![effect_event("read-only-commit")],
+            vec![effect_event("write-commit")]
+        ]
+    );
+}
+
+#[test]
+fn r3_deferred_commit_then_write_rollback_keeps_prior_event() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN DEFERRED").unwrap();
+    r3_publish_only(&store, "read-only-commit");
+    guard.execute_batch("COMMIT; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "write-rollback");
+    guard.execute_batch("ROLLBACK").unwrap();
+    drop(guard);
+    let notified = pending(&store.outbox_wake());
+    println!(
+        "R3 COMMIT then ROLLBACK batches={:?} outbox_wake={notified}",
+        *batches.0.lock().unwrap()
+    );
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM root_effects", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM outbox_events WHERE topic='root.effect'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert!(!notified);
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![vec![effect_event("read-only-commit")]]
+    );
+}
+
+fn r3_raw_savepoint(keep_parent: bool, rollback_child: bool, commit_root: bool) {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+    if keep_parent {
+        stage_effects(&store, "parent");
+    }
+    guard.execute_batch("SAVEPOINT raw_child").unwrap();
+    stage_effects(&store, "child");
+    if rollback_child {
+        guard.execute_batch("ROLLBACK TO raw_child").unwrap();
+    }
+    guard.execute_batch("RELEASE raw_child").unwrap();
+    guard
+        .execute_batch(if commit_root { "COMMIT" } else { "ROLLBACK" })
+        .unwrap();
+    drop(guard);
+    let expected_ids: Vec<&str> = if !commit_root {
+        vec![]
+    } else if rollback_child {
+        if keep_parent { vec!["parent"] } else { vec![] }
+    } else if keep_parent {
+        vec!["parent", "child"]
+    } else {
+        vec!["child"]
+    };
+    let notified = pending(&store.outbox_wake());
+    store.reader(|c| {
+        let ids: Vec<String> = c.prepare("SELECT id FROM root_effects ORDER BY rowid")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let outbox: Vec<String> = c.prepare("SELECT json_extract(payload,'$.id') FROM outbox_events WHERE topic='root.effect' ORDER BY seq")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        println!("R3 raw savepoint parent={keep_parent} rollback_child={rollback_child} commit_root={commit_root}: rows={ids:?} outbox={outbox:?} batches={:?} wake={notified}", *batches.0.lock().unwrap());
+        assert_eq!(ids, expected_ids);
+        assert_eq!(outbox, expected_ids);
+        Ok::<_, StoreError>(())
+    }).unwrap();
+    assert_eq!(
+        notified,
+        !expected_ids.is_empty(),
+        "rolled-back outbox must not wake"
+    );
+    let expected: Vec<_> = expected_ids.iter().map(|id| effect_event(id)).collect();
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        if expected.is_empty() {
+            vec![]
+        } else {
+            vec![expected]
+        }
+    );
+}
+
+#[test]
+fn r3_raw_savepoint_rollback_keeps_parent_and_discards_child_effects() {
+    r3_raw_savepoint(true, true, true);
+}
+#[test]
+fn r3_raw_savepoint_rollback_child_only_emits_nothing() {
+    r3_raw_savepoint(false, true, true);
+}
+#[test]
+fn r3_raw_savepoint_release_control() {
+    r3_raw_savepoint(true, false, true);
+}
+#[test]
+fn r3_raw_savepoint_root_rollback_control() {
+    r3_raw_savepoint(true, true, false);
+}
+
+#[test]
+fn r3_deferred_rollback_then_write_commit_control() {
+    let (_dir, store, batches) = r3_fixture();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN DEFERRED").unwrap();
+    r3_publish_only(&store, "read-only-rollback");
+    guard.execute_batch("ROLLBACK; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "write-commit");
+    guard.execute_batch("COMMIT").unwrap();
+    drop(guard);
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![vec![effect_event("write-commit")]]
+    );
+}
