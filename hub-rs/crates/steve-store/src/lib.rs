@@ -269,9 +269,11 @@ impl Store {
     /// rely on due_loop's 60-second fallback.
     /// DomainEvent carries business facts; it must not be a second wake path for a due loop.
     ///
-    /// SQLite update_hook observes trigger writes, but not truncate-optimized unconditional
-    /// DELETEs, REPLACE's implicit deleted rows, or WITHOUT ROWID tables. Use explicit row writes
-    /// for promptly making work due; these SQLite exceptions also rely on the fallback.
+    /// Known update_hook blind spots include truncate-optimized unconditional DELETEs and
+    /// WITHOUT ROWID writes. These omissions are not permission for silent mutations of a
+    /// subscribed table. REPLACE skips callbacks for its implicit deleted rows, but its
+    /// replacement INSERT normally hints the same rowid table; this is a table-level hint,
+    /// not a per-row deletion event.
     /// A rolled-back savepoint can leave a harmless extra hint when its outer write commits.
     /// Each SQLite commit seals its hint separately, so a later autocommit statement failure or
     /// rollback in the same writer closure cannot erase an earlier successful commit.
