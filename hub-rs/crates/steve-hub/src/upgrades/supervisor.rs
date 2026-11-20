@@ -815,7 +815,14 @@ server.serve_forever()
         let group = former_group.id().unwrap();
         let mut child = HubChild { process, group };
         steve_runtime::testkit::eventually_sync("child ignores TERM", || ready.exists()).await;
-        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        // Test-only deadline: on failure the guarded children drop and release blocking waitid.
+        tokio::time::timeout(
+            steve_runtime::testkit::EVENTUALLY,
+            stop(&mut child, Duration::from_millis(50)),
+        )
+        .await
+        .expect("forced shutdown must finish before the shared test deadline")
+        .unwrap();
         assert!(child.id().is_none());
         former_group.wait().await.unwrap();
         steve_runtime::testkit::eventually_sync("forced shutdown removed both groups", || unsafe {
@@ -918,13 +925,13 @@ server.serve_forever()
         let mut child = spawn(&cfg, &old, None).unwrap();
         let up = wait_health(&cfg, &u, &mut child, "0.1.0", None).await;
         if taken() {
-            let _ = stop(&mut child, Duration::from_millis(50)).await;
+            let _ = stop(&mut child, STOP_GRACE).await;
             return false;
         }
         up.unwrap();
         let applied = apply(&cfg, &u, &mut child, &mut op).await;
         if taken() {
-            let _ = stop(&mut child, Duration::from_millis(50)).await;
+            let _ = stop(&mut child, STOP_GRACE).await;
             return false;
         }
         applied.unwrap();
@@ -939,7 +946,7 @@ server.serve_forever()
                 .unwrap(),
             "before-upgrade"
         );
-        stop(&mut child, Duration::from_millis(50)).await.unwrap();
+        stop(&mut child, STOP_GRACE).await.unwrap();
         true
     }
     #[tokio::test]
