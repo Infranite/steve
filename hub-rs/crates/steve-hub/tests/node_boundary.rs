@@ -735,3 +735,111 @@ fn rationale_and_inventory_must_match_in_both_directions() {
     let wrong_rule = [e(Fs, "fixture.rs", Hub, "different rule")];
     assert_eq!(rationale_problems(&listed, &wrong_rule).len(), 2);
 }
+
+/// command/ may depend on pure contracts, never on coordinator I/O, clocks or error dispatch.
+fn command_path_allowed(path: &str, depth: usize) -> bool {
+    let path = path.split(" as ").next().unwrap().trim_start_matches("::");
+    let parts: Vec<_> = path.split("::").collect();
+    match parts[0] {
+        "crate" => path.starts_with("crate::wire::node_runtime::command::"),
+        "super" => parts.iter().take_while(|p| **p == "super").count() <= depth,
+        "self" => true,
+        "steve_runtime" => parts.get(1) == Some(&"machine"),
+        "steve_types" => parts.len() == 2 && matches!(parts[1], "Retry" | "DecisionId"),
+        "steve_node_api" => {
+            parts.len() == 2 && matches!(parts[1], "Intent" | "IntentKey" | "Outcome")
+        }
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" | "bool" | "char" | "str" | "f32" | "f64" => true,
+        // Unqualified associated paths such as State::Sending are local types, not crates.
+        name => name.starts_with(|c: char| c.is_ascii_uppercase()),
+    }
+}
+
+fn command_problems(code: &str, depth: usize) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (_, path) in scan::uses(code) {
+        if !command_path_allowed(&path, depth) {
+            problems.push(format!("import {path}"));
+        }
+    }
+    let paths =
+        regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)+").unwrap();
+    for path in paths.find_iter(code) {
+        let path: String = path
+            .as_str()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if !command_path_allowed(&path, depth) {
+            problems.push(format!("path {path}"));
+        }
+    }
+    // Catch bare aliases and forbidden calls inside macro token trees too.
+    for token in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if matches!(
+            token,
+            "Error"
+                | "ApiError"
+                | "safe_detail"
+                | "reason"
+                | "params"
+                | "Clock"
+                | "SystemTime"
+                | "Instant"
+                | "Utc"
+                | "rng"
+                | "random"
+                | "Store"
+                | "StoreError"
+                | "Tx"
+                | "Connection"
+                | "include"
+                | "include_str"
+                | "include_bytes"
+        ) {
+            problems.push(format!("token {token}"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn command_planning_stays_pure_and_inside_its_boundary() {
+    let mut problems = Vec::new();
+    for source in scan::crate_sources(crates_dir(), "steve-hub") {
+        let Some(relative) = source
+            .rel
+            .strip_prefix("steve-hub/src/wire/node_runtime/command/")
+        else {
+            continue;
+        };
+        let depth = relative.split('/').count() - usize::from(relative.ends_with("mod.rs"));
+        for problem in command_problems(&source.code, depth) {
+            problems.push(format!("{}: {problem}", source.rel));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_command_boundary_sees_renames_globs_parent_escapes_and_qualified_calls() {
+    for source in [
+        "use crate::backend::Backend;",
+        "use crate::wire::node_runtime::config;",
+        "use super::super::*;",
+        "use std::{time as t};",
+        "use steve_store::*;",
+        "fn f() { let x = tokio::time::Instant::now(); }",
+        "use steve_runtime::{clock as c};",
+        "use steve_types::{Error as E};",
+        "use steve_types as types;",
+        "fn f() { let x = rand::random::<u64>(); }",
+        "macro_rules! hidden { () => { std::fs::read(\"x\") }; }",
+    ] {
+        let code = scan::production(source).unwrap();
+        assert!(!command_problems(&code, 1).is_empty(), "missed {source}");
+    }
+    let source = "use steve_types::Retry; use super::machine::State; fn f(now: i64) -> i128 { i128::from(now) } #[cfg(test)] mod tests { use std::time::Instant; }";
+    assert!(command_problems(&scan::production(source).unwrap(), 1).is_empty());
+}

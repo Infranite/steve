@@ -37,6 +37,7 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod apply;
 mod capacity_retry;
+mod command;
 mod config;
 mod cost;
 mod heads;
