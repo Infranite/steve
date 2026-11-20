@@ -6,7 +6,8 @@ use crate::signing::{
 use anyhow::{Context, Result, ensure};
 use reqwest::Method;
 use reqwest::blocking::Client;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+#[cfg(test)]
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -150,52 +151,126 @@ impl Journal {
     }
 }
 
-/// Reads schema compatibility without creating or migrating the database. This is the same rule as
-/// steve_store::db::compat: unstamped legacy databases require a reader of their own schema.
-pub fn schema_state(db: &Path) -> Result<Value> {
+/// Reuse the engine's read-only discriminator, never a runtime/admin open or migration.
+fn inspect_storage(db: &Path) -> Result<steve_store_sqlite::compat::StorageState> {
+    use steve_store_sqlite::{
+        compat::{StorageCapabilities, StorageState},
+        open,
+    };
     if !db.exists() {
-        return Ok(json!({"schema":0,"min_reader":0}));
+        return Ok(StorageState::Empty);
     }
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let has = |name: &str| -> Result<bool> {
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
-            [name],
-            |r| r.get(0),
-        )?)
-    };
-    let schema: i64 = if has("schema_version")? {
-        conn.query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let min_reader: i64 = if has("schema_compat")? {
-        conn.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or(schema)
-    } else {
-        schema
-    };
-    Ok(json!({"schema":schema,"min_reader":min_reader}))
+    let conn = open::open_readonly(db)?;
+    let state = open::inspect(&conn)?;
+    match &state {
+        StorageState::Legacy { schema_version } => {
+            let legacy = StorageCapabilities::compiled()
+                .legacy
+                .context("compiled converter missing")?;
+            ensure!(
+                (i64::from(legacy.min_read)..=i64::from(legacy.target)).contains(schema_version),
+                "legacy input outside compiled conversion range"
+            );
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schema_compat')",
+                [],
+                |r| r.get(0),
+            )?;
+            if exists {
+                let (count, minimum): (i64, i64) = conn.query_row(
+                    "SELECT count(*),min(min_reader) FROM schema_compat WHERE typeof(min_reader)='integer'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let views: i64 = conn.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name='schema_compat' AND type!='table'",
+                    [], |r| r.get(0),
+                )?;
+                ensure!(
+                    count == 1
+                        && views == 0
+                        && conn.query_row("SELECT count(*) FROM schema_compat", [], |r| r
+                            .get::<_, i64>(0))?
+                            == 1
+                        && (0..=i64::from(legacy.target)).contains(&minimum),
+                    "invalid legacy minimum reader"
+                );
+            }
+        }
+        StorageState::Current { .. } => {
+            let unknown: i64 = conn.query_row(
+                "SELECT count(*) FROM meta WHERE domain NOT IN ('core','stream','comms') OR typeof(domain)!='text' OR typeof(key)!='text' OR typeof(value)!='text'",
+                [],
+                |r| r.get(0),
+            )?;
+            let duplicates: i64 = conn.query_row("SELECT count(*) FROM (SELECT domain,key FROM meta GROUP BY domain,key HAVING count(*) != 1)", [], |r| r.get(0))?;
+            let count: i64 =
+                conn.query_row("SELECT count(*) FROM domain_schema", [], |r| r.get(0))?;
+            ensure!(
+                unknown == 0 && duplicates == 0 && count == 3,
+                "duplicate or unknown storage metadata"
+            );
+        }
+        StorageState::Empty => {
+            // SQL LIKE treats '_' as a wildcard: sqlitex is user data, not an
+            // internal sqlite_ object. Do not let that spelling pass as empty.
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE lower(substr(name,1,7)) != 'sqlite_'",
+                [],
+                |r| r.get(0),
+            )?;
+            ensure!(count == 0, "unrecognized nonempty storage");
+        }
+    }
+    Ok(state)
+}
+/// Receipt/probe state has no legacy scalar pretending to describe a current layout.
+pub fn schema_state(db: &Path) -> Result<Value> {
+    use steve_store_sqlite::compat::StorageState;
+    Ok(match inspect_storage(db)? {
+        StorageState::Empty => json!({"kind":"empty"}),
+        StorageState::Legacy { schema_version } => {
+            json!({"kind":"legacy","schema_version":schema_version})
+        }
+        StorageState::Current {
+            layout,
+            domains,
+            contract_schema,
+        } => json!({
+            "kind":"current", "layout":layout.generation, "min_reader":layout.min_reader,
+            "contract":contract_schema, "core":domains["core"], "stream":domains["stream"], "comms":domains["comms"]
+        }),
+    })
+}
+pub fn storage_capabilities(
+    value: &Value,
+) -> Result<steve_store_sqlite::compat::StorageCapabilities> {
+    use steve_store_sqlite::compat::{StorageCapabilities, StorageState};
+    ensure!(
+        !value["storage"]
+            .as_object()
+            .is_some_and(|o| o.get("legacy").is_some_and(Value::is_null)),
+        "null legacy capability"
+    );
+    let caps: StorageCapabilities = serde_json::from_value(value["storage"].clone())
+        .context("missing, unknown or old-format storage capabilities")?;
+    caps.can_open(&StorageState::Empty, false)?;
+    Ok(caps)
+}
+pub(crate) fn check_build_storage(manifest: &Value, info: &Value) -> Result<()> {
+    ensure!(
+        storage_capabilities(manifest)? == storage_capabilities(info)?,
+        "manifest storage differs from Hub build"
+    );
+    Ok(())
 }
 pub fn check_schema(db: &Path, release: &Path) -> Result<()> {
-    let state = schema_state(db)?;
-    let needed = state["min_reader"]
-        .as_i64()
-        .context("invalid schema minimum")?;
-    if needed == 0 {
-        return Ok(());
-    }
     let manifest = json_file(&release.join("release.json"))?;
-    let known = manifest["schema"]["target"]
-        .as_i64()
-        .context("release does not declare its supported schema")?;
     ensure!(
-        known >= needed,
-        "release knows schema {known}, but database requires at least {needed}; nothing was changed"
+        manifest["format_version"] == 1,
+        "unsupported release manifest format"
     );
+    storage_capabilities(&manifest)?.can_open(&inspect_storage(db)?, false)?;
     Ok(())
 }
 
@@ -1098,7 +1173,11 @@ mod tests {
             return;
         }
         let db = Connection::open(home.join("data/steve.sqlite3")).unwrap();
-        db.execute_batch("UPDATE schema_version SET v=54; UPDATE schema_compat SET min_reader=54; CREATE TABLE probe_write(v INTEGER); INSERT INTO probe_write VALUES(7);").unwrap();
+        db.execute_batch("DROP TABLE schema_version; DROP TABLE schema_compat; CREATE TABLE probe_write(v INTEGER); INSERT INTO probe_write VALUES(7);").unwrap();
+        let matrix: Value =
+            serde_json::from_str(include_str!("../tests/storage_matrix.json")).unwrap();
+        db.execute_batch(matrix["current_sql"].as_str().unwrap())
+            .unwrap();
         drop(db);
         assert_ne!(
             std::env::var("STEVE_NATIVE_TEST_PROBE_FAIL").as_deref(),
@@ -1109,7 +1188,12 @@ mod tests {
             let id = std::env::var("STEVE_UPGRADE_ID").unwrap();
             let mut progress = crate::migration::Reporter::new(&home, &id).unwrap();
             progress
-                .report(54, 54, 100_000, mode == "finished")
+                .report(steve_store_sqlite::migrate::Progress {
+                    phase: steve_store_sqlite::migrate::Phase::DomainMigration,
+                    domain: Some("comms"),
+                    vm_steps: 100_000,
+                    complete: mode == "finished",
+                })
                 .unwrap();
             if mode == "advancing" {
                 for n in 1..=17 {
@@ -1117,9 +1201,23 @@ mod tests {
                     // Keep this pacing: a child-local fake clock cannot drive the parent's
                     // std::time budget or preserve the test's elapsed-time assertion.
                     std::thread::sleep(Duration::from_millis(400));
-                    progress.report(54, 54, n * 100_000, false).unwrap();
+                    progress
+                        .report(steve_store_sqlite::migrate::Progress {
+                            phase: steve_store_sqlite::migrate::Phase::DomainMigration,
+                            domain: Some("comms"),
+                            vm_steps: n * 100_000,
+                            complete: false,
+                        })
+                        .unwrap();
                 }
-                progress.report(54, 54, 1_800_000, true).unwrap();
+                progress
+                    .report(steve_store_sqlite::migrate::Progress {
+                        phase: steve_store_sqlite::migrate::Phase::DomainMigration,
+                        domain: Some("comms"),
+                        vm_steps: 1_800_000,
+                        complete: true,
+                    })
+                    .unwrap();
             } else {
                 // The parent must stop this candidate and roll back, whether migration stalled or
                 // finished but startup never became healthy. Only the test's own child is stopped.
@@ -1212,7 +1310,7 @@ mod tests {
         let old = home.join("releases/1.2.2-local-bbbbbbb");
         fs::create_dir_all(old.join("bin")).unwrap();
         fs::create_dir_all(old.join("web/dist")).unwrap();
-        let old_manifest = json!({"format_version":1,"version":"1.2.2","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":{"target":53}});
+        let old_manifest = json!({"format_version":1,"version":"1.2.2","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","schema":{"min_read":113,"max_read":113,"target":113}});
         fs::write(old.join("release.json"), old_manifest.to_string()).unwrap();
         executable(&old.join("bin/steve-hub"), "#!/bin/sh\nexit 0\n");
         fs::create_dir_all(home.join("web")).unwrap();
@@ -1223,7 +1321,7 @@ mod tests {
         private_dir(&home.join("signing")).unwrap();
         signing::exclusive_json(&home.join("signing/identity.json"), &json!({"label":"fixture.steve","hub_identifier":"io.github.infranite.steve.hub","keyhelper_identifier":"io.github.infranite.steve.keyhelper","vault_service":"fixture.vault"})).unwrap();
         fs::create_dir(home.join("data")).unwrap();
-        Connection::open(home.join("data/steve.sqlite3")).unwrap().execute_batch("CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(53); CREATE TABLE schema_compat(min_reader INTEGER); INSERT INTO schema_compat VALUES(53); CREATE TABLE original(v INTEGER); INSERT INTO original VALUES(9);").unwrap();
+        Connection::open(home.join("data/steve.sqlite3")).unwrap().execute_batch("CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(113); CREATE TABLE schema_compat(min_reader INTEGER); INSERT INTO schema_compat VALUES(113); CREATE TABLE original(v INTEGER); INSERT INTO original VALUES(9);").unwrap();
         let helper = std::env::current_exe().unwrap();
         let quoted = shlex::try_quote(helper.to_str().unwrap()).unwrap();
         executable(
@@ -1231,7 +1329,7 @@ mod tests {
             &format!(
                 r#"#!/bin/sh
 case "${{1:-}}" in
-    --build-info) printf '%s\n' '{{"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":54,"check_config":true}}'; exit 0;;
+    --build-info) printf '%s\n' '{build_info}'; exit 0;;
     --check-config) printf '%s\n' '{{"ok":true}}'; exit 0;;
     --admin)
         [ "$2 $3 $4" = "backup --reason pre-upgrade" ] || exit 9
@@ -1241,7 +1339,8 @@ case "${{1:-}}" in
 esac
 export STEVE_NATIVE_TEST_FIXTURE=1
 exec {quoted} --exact release::tests::fixture_process --nocapture
-"#
+"#,
+                build_info = json!({"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target,"storage":steve_store_sqlite::compat::StorageCapabilities::compiled(),"check_config":true})
             ),
         );
         let manager = home.join("launchctl");
@@ -1300,12 +1399,12 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "succeeded"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-            54
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["layout"],
+            2
         );
         let backup =
             PathBuf::from(outcome.receipt["backup"].as_str().unwrap()).join("steve.sqlite3");
-        assert_eq!(schema_state(&backup).unwrap()["schema"], 53);
+        assert_eq!(schema_state(&backup).unwrap()["schema_version"], 113);
         assert_eq!(
             fs::metadata(backup).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1321,8 +1420,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
         assert_eq!(outcome.receipt["phase"], "backup");
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-            53
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema_version"],
+            113
         );
         assert_ne!(
             fs::canonicalize(dir.path().join("current")).unwrap(),
@@ -1340,8 +1439,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "rolled_back"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-            53
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema_version"],
+            113
         );
         assert_eq!(
             json_file(&dir.path().join("current/release.json")).unwrap()["version"],
@@ -1373,8 +1472,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
         assert!(start.elapsed() > runtime.health_timeout * 2);
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-            54
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["layout"],
+            2
         );
     }
     #[test]
@@ -1395,8 +1494,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
                 "rolled_back"
             );
             assert_eq!(
-                schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-                53
+                schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema_version"],
+                113
             );
             assert_eq!(
                 json_file(&dir.path().join("current/release.json")).unwrap()["version"],
@@ -1418,8 +1517,8 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
             "failed"
         );
         assert_eq!(
-            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
-            54
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["layout"],
+            2
         );
         assert_eq!(
             fs::canonicalize(dir.path().join("current")).unwrap(),
@@ -1436,30 +1535,18 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
     fn schema_gate_preserves_legacy_and_future_databases() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("data.sqlite3");
-        assert_eq!(
-            schema_state(&db).unwrap(),
-            json!({"schema":0,"min_reader":0})
-        );
+        assert_eq!(schema_state(&db).unwrap(), json!({"kind":"empty"}));
         assert!(!db.exists());
         Connection::open(&db)
             .unwrap()
             .execute_batch(
-                "CREATE TABLE schema_version(v INTEGER); INSERT INTO schema_version VALUES(55);",
+                "CREATE TABLE schema_version(v INTEGER);INSERT INTO schema_version VALUES(115);",
             )
             .unwrap();
-        assert_eq!(
-            schema_state(&db).unwrap(),
-            json!({"schema":55,"min_reader":55})
-        );
-        fs::write(
-            dir.path().join("release.json"),
-            r#"{"schema":{"target":54}}"#,
-        )
-        .unwrap();
+        let before = fs::read(&db).unwrap();
+        fs::write(dir.path().join("release.json"),json!({"format_version":1,"storage":steve_store_sqlite::compat::StorageCapabilities::compiled()}).to_string()).unwrap();
         assert!(check_schema(&db, dir.path()).is_err());
-        Connection::open(&db).unwrap().execute_batch("CREATE TABLE schema_compat(min_reader INTEGER); INSERT INTO schema_compat VALUES(54);").unwrap();
-        check_schema(&db, dir.path()).unwrap();
-        assert_eq!(schema_state(&db).unwrap()["schema"], 55);
+        assert_eq!(fs::read(&db).unwrap(), before);
     }
     #[test]
     fn prune_preserves_protected_unknown_and_unowned_uuid_directories() {

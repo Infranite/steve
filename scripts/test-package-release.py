@@ -25,6 +25,8 @@ tap = importlib.util.module_from_spec(tap_spec)
 tap_spec.loader.exec_module(tap)
 
 
+STORAGE = json.loads((Path(__file__).parents[1] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())["manifest"]["storage"]
+
 class BundleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -34,7 +36,8 @@ class BundleTests(unittest.TestCase):
         self.web.mkdir()
         (self.web / "index.html").write_text('<html><head></head><body></body></html>')
         self.binary = root / "hub"
-        self.binary.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"version":"0.2.0","commit":"' + 'a' * 40 + '","schema":24,"target":"aarch64-apple-darwin"}\'\n')
+        info = dict(version="0.2.0", commit="a" * 40, schema=STORAGE["legacy"]["target"], storage=STORAGE, target="aarch64-apple-darwin")
+        self.binary.write_text("#!/bin/sh\nprintf '%s\\n' '" + json.dumps(info) + "'\n")
         self.binary.chmod(0o755)
         self.node = root / "node"
         self.node.write_text(self.binary.read_text())
@@ -47,7 +50,7 @@ class BundleTests(unittest.TestCase):
         (root / "private.env").write_text("must not enter release")
         self.out = root / "out"
         self.args = SimpleNamespace(version="0.2.0", commit="a" * 40,
-            target="aarch64-apple-darwin", schema=24, binary=str(self.binary), node=str(self.node), cli=str(self.cli), keyhelper=str(self.helper), web=str(self.web), out=str(self.out))
+            target="aarch64-apple-darwin", schema=STORAGE["legacy"]["target"], binary=str(self.binary), node=str(self.node), cli=str(self.cli), keyhelper=str(self.helper), web=str(self.web), out=str(self.out))
 
     def test_bundle_contains_only_selected_outputs_and_consistent_version(self):
         release.package(self.args)
@@ -120,7 +123,7 @@ class BundleTests(unittest.TestCase):
         inner = json.loads((destination / "release.json").read_text())
         legacy.verify_manifest(inner, runtime)
         self.assertEqual(set(inner), {"format_version", "version", "commit", "hub_version", "web_version",
-                                      "api_protocol", "schema", "assets"})
+                                      "api_protocol", "schema", "storage", "assets"})
         self.assertNotIn("cli_protocol", runtime)
         self.assertFalse((destination / "ops/steve.py").exists())
         self.assertFalse((destination / "bin/steve").exists())
@@ -156,7 +159,7 @@ class BundleTests(unittest.TestCase):
         for binary in (self.binary, self.node, self.cli):
             binary.write_bytes(header)
         identity = json.dumps(dict(version=self.args.version, commit=self.args.commit,
-                                   schema=self.args.schema, target=self.args.target)).encode()
+                                   schema=self.args.schema, storage=STORAGE, target=self.args.target)).encode()
         with patch.object(release.subprocess, "check_output", return_value=identity):
             release.package(self.args)
         manifest = json.loads((self.out / "installer-manifest-aarch64-apple-darwin.json").read_text())
@@ -232,6 +235,62 @@ class BundleTests(unittest.TestCase):
         self.cli.unlink()
         self.cli.symlink_to(self.binary)
         with self.assertRaisesRegex(ValueError, "symlink"):
+            release.package(self.args)
+
+
+    def test_shared_matrix_through_real_packaging_and_gate(self):
+        gate_spec = importlib.util.spec_from_file_location("gate_fixtures", Path(__file__).parents[1] / "ops/test-schema-gate.py")
+        gate = importlib.util.module_from_spec(gate_spec)
+        gate_spec.loader.exec_module(gate)
+        from contextlib import closing
+        import sqlite3
+        for case, sql, candidate in gate.fixtures():
+            with self.subTest(case=case["name"]):
+                folder = Path(self.tmp.name) / case["name"]
+                folder.mkdir()
+                db = folder / "steve.sqlite3"
+                if not case.get("missing"):
+                    with closing(sqlite3.connect(db)) as c:
+                        c.executescript(sql)
+                before = db.read_bytes() if db.exists() else None
+                storage = candidate.get("storage")
+                info = dict(version=self.args.version, commit=self.args.commit, target=self.args.target,
+                            schema=STORAGE["legacy"]["target"], storage=storage)
+                self.binary.write_text("#!/bin/sh\nprintf '%s\\n' '" + json.dumps(info) + "'\n")
+                self.args.out = str(folder / "out")
+                try:
+                    release.package(self.args)
+                except ValueError as error:
+                    self.assertFalse(case["allowed"])
+                    self.assertRegex(str(error), "storage|legacy schema")
+                    continue
+                packaged = json.loads((Path(self.args.out) / "manifest-aarch64-apple-darwin.json").read_text())
+                (folder / "release.json").write_text(json.dumps(packaged))
+                self.assertEqual(gate.schema_gate.check(db, folder) is None, case["allowed"])
+                self.assertEqual(db.read_bytes() if db.exists() else None, before)
+
+    def test_merge_refuses_platform_storage_disagreement(self):
+        release.package(self.args)
+        mac = self.out / "manifest-aarch64-apple-darwin.json"
+        self.args.target = "x86_64-unknown-linux-gnu"
+        for binary in (self.binary, self.node):
+            binary.write_text(binary.read_text().replace("aarch64-apple-darwin", self.args.target))
+        release.package(self.args)
+        linux = self.out / "manifest-x86_64-unknown-linux-gnu.json"
+        value = json.loads(linux.read_text())
+        value["storage"]["core"]["target"] += 1
+        linux.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            release.merge(SimpleNamespace(out=str(self.out / "steve-release.json"), manifests=[str(mac), str(linux)]))
+
+    def test_only_binary_values_generate_storage_and_the_old_wrapper(self):
+        self.args.schema = 999
+        release.package(self.args)
+        value = json.loads((self.out / "manifest-aarch64-apple-darwin.json").read_text())
+        self.assertEqual(value["storage"], STORAGE)
+        self.assertEqual(value["schema"], dict(min_read=113, max_read=114, target=114))
+        self.binary.write_text(self.binary.read_text().replace('"schema": 114', '"schema": 112'))
+        with self.assertRaisesRegex(ValueError, "legacy schema wrapper"):
             release.package(self.args)
 
 

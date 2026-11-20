@@ -129,10 +129,17 @@ def check_manifest(manifest, *, legacy_lock=False):
     require(manifest.get("hub_version") == version and manifest.get("web_version") == version
             and type(manifest.get("api_protocol")) is int and manifest["api_protocol"] == 1,
             "installer component identity is inconsistent")
-    schema = manifest.get("schema")
-    require(isinstance(schema, dict) and all(type(schema.get(k)) is int and schema[k] > 0
-            for k in ("min_read", "max_read", "target"))
-            and schema["min_read"] <= schema["target"] <= schema["max_read"], "invalid installer schema")
+    # Existing tap locks are version/asset provenance, not permission to open data.
+    # Every newly published installer must declare the new flat storage contract.
+    if not legacy_lock or "storage" in manifest:
+        storage = manifest.get("storage")
+        names = {"layout", "contract", "core", "stream", "comms", "legacy"}
+        require(isinstance(storage, dict) and set(storage) == names, "invalid installer storage capabilities")
+        for bounds in storage.values():
+            require(isinstance(bounds, dict) and set(bounds) == {"min_read", "target"}
+                    and all(type(bounds[k]) is int for k in bounds)
+                    and 0 < bounds["min_read"] <= bounds["target"] <= 2**32-1,
+                    "invalid installer storage range")
     assets = manifest.get("assets")
     require(isinstance(assets, list) and len(assets) == len(TARGETS), "installer requires both platforms")
     seen = set()

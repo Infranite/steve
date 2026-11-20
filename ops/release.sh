@@ -52,7 +52,7 @@ WEB_PREV_VERSION=$(json_field $WEB/current/release.json version)
 LOG=$LOGS/$(strftime '%Y%m%d-%H%M%S' $EPOCHSECONDS)-run-$$.log
 VER="" SHA="" COMMIT="" BASE="" KIND="" DO_HUB=0 DO_WEB=0 HUB_OK=0 WEB_OK=0 HUB_FILES=() WEB_FILES=()
 # the hub lines of history.jsonl also say which Hub ran before and after, the database backup and the schema around it
-HUB_IMPL="" PREV_IMPL="" BACKUP="" SCHEMA_BEFORE="" SCHEMA_AFTER=""
+HUB_IMPL="" PREV_IMPL="" BACKUP="" STORAGE_BEFORE="" STORAGE_AFTER=""
 
 # ── results: last.json (what the Hub reports to the item), web/last.json, history.jsonl ──
 last() { # ok error [pending] [degraded]
@@ -60,9 +60,9 @@ last() { # ok error [pending] [degraded]
 }
 history() { # kind ok error rolled_back started prev files...   (DEGRADED=true: the failed release stays)
   local kind=$1 ok=$2 err=$3 rb=$4 t=$5 prev=$6 hx=""; shift 6
-  [[ $kind == hub || $kind == rollback ]] && hx=",\"degraded\":${DEGRADED:-false},\"hub\":$(js "$HUB_IMPL"),\"prev_hub\":$(js "$PREV_IMPL"),\"backup\":$(js "$BACKUP"),\"schema_before\":$(js "$SCHEMA_BEFORE"),\"schema_after\":$(js "$SCHEMA_AFTER")"
+  [[ $kind == hub || $kind == rollback ]] && hx=",\"degraded\":${DEGRADED:-false},\"hub\":$(js "$HUB_IMPL"),\"prev_hub\":$(js "$PREV_IMPL"),\"backup\":$(js "$BACKUP"),\"db_before\":${STORAGE_BEFORE:-null},\"db_after\":${STORAGE_AFTER:-null}"
   print -r -- "{\"kind\":$(js "$kind"),\"version\":$(js "$VER"),\"prev\":$(js "$prev"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"item\":$(js "$ITEM"),\"files_changed\":$(jarr "$@"),\"started\":$(js "$(iso $t)"),\"finished\":$(js "$(iso)"),\"duration_s\":$(( EPOCHSECONDS - t )),\"ok\":$ok,\"error\":$(js "$err"),\"rolled_back\":$rb,\"log\":$(js "$LOG")$hx}" >>$HIST
-  print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${SCHEMA_BEFORE:-?}->${SCHEMA_AFTER:-?}}"
+  print -r -- "   history: $kind $VER ok=$ok${err:+ error=$err} rolled_back=$rb${hx:+ hub=$PREV_IMPL->$HUB_IMPL backup=${BACKUP:-none} schema=${STORAGE_BEFORE:-?}->${STORAGE_AFTER:-?}}"
 }
 # a rollback's result: its own file, so a Hub from before 0.2.14 (which would read last.json as the item's release) never
 # sees it; the Hub notes it on the item and, when it went through, marks the YOLO undo that asked for it done
@@ -143,7 +143,7 @@ if (m.get("completed") is not True or d.get("quick_check")!="ok"
     sys.exit("Hub returned an incomplete or unverified backup")
 print(directory)'
 }
-schema() { [[ -f $DB ]] && sqlite3 $DB "SELECT v FROM schema_version" 2>/dev/null | head -1 }
+schema() { python3 $OPS/schema_gate.py state $DB }
 # can the release open the database as it is now? (prints why not)
 can_open() { python3 $OPS/schema_gate.py check $DB $1 }
 
@@ -253,28 +253,41 @@ hub_release() {
   step "hub: export $COMMIT to $DIR"
   mkdir -p $DIR && git -C $REPO archive HEAD | tar -x -C $DIR || hub_fail "导出代码失败"
   cd $DIR
-  local known=""
+  local build_info="" why=""
   if [[ -f $DIR/hub-rs/Cargo.toml ]]; then
     step "hub: cargo build (Rust Hub)"
     HUB_IMPL=rust
     rust_build $DIR || hub_fail "Rust Hub 构建失败，见 $LOG"
     step "hub: steve-keyhelper"
     keyhelper_install $DIR || hub_fail "steve-keyhelper 安装或密钥迁移失败，见 $LOG"
-    # the schema this Hub knows, for every later switch to this release (ops/schema_gate.py)
-    known=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["schema"])' <<<"$($DIR/bin/steve-hub --build-info 2>/dev/null)" 2>/dev/null)
-    [[ $known == <-> ]] || hub_fail "Rust Hub 说不出自己的 schema（--build-info），见 $LOG"
+    build_info=$("$DIR/bin/steve-hub" --build-info) || { hub_fail "Hub build identity unavailable"; return 1; }
   else
     hub_fail "这份代码里没有 hub-rs/Cargo.toml，无法构建 Hub"
   fi
-  print -r -- "   hub: ${PREV_IMPL:-none} -> $HUB_IMPL${known:+ (schema v$known)}"
-  print -r -- "{\"version\":$(js "$VER"),\"commit\":$(js "$COMMIT"),\"branch\":$(js "$BRANCH"),\"built_at\":$(js "$(iso)"),\"hub\":$(js $HUB_IMPL)${RUST_SHA:+,\"hub_sha256\":$(js $RUST_SHA)}${known:+,\"schema\":{\"target\":$known\}}}" >$DIR/release.json
+  print -r -- "   hub: ${PREV_IMPL:-none} -> $HUB_IMPL"
+  python3 - "$DIR" "$VER" "$COMMIT" "$BRANCH" "$(iso)" "$HUB_IMPL" "$RUST_SHA" "$build_info" <<'IDENTITY'
+import json, pathlib, sys
+root, version, commit, branch, built_at, hub, sha, raw = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(root) / 'ops'))
+import schema_gate
+info = json.loads(raw)
+if info.get('version') != version or info.get('commit') != commit:
+    raise SystemExit('Hub build identity differs from requested release')
+value = dict(format_version=1, version=version, commit=commit, branch=branch,
+             built_at=built_at, hub=hub, hub_version=version, web_version=version, api_protocol=1, assets=[],
+             hub_sha256=sha, **schema_gate.release_identity(info))
+(pathlib.Path(root) / 'release.json').write_text(json.dumps(value) + '\n')
+IDENTITY
+  [[ $? == 0 ]] || { hub_fail "invalid compiled storage capabilities"; return 1; }
+  if ! why=$(can_open "$DIR"); then hub_fail "$why"; return 1; fi
   if [[ -n ${STEVE_FIRST:-} ]]; then
     step "hub: first release, nothing to restart"; ln -sfn $DIR $HOME_DIR/current; HUB_OK=1; history hub true "" false $T_HUB "" $HUB_FILES; return 0
   fi
   step "hub: drain"
   drain
   step "hub: backup the database"
-  SCHEMA_BEFORE=$(schema) COMPAT_BEFORE=$(python3 $OPS/schema_gate.py state $DB)
+  STORAGE_BEFORE=$(schema) || { hub_fail "cannot inspect storage"; return 1; }
+  COMPAT_BEFORE=$STORAGE_BEFORE
   if [[ -f $DB ]]; then
     BACKUP=$(hub_backup "$DIR/bin/steve-hub") || { hub_fail "发布前数据库备份失败，没有切换"; return 1 }
     print -r -- "   backup $BACKUP"
@@ -284,15 +297,15 @@ hub_release() {
   switch_to $VER
   step "hub: health check"
   if healthy $VER $COMMIT; then
-    SCHEMA_AFTER=$(schema)
-    HUB_OK=1; print -r -- "✓ hub $VER is live ($HUB_IMPL, schema v${SCHEMA_BEFORE:-?} -> v${SCHEMA_AFTER:-?})"; history hub true "" false $T_HUB "$PREV" $HUB_FILES
+    STORAGE_AFTER=$(schema)
+    HUB_OK=1; print -r -- "✓ hub $VER is live ($HUB_IMPL, storage ${STORAGE_BEFORE:-?} -> ${STORAGE_AFTER:-?})"; history hub true "" false $T_HUB "$PREV" $HUB_FILES
     step "hub: prune old releases"
     # keep the newest 3 and the previous one
     local old
     for old in $REL/2*(N/om[4,-1]); do [[ ${old:t} != $PREV ]] && { print -r -- "   remove $old"; rm -rf -- $old }; done
     return 0
   fi
-  SCHEMA_AFTER=$(schema)
+  STORAGE_AFTER=$(schema)
   local err="新版本启动后健康检查没有通过" why=""
   # the previous release ran on the database as it was; if the new Hub moved it past what that one knows, going
   # back would put an old binary on a database it can't read: the new release stays, degraded
@@ -309,7 +322,7 @@ hub_release() {
     switch_to $PREV
     healthy $PREV "$(json_field $REL/$PREV/release.json commit)" || err="新版本健康检查没有通过，回滚后旧版本也没有起来"
   fi
-  [[ $SCHEMA_AFTER != $SCHEMA_BEFORE ]] && print -r -- "   the database stays at schema v$SCHEMA_AFTER (was v$SCHEMA_BEFORE; backup $BACKUP)"
+  [[ $STORAGE_AFTER != $STORAGE_BEFORE ]] && print -r -- "   the database stays at storage $STORAGE_AFTER (was $STORAGE_BEFORE; backup $BACKUP)"
   rm -rf -- $DIR
   history hub false "$err" true $T_HUB "$PREV" $HUB_FILES
   reset_main; last false "$err"
@@ -338,19 +351,19 @@ rollback_main() { # [version]
   if ! why=$(can_open $REL/$target); then
     err="不能回滚到 $target：$why；当前版本保留"
     print -r -- "✗ $err"
-    SCHEMA_BEFORE=$(schema) SCHEMA_AFTER=$SCHEMA_BEFORE
+    STORAGE_BEFORE=$(schema) STORAGE_AFTER=$STORAGE_BEFORE
     history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"
     finish 1
   fi
   print -r -- "   yes: $(python3 $OPS/schema_gate.py state $DB)"
   step "rollback: drain"; drain
   step "rollback: backup the database"
-  SCHEMA_BEFORE=$(schema)
+  STORAGE_BEFORE=$(schema)
   if [[ -f $DB ]]; then
     BACKUP=$(hub_backup "$HOME_DIR/current/bin/steve-hub")
     if [[ $? != 0 ]]; then
       err="回滚前数据库备份失败，没有切换"; print -r -- "✗ $err"
-      SCHEMA_AFTER=$SCHEMA_BEFORE; history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"; finish 1
+      STORAGE_AFTER=$STORAGE_BEFORE; history rollback false "$err" false $T_HUB "$cur"; rollback_result false "$err"; finish 1
     fi
   fi
   step "rollback: switch to $target and restart"
@@ -364,7 +377,7 @@ rollback_main() { # [version]
       step "rollback: back to $cur"; switch_to $cur; healthy $cur "$(json_field $REL/$cur/release.json commit)" || err="回滚到 $target 和切回 $cur 后健康检查都没有通过"
     fi
   fi
-  SCHEMA_AFTER=$(schema)
+  STORAGE_AFTER=$(schema)
   history rollback $ok "$err" false $T_HUB "$cur"
   rollback_result $ok "$err"
   finish $([[ $ok == true ]] && print 0 || print 1)

@@ -15,6 +15,8 @@ OPS = pathlib.Path(__file__).resolve().parent
 SCRIPT = OPS / "local-release.py"
 
 
+STORAGE = json.loads((pathlib.Path(__file__).resolve().parents[1] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())["manifest"]["storage"]
+
 class Journal(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -113,6 +115,10 @@ class SigningPassword(unittest.TestCase):
     keychain is a fake `security` on PATH: the real one is never asked."""
 
     def setUp(self):
+        from unittest.mock import patch
+        store = patch.dict(os.environ, {"STEVE_VAULT_KEYSTORE":"keychain"})
+        store.start()
+        self.addCleanup(store.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.home = pathlib.Path(self.tmp.name)
         (self.home / "signing").mkdir()
@@ -301,7 +307,6 @@ class ConfigGate(unittest.TestCase):
         (self.home / "web").mkdir()
         (self.home / "web/current").symlink_to(self.old / "web/dist")
         self.m = Journal.module(self)
-        self.m.schema_gate.check = lambda db, candidate: None
         self.reached = []
 
         def tripwire(name):
@@ -323,12 +328,12 @@ class ConfigGate(unittest.TestCase):
         (d / "bin").mkdir(parents=True)
         (d / "web/dist").mkdir(parents=True)
         (d / "web/dist/index.html").write_text("<!doctype html>")
-        (d / "release.json").write_text(json.dumps(dict(version=name.split("-")[0], commit="c" * 40)))
+        (d / "release.json").write_text(json.dumps(dict(version=name.split("-")[0], commit="c" * 40, format_version=1, storage=STORAGE)))
         asked = d / "asked"
         hub = d / "bin/steve-hub"
         hub.write_text(f"""#!/bin/sh
 case "$1" in
-  --build-info) echo '{{"version":"{name.split("-")[0]}","commit":"{"c" * 40}","schema":1{',"check_config":true' if check else ''}}}' ;;
+  --build-info) echo '{{"version":"{name.split("-")[0]}","commit":"{"c" * 40}","schema":{STORAGE["legacy"]["target"]},"storage":{json.dumps(STORAGE)}{',"check_config":true' if check else ''}}}' ;;
   --check-config)
     echo "$STEVE_HOST|$STEVE_HOME|$STEVE_PORT" > "{asked}"
     if [ "$STEVE_HOST" = 0.0.0.0 ] && [ "$STEVE_ALLOW_ANY_HOST" != 1 ]; then

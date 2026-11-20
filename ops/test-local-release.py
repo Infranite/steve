@@ -91,9 +91,11 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
         f"STEVE_REPO={root / 'repo'}", "STEVE_FORBID_REAL_HOSTS=1"]) + "\n")
     (home / "signing/identity.json").write_text(json.dumps(dict(
         label="test.unused", hub_identifier=IDENT, keyhelper_identifier="test.unused.keyhelper", vault_service="test.unused")))
-    schema = info["schema"]
+    sys.path.insert(0, str(OPS))
+    import schema_gate
+    identity = schema_gate.release_identity(info)
 
-    def bundle(name, target=schema, web_version=VERSION):
+    def bundle(name, web_version=VERSION):
         d = home / "releases" / name
         (d / "bin").mkdir(parents=True)
         (d / "web/dist/assets").mkdir(parents=True)
@@ -102,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
                        capture_output=True)
         (d / "release.json").write_text(json.dumps(dict(
             format_version=1, version=VERSION, commit=COMMIT, hub_version=VERSION, web_version=VERSION, api_protocol=1,
-            schema=dict(min_read=target, max_read=target, target=target), assets=[])))
+            **identity, assets=[])))
         (d / "web/dist/release.json").write_text(json.dumps({"version": web_version}))
         (d / "web/dist/index.html").write_text(
             f'<!doctype html><html><head><meta name="steve-web-version" content="{web_version}"></head></html>')
@@ -186,8 +188,17 @@ with tempfile.TemporaryDirectory(prefix="steve-local-release-") as tmp:
 
         print("── a release that can't open the database: refused, nothing stops")
         before = pid()
-        r = deploy(bundle("0.8.0-old", target=schema - 1))
-        assert r.returncode == 1 and "需要至少" in r.stdout, r.stdout + r.stderr
+        db = home / "data/steve.sqlite3"
+        with sqlite3.connect(db) as c:
+            c.execute("UPDATE domain_schema SET version=? WHERE domain='core'",(identity['storage']['core']['target']+1,))
+        try:
+            r = deploy(bundle("0.8.0-old"))
+            assert r.returncode == 1 and "storage" in r.stdout, r.stdout + r.stderr
+            with sqlite3.connect(db) as c:
+                assert c.execute("SELECT version FROM domain_schema WHERE domain='core'").fetchone()[0] == identity['storage']['core']['target']+1
+        finally:
+            with sqlite3.connect(db) as c:
+                c.execute("UPDATE domain_schema SET version=? WHERE domain='core'",(identity['storage']['core']['target'],))
         assert (home / "current").resolve() == b.resolve() and pid() == before
         assert health()["drain"] is False
         ok("refused by the gate, same Hub process, no drain")

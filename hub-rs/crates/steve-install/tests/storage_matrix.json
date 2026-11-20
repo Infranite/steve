@@ -1,0 +1,567 @@
+{
+  "current_sql": "CREATE TABLE meta(domain TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(domain,key));\nCREATE TABLE domain_schema(domain TEXT PRIMARY KEY NOT NULL,version INTEGER NOT NULL);\nCREATE TABLE uow_applied(domain TEXT,key TEXT);\nCREATE TABLE cursor(domain TEXT,name TEXT);\nCREATE TABLE schema_compat(min_reader INTEGER NOT NULL);\nINSERT INTO schema_compat VALUES(1000);\nINSERT INTO meta VALUES('core','layout','2'),('core','min_reader','2'),('core','contract_schema','1'),('core','store_generation','store-fixture'),('core','file_id','file-fixture'),('core','file','steve.sqlite3'),('stream','file','steve.sqlite3'),('stream','file_id','file-fixture'),('comms','file','steve.sqlite3'),('comms','file_id','file-fixture');\nINSERT INTO domain_schema VALUES('core',1),('stream',1),('comms',1);",
+  "legacy_sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(113);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(113);",
+  "cases": [
+    {
+      "name": "missing",
+      "sql": "",
+      "allowed": true,
+      "missing": true,
+      "state": {
+        "kind": "empty"
+      },
+      "base": "empty"
+    },
+    {
+      "name": "empty",
+      "sql": "",
+      "allowed": true,
+      "state": {
+        "kind": "empty"
+      },
+      "base": "empty"
+    },
+    {
+      "name": "legacy-113",
+      "sql": "",
+      "allowed": true,
+      "state": {
+        "kind": "legacy",
+        "schema_version": 113
+      },
+      "base": "legacy"
+    },
+    {
+      "name": "current-old-shell-ignored",
+      "sql": "",
+      "allowed": true,
+      "state": {
+        "kind": "current",
+        "layout": 2,
+        "min_reader": 2,
+        "contract": 1,
+        "core": 1,
+        "stream": 1,
+        "comms": 1
+      },
+      "base": "current"
+    },
+    {
+      "name": "legacy-without-converter",
+      "sql": "",
+      "allowed": false,
+      "base": "legacy",
+      "patch": {
+        "/storage/legacy": null
+      }
+    },
+    {
+      "name": "candidate-missing-layout",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/layout": null
+      }
+    },
+    {
+      "name": "candidate-missing-contract",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/contract": null
+      }
+    },
+    {
+      "name": "candidate-missing-core",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core": null
+      }
+    },
+    {
+      "name": "candidate-missing-stream",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/stream": null
+      }
+    },
+    {
+      "name": "candidate-missing-comms",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/comms": null
+      }
+    },
+    {
+      "name": "candidate-old-or-unknown-unknown",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/unknown": {
+          "min_read": 1,
+          "target": 1
+        }
+      }
+    },
+    {
+      "name": "candidate-old-or-unknown-domains",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/domains": {}
+      }
+    },
+    {
+      "name": "candidate-old-or-unknown-format_version",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/format_version": 1
+      }
+    },
+    {
+      "name": "candidate-mixed-max_read",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/legacy/max_read": 2
+      }
+    },
+    {
+      "name": "candidate-mixed-convert",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/legacy/convert": true
+      }
+    },
+    {
+      "name": "candidate-invalid-target-True",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": true
+      }
+    },
+    {
+      "name": "candidate-invalid-target-0",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": 0
+      }
+    },
+    {
+      "name": "candidate-invalid-target--1",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": -1
+      }
+    },
+    {
+      "name": "candidate-invalid-target-1.0",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": 1.0
+      }
+    },
+    {
+      "name": "candidate-invalid-target-1",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": "1"
+      }
+    },
+    {
+      "name": "candidate-invalid-target-4294967296",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/target": 4294967296
+      }
+    },
+    {
+      "name": "candidate-reversed-range",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage/core/min_read": 2
+      }
+    },
+    {
+      "name": "current-old-manifest",
+      "sql": "",
+      "allowed": false,
+      "base": "current",
+      "patch": {
+        "/storage": null
+      }
+    },
+    {
+      "name": "empty-old-manifest",
+      "sql": "",
+      "allowed": false,
+      "base": "empty",
+      "patch": {
+        "/storage": null
+      }
+    },
+    {
+      "name": "legacy-0",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(0);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(0);",
+      "allowed": false,
+      "base": "empty"
+    },
+    {
+      "name": "legacy-112",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(112);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(112);",
+      "allowed": false,
+      "base": "empty"
+    },
+    {
+      "name": "legacy-114",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(114);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(114);",
+      "allowed": true,
+      "base": "empty",
+      "state": {
+        "kind": "legacy",
+        "schema_version": 114
+      }
+    },
+    {
+      "name": "legacy-1000",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(1000);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(1000);",
+      "allowed": false,
+      "base": "empty"
+    },
+    {
+      "name": "legacy-future-reader",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(113);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(115);",
+      "allowed": false,
+      "base": "empty"
+    },
+    {
+      "name": "legacy-empty-header",
+      "sql": "DELETE FROM schema_version;",
+      "allowed": false,
+      "base": "legacy"
+    },
+    {
+      "name": "legacy-duplicate-header",
+      "sql": "INSERT INTO schema_version VALUES(113);",
+      "allowed": false,
+      "base": "legacy"
+    },
+    {
+      "name": "legacy-duplicate-reader",
+      "sql": "INSERT INTO schema_compat VALUES(113);",
+      "allowed": false,
+      "base": "legacy"
+    },
+    {
+      "name": "unknown-nonempty",
+      "sql": "CREATE TABLE unrelated(v INTEGER);",
+      "allowed": false,
+      "base": "empty"
+    },
+    {
+      "name": "current-missing-meta",
+      "sql": "DROP TABLE meta;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-missing-domain_schema",
+      "sql": "DROP TABLE domain_schema;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-missing-uow_applied",
+      "sql": "DROP TABLE uow_applied;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-missing-cursor",
+      "sql": "DROP TABLE cursor;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-missing-schema_compat",
+      "sql": "DROP TABLE schema_compat;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "mixed-current-legacy",
+      "sql": "CREATE TABLE schema_version(v INTEGER);INSERT INTO schema_version VALUES(113);",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-missing-domain",
+      "sql": "DELETE FROM domain_schema WHERE domain='stream';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-unknown-domain",
+      "sql": "INSERT INTO domain_schema VALUES('unknown',1);",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-unknown-meta-domain",
+      "sql": "INSERT INTO meta VALUES('unknown','file','x');",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-min_reader",
+      "sql": "UPDATE meta SET value='3' WHERE domain='core' AND key='min_reader';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-layout",
+      "sql": "UPDATE meta SET value='3' WHERE domain='core' AND key='layout';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-contract_schema",
+      "sql": "UPDATE meta SET value='2' WHERE domain='core' AND key='contract_schema';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-domain-core",
+      "sql": "UPDATE domain_schema SET version=2 WHERE domain='core';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-domain-stream",
+      "sql": "UPDATE domain_schema SET version=2 WHERE domain='stream';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-future-domain-comms",
+      "sql": "UPDATE domain_schema SET version=2 WHERE domain='comms';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "current-below-domain-min",
+      "sql": "UPDATE domain_schema SET version=0 WHERE domain='core';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-fence-50",
+      "sql": "DELETE FROM schema_compat;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-fence-51",
+      "sql": "INSERT INTO schema_compat VALUES(1000);",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-fence-52",
+      "sql": "UPDATE schema_compat SET min_reader=999;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-fence-53",
+      "sql": "UPDATE schema_compat SET min_reader=1001;",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-fence-54",
+      "sql": "DROP TABLE schema_compat;CREATE TABLE schema_compat(min_reader INTEGER);INSERT INTO schema_compat VALUES(1000);",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-identity-55",
+      "sql": "DELETE FROM meta WHERE key='store_generation';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-identity-56",
+      "sql": "UPDATE meta SET value='' WHERE key='file_id';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-identity-57",
+      "sql": "UPDATE meta SET value='../outside' WHERE domain='stream' AND key='file';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "invalid-identity-58",
+      "sql": "UPDATE meta SET value='wrong' WHERE domain='stream' AND key='file_id';",
+      "allowed": false,
+      "base": "current"
+    },
+    {
+      "name": "legacy-negative-reader",
+      "base": "legacy",
+      "sql": "UPDATE schema_compat SET min_reader=-1;",
+      "allowed": false
+    },
+    {
+      "name": "legacy-reader-view",
+      "base": "legacy",
+      "sql": "DROP TABLE schema_compat;CREATE VIEW schema_compat AS SELECT 113 AS min_reader;",
+      "allowed": false
+    },
+    {
+      "name": "legacy-115",
+      "base": "empty",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(115);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(115);",
+      "allowed": false
+    },
+    {
+      "name": "legacy-113-reader114",
+      "base": "legacy",
+      "sql": "UPDATE schema_compat SET min_reader=114;",
+      "allowed": true,
+      "state": {
+        "kind": "legacy",
+        "schema_version": 113
+      }
+    },
+    {
+      "name": "legacy-114-without-converter",
+      "base": "empty",
+      "sql": "CREATE TABLE schema_version(v INTEGER NOT NULL);INSERT INTO schema_version VALUES(114);CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);INSERT INTO schema_compat VALUES(114);",
+      "allowed": false,
+      "patch": {
+        "/storage/legacy": null
+      }
+    },
+    {
+      "name": "legacy-null-reader",
+      "base": "legacy",
+      "sql": "DROP TABLE schema_compat;CREATE TABLE schema_compat(min_reader INTEGER);INSERT INTO schema_compat VALUES(NULL);",
+      "allowed": false
+    },
+    {
+      "name": "legacy-text-reader",
+      "base": "legacy",
+      "sql": "DROP TABLE schema_compat;CREATE TABLE schema_compat(min_reader TEXT);INSERT INTO schema_compat VALUES('113');",
+      "allowed": false
+    },
+    {
+      "name": "current-duplicate-meta",
+      "base": "current",
+      "sql": "ALTER TABLE meta RENAME TO old_meta;CREATE TABLE meta(domain TEXT,key TEXT,value TEXT);INSERT INTO meta SELECT * FROM old_meta;INSERT INTO meta SELECT * FROM old_meta WHERE key='layout';DROP TABLE old_meta;",
+      "allowed": false
+    },
+    {
+      "name": "candidate-explicit-null-legacy",
+      "base": "empty",
+      "sql": "",
+      "allowed": false,
+      "patch": {
+        "/storage": {
+          "layout": {
+            "min_read": 2,
+            "target": 2
+          },
+          "contract": {
+            "min_read": 1,
+            "target": 1
+          },
+          "core": {
+            "min_read": 1,
+            "target": 1
+          },
+          "stream": {
+            "min_read": 1,
+            "target": 1
+          },
+          "comms": {
+            "min_read": 1,
+            "target": 1
+          },
+          "legacy": null
+        }
+      }
+    },
+    {
+      "name": "unknown-sqlite-like-prefix",
+      "base": "empty",
+      "sql": "CREATE TABLE sqlitex(v INTEGER);",
+      "allowed": false
+    }
+  ],
+  "manifest": {
+    "storage": {
+      "layout": {
+        "min_read": 2,
+        "target": 2
+      },
+      "contract": {
+        "min_read": 1,
+        "target": 1
+      },
+      "core": {
+        "min_read": 1,
+        "target": 1
+      },
+      "stream": {
+        "min_read": 1,
+        "target": 1
+      },
+      "comms": {
+        "min_read": 1,
+        "target": 1
+      },
+      "legacy": {
+        "min_read": 113,
+        "target": 114
+      }
+    },
+    "schema": {
+      "target": 1,
+      "min_read": 1,
+      "max_read": 1
+    },
+    "format_version": 1
+  }
+}

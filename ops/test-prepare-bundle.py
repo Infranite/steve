@@ -19,6 +19,8 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
+STORAGE = json.loads((Path(__file__).parents[1] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())["manifest"]["storage"]
+
 class BundleFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -29,8 +31,8 @@ class BundleFixture:
         self.candidate = self.home / "releases" / ("0.2.0-" + str(uuid.uuid4()))
         for d in ("bin", "web/dist", "ops"):
             (self.candidate / d).mkdir(parents=True)
-        self.info = dict(version="0.2.0", commit="a" * 40, target="aarch64-apple-darwin", schema=24)
-        self.manifest = dict(self.info, format_version=1, hub_version="0.2.0", web_version="0.2.0", schema={"target":24})
+        self.info = dict(version="0.2.0", commit="a" * 40, target="aarch64-apple-darwin", schema=STORAGE["legacy"]["target"], storage=STORAGE)
+        self.manifest = dict(self.info, format_version=1, hub_version="0.2.0", web_version="0.2.0", schema=dict(min_read=114,max_read=114,target=114))
         (self.candidate / "release.json").write_text(json.dumps(self.manifest))
         (self.candidate / "web/dist/release.json").write_text(json.dumps(self.info))
         (self.candidate / "web/dist/index.html").write_text('<meta name="steve-web-version" content="0.2.0" />')

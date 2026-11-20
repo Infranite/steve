@@ -106,20 +106,24 @@ class MigrationBudget:
             if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o022:
                 return
             p = json.loads(self.path.read_text())
-            if not isinstance(p, dict) or p.get('format') != 1 or p.get('upgrade_id') != self.ident or p.get('pid') != self.pid:
+            phases = schema_gate.PHASES
+            domains = (None, 'contract', *schema_gate.DOMAINS)
+            if (not isinstance(p, dict) or p.get('format') != 2 or type(p['format']) is not int
+                    or p.get('upgrade_id') != self.ident or type(p.get('pid')) is not int or p['pid'] != self.pid
+                    or type(p.get('vm_steps')) is not int or not 0 <= p['vm_steps'] <= 2**64-1
+                    or type(p.get('complete')) is not bool or p.get('phase') not in phases
+                    or p.get('domain') not in domains
+                    or set(p) != {'format','upgrade_id','pid','phase','domain','vm_steps','complete'}):
                 return
-            if type(p['format']) is not int or type(p['pid']) is not int:
-                return
-            if any(type(p.get(k)) is not int or p[k] < 0 for k in ('migration', 'target', 'vm_steps')) or type(p.get('complete')) is not bool:
-                return
-            if any(p[k] > 2**32-1 for k in ('pid', 'migration', 'target')) or p['vm_steps'] > 2**64-1:
-                return
-            if not 0 < p['migration'] <= p['target'] or (p['complete'] and p['migration'] != p['target']):
+            position = (phases.index(p['phase']), domains.index(p['domain']))
+            if (position[0] != 3 and position[1] != 0) or (p['complete'] and position != (3, 4)):
                 return
             old = self.seen
-            if old and (old['complete'] or p['target'] != old['target'] or p['migration'] < old['migration'] or p['vm_steps'] < old['vm_steps']
-                        or (p['migration'] == old['migration'] and p['vm_steps'] == old['vm_steps'] and not p['complete'])):
-                return
+            if old:
+                before = (phases.index(old['phase']), domains.index(old['domain']))
+                if (old['complete'] or position < before or p['vm_steps'] < old['vm_steps']
+                        or (position == before and p['vm_steps'] == old['vm_steps'] and not p['complete'])):
+                    return
             self.advanced, self.seen = now, p
         except (OSError, ValueError, TypeError):
             pass
@@ -554,7 +558,7 @@ def validate_bundle(args):
     if (manifest.get("format_version") != 1 or manifest.get("hub_version") != args.version
             or manifest.get("web_version") != args.version
             or info.get("target") != "aarch64-apple-darwin"
-            or (manifest.get("schema") or {}).get("target") != info.get("schema")):
+            or not schema_gate.matching_storage(manifest, info)):
         raise Refused("release metadata does not match Hub build")
     if not re.search(r'<meta\s+name=["\']steve-web-version["\']\s+content=["\']'
                      + re.escape(args.version) + r'["\']', html):
@@ -848,7 +852,7 @@ def deploy(args, journal=Journal(None)):
     if signed_identifier(binary) != ident["hub_identifier"]:
         raise Refused(f"{binary} is signed as {signed_identifier(binary)}, not {ident['hub_identifier']}")
     info = build_info(binary)
-    if (info["version"], info["commit"]) != (version, manifest["commit"]):
+    if (info["version"], info["commit"]) != (version, manifest["commit"]) or not schema_gate.matching_storage(manifest, info):
         raise Refused(f"--build-info {info} does not match release.json")
     if not (candidate / "web/dist/index.html").exists():
         raise Refused("the release has no web build")

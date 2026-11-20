@@ -1,108 +1,90 @@
 #!/bin/bash
-# Released migrations never change. The last released version is the baseline: its LOCK must be a prefix of this one
-# (lines are only appended), and a version from before the LOCK gets one computed from its migration files. So a
-# released migration can't change even when its file and its LOCK line are edited together.
-# Usage: ops/check-migration-lock.sh [<this version tag>]   (CI passes the tag it builds; locally: HEAD)
+# Verify only retained legacy 113/114 and every domain LOCK. First archive publication
+# must continue the last published old chain; afterwards that archive is frozen.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DIR=hub-rs/crates/steve-store/migrations
-[ -d "$DIR" ] || DIR=hub-rs/crates/steve-store-sqlite/legacy/migrations
 this=${1:-}
-# the newest released version before the one being built (fetched one by one: CI checks out shallow); a
-# version built again later (a re-run) still compares with the one before it, not with what came after
-tags=$(git ls-remote --tags --refs origin 'v*') || { echo "✗ can't list the released versions"; exit 1; }
+tags=$(git ls-remote --tags --refs origin 'v*') || { echo "cannot list released versions"; exit 1; }
 versions=$(sed 's|.*refs/tags/||' <<<"$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vxF "${this:-none}" || true)
 if [[ $this =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   prev=$(printf '%s\n' $versions "$this" | sort -V | grep -B1 -xF "$this" | grep -vxF "$this" || true)
 else
   prev=$(printf '%s\n' $versions | sort -V | tail -1 || true)
 fi
-if [ -n "$prev" ]; then
-  git rev-parse -q --verify "refs/tags/$prev" >/dev/null ||
-    git fetch -q --depth 1 origin "refs/tags/$prev:refs/tags/$prev" || { echo "✗ can't fetch $prev"; exit 1; }
-  HISTORY_DIR=$DIR
-  if ! git cat-file -e "$prev:$HISTORY_DIR" 2>/dev/null; then
-    HISTORY_DIR=hub-rs/crates/steve-store/migrations
-  fi
-  if git cat-file -e "$prev:$HISTORY_DIR/LOCK" 2>/dev/null; then
-    old=$(git show "$prev:$HISTORY_DIR/LOCK" | grep -v '^#' | grep .)
-  else
-    # before the LOCK: the hash of every migration file it released
-    old=$(git ls-tree --name-only "$prev" "$HISTORY_DIR/" | grep '\.sql$' | sort | while read -r f; do
-      echo "$(basename "$f") $(git show "$prev:$f" | shasum -a 256 | cut -d' ' -f1)"; done)
-  fi
-  [ -n "$old" ] || { echo "✗ $prev released no migrations? (nothing read from it)"; exit 1; }
-  new=$(grep -v '^#' "$DIR/LOCK" | grep .)
-  case "$new" in
-    "$old"*) echo "$DIR/LOCK keeps the $(grep -c . <<<"$old") migrations $prev released and only appends" ;;
-    *) echo "✗ $DIR/LOCK changed migrations that $prev released:"; diff <(echo "$old") <(echo "$new") || true; exit 1 ;;
-  esac
-
-fi
-# Every layout keeps its own append-only history. First appearances still verify every hash.
-python3 - "$prev" <<'PY'
+[ -n "$prev" ] || { echo "cannot establish released legacy migration provenance"; exit 1; }
+git rev-parse -q --verify "refs/tags/$prev" >/dev/null || git fetch -q --depth 1 origin "refs/tags/$prev:refs/tags/$prev"
+python3 -I - "$prev" <<'PY'
 import hashlib
-import pathlib
+from pathlib import Path
+import re
 import subprocess
 import sys
 
-base = pathlib.Path('hub-rs/crates/steve-store-sqlite')
-legacy = base / 'legacy/migrations'
-previous = sys.argv[1]
+previous=sys.argv[1]
+base=Path('hub-rs/crates/steve-store-sqlite')
 
-def fail(message):
-    sys.exit('✗ ' + message)
+def fail(message): raise SystemExit('migration LOCK refused: '+message)
+def exists(path):
+    return subprocess.run(['git','cat-file','-e',f'{previous}:{path}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+def old(path):
+    if not exists(path): fail(f'missing published path {previous}:{path}')
+    return subprocess.check_output(['git','show',f'{previous}:{path}'])
+def names(path,published):
+    if published:
+        return [Path(p).name for p in subprocess.check_output(['git','ls-tree','--name-only',previous,str(path)+'/']).decode().splitlines()]
+    if not path.is_dir() or path.is_symlink(): fail(f'missing directory {path}')
+    for p in path.iterdir():
+        if not p.is_file() or p.is_symlink(): fail(f'not an ordinary migration file: {p}')
+    return [p.name for p in path.iterdir()]
+def historical(name):
+    match=re.fullmatch(r'([0-9]{3})(?:_[A-Za-z0-9_]+)?\.sql',name)
+    return match and int(match[1])<113
 
-def released(path):
-    if not previous:
-        return None
-    result = subprocess.run(['git', 'cat-file', '-e', f'{previous}:{path}'], capture_output=True)
-    if result.returncode:
-        return None
-    return subprocess.check_output(['git', 'show', f'{previous}:{path}'])
+def verify(path,*,legacy=False,published=False):
+    files=names(path,published)
+    if 'LOCK' not in files: fail(f'missing LOCK: {path}')
+    read=old if published else lambda p:p.read_bytes()
+    data=read(path/'LOCK')
+    entries=[]
+    for line in data.decode().splitlines():
+        fields=line.split()
+        if not fields or line.startswith('#'): continue
+        if legacy and historical(fields[0]): continue
+        if len(fields)!=2 or Path(fields[0]).name!=fields[0] or not re.fullmatch('[0-9a-f]{64}',fields[1]):
+            fail(f'invalid LOCK entry in {path}: {line}')
+        filename,digest=fields
+        if filename not in files or hashlib.sha256(read(path/filename)).hexdigest()!=digest:
+            fail(f'missing SQL or hash mismatch: {path/filename}')
+        entries.append((filename,digest))
+    listed=[e[0] for e in entries]
+    actual={f for f in files if f!='LOCK' and not (legacy and historical(f))}
+    if not listed or len(set(listed))!=len(listed) or set(listed)!=actual:
+        fail(f'missing/extra/duplicate migration in {path}')
+    if legacy:
+        if listed not in [['113.sql'],['113.sql','114.sql']]: fail('legacy must retain exactly 113 and optional 114')
+    else:
+        for number,name in enumerate(listed,1):
+            if not re.fullmatch(rf'{number:04}(?:_[A-Za-z0-9_]+)?\.sql',name): fail(f'noncontiguous domain LOCK {path}')
+    return entries
 
-def verify(directory):
-    if not directory.is_dir():
-        fail(f'missing migration directory: {directory}')
-    lock = directory / 'LOCK'
-    entries = []
-    for line in lock.read_text().splitlines():
-        if not line or line.startswith('#'):
-            continue
-        fields = line.split()
-        if len(fields) != 2 or pathlib.Path(fields[0]).name != fields[0]:
-            fail(f'invalid LOCK line in {lock}: {line}')
-        filename, digest = fields
-        if hashlib.sha256((directory / filename).read_bytes()).hexdigest() != digest:
-            fail(f'hash mismatch: {directory / filename}')
-        entries.append(filename)
-    if not entries or len(set(entries)) != len(entries) or set(entries) != {p.name for p in directory.glob('*.sql')}:
-        fail(f'{lock} must list every SQL file exactly once')
-    old = released(lock)
-    if old is not None:
-        old_lines = [s for s in old.decode().splitlines() if s and not s.startswith('#')]
-        new_lines = [s for s in lock.read_text().splitlines() if s and not s.startswith('#')]
-        if new_lines[:len(old_lines)] != old_lines:
-            fail(f'{lock} changed the prefix released in {previous}')
-    elif released(directory) is not None:
-        fail(f'{previous}:{directory} exists without a LOCK')
-    print(f'{lock}: all hashes and released prefix verified')
-
-verify(legacy)
-old_directory = pathlib.Path('hub-rs/crates/steve-store/migrations')
-if old_directory.exists():
-    files = {p.name: p.read_bytes() for p in old_directory.iterdir() if p.is_file()}
-    archived = {p.name: p.read_bytes() for p in legacy.iterdir() if p.is_file()}
-    if archived != files:
-        fail('legacy archive differs from steve-store/migrations (including LOCK)')
-    print('legacy archive equals the old migration directory byte for byte')
-# Once an archive was released it is frozen, not merely append-only.
-if previous and released(legacy) is not None:
-    paths = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', previous, str(legacy)]).decode().splitlines()
-    expected = {pathlib.Path(p).name: released(p) for p in paths}
-    actual = {p.name: p.read_bytes() for p in legacy.iterdir() if p.is_file()}
-    if actual != expected:
-        fail(f'legacy archive changed since {previous}')
-for domain in ('core', 'stream', 'comms', 'contract'):
-    verify(base / 'schema' / domain)
+legacy=base/'legacy/migrations'
+current=verify(legacy,legacy=True)
+if exists(legacy):
+    released=verify(legacy,legacy=True,published=True)
+    if (current!=released or (legacy/"LOCK").read_bytes()!=old(legacy/"LOCK")
+            or any((legacy/name).read_bytes()!=old(legacy/name) for name,_ in released)):
+        fail('published legacy 113/114 archive changed')
+else:
+    predecessor=Path('hub-rs/crates/steve-store/migrations')
+    released=verify(predecessor,legacy=True,published=True)
+    if current[:len(released)]!=released or any((legacy/name).read_bytes()!=old(predecessor/name) for name,_ in released):
+        fail('first archive does not continue the published legacy LOCK/SQL chain')
+print(f'{legacy}: retained 113/114 hashes and published provenance verified')
+for domain in ('core','stream','comms','contract'):
+    path=base/'schema'/domain
+    entries=verify(path)
+    if exists(path):
+        released=verify(path,published=True)
+        if entries[:len(released)]!=released: fail(f'published domain LOCK prefix changed: {path}')
+    print(f'{path}: all hashes and append-only published prefix verified')
 PY

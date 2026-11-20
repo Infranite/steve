@@ -23,6 +23,8 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
+STORAGE = json.loads((Path(__file__).parents[1] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())["manifest"]["storage"]
+
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -46,7 +48,7 @@ class Fixture(unittest.TestCase):
         self.bootstrap_error, self.bootstrap_hook, self.fetch_hook = False, None, None
         self.repository = "Infranite/steve"
         self.manifest = dict(format_version=1, version="0.3.0", hub_version="0.3.0", web_version="0.3.0",
-                             commit="b" * 40, api_protocol=1, schema=dict(min_read=24, max_read=24, target=24),
+                             commit="b" * 40, api_protocol=1, storage=STORAGE, schema=dict(min_read=114, max_read=114, target=114),
                              assets=[dict(target="aarch64-apple-darwin", name="steve-0.3.0-aarch64-apple-darwin.tar.gz", size=17, sha256="c" * 64)])
         self.remote = dict(tag_name="v0.3.0", draft=False, prerelease=False,
                            assets=[dict(name="steve-release.json"), dict(name=self.manifest["assets"][0]["name"])])
@@ -57,7 +59,7 @@ class Fixture(unittest.TestCase):
         (path / "ops").mkdir()
         (path / "ops/run.sh").write_text("fixture")
         (path / "bin/steve-hub").write_text("not executable")
-        info = dict(version=version, commit=commit * 40, target="aarch64-apple-darwin", schema=24,
+        info = dict(format_version=1, version=version, commit=commit * 40, target="aarch64-apple-darwin", schema=STORAGE["legacy"]["target"], storage=STORAGE,
                     upgrade_runner=dict(journal=1, kinds=["release_bundle", "local_release"]))
         (path / "release.json").write_text(json.dumps(info))
         return path

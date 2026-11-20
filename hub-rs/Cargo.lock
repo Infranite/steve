@@ -5773,6 +5773,7 @@ dependencies = [
  "shlex",
  "steve-i18n",
  "steve-runtime",
+ "steve-store-sqlite",
  "tempfile",
  "url",
  "uuid",

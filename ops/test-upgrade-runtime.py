@@ -2,9 +2,13 @@
 """Isolated actual-Hub smoke test. Usage: python3 ops/test-upgrade-runtime.py /absolute/steve-hub
 Uses a disposable home/key directory and loopback port; never touches a running installation.
 """
-import fcntl, json, os, pathlib, shutil, signal, socket, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
+import copy, fcntl, json, os, pathlib, shutil, signal, socket, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 
 binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import schema_gate
+identity = json.loads(subprocess.check_output([str(binary),'--build-info'],timeout=15))
+storage_identity = schema_gate.release_identity(identity)
 
 def atomic(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,13 +31,15 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
     # Avoid inherited production auth/channels/external integrations in this isolated fixture.
     for key in list(env):
         if key.startswith(('STEVE_OIDC_', 'LARK_', 'FEISHU_', 'GITHUB_', 'STEVE_UPGRADE_', 'STEVE_KEYHELPER')): env.pop(key)
-    def bundle(version,schema):
+    def bundle(version,storage=None):
+        payload=copy.deepcopy(storage_identity)
+        if storage is not None: payload["storage"]=storage
         path=home/'releases'/version;(path/'bin').mkdir(parents=True);(path/'web/dist').mkdir(parents=True)
         shutil.copy2(binary,path/'bin/steve-hub')
-        atomic(path/'release.json',dict(format_version=1,version=version,commit='a'*40,hub_version=version,web_version=version,api_protocol=1,schema=dict(min_read=schema,max_read=schema,target=schema),assets=[]))
+        atomic(path/'release.json',dict(format_version=1,version=version,commit='a'*40,hub_version=version,web_version=version,api_protocol=1,**payload,assets=[]))
         atomic(path/'web/dist/release.json',{'version':version});(path/'web/dist/index.html').write_text('<html>upgrade fixture</html>')
         return path
-    old=bundle('0.1.0',0);(home/'current').symlink_to(old)
+    old=bundle('0.1.0');(home/'current').symlink_to(old)
     log=open(root/'runtime.log','w+')
     process=None
     def start():
@@ -65,9 +71,10 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
         process=start();eventually(lambda:health('0.1.0'),'old actual Hub ready')
         db=home/'data/steve.sqlite3'
         with sqlite3.connect(db) as conn:
-            schema=conn.execute('SELECT v FROM schema_version').fetchone()[0]
+            observed=schema_gate.state(db)
+            assert observed['kind']=='current',observed
             conn.execute('CREATE TABLE upgrade_smoke_evidence(value TEXT)');conn.execute("INSERT INTO upgrade_smoke_evidence VALUES('preserve')")
-        new=bundle('0.2.0',schema);job=operation('0.2.0',new)
+        new=bundle('0.2.0');job=operation('0.2.0',new)
         result=eventually(lambda:phase(job,['succeeded','failed','rolled_back']),'successful upgrade')
         assert result['phase']=='succeeded',result
         assert health('0.2.0');assert (home/'current').resolve()==new.resolve()
@@ -76,7 +83,8 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
         assert seen['current']=={'hub':'0.2.0','web':'0.2.0'} and seen['operation']['phase']=='succeeded',seen
         assert seen['backup']['database'] and pathlib.Path(seen['backup']['database']).exists(),seen['backup']
         print('PASS actual Hub paired upgrade and post-commit health; settings read back managed install, both versions and the verified backup')
-        bad=bundle('0.3.0',schema+100);job=operation('0.3.0',bad)
+        mismatched=copy.deepcopy(storage_identity['storage']);mismatched['core']['target']+=100
+        bad=bundle('0.3.0',mismatched);job=operation('0.3.0',bad)
         result=eventually(lambda:phase(job,['rolled_back','failed']),'schema gate rollback')
         assert result['phase']=='rolled_back',result
         eventually(lambda:health('0.2.0'),'rollback actual Hub ready')
@@ -85,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
         assert seen['operation']['phase']=='rolled_back' and seen['current']=={'hub':'0.2.0','web':'0.2.0'},seen
         assert pathlib.Path(seen['backup']['database']).name==result['id']+'.sqlite3',seen['backup']
         assert list((home/'updates').glob(result['id']+'.failed.*.sqlite3')),'the failed database is kept as evidence'
-        print('PASS actual Hub incompatible-schema gate rejects; old database and paired bundle restored; settings name the backup and the kept failed database')
+        print('PASS actual Hub storage identity mismatch rejects; old database and paired bundle restored; settings name the backup and the kept failed database')
         # Kill the complete isolated process group inside the persisted pre-commit window.
         job=operation('0.3.0',bad);eventually(lambda:phase(job,['verifying']),'pre-commit crash window',10);kill_group()
         def instance_available():
@@ -110,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='steve-upgrade-smoke-') as temp:
             with urllib.request.urlopen(req,timeout=2) as r: return json.load(r).get('maintenance') is False
         eventually(maintenance_released,'maintenance released after parent-only crash')
         print('PASS normal managed Hub exits after supervisor-only crash; new supervisor starts safely')
-        print('Temporary STEVE_HOME only; no GitHub publication, production restart, or agent task execution. Schema:',schema)
+        print('Temporary STEVE_HOME only; no GitHub publication, production restart, or agent task execution. Storage:',observed)
     except Exception:
         log.flush();log.seek(0);print(log.read()[-14000:],file=sys.stderr);raise
     finally:
