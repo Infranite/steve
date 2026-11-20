@@ -741,3 +741,56 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     );
     rt.stop("test complete");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_upgrade_link_preserves_unknown_incarnation_until_ordinary_introduction() {
+    let h = Hub::start().await;
+    let (identity, node) = h.paired("u1").await;
+    let fake = FakeNode::new(node.as_str());
+    let incarnation = || {
+        h.q::<Option<i64>>(&format!(
+            "SELECT incarnation FROM nodes WHERE node_id='{node}'"
+        ))
+    };
+    assert_eq!(incarnation(), None);
+    let first = dial_url_as(
+        &h.ws_url(),
+        &h.svc.hub_id,
+        &identity,
+        &node,
+        fake.clone(),
+        77,
+        PROTOCOL + 1,
+    )
+    .await
+    .unwrap();
+    until("upgrade link installed", 5, || {
+        h.svc.registry.current(node.as_str()).is_some()
+    })
+    .await;
+    assert_eq!(
+        incarnation(),
+        None,
+        "bootstrap must not invent incarnation zero"
+    );
+    first.conn.close(
+        None,
+        steve_node_wire::close::GOODBYE,
+        "compatible release ready",
+    );
+    until("upgrade link detached", 5, || {
+        h.svc.registry.current(node.as_str()).is_none()
+    })
+    .await;
+    let normal = dial(&h, &identity, &node, fake, 123).await.unwrap();
+    until("ordinary link ready", 5, || {
+        h.svc.fleet.remote(&node).ready_generation() == Some(normal.generation)
+    })
+    .await;
+    assert_eq!(normal.generation, 2);
+    assert_eq!(incarnation(), Some(123));
+    assert!(
+        !h.svc.fleet.remote(&node).is_reconciling(),
+        "unknown incarnation is not a restart"
+    );
+}

@@ -132,7 +132,14 @@ fn records(home: &Path) -> Vec<Record> {
 
 fn set_phase(home: &Path, r: &mut Record, phase: &str, error: Option<String>) {
     r.state.phase = phase.into();
-    r.state.error = error;
+    r.state.error = error.map(|mut error| {
+        let mut end = error.len().min(2048);
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        error.truncate(end);
+        error
+    });
     r.state.updated = Timestamp(now());
     if let Err(e) = save(home, r) {
         tracing::error!(
@@ -1035,6 +1042,49 @@ mod tests {
         assert!(check_request(&me, &v).is_err(), "not a release version");
         assert!(op_name(&OperationId::new("..").unwrap()).is_err());
         assert!(op_name(&OperationId::new("a:b").unwrap()).is_err());
+    }
+
+    #[test]
+    fn persisted_upgrade_errors_fit_status_frames_without_splitting_utf8() {
+        use steve_node_api::upgrade_v1 as v1;
+        let home = tempfile::tempdir().unwrap();
+        let request = request("nup_error", "1.2.3", b"unused");
+        let mut record = Record {
+            state: NodeUpgradeState {
+                operation: request.operation.clone(),
+                phase: "staging".into(),
+                version: "1.2.3".into(),
+                previous: Some("1.1.0".into()),
+                error: None,
+                updated: Timestamp(1),
+            },
+            request,
+            release: None,
+            previous_release: None,
+        };
+        for detail in [
+            format!("{}中文", "x".repeat(2047)),
+            "错误🙂".repeat(v1::MAX_FRAME),
+        ] {
+            set_phase(home.path(), &mut record, "failed", Some(detail.clone()));
+            let saved = load(home.path(), "nup_error").unwrap().unwrap();
+            let clipped = saved.state.error.as_ref().unwrap();
+            assert!(clipped.len() <= 2048);
+            assert!(detail.starts_with(clipped));
+            assert_eq!(saved.state.error, record.state.error);
+            let state = v1::StatusResponse::try_from(saved.state).unwrap();
+            let response = v1::Frame {
+                v: 1,
+                t: v1::Kind::Res,
+                id: "status".into(),
+                re: Some("request".into()),
+                m: String::new(),
+                generation: 7,
+                p: serde_json::to_value(v1::Outcome::Ok(serde_json::to_value(state).unwrap()))
+                    .unwrap(),
+            };
+            assert!(response.encode().unwrap().len() <= v1::MAX_FRAME);
+        }
     }
 
     #[tokio::test]

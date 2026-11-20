@@ -437,10 +437,7 @@ fn fixed_payloads_reject_unknown_or_mutable_scope_fields() {
     ] {
         assert_eq!(
             code.retryable(),
-            matches!(
-                code,
-                v1::Code::Busy | v1::Code::Exhausted | v1::Code::Internal
-            )
+            matches!(code, v1::Code::Busy | v1::Code::Exhausted)
         );
     }
     let mut unknown = v1::Frame::ctl("test", "future", 0, json!({}));

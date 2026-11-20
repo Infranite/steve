@@ -48,6 +48,21 @@ fn wire_incompatible_defers_local_work_and_downgrade_keeps_its_code() {
 }
 
 #[test]
+fn uncertain_ordinary_outcomes_cannot_become_retryable_v1_answers() {
+    use steve_node_api::{ApiError, ErrorCode, OperationId, RetryClass};
+    for ordinary in [
+        ApiError::uncertain(&OperationId::new("op_switch").unwrap(), "response lost"),
+        ApiError::new(ErrorCode::Gap, "missing execution events"),
+        ApiError::new(ErrorCode::Internal, "execution outcome unavailable"),
+    ] {
+        let wire = v1::Error::from(ordinary);
+        assert_eq!(wire.code, v1::Code::Internal);
+        assert!(!wire.code.retryable());
+        assert_eq!(ApiError::from(wire).retry, RetryClass::Never);
+    }
+}
+
+#[test]
 fn switch_actions_are_exclusive_and_legacy_flags_are_not_wire_fields() {
     use steve_node_api::{OperationId, UpgradeSwitch};
     for (action, abandon, force) in [

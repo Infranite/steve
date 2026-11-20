@@ -105,31 +105,36 @@ impl Admission for Admit {
         let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
             store.transaction::<_, StoreError>(|tx| {
-                let inc = steve_store::nodes::get(tx, &node)?
-                    .and_then(|n| n.incarnation)
-                    .unwrap_or(0);
-                let l = steve_store::nodes::begin_link(tx, &node, inc, now())?;
-                if let Some(l) = &l {
+                // Bootstrap allocates a generation without inventing ordinary restart metadata.
+                // In particular a first upgrade-only connection must leave NULL incarnation NULL.
+                let link: Option<(i64, Option<i64>)> = tx.query_row(
+                    "UPDATE nodes SET generation=generation+1, last_seen=?2
+                     WHERE node_id=?1 AND state IN ('active','paused') RETURNING generation, incarnation",
+                    rusqlite::params![node, now()], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((generation, _)) = &link {
                     steve_store::nodes::set_link(tx, &node, &arrival)?;
                     steve_store::nodes::audit(
                         tx,
                         Some(&node),
                         None,
                         "link",
-                        Some(&format!("generation {}", l.generation)),
+                        Some(&format!("generation {generation}")),
                         now(),
                     )?;
                 }
-                Ok(l)
+                Ok(link)
             })
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        let Some(link) = link else { return Ok(None) };
-        *self.previous.lock().unwrap() = Some(link.previous_incarnation);
+        let Some((generation, previous_incarnation)) = link else {
+            return Ok(None);
+        };
+        *self.previous.lock().unwrap() = Some(previous_incarnation);
         Ok(Some(Admitted {
-            generation: link.generation as u64,
+            generation: generation as u64,
         }))
     }
 

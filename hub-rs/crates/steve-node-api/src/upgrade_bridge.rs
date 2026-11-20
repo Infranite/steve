@@ -18,6 +18,7 @@ impl From<ApiError> for v1::Error {
             ErrorCode::Invalid | ErrorCode::Expired => v1::Code::Invalid,
             ErrorCode::Downgrade => v1::Code::Downgrade,
             ErrorCode::Stale | ErrorCode::Offline => v1::Code::Incompatible,
+            // Never turn uncertainty into permission to resend a possibly executed command.
             ErrorCode::OutcomeUnknown | ErrorCode::Gap | ErrorCode::Internal => v1::Code::Internal,
         };
         Self {

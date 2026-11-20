@@ -11,6 +11,10 @@ use steve_node_api::*;
 use crate::conn::{Handler, from_value as de, to_value as en, unsupported};
 use crate::methods::*;
 
+/// Leave header space, then account for hex's two characters per byte. This must remain safe
+/// even when the ordinary protocol's local chunk policy grows.
+pub const UPGRADE_CHUNK_BYTES: u32 = ((upgrade_v1::MAX_FRAME - 4096) / 2) as u32;
+
 pub struct ServeHub {
     pub sink: Arc<dyn EventSink>,
     pub tools: Arc<dyn HubTools>,
@@ -34,7 +38,7 @@ impl Handler for ServeHub {
         }
         let request: upgrade_v1::FetchRequest = crate::upgrade::decode(p)?;
         let (access, id, offset, max) = upgrade_bridge::fetch_request(request)?;
-        let max = max.min(crate::envelope::CHUNK_BYTES);
+        let max = max.min(UPGRADE_CHUNK_BYTES);
         let chunk = self
             .files()
             .map_err(upgrade_v1::Error::from)?

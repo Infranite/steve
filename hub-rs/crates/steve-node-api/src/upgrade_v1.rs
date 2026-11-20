@@ -18,6 +18,10 @@
 //! and closes after noted. Hub refuses Hello outside 1..=N. Welcome confirms only the Hub's
 //! ordinary proto; equality with the Node proto selects normal mode, otherwise upgrade-only.
 //! Selection controls only the five methods and errors, NEVER bootstrap or fixed controls.
+//! This release implements only v1, so all five methods write v=1. A v2 implementation MUST
+//! retain Hello's selected version in Conn and use it to select both the writer and reader.
+//! Code::retryable describes only an on-wire v1 answer. Ordinary calls on an upgrade-only link
+//! use local connection policy (including incompatible -> offline with the same operation).
 //!
 //! upgrade_fetch is Node -> Hub; probe_build/upgrade_stage/upgrade_switch/upgrade_status are
 //! Hub -> Node. Fetch names only an operation, offset and requested maximum; the Hub may
@@ -270,10 +274,11 @@ pub enum Code {
 }
 
 impl Code {
-    /// Only transient capacity and implementation failures may be resent as the same operation.
+    /// Only transient capacity failures may be resent as the same operation.
+    /// Internal is conservative: it also carries errors whose execution outcome is unknown.
     /// A lost switch response is a LOCAL transport outcome: reconnect and query upgrade_status.
     pub fn retryable(self) -> bool {
-        matches!(self, Self::Busy | Self::Exhausted | Self::Internal)
+        matches!(self, Self::Busy | Self::Exhausted)
     }
 }
 

@@ -194,6 +194,13 @@ enum Route {
 
 /// A mismatched peer's ordinary requests never touch a mutable payload decoder.
 fn route(mode: upgrade::Mode, env: &Envelope) -> Route {
+    if !(1..=9).contains(&env.v) && env.v != steve_node_api::PROTOCOL {
+        return if env.t == Kind::Req {
+            Route::Incompatible
+        } else {
+            Route::Unsupported
+        };
+    }
     if env.t == Kind::Ctl
         && matches!(env.m.as_str(), upgrade::HEARTBEAT | upgrade::FENCED)
         && env.v != upgrade::UPGRADE_PROTOCOL
@@ -247,7 +254,28 @@ fn decode_frame(text: &str) -> Option<Envelope> {
                 p: frame.p,
             })
         }
-        _ => Envelope::decode(text),
+        v if v == steve_node_api::PROTOCOL => Envelope::decode(text),
+        v => {
+            // No ordinary header field other than integer v is permanent. Read only enough
+            // to refuse a foreign request; its other fields belong to an unknown schema.
+            let foreign: Value = serde_json::from_str(text).ok()?;
+            let id = foreign.get("id").and_then(Value::as_str);
+            Some(Envelope {
+                v,
+                t: if foreign.get("t").and_then(Value::as_str) == Some("req") && id.is_some() {
+                    Kind::Req
+                } else {
+                    Kind::Unknown
+                },
+                id: id.unwrap_or_default().into(),
+                re: None,
+                m: String::new(),
+                generation: 0,
+                trace: None,
+                deadline_at: 0,
+                p: Value::Null,
+            })
+        }
     }
 }
 
@@ -294,6 +322,13 @@ impl Conn {
         handler: Arc<dyn Handler>,
         opts: ConnOptions,
     ) -> Arc<Conn> {
+        // This Conn has only the v1 upgrade codec. When adding v2, retain Hello's selected
+        // upgrade version here and use it for both encoding and dispatch instead of this default.
+        debug_assert_eq!(
+            upgrade::UPGRADE_PROTOCOL,
+            1,
+            "Conn only implements upgrade v1"
+        );
         let (ctl, ctl_rx) = LaneQ::new(256, LANE_BYTES[0]);
         let (events, events_rx) = LaneQ::new(16, LANE_BYTES[1]);
         let (bulk, bulk_rx) = LaneQ::new(16, LANE_BYTES[2]);
@@ -763,7 +798,7 @@ async fn reader(
             Route::Ordinary => Schema::Ordinary,
             Route::V1 => Schema::V1,
             Route::Incompatible => {
-                s.incompatible(env.id, &env.m, env.generation);
+                s.incompatible(env.id, &env.m, s.generation);
                 continue;
             }
             Route::Unsupported => {

@@ -112,6 +112,7 @@ async fn upgrade_rejects_every_ordinary_method_before_decode_or_execution_and_ke
 
 struct Archive {
     reads: AtomicUsize,
+    full: bool,
 }
 #[async_trait]
 impl HubFiles for Archive {
@@ -131,7 +132,14 @@ impl HubFiles for Archive {
                 "not granted to this operation",
             ));
         }
-        assert!(max <= steve_node_wire::envelope::CHUNK_BYTES);
+        assert!(max <= steve_node_wire::serve_hub::UPGRADE_CHUNK_BYTES);
+        if self.full {
+            return Ok(ReadChunk {
+                offset,
+                bytes: vec![0xff; max as usize],
+                eof: true,
+            });
+        }
         let archive = b"archive";
         let start = offset as usize;
         let end = archive.len().min(start + max.min(3) as usize);
@@ -220,6 +228,7 @@ async fn wired(
     let hub = accepting.await.unwrap();
     let archive = Arc::new(Archive {
         reads: AtomicUsize::new(0),
+        full: false,
     });
     let hub_connection = Conn::spawn(
         hub.sink,
@@ -487,6 +496,7 @@ async fn ordinary_blob_fetch_cannot_reach_the_upgrade_archive_port_even_on_a_nor
     let (h, n) = steve_node_wire::testkit::pair();
     let archive = Arc::new(Archive {
         reads: AtomicUsize::new(0),
+        full: false,
     });
     let hub = Conn::spawn(
         h.sink,
@@ -587,6 +597,97 @@ async fn a_lost_or_unreadable_switch_answer_is_local_uncertainty_not_a_wire_erro
                 .unwrap_err()
                 .code,
             ErrorCode::Offline
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_full_upgrade_chunk_fits_the_permanent_frame_limit() {
+    let (hub, mut peer) = steve_node_wire::testkit::pair();
+    let archive = Arc::new(Archive {
+        reads: AtomicUsize::new(0),
+        full: true,
+    });
+    let connection = Conn::spawn(
+        hub.sink,
+        hub.stream,
+        7,
+        Arc::new(ServeHub {
+            sink: Arc::new(RecordingSink::default()),
+            tools: Arc::new(common::StubTools::default()),
+            files: Some(archive.clone()),
+            secrets: None,
+        }),
+        options("h"),
+    );
+    let request = v1::Frame {
+        v: 1,
+        t: v1::Kind::Req,
+        id: "full-block".into(),
+        re: None,
+        m: v1::UPGRADE_FETCH.into(),
+        generation: 7,
+        p: json!({"operation":"op_upgrade","offset":0,"max":u32::MAX}),
+    };
+    peer.sink
+        .send(Frame::Text(request.encode().unwrap()))
+        .await
+        .unwrap();
+    let Some(Ok(Frame::Text(text))) = peer.stream.next().await else {
+        panic!("full chunk response missing")
+    };
+    assert!(text.len() <= v1::MAX_FRAME);
+    let frame = v1::Frame::decode(&text).unwrap();
+    let v1::Outcome::Ok(payload) = serde_json::from_value(frame.p).unwrap() else {
+        panic!("full chunk refused")
+    };
+    let response: v1::FetchResponse = serde_json::from_value(payload).unwrap();
+    assert_eq!(response.bytes.len(), (v1::MAX_FRAME - 4096) / 2);
+    assert!(response.eof);
+    assert_eq!(archive.reads.load(Ordering::SeqCst), 1);
+    assert!(!connection.is_closed());
+}
+
+#[tokio::test]
+async fn foreign_ordinary_headers_are_refused_without_decoding_the_current_schema() {
+    for mode in [v1::Mode::Normal, v1::Mode::Upgrade] {
+        let (hub, mut peer) = steve_node_wire::testkit::pair();
+        let count = Arc::new(Count::default());
+        let mut opts = options("h");
+        opts.mode = mode;
+        let connection = Conn::spawn(hub.sink, hub.stream, 7, count.clone(), opts);
+        peer.sink
+            .send(Frame::Text(
+                json!({
+                    "v":PROTOCOL+1,"t":"req","id":"future-request",
+                    "new_header":{"anything":[true,1]},"gen":"a different schema",
+                    "trace":{},"deadline_at":"not our deadline format", "p":{"future":true}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(Frame::Text(text))) = peer.stream.next().await else {
+            panic!("foreign request closed")
+        };
+        let response = v1::Frame::decode(&text).unwrap();
+        assert_eq!(response.re.as_deref(), Some("future-request"));
+        assert_eq!(response.generation, 7);
+        let v1::Outcome::Err(error) = serde_json::from_value(response.p).unwrap() else {
+            panic!("foreign request executed")
+        };
+        assert_eq!(error.code, v1::Code::Incompatible);
+        assert_eq!(count.normal.load(Ordering::SeqCst), 0);
+        assert!(!connection.is_closed());
+        peer.sink
+            .send(Frame::Text(
+                json!({"v":PROTOCOL+1,"t":"ctl","id":23,"new_header":true}).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            connection.closed().await.0,
+            steve_node_wire::close::UNSUPPORTED
         );
     }
 }
