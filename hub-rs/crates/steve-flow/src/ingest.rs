@@ -722,7 +722,6 @@ pub struct Poller {
     failures: Mutex<HashMap<String, u32>>,
     serial: tokio::sync::Mutex<()>,
     cadence: Limiter<()>,
-    changes: Option<tokio::sync::mpsc::Receiver<steve_types::Notification>>,
 }
 
 struct PollRow {
@@ -740,17 +739,7 @@ impl Poller {
             failures: Mutex::default(),
             serial: tokio::sync::Mutex::new(()),
             cadence: Limiter::new(cadence_rate()),
-            changes: None,
         }
-    }
-
-    /// Already committed connection/source changes request a replan, never erase a row's fence.
-    pub fn with_changes(
-        mut self,
-        changes: tokio::sync::mpsc::Receiver<steve_types::Notification>,
-    ) -> Self {
-        self.changes = Some(changes);
-        self
     }
 
     fn failure_counts(&self) -> std::sync::MutexGuard<'_, HashMap<String, u32>> {
@@ -858,34 +847,22 @@ impl Poller {
         self.run_on_clock(clock).await;
     }
 
-    async fn run_on_clock(mut self, clock: Arc<dyn steve_runtime::Clock>) {
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let changed = wake.clone();
-        let changes = self.changes.take();
-        let observe = async move {
-            if let Some(mut changes) = changes {
-                while changes.recv().await.is_some() {
-                    changed.notify_one();
-                }
-            }
-            std::future::pending::<()>().await;
-        };
-        tokio::join!(
-            due_loop(
-                Arc::new(self),
-                clock,
-                wake,
-                Backoff {
-                    base: POLL_TICK,
-                    max: POLL_TICK,
-                    factor: 1,
-                    jitter: Jitter::None,
-                    attempts: None,
-                    reset_after: None,
-                }
-            ),
-            observe
-        );
+    async fn run_on_clock(self, clock: Arc<dyn steve_runtime::Clock>) {
+        let wake = self.cx.store().commit_wake(&["connections"]);
+        due_loop(
+            Arc::new(self),
+            clock,
+            wake,
+            Backoff {
+                base: POLL_TICK,
+                max: POLL_TICK,
+                factor: 1,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        )
+        .await;
     }
 }
 

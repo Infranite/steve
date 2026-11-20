@@ -537,50 +537,48 @@ impl Clock for ObservedClock {
         })
     }
 }
-fn change(id: &str) -> steve_types::Notification {
-    Arc::new(steve_types::Envelope {
-        event: steve_types::ChannelsEvent::Connection {
-            id: id.into(),
-            ws: WS.into(),
-        }
-        .into(),
-        rev: steve_types::Rev(1),
-    })
-}
-
 #[tokio::test]
-async fn committed_wake_replans_without_erasing_the_row_fence_or_self_spinning() {
+async fn a_real_connection_commit_wakes_the_idle_poll_source() {
     let adapter = Scripted::new();
     let env = FlowEnv::with_events(vec![adapter.clone()]);
     env.env.clock.set(0);
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
     let sleeps = Arc::new(AtomicUsize::new(0));
     let clock = Arc::new(ObservedClock {
         time: env.env.clock.clone(),
         sleeps: sleeps.clone(),
     });
-    let source = paced_source(&env).with_changes(rx);
+    let source = paced_source(&env);
     let running = tokio::spawn(source.run_on_clock(clock));
     eventually_sync("idle fallback wait", || {
         sleeps.load(Ordering::SeqCst) > 0 && env.env.clock.observed(0)
     })
     .await;
-    let first = sleeps.load(Ordering::SeqCst);
-    let id = env.connection(WS, FakeEventAdapter::ID, None, ME);
-    tx.send(change(&id)).await.unwrap();
-    eventually_sync("committed connection wake", || {
-        adapter.calls.lock().unwrap().len() == 1 && sleeps.load(Ordering::SeqCst) > first
-    })
-    .await;
     let before = sleeps.load(Ordering::SeqCst);
-    for _ in 0..3 {
-        tx.send(change(&id)).await.unwrap();
-    }
-    eventually_sync("own hints only replan", || {
-        sleeps.load(Ordering::SeqCst) > before && tx.capacity() == 1
+    let id = env.connection(WS, FakeEventAdapter::ID, None, ME);
+    // This helper writes through the authoritative Store but publishes no DomainEvent.
+    eventually_sync("real committed connection wake", || {
+        adapter.calls.lock().unwrap().len() == 1 && sleeps.load(Ordering::SeqCst) > before
     })
     .await;
-    assert_eq!(adapter.calls.lock().unwrap().len(), 1);
+    assert_eq!(env.env.clock.now(), 0, "no fallback time advanced");
+    assert_eq!(adapter.calls.lock().unwrap().as_slice(), [id.clone()]);
+    let before = sleeps.load(Ordering::SeqCst);
+    env.env
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE connections SET updated=updated+1 WHERE id=?", [&id])?;
+            Ok(())
+        })
+        .unwrap();
+    eventually_sync("real update only replans", || {
+        sleeps.load(Ordering::SeqCst) > before
+    })
+    .await;
+    assert_eq!(
+        adapter.calls.lock().unwrap().len(),
+        1,
+        "updates do not erase a row fence"
+    );
     env.env.clock.advance(119_999);
     eventually_sync("before row deadline", || {
         env.env.clock.observed(119_999) || adapter.calls.lock().unwrap().len() > 1
@@ -594,7 +592,60 @@ async fn committed_wake_replans_without_erasing_the_row_fence_or_self_spinning()
     .await;
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
-    assert!(tx.is_closed(), "the owned observer stops with its source");
+}
+
+#[tokio::test]
+async fn own_last_sync_commits_do_not_turn_the_source_into_a_hot_loop() {
+    let adapter = Scripted::with_period(Duration::from_secs(2));
+    let env = FlowEnv::with_events(vec![adapter.clone()]);
+    env.env.clock.set(0);
+    let id = env.connection(WS, FakeEventAdapter::ID, None, ME);
+    let sleeps = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(ObservedClock {
+        time: env.env.clock.clone(),
+        sleeps: sleeps.clone(),
+    });
+    let running = tokio::spawn(paced_source(&env).run_on_clock(clock));
+    eventually_sync("initial poll and post-commit sleep", || {
+        adapter.calls.lock().unwrap().len() == 1
+            && sleeps.load(Ordering::SeqCst) > 0
+            && env.env.clock.observed(0)
+    })
+    .await;
+    // Every successful poll commits connections.last_sync and wakes this same source. No
+    // external write or manually synthesized wake is made during the following 60 seconds.
+    for second in 1..=60 {
+        env.env.clock.advance(1000);
+        eventually_sync("bounded own-commit replan", || {
+            env.env.clock.observed(second * 1000)
+        })
+        .await;
+        let calls = adapter.calls.lock().unwrap().len();
+        assert_eq!(
+            calls,
+            1 + (second / 15) as usize,
+            "second={second}: round completion gap is authoritative"
+        );
+        assert!(
+            sleeps.load(Ordering::SeqCst) <= 2 * calls + 3,
+            "last_sync produces only bounded re-evaluation"
+        );
+    }
+    assert_eq!(adapter.calls.lock().unwrap().len(), 5);
+    let saved = env
+        .env
+        .store()
+        .reader(|c| -> FlowResult<i64> {
+            Ok(
+                c.query_row("SELECT last_sync FROM connections WHERE id=?", [&id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(saved, 60_000);
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]
