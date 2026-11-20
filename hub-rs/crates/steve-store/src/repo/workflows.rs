@@ -562,6 +562,8 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
     if let Some(child) = unit.item_id.as_deref() {
         return reclaim_in(tx, &item, unit, child);
     }
+    let inherited: Vec<String> = all(tx, super::catalog::ITEM_TAGS, [parent], |r| r.get(0))?;
+    let tags = super::kinds::checked(tx, &item.workspace_id, &inherited)?;
     let prefix: String = tx.query_row(
         "SELECT item_prefix FROM workspaces WHERE id=?",
         [&item.workspace_id],
@@ -582,10 +584,7 @@ pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
             params![child,item.workspace_id,no,unit.spec.title,unit.spec.bot_id,item.project_id,
                 to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t,parent],
         )?;
-    tx.execute(
-        "INSERT INTO item_tags(item_id,tag_id) SELECT ?,tag_id FROM item_tags WHERE item_id=?",
-        params![child, parent],
-    )?;
+    super::put_item_tags(tx, &child, &tags)?;
     tx.execute(
         "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,1,?,?)",
         params![child, unit.spec.goal, t],

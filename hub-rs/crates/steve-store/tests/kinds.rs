@@ -89,32 +89,76 @@ fn every_workspace_has_the_six_and_seeding_again_changes_nothing() {
 }
 
 #[test]
-fn an_older_tag_of_that_name_becomes_the_category_and_strays_leave_it() {
+fn a_legacy_reserved_name_is_refused_without_reclassifying_its_items() {
     let t = fresh();
+    let s = &t.store;
+    steve(s);
+    let feat = kind(s, "feat");
+    let legacy = domain(s, "legacy chore");
+    let item = item(s, vec![feat.clone(), legacy.clone()])
+        .unwrap()
+        .unwrap();
+    // Model an old namespace collision at the last seed name, with other categories absent.
     let c = Connection::open(t.dir.path().join("steve.sqlite3")).unwrap();
-    // a database from before the categories: none seeded yet
-    c.execute_batch(
-        "DELETE FROM tags;
-         INSERT INTO tags VALUES ('tag_old_bug', 'default', 'bug', '主题', '老的', '你', 1);
-         INSERT INTO tags VALUES ('tag_old_type', 'default', '需求', '类型', '老的', '你', 1);",
+    c.execute("DELETE FROM tags WHERE cat=? AND name<>'feat'", [KIND_CAT])
+        .unwrap();
+    c.execute("UPDATE tags SET name='chore' WHERE id=?", [&legacy])
+        .unwrap();
+    c.execute(
+        "INSERT INTO tags VALUES ('tag_old_type','default','需求','类型','老的','你',1)",
+        [],
     )
     .unwrap();
-    let s = &t.store;
-    assert_eq!(kind(s, "bug"), "tag_old_bug");
-    let old = s.tags().get("tag_old_bug").unwrap().unwrap();
-    assert_eq!(
-        (old.cat.as_str(), old.description.as_str()),
-        (KIND_CAT, "老的")
+    t.events.take();
+
+    assert!(conflict(s.tags().kinds(WS)).contains("chore"));
+    assert!(
+        t.events.take().is_empty(),
+        "a refused initialization publishes no seed events"
     );
+    let tags = s.tags().list(WS).unwrap();
+    assert_eq!(
+        tags.iter()
+            .filter(|tag| tag.cat == KIND_CAT && steve_store::kinds::is_kind(&tag.name))
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["feat"],
+        "no missing category was partially seeded"
+    );
+    let old = s.tags().get(&legacy).unwrap().unwrap();
+    assert_eq!(
+        (
+            old.name.as_str(),
+            old.cat.as_str(),
+            old.description.as_str()
+        ),
+        ("chore", "领域", "d")
+    );
+    assert_eq!(
+        s.tags().of_item(&item.id).unwrap(),
+        [feat.clone(), legacy.clone()]
+    );
+    assert_eq!(s.tags().get("tag_old_type").unwrap().unwrap().cat, KIND_CAT);
+
+    // Resolution is an explicit public rename, never automatic metadata conversion.
+    s.tags()
+        .patch(
+            &legacy,
+            &TagPatch {
+                name: Some("legacy chore".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let seeded = s.tags().kinds(WS).unwrap();
+    assert_eq!(seeded.len(), 6);
+    assert_ne!(
+        seeded.iter().find(|tag| tag.name == "chore").unwrap().id,
+        legacy
+    );
+    assert_eq!(s.tags().get(&legacy).unwrap().unwrap().cat, "领域");
     assert_eq!(s.tags().get("tag_old_type").unwrap().unwrap().cat, "主题");
-    let cats: Vec<Tag> = s
-        .tags()
-        .list(WS)
-        .unwrap()
-        .into_iter()
-        .filter(|t| t.cat == KIND_CAT)
-        .collect();
-    assert_eq!(cats.len(), 6);
+    assert_eq!(s.tags().of_item(&item.id).unwrap(), [feat, legacy]);
 }
 
 #[test]

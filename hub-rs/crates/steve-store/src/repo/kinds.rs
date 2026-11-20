@@ -115,7 +115,7 @@ pub(crate) fn add_delivery_labels(
     Ok(())
 }
 
-/// The item categories with what each is for (also the router's and the backfill's guidance).
+/// The item categories with what each is for, including the router's guidance.
 pub const KINDS: [(&str, &str); 6] = [
     ("bug", "修复错误、故障或不符合预期的行为"),
     ("feat", "新增能力、交互或功能改进"),
@@ -155,33 +155,31 @@ pub fn is_kind(name: &str) -> bool {
 /// Where a domain tag goes when it was filed under [`KIND_CAT`] before the categories existed.
 const MOVED_CAT: &str = "主题";
 
-/// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Idempotent: an existing tag of
-/// that name becomes the category (keeping its id, uses and description); any other tag under
-/// [`KIND_CAT`] moves to [`MOVED_CAT`], so the category is never ambiguous.
+/// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Existing category
+/// tags keep their ids and descriptions. A reserved name in another category is refused before
+/// any seeding; an operator must explicitly rename that tag first.
 pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
+    let existing = KINDS
+        .iter()
+        .map(|(name, _)| {
+            one(
+                w.c,
+                "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
+                [ws, *name],
+                Tag::from_row,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(tag) = existing.iter().flatten().find(|tag| tag.cat != KIND_CAT) {
+        return Err(StoreError::Conflict(steve_i18n::t!(
+            "store.tag.kind_name",
+            name = tag.name.as_str()
+        )));
+    }
     let mut out = vec![];
-    for (name, desc) in KINDS {
-        let ex = one(
-            w.c,
-            "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
-            [ws, name],
-            Tag::from_row,
-        )?;
-        match ex {
-            Some(t) if t.cat == KIND_CAT => out.push(t),
-            Some(t) => {
-                w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [KIND_CAT, &t.id])?;
-                w.publish(steve_types::DomainEvent::from(
-                    steve_types::ConfigEvent::Tag {
-                        ws: ws.into(),
-                        id: t.id.clone().into(),
-                    },
-                ));
-                out.push(Tag {
-                    cat: KIND_CAT.into(),
-                    ..t
-                });
-            }
+    for ((name, desc), existing) in KINDS.into_iter().zip(existing) {
+        match existing {
+            Some(tag) => out.push(tag),
             None => {
                 let id = uid("tag");
                 w.c.run(
