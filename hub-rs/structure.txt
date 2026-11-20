@@ -40,8 +40,7 @@ steve-channels	crates/steve-channels/src/inbound.rs	too_many_lines	511,263,161
 steve-channels	crates/steve-channels/src/lifecycle.rs	cognitive_complexity	40
 steve-channels	crates/steve-channels/src/membership.rs	cognitive_complexity	27
 steve-channels	crates/steve-channels/src/membership.rs	too_many_lines	164
-steve-channels	crates/steve-channels/src/names.rs	cognitive_complexity	72,30
-steve-channels	crates/steve-channels/src/names.rs	too_many_lines	387
+steve-channels	crates/steve-channels/src/names.rs	cognitive_complexity	30
 steve-channels	crates/steve-channels/src/outbound.rs	cognitive_complexity	53,29,29
 steve-channels	crates/steve-channels/src/outbound.rs	too_many_lines	419,309,140,124,117
 steve-channels	crates/steve-channels/src/reactions.rs	cognitive_complexity	32
