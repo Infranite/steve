@@ -672,6 +672,121 @@ pub fn derive(f: &Facts, policy: &WorkPolicy) -> Derived {
     }
 }
 
+fn due(kind: Due, id: Option<String>, at: Option<i64>) -> Option<NextStep> {
+    Some(NextStep::Due { kind, id, at })
+}
+
+fn attention_row(f: &Facts, settled: Settled, judged: Option<&Judged>) -> Option<Row> {
+    use Lane::*;
+    use Owner::*;
+    /* 3: only what you can move on yourself */
+    if let Some(c) = f.cards.iter().find(|c| !c.stop).or(f.cards.first()) {
+        return Some(row(
+            3,
+            "card",
+            NeedsYou,
+            You,
+            Some(c.question.clone()),
+            Some(NextStep::Card {
+                decision_id: c.id.clone(),
+            }),
+        ));
+    }
+    if f.item.paused {
+        return Some(row(
+            3,
+            "paused",
+            NeedsYou,
+            You,
+            None,
+            Some(NextStep::Control { action: "resume" }),
+        ));
+    }
+    if let Some(s) = &f.session
+        && s.held_by_you
+        && settled == Settled::Evaluable
+    {
+        return Some(row(
+            3,
+            "your_stop",
+            NeedsYou,
+            You,
+            None,
+            Some(NextStep::Control { action: "continue" }),
+        ));
+    }
+    if f.merge_declined {
+        return Some(row(3, "merge_declined", NeedsYou, You, None, None));
+    }
+    if judged.is_some_and(|j| j.verdict == "done") && settled == Settled::Evaluable {
+        /* judged done, but not every condition of an automatic close holds: confirm it */
+        return Some(row(3, "confirm_done", NeedsYou, You, None, None));
+    }
+    None
+}
+
+fn waiting_row(f: &Facts, settled: Settled, waits: &[&Wait]) -> Option<Row> {
+    use Lane::*;
+    use Owner::*;
+    if let Some(w) = waits.iter().find(|w| w.on == "you") {
+        /* a wait on you is a card or nothing: the Hub never wakes it by itself */
+        return Some(row(
+            3,
+            "waits_on_you",
+            NeedsYou,
+            You,
+            Some(w.what.clone()),
+            None,
+        ));
+    }
+    /* 4: registered waits */
+    if f.dependency_wait {
+        return Some(row(
+            4,
+            "dependency",
+            Running,
+            Hub,
+            None,
+            due(Due::Dependency, None, None),
+        ));
+    }
+    if let Some(until) = f.quota_until.filter(|u| *u > f.now) {
+        return Some(row(
+            4,
+            "quota",
+            Running,
+            Hub,
+            None,
+            due(Due::Quota, None, Some(until)),
+        ));
+    }
+    if let Some(w) = waits.first() {
+        return Some(row(
+            4,
+            "waiting",
+            Running,
+            Hub,
+            Some(w.what.clone()),
+            due(Due::Wait, Some(w.id.clone()), Some(w.next_check)),
+        ));
+    }
+    /* the Hub follows its closing operations once no turn is in the way: a settled one, or none at all
+     * (no session is not a settled turn, but nothing of it can change the result either) */
+    if (settled == Settled::Evaluable || f.session.is_none())
+        && let Some(o) = f.closing_ops.first()
+    {
+        return Some(row(
+            4,
+            "closing",
+            Running,
+            Hub,
+            Some(o.label.clone()),
+            due(Due::Closing, Some(o.id.clone()), None),
+        ));
+    }
+    None
+}
+
 fn rows(
     f: &Facts,
     settled: Settled,
@@ -681,7 +796,6 @@ fn rows(
 ) -> Row {
     use Lane::*;
     use Owner::*;
-    let due = |kind, id: Option<String>, at| Some(NextStep::Due { kind, id, at });
     /* 1 */
     if f.item.phase == crate::cycle::CLOSED {
         return row(1, "done", Done, Nobody, None, None);
@@ -699,102 +813,16 @@ fn rows(
             due(Due::Grace, judged.map(|j| j.id.clone()), Some(after)),
         );
     }
-    /* 3: only what you can move on yourself */
-    if let Some(c) = f.cards.iter().find(|c| !c.stop).or(f.cards.first()) {
-        return row(
-            3,
-            "card",
-            NeedsYou,
-            You,
-            Some(c.question.clone()),
-            Some(NextStep::Card {
-                decision_id: c.id.clone(),
-            }),
-        );
-    }
-    if f.item.paused {
-        return row(
-            3,
-            "paused",
-            NeedsYou,
-            You,
-            None,
-            Some(NextStep::Control { action: "resume" }),
-        );
-    }
-    if let Some(s) = &f.session
-        && s.held_by_you
-        && settled == Settled::Evaluable
-    {
-        return row(
-            3,
-            "your_stop",
-            NeedsYou,
-            You,
-            None,
-            Some(NextStep::Control { action: "continue" }),
-        );
-    }
-    if f.merge_declined {
-        return row(3, "merge_declined", NeedsYou, You, None, None);
-    }
-    if judged.is_some_and(|j| j.verdict == "done") && settled == Settled::Evaluable {
-        /* judged done, but not every condition of an automatic close holds: confirm it */
-        return row(3, "confirm_done", NeedsYou, You, None, None);
+    if let Some(selected) = attention_row(f, settled, judged) {
+        return selected;
     }
     let waits: Vec<_> = f
         .waits
         .iter()
         .filter(|w| w.cycle == f.item.cycle && w.cap.is_none_or(|c| w.wakes < c))
         .collect();
-    if let Some(w) = waits.iter().find(|w| w.on == "you") {
-        /* a wait on you is a card or nothing: the Hub never wakes it by itself */
-        return row(3, "waits_on_you", NeedsYou, You, Some(w.what.clone()), None);
-    }
-    /* 4: registered waits */
-    if f.dependency_wait {
-        return row(
-            4,
-            "dependency",
-            Running,
-            Hub,
-            None,
-            due(Due::Dependency, None, None),
-        );
-    }
-    if let Some(until) = f.quota_until.filter(|u| *u > f.now) {
-        return row(
-            4,
-            "quota",
-            Running,
-            Hub,
-            None,
-            due(Due::Quota, None, Some(until)),
-        );
-    }
-    if let Some(w) = waits.first() {
-        return row(
-            4,
-            "waiting",
-            Running,
-            Hub,
-            Some(w.what.clone()),
-            due(Due::Wait, Some(w.id.clone()), Some(w.next_check)),
-        );
-    }
-    /* the Hub follows its closing operations once no turn is in the way: a settled one, or none at all
-     * (no session is not a settled turn, but nothing of it can change the result either) */
-    if (settled == Settled::Evaluable || f.session.is_none())
-        && let Some(o) = f.closing_ops.first()
-    {
-        return row(
-            4,
-            "closing",
-            Running,
-            Hub,
-            Some(o.label.clone()),
-            due(Due::Closing, Some(o.id.clone()), None),
-        );
+    if let Some(selected) = waiting_row(f, settled, &waits) {
+        return selected;
     }
     /* 5: something is on its way */
     if let Some((code, next)) = busy {

@@ -876,6 +876,19 @@ impl Tx<'_> {
         Ok((bundle, checked, fingerprint, input_seq))
     }
 
+    fn judge_model_choice(&self, workspace: &str, worker: &Worker) -> Choice {
+        let models = self.c.models();
+        let resolved = models.for_call(workspace, PURPOSE, Tier::Smart);
+        let custom = models.custom(workspace, PURPOSE).is_some();
+        let h = models.harness(&resolved.harness);
+        let offered: Vec<String> = h
+            .as_ref()
+            .map(|h| h.models.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default();
+        let quick = h.as_ref().and_then(|h| h.fast_model());
+        choose(resolved, custom, worker, &offered, quick)
+    }
+
     /// One judging pass under the lock: the sweep, then the due candidates — superseded, put off
     /// (busy or unknown), decided by facts and rules, or claimed for the model (returned).
     pub(crate) fn judge_prepare(&self, at: i64) -> Result<Vec<Prepared>> {
@@ -959,16 +972,7 @@ impl Tx<'_> {
                 harness: s.harness.clone(),
                 model: s.model.clone().filter(|m| !m.is_empty()),
             };
-            let models = self.c.models();
-            let resolved = models.for_call(&item.workspace_id, PURPOSE, Tier::Smart);
-            let custom = models.custom(&item.workspace_id, PURPOSE).is_some();
-            let h = models.harness(&resolved.harness);
-            let offered: Vec<String> = h
-                .as_ref()
-                .map(|h| h.models.iter().map(|m| m.id.clone()).collect())
-                .unwrap_or_default();
-            let quick = h.as_ref().and_then(|h| h.fast_model());
-            let choice = choose(resolved, custom, &worker, &offered, quick);
+            let choice = self.judge_model_choice(&item.workspace_id, &worker);
             out.push(Prepared {
                 candidate: c,
                 claim,

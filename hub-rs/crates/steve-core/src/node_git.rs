@@ -184,45 +184,7 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
         Some(o) => format!("{}:{tree}:{}:{}", f.head, o.base, o.patch),
         None => format!("{}:{tree}", f.head),
     };
-    let ref_of = |r: &str| {
-        f.refs
-            .iter()
-            .find(|(n, _)| n == r)
-            .and_then(|(_, sha)| sha.clone())
-    };
-    /* anything to release: the branch beyond main, and when the workspace is on the item's branch
-     * (its worktree) its own commits and changes too */
-    let changes = match (&want.branch, ref_of("main")) {
-        (None, _) | (_, None) => None,
-        (Some(b), Some(_)) => {
-            let branch = ref_of(&format!("refs/heads/{b}"));
-            let on_branch = f.branch.as_deref() == Some(b.as_str());
-            let mut ranges = vec![];
-            if branch.is_some() {
-                ranges.push(("main".to_string(), format!("refs/heads/{b}")));
-            }
-            if on_branch {
-                ranges.push(("main".to_string(), "HEAD".to_string()));
-            }
-            if ranges.is_empty() {
-                Some(false)
-            } else {
-                match port
-                    .facts(
-                        item,
-                        Ask {
-                            ranges,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    Ok(r) => Some(r.ranges.iter().any(|r| r.ahead > 0) || (on_branch && r.dirty)),
-                    Err(_) => None,
-                }
-            }
-        }
-    };
+    let changes = gathered_changes(port, item, &want, &f).await;
     let mut contains = vec![];
     for (head, commit) in &want.contains {
         let yes = port
@@ -245,6 +207,24 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
             .unwrap_or(false);
         contains.push(yes);
     }
+    let moved = gathered_movement(port, item, &want, &print).await;
+    Ok(Some(Seen {
+        head: f.head.clone(),
+        print,
+        want,
+        moved,
+        changes,
+        contains,
+        dirty: f.dirty,
+    }))
+}
+
+async fn gathered_movement(
+    port: &dyn NodeGit,
+    item: &str,
+    want: &Want,
+    print: &str,
+) -> Option<String> {
     let moved = match &want.frozen {
         Some(frozen) if !same_result(frozen, &print) => {
             let pairs = crate::upstream::describe_pairs(frozen, &print);
@@ -287,15 +267,55 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
         }
         _ => None,
     };
-    Ok(Some(Seen {
-        head: f.head.clone(),
-        print,
-        want,
-        moved,
-        changes,
-        contains,
-        dirty: f.dirty,
-    }))
+    moved
+}
+
+async fn gathered_changes(
+    port: &dyn NodeGit,
+    item: &str,
+    want: &Want,
+    f: &na::GitFacts,
+) -> Option<bool> {
+    let ref_of = |r: &str| {
+        f.refs
+            .iter()
+            .find(|(n, _)| n == r)
+            .and_then(|(_, sha)| sha.clone())
+    };
+    /* anything to release: the branch beyond main, and when the workspace is on the item's branch
+     * (its worktree) its own commits and changes too */
+    let changes = match (&want.branch, ref_of("main")) {
+        (None, _) | (_, None) => None,
+        (Some(b), Some(_)) => {
+            let branch = ref_of(&format!("refs/heads/{b}"));
+            let on_branch = f.branch.as_deref() == Some(b.as_str());
+            let mut ranges = vec![];
+            if branch.is_some() {
+                ranges.push(("main".to_string(), format!("refs/heads/{b}")));
+            }
+            if on_branch {
+                ranges.push(("main".to_string(), "HEAD".to_string()));
+            }
+            if ranges.is_empty() {
+                Some(false)
+            } else {
+                match port
+                    .facts(
+                        item,
+                        Ask {
+                            ranges,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(r) => Some(r.ranges.iter().any(|r| r.ahead > 0) || (on_branch && r.dirty)),
+                    Err(_) => None,
+                }
+            }
+        }
+    };
+    changes
 }
 
 pub(crate) fn missing(m: impl Into<String>) -> Probe {
@@ -355,26 +375,8 @@ pub(crate) async fn probe(port: &dyn NodeGit, item: &str, rule: &str) -> (Option
             );
         }
     };
-    let sha = |r: &str| {
-        fetched
-            .refs
-            .iter()
-            .find(|(n, _)| n == r)
-            .and_then(|(_, s)| s.clone())
-    };
-    let Some(up) = ups.into_iter().find(|r| sha(r).is_some()) else {
+    let Some((up, branch)) = remote_default_branch(&fetched, &ups) else {
         return (Some(head), missing("远端没有默认分支"));
-    };
-    /* the default branch by name: origin/HEAD is the one it points at */
-    let branch = if up == ups[0] {
-        ups[1..]
-            .iter()
-            .find(|r| sha(r) == sha(up))
-            .unwrap_or(&up)
-            .trim_start_matches("refs/remotes/")
-            .to_string()
-    } else {
-        up.trim_start_matches("refs/remotes/").to_string()
     };
     let mut p = Probe {
         branch: branch.clone(),
@@ -419,6 +421,29 @@ pub(crate) async fn probe(port: &dyn NodeGit, item: &str, rule: &str) -> (Option
     }
     p.met = true;
     (Some(head), p)
+}
+
+fn remote_default_branch<'a>(fetched: &na::GitFacts, ups: &[&'a str]) -> Option<(&'a str, String)> {
+    let sha = |r: &str| {
+        fetched
+            .refs
+            .iter()
+            .find(|(n, _)| n == r)
+            .and_then(|(_, s)| s.clone())
+    };
+    let up = ups.iter().copied().find(|r| sha(r).is_some())?;
+    /* the default branch by name: origin/HEAD is the one it points at */
+    let branch = if up == ups[0] {
+        ups[1..]
+            .iter()
+            .find(|r| sha(r) == sha(up))
+            .unwrap_or(&up)
+            .trim_start_matches("refs/remotes/")
+            .to_string()
+    } else {
+        up.trim_start_matches("refs/remotes/").to_string()
+    };
+    Some((up, branch))
 }
 
 /// [`probe`] from synchronous code holding no lock, bounded: one that does not finish in time

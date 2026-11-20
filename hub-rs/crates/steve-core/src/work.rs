@@ -132,6 +132,42 @@ fn names(xs: &[String]) -> String {
     s
 }
 
+struct UnitWork {
+    running: Vec<String>,
+    user: Vec<String>,
+    queued: Vec<String>,
+    failed: Vec<String>,
+    downstream: Vec<String>,
+    to_start: bool,
+}
+
+fn held_units(g: &Workflow) -> std::collections::HashSet<&str> {
+    /* pending units downstream of a failed or cancelled one, or of one out of attempts (it
+     * never starts again: workflow_drive starts only a unit with attempts left), wait on
+     * nothing that will come */
+    let mut held: std::collections::HashSet<&str> = g
+        .units
+        .iter()
+        .filter(|u| {
+            matches!(u.status.as_str(), "failed" | "cancelled")
+                || u.status == "pending" && u.attempt >= g.max_attempts
+        })
+        .map(|u| u.spec.id.as_str())
+        .collect();
+    loop {
+        let before = held.len();
+        for u in g.units.iter().filter(|u| u.status == "pending") {
+            if u.spec.depends_on.iter().any(|d| held.contains(d.as_str())) {
+                held.insert(u.spec.id.as_str());
+            }
+        }
+        if held.len() == before {
+            break;
+        }
+    }
+    held
+}
+
 impl Tx<'_> {
     /// What `item`'s work is doing now. The Hub's own holds (a release, maintenance) are not part of
     /// it: they delay turns, they do not explain an item. Its words are written into the item's `now`,
@@ -285,47 +321,10 @@ impl Tx<'_> {
         steve_i18n::stored(|| self.graph_work_in(g))
     }
 
-    fn graph_work_in(&self, g: &Workflow) -> Result<Option<Work>> {
-        if let Some((by, why)) = g.paused_by() {
-            return Ok(Some(if by == steve_store::PAUSED_BY_AGENT {
-                Work::Halted(steve_i18n::t!(
-                    "core.now.workflow_halted",
-                    why = js_head(why, 160)
-                ))
-            } else {
-                Work::Paused(steve_i18n::t!("core.now.workflow_paused"))
-            }));
-        }
-        if !self.workflow_current(g)? {
-            return Ok(Some(Work::Failed(steve_i18n::t!(
-                "core.now.workflow_replan"
-            ))));
-        }
+    fn graph_unit_work(&self, g: &Workflow) -> Result<UnitWork> {
         let (mut running, mut user, mut queued, mut failed) = (vec![], vec![], vec![], vec![]);
         let mut to_start = false;
-        /* pending units downstream of a failed or cancelled one, or of one out of attempts (it
-         * never starts again: workflow_drive starts only a unit with attempts left), wait on
-         * nothing that will come */
-        let mut held: std::collections::HashSet<&str> = g
-            .units
-            .iter()
-            .filter(|u| {
-                matches!(u.status.as_str(), "failed" | "cancelled")
-                    || u.status == "pending" && u.attempt >= g.max_attempts
-            })
-            .map(|u| u.spec.id.as_str())
-            .collect();
-        loop {
-            let before = held.len();
-            for u in g.units.iter().filter(|u| u.status == "pending") {
-                if u.spec.depends_on.iter().any(|d| held.contains(d.as_str())) {
-                    held.insert(u.spec.id.as_str());
-                }
-            }
-            if held.len() == before {
-                break;
-            }
-        }
+        let held = held_units(g);
         let mut downstream = vec![];
         for u in &g.units {
             let title = u.spec.title.clone();
@@ -376,6 +375,40 @@ impl Tx<'_> {
                 _ => {}
             }
         }
+        Ok(UnitWork {
+            running,
+            user,
+            queued,
+            failed,
+            to_start,
+            downstream,
+        })
+    }
+
+    fn graph_work_in(&self, g: &Workflow) -> Result<Option<Work>> {
+        if let Some((by, why)) = g.paused_by() {
+            return Ok(Some(if by == steve_store::PAUSED_BY_AGENT {
+                Work::Halted(steve_i18n::t!(
+                    "core.now.workflow_halted",
+                    why = js_head(why, 160)
+                ))
+            } else {
+                Work::Paused(steve_i18n::t!("core.now.workflow_paused"))
+            }));
+        }
+        if !self.workflow_current(g)? {
+            return Ok(Some(Work::Failed(steve_i18n::t!(
+                "core.now.workflow_replan"
+            ))));
+        }
+        let UnitWork {
+            running,
+            user,
+            queued,
+            mut failed,
+            to_start,
+            downstream,
+        } = self.graph_unit_work(g)?;
         if failed.is_empty() && !downstream.is_empty() {
             /* held only by optional work that failed: still for the coordinator to sort out */
             failed.push(steve_i18n::t!("core.now.optional_failed"));
