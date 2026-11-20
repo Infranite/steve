@@ -154,8 +154,8 @@ pub fn is_kind(name: &str) -> bool {
 
 /// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Existing category
 /// tags keep their ids and descriptions. A reserved name in another category is refused before
-/// any seeding; an operator must explicitly rename that tag first. Missing delivery names are
-/// seeded too, without recategorizing existing tags or changing existing items.
+/// any seeding; an operator must explicitly rename that tag first. Delivery tags are seeded
+/// only when the workspace is created, never by this recurring category check.
 pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
     let mut pending = Vec::with_capacity(KINDS.len());
     for (name, desc) in KINDS {
@@ -200,8 +200,13 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             }
         }
     }
-    // Delivery tags are optional. A name in another category belongs to its user;
-    // leave it and its associations untouched, and let automatic labeling skip that name.
+    Ok(out)
+}
+
+/// Initial optional delivery tags for a newly inserted workspace. Never call on an existing
+/// workspace: deleting or renaming these editable tags must not make them reappear.
+pub(crate) fn seed_deliveries(w: &W, ws: &str) -> Result<()> {
+    // Preserve any existing names without recategorizing user tags.
     for (name, desc) in DELIVERIES {
         if w.c
             .prepare_cached("SELECT 1 FROM tags WHERE workspace_id = ? AND name = ?")?
@@ -221,15 +226,18 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             },
         ));
     }
-    Ok(out)
+    Ok(())
 }
 
-/// Whether `id` is one of the categories.
+/// Whether `id` is one of the six reserved categories.
 pub(crate) fn is_kind_tag(c: &Connection, id: &str) -> Result<bool> {
-    Ok(
-        c.prepare_cached("SELECT 1 FROM tags WHERE id = ? AND cat = ?")?
-            .exists([id, KIND_CAT])?,
-    )
+    Ok(one(
+        c,
+        "SELECT name FROM tags WHERE id = ? AND cat = ?",
+        [id, KIND_CAT],
+        |r| r.get::<_, String>(0),
+    )?
+    .is_some_and(|name| is_kind(&name)))
 }
 
 /// An item's tag ids made valid for `ws`: ids that are not tags of `ws` dropped, duplicates once, the

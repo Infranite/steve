@@ -633,25 +633,36 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
         .unwrap()["id"]
         .as_str()
         .unwrap();
-    let (status, body) = e
-        .call(
-            "PATCH",
-            &format!("/api/tags/{report}"),
-            Some(json!({"cat":"领域","description":"user report"})),
-        )
-        .await;
+    let (status, body) = e.call("DELETE", &format!("/api/tags/{report}"), None).await;
     assert_eq!(status, 200, "{body}");
-    let (status, body) = e
+    let request = json!({
+        "title":"调研报告", "goal":"分析结论", "bot":state["bots"][0]["id"],
+        "project":null, "mode":"propose"
+    });
+    let (status, body) = e.call("POST", "/api/items", Some(request.clone())).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    assert!(
+        !state["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "报告"),
+        "task creation must not resurrect the deleted tag"
+    );
+    let (status, ordinary) = e
         .call(
             "POST",
             "/api/tags",
-            Some(json!({"name":"BF4 topic","cat":"主题","description":"fixture"})),
+            Some(json!({
+                "name":"报告","cat":"领域","description":"user report"
+            })),
         )
         .await;
-    assert_eq!(status, 200, "{body}");
-    let (status, body) = e.call("POST", "/api/items", Some(json!({
-        "title":"调研报告", "goal":"分析结论", "bot":state["bots"][0]["id"], "mode":"propose"
-    }))).await;
+    assert_eq!(status, 200, "{ordinary}");
+    assert_eq!(ordinary["cat"], "领域");
+    assert_ne!(ordinary["id"], report);
+    let (status, body) = e.call("POST", "/api/items", Some(request)).await;
     assert_eq!(status, 200, "{body}");
     let (_, item) = e
         .call(
@@ -660,19 +671,13 @@ async fn optional_delivery_names_do_not_block_creation(e: &Env) {
             None,
         )
         .await;
-    assert!(
-        !item["tags"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|id| id == report)
-    );
+    assert!(!item["tags"].as_array().unwrap().contains(&ordinary["id"]));
     let (_, state) = e.call("GET", "/api/state", None).await;
     let kept = state["tags"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|t| t["id"] == report)
+        .find(|t| t["id"] == ordinary["id"])
         .unwrap();
     assert_eq!(kept["cat"], "领域");
     assert_eq!(kept["description"], "user report");

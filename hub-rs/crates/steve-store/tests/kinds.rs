@@ -377,3 +377,337 @@ fn a_chat_does_not_require_a_task_category() {
     assert_eq!(chat.kind, "chat");
     assert!(s.tags().of_item(&chat.id).unwrap().is_empty());
 }
+
+mod delivery_seeds {
+    use super::*;
+    use steve_store::kinds::{DELIVERIES, DELIVERY_CAT};
+
+    fn tag(s: &Store, name: &str) -> Tag {
+        s.tags().by_name(WS, name).unwrap().unwrap()
+    }
+
+    fn task(s: &Store, title: &str, tags: Vec<String>) -> Item {
+        steve(s);
+        s.items()
+            .create(
+                WS,
+                &NewItem {
+                    title: title.into(),
+                    goal: title.into(),
+                    bot_id: "steve".into(),
+                    tags,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap()
+    }
+
+    fn changes(s: &Store) -> u64 {
+        s.with_conn(|c| Ok(c.total_changes())).unwrap()
+    }
+
+    #[test]
+    fn every_new_workspace_has_delivery_seeds_and_repeated_ensure_writes_nothing() {
+        let t = fresh();
+        let s = &t.store;
+        let me = s
+            .users()
+            .create("delivery-owner", "Owner", None, "owner")
+            .unwrap();
+        let other = s
+            .workspaces()
+            .create(
+                &NewWorkspace {
+                    name: "other".into(),
+                    ..Default::default()
+                },
+                &me,
+            )
+            .unwrap();
+        for ws in [WS, &other.id] {
+            let seeds: Vec<_> = s
+                .tags()
+                .list(ws)
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.cat == DELIVERY_CAT)
+                .collect();
+            assert_eq!(seeds.len(), 6);
+            for (name, desc) in DELIVERIES {
+                assert!(
+                    seeds
+                        .iter()
+                        .any(|t| t.name == name && t.description == desc)
+                );
+            }
+            let before = s.tags().list(ws).unwrap();
+            t.events.take();
+            let writes = changes(s);
+            s.tags().kinds(ws).unwrap();
+            s.tags().kinds(ws).unwrap();
+            assert_eq!(changes(s), writes);
+            assert_eq!(s.tags().list(ws).unwrap(), before);
+            assert!(t.events.take().is_empty());
+        }
+    }
+
+    #[test]
+    fn deleted_delivery_tags_stay_deleted_and_do_not_claim_user_names() {
+        let t = fresh();
+        let s = &t.store;
+        let report = tag(s, "报告");
+        let feat = tag(s, "feat").id;
+        s.tags().remove(&report.id).unwrap();
+        let item = task(s, "调研报告", vec![feat.clone()]);
+        assert!(s.tags().by_name(WS, "报告").unwrap().is_none());
+        assert_eq!(s.tags().of_item(&item.id).unwrap(), [feat.clone()]);
+        s.ensure_workspace().unwrap();
+        assert!(
+            s.tags().by_name(WS, "报告").unwrap().is_none(),
+            "startup must not resurrect it"
+        );
+        let ordinary = s
+            .tags()
+            .create(
+                WS,
+                &NewTag {
+                    name: "报告".into(),
+                    cat: "领域".into(),
+                    description: "user report".into(),
+                },
+                "me",
+            )
+            .unwrap();
+        assert_eq!(ordinary.cat, "领域");
+        assert_ne!(ordinary.id, report.id);
+        let after = task(s, "调研报告", vec![feat.clone()]);
+        s.tags()
+            .set_item(&after.id, std::slice::from_ref(&feat))
+            .unwrap();
+        s.artifacts()
+            .add_as(&after.id, "报告", "调研结论", None, Some("result"))
+            .unwrap();
+        assert_eq!(s.tags().of_item(&after.id).unwrap(), [feat]);
+        assert_eq!(tag(s, "报告"), ordinary);
+        assert!(
+            !s.tags()
+                .list(WS)
+                .unwrap()
+                .iter()
+                .any(|t| t.name == "报告" && t.cat == DELIVERY_CAT)
+        );
+    }
+
+    #[test]
+    fn an_ordinary_delivery_name_is_preserved_and_does_not_block_writes() {
+        let t = fresh();
+        let s = &t.store;
+        let report = tag(s, "报告");
+        let feat = tag(s, "feat").id;
+        s.tags()
+            .patch(
+                &report.id,
+                &TagPatch {
+                    cat: Some("领域".into()),
+                    description: Some("user report".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ordinary = tag(s, "报告");
+        let old = task(s, "ordinary task", vec![feat.clone(), ordinary.id.clone()]);
+        t.events.take();
+        let writes = changes(s);
+        s.tags().kinds(WS).unwrap();
+        assert_eq!(changes(s), writes);
+        assert!(t.events.take().is_empty());
+        s.ensure_workspace().unwrap();
+        assert_eq!(tag(s, "报告"), ordinary);
+        assert_eq!(
+            s.tags().of_item(&old.id).unwrap(),
+            [feat.clone(), ordinary.id.clone()]
+        );
+        s.tags()
+            .create(
+                WS,
+                &NewTag {
+                    name: "ordinary topic".into(),
+                    cat: "主题".into(),
+                    ..Default::default()
+                },
+                "me",
+            )
+            .unwrap();
+        let new = task(s, "设计方案与调研报告", vec![feat.clone()]);
+        let labels = s.tags().of_item(&new.id).unwrap();
+        assert!(labels.contains(&tag(s, "方案").id));
+        assert!(
+            !labels.contains(&ordinary.id),
+            "never mistake the ordinary tag for delivery"
+        );
+        s.artifacts()
+            .add_as(&new.id, "报告", "调研结论", None, Some("result"))
+            .unwrap();
+        assert!(!s.tags().of_item(&new.id).unwrap().contains(&ordinary.id));
+        s.artifacts()
+            .add_as(&new.id, "部署记录", "升级完成", None, Some("result"))
+            .unwrap();
+        assert!(
+            s.tags()
+                .of_item(&new.id)
+                .unwrap()
+                .contains(&tag(s, "操作").id)
+        );
+        assert_eq!(tag(s, "报告"), ordinary);
+
+        // Explicitly releasing the name leaves it free; existing associations keep the old id.
+        s.tags()
+            .patch(
+                &ordinary.id,
+                &TagPatch {
+                    name: Some("user report".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        s.tags().kinds(WS).unwrap();
+        assert!(s.tags().by_name(WS, "报告").unwrap().is_none());
+        assert_eq!(s.tags().get(&ordinary.id).unwrap().unwrap().cat, "领域");
+        assert_eq!(
+            s.tags().of_item(&old.id).unwrap(),
+            [feat.clone(), ordinary.id]
+        );
+        let after = task(s, "调研报告", vec![feat.clone()]);
+        assert_eq!(s.tags().of_item(&after.id).unwrap(), [feat]);
+    }
+
+    #[test]
+    fn ensuring_seeds_never_infers_existing_items_or_artifacts() {
+        let t = fresh();
+        let s = &t.store;
+        let feat = tag(s, "feat").id;
+        let item = task(s, "设计方案与调研报告", vec![feat.clone()]);
+        s.artifacts()
+            .add_as(&item.id, "部署记录", "升级完成", None, Some("result"))
+            .unwrap();
+        s.tags()
+            .set_item(&item.id, std::slice::from_ref(&feat))
+            .unwrap();
+        let before = serde_json::to_value(s.items().get(&item.id).unwrap()).unwrap();
+        for marker in [None, Some("true")] {
+            s.with_conn(|c| {
+            c.execute("DELETE FROM settings WHERE workspace_id=? AND key='__delivery_tags_backfilled_v1'", [WS])?;
+            if let Some(value) = marker {
+                c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, '__delivery_tags_backfilled_v1', ?, 1)", rusqlite::params![WS,value])?;
+            }
+            Ok(())
+        }).unwrap();
+            t.events.take();
+            let writes = changes(s);
+            s.ensure_workspace().unwrap();
+            assert_eq!(
+                changes(s),
+                writes + u64::from(marker.is_some()),
+                "only obsolete checkpoint cleanup may write"
+            );
+            assert!(t.events.take().is_empty());
+            assert_eq!(s.tags().of_item(&item.id).unwrap(), [feat.clone()]);
+            assert_eq!(
+                serde_json::to_value(s.items().get(&item.id).unwrap()).unwrap(),
+                before
+            );
+            assert_eq!(
+                s.settings()
+                    .get::<Option<bool>>(WS, "__delivery_tags_backfilled_v1", None)
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_startup_removes_only_the_obsolete_checkpoint_once() {
+        let t = fresh();
+        let s = &t.store;
+        let me = s
+            .users()
+            .create("checkpoint-owner", "Owner", None, "owner")
+            .unwrap();
+        let other = s
+            .workspaces()
+            .create(
+                &NewWorkspace {
+                    name: "other".into(),
+                    ..Default::default()
+                },
+                &me,
+            )
+            .unwrap();
+        s.with_conn(|c| {
+        for ws in [WS, &other.id] {
+            c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, '__delivery_tags_backfilled_v1', 'true', 1)", [ws])?;
+            c.execute("INSERT INTO settings(workspace_id,key,value,updated) VALUES(?, 'user_preference', 'true', 1)", [ws])?;
+        }
+        Ok(())
+    }).unwrap();
+        assert!(
+            s.settings()
+                .all(WS)
+                .unwrap()
+                .contains_key("__delivery_tags_backfilled_v1"),
+            "settings reads have no legacy-key filter"
+        );
+        let writes = changes(s);
+        s.ensure_workspace().unwrap();
+        assert_eq!(changes(s), writes + 2);
+        for ws in [WS, &other.id] {
+            let settings = s.settings().all(ws).unwrap();
+            assert!(!settings.contains_key("__delivery_tags_backfilled_v1"));
+            assert_eq!(settings["user_preference"], serde_json::json!(true));
+        }
+        let writes = changes(s);
+        s.ensure_workspace().unwrap();
+        assert_eq!(
+            changes(s),
+            writes,
+            "later startups do not repeat a data change"
+        );
+    }
+}
+
+#[test]
+fn nonreserved_tags_in_the_type_category_remain_editable_removable_and_mergeable() {
+    let t = fresh();
+    let s = &t.store;
+    let a = domain(s, "legacy-a");
+    let b = domain(s, "legacy-b");
+    let into = domain(s, "topic");
+    s.with_conn(|c| {
+        c.execute(
+            "UPDATE tags SET cat=? WHERE id IN (?,?)",
+            rusqlite::params![KIND_CAT, a, b],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let changed = s
+        .tags()
+        .patch(
+            &a,
+            &TagPatch {
+                name: Some("renamed legacy".into()),
+                cat: Some(KIND_CAT.into()),
+                description: Some("edited".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(changed.name, "renamed legacy");
+    assert_eq!(changed.description, "edited");
+    s.tags().merge(&a, &into).unwrap();
+    s.tags().remove(&b).unwrap();
+    assert!(s.tags().get(&a).unwrap().is_none());
+    assert!(s.tags().get(&b).unwrap().is_none());
+    assert!(s.tags().get(&into).unwrap().is_some());
+}

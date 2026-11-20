@@ -257,7 +257,7 @@ impl Tags<'_> {
     pub fn patch(&self, id: &str, p: &TagPatch) -> Result<Option<Tag>> {
         self.0.write(|w| {
             if let Some(t) = one(w.c, TAG, [id], Tag::from_row)? {
-                let kind = t.cat == kinds::KIND_CAT;
+                let kind = kinds::is_kind_tag(w.c, id)?;
                 if kind && p.name.as_ref().is_some_and(|n| *n != t.name) {
                     return Err(StoreError::Conflict(steve_i18n::t!(
                         "store.tag.kind_rename"
@@ -268,7 +268,7 @@ impl Tags<'_> {
                         "store.tag.kind_recategorize"
                     )));
                 }
-                if !kind && p.cat.as_deref() == Some(kinds::KIND_CAT) {
+                if !kind && t.cat != kinds::KIND_CAT && p.cat.as_deref() == Some(kinds::KIND_CAT) {
                     return Err(not_a_kind());
                 }
                 if !kind && p.name.as_deref().is_some_and(kinds::is_kind) {
