@@ -235,36 +235,7 @@ pub async fn get(
             .await
             .map_err(internal)?
             .map_err(internal)?;
-            for (h, run) in &mut saved.runs {
-                if run.receipt.state.is_finished() {
-                    continue;
-                }
-                let receipt = match inspect(node.as_ref(), run).await {
-                    Ok(receipt) => Some(receipt),
-                    Err(e)
-                        if e.code == na::ErrorCode::Invalid
-                            && crate::nodes::now() > run.command.accept_before.0 =>
-                    {
-                        Some(na::Receipt {
-                            operation: run.command.id.clone(),
-                            state: na::Observed::Finished {
-                                outcome: na::Outcome::Failed,
-                                result: None,
-                                error: Some(na::ApiError::new(
-                                    na::ErrorCode::Expired,
-                                    "The Node has no receipt and the acceptance deadline passed; explicitly retry with a new operation",
-                                )),
-                            },
-                        })
-                    }
-                    Err(_) => None,
-                };
-                if let Some(receipt) = receipt {
-                    run.receipt = receipt.clone();
-                    run.reconciled = true;
-                    persist_receipt(&store, &id, h, receipt, true).await?;
-                }
-            }
+            reconcile_runs(&store, &id, node.as_ref(), &mut saved).await?;
         }
         Ok(_) => {
             error = Some("Node returned another Node's update inventory".into());
@@ -303,6 +274,46 @@ pub async fn get(
     ))
 }
 
+/// Refresh unfinished saved operations without ever resubmitting an upgrade.
+async fn reconcile_runs(
+    store: &Store,
+    id: &str,
+    node: &dyn na::Node,
+    saved: &mut Saved,
+) -> Result<(), ApiError> {
+    for (h, run) in &mut saved.runs {
+        if run.receipt.state.is_finished() {
+            continue;
+        }
+        let receipt = match inspect(node, run).await {
+            Ok(receipt) => Some(receipt),
+            Err(e)
+                if e.code == na::ErrorCode::Invalid
+                    && crate::nodes::now() > run.command.accept_before.0 =>
+            {
+                Some(na::Receipt {
+                    operation: run.command.id.clone(),
+                    state: na::Observed::Finished {
+                        outcome: na::Outcome::Failed,
+                        result: None,
+                        error: Some(na::ApiError::new(
+                            na::ErrorCode::Expired,
+                            "The Node has no receipt and the acceptance deadline passed; explicitly retry with a new operation",
+                        )),
+                    },
+                })
+            }
+            Err(_) => None,
+        };
+        if let Some(receipt) = receipt {
+            run.receipt = receipt.clone();
+            run.reconciled = true;
+            persist_receipt(&store, &id, h, receipt, true).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Start {
@@ -310,6 +321,79 @@ pub struct Start {
     versions: BTreeMap<String, String>,
     #[serde(default)]
     retry_unknown: bool,
+}
+
+/// Admit one owner-authorized durable intent under the writer lock, preserving retry identity.
+fn admit_upgrade(
+    tx: &rusqlite::Connection,
+    me: &str,
+    node: &str,
+    h: String,
+    cmd: na::Command<na::UpgradeHarness>,
+    retry_unknown: bool,
+) -> Result<Run, StoreError> {
+    // Re-read authority under the writer lock: a stale Ctx or a concurrent pause,
+    // revocation or role change cannot admit a new intent.
+    if !authorized(tx, me, node, true)? {
+        return Err(StoreError::Conflict("harness_owner_required".into()));
+    }
+    let mut saved = load(tx, node)?;
+    if let Some(prior) = saved.runs.get(&h) {
+        if prior.command.id == cmd.id {
+            if prior.command.body != cmd.body {
+                return Err(StoreError::Conflict(
+                    "same operation, other component versions".into(),
+                ));
+            }
+            return Ok(prior.clone());
+        }
+        if !retry_unknown && !prior.receipt.state.is_finished() && prior.command.body == cmd.body {
+            return Ok(prior.clone());
+        }
+        if !prior.receipt.state.is_finished()
+            && !(retry_unknown
+                && prior.reconciled
+                && matches!(prior.receipt.state, na::Observed::Unknown { .. }))
+        {
+            return Err(StoreError::Conflict(
+                "Previous upgrade is running or unknown; read its receipt before retrying".into(),
+            ));
+        }
+    }
+    let run = Run {
+        receipt: na::Receipt {
+            operation: cmd.id.clone(),
+            state: na::Observed::Unknown {
+                reason: "Upgrade intent saved; acceptance has not been confirmed".into(),
+            },
+        },
+        command: cmd,
+        reconciled: false,
+    };
+    saved.runs.insert(h, run.clone());
+    save(tx, node, &saved)?;
+    Ok(run)
+}
+
+/// Observe a saved command before considering its one safe idempotent submission.
+async fn observe_or_submit(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::Receipt> {
+    // Observe first, even after an HTTP retry or Hub restart. Invalid means the Node knows no
+    // such operation; resending this exact saved command then cannot repeat an accepted effect.
+    match inspect(node, run).await {
+        Ok(r) => Ok(r),
+        Err(e) if e.code == na::ErrorCode::Invalid => tokio::time::timeout(
+            Duration::from_secs(10),
+            node.upgrade_harness(run.command.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(na::ApiError::new(
+                na::ErrorCode::OutcomeUnknown,
+                "Acceptance timed out; inspect this operation after reconnecting",
+            ))
+        }),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn start(
@@ -346,53 +430,7 @@ pub async fn start(
     // Durable single intent per harness. Different clicks while unfinished return the same
     // operation; same-id/different-content requests are conflicts before anything is sent.
     let run = tokio::task::spawn_blocking(move || {
-        s.transaction(|tx| {
-            // Re-read authority under the writer lock: a stale Ctx or a concurrent pause,
-            // revocation or role change cannot admit a new intent.
-            if !authorized(tx, &me, &n, true)? {
-                return Err(StoreError::Conflict("harness_owner_required".into()));
-            }
-            let mut saved = load(tx, &n)?;
-            if let Some(prior) = saved.runs.get(&h) {
-                if prior.command.id == cmd.id {
-                    if prior.command.body != cmd.body {
-                        return Err(StoreError::Conflict(
-                            "same operation, other component versions".into(),
-                        ));
-                    }
-                    return Ok(prior.clone());
-                }
-                if !retry_unknown
-                    && !prior.receipt.state.is_finished()
-                    && prior.command.body == cmd.body
-                {
-                    return Ok(prior.clone());
-                }
-                if !prior.receipt.state.is_finished()
-                    && !(retry_unknown
-                        && prior.reconciled
-                        && matches!(prior.receipt.state, na::Observed::Unknown { .. }))
-                {
-                    return Err(StoreError::Conflict(
-                        "Previous upgrade is running or unknown; read its receipt before retrying"
-                            .into(),
-                    ));
-                }
-            }
-            let run = Run {
-                receipt: na::Receipt {
-                    operation: cmd.id.clone(),
-                    state: na::Observed::Unknown {
-                        reason: "Upgrade intent saved; acceptance has not been confirmed".into(),
-                    },
-                },
-                command: cmd,
-                reconciled: false,
-            };
-            saved.runs.insert(h, run.clone());
-            save(tx, &n, &saved)?;
-            Ok(run)
-        })
+        s.transaction(|tx| admit_upgrade(tx, &me, &n, h, cmd, retry_unknown))
     })
     .await
     .map_err(internal)?
@@ -409,23 +447,7 @@ pub async fn start(
     if run.receipt.state.is_finished() {
         return Ok(Json(json!({"receipt":run.receipt})));
     }
-    // Observe first, even after an HTTP retry or Hub restart. Invalid means the Node knows no
-    // such operation; resending this exact saved command then cannot repeat an accepted effect.
-    let result = match inspect(node.as_ref(), &run).await {
-        Ok(r) => Ok(r),
-        Err(e) if e.code == na::ErrorCode::Invalid => tokio::time::timeout(
-            Duration::from_secs(10),
-            node.upgrade_harness(run.command.clone()),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(na::ApiError::new(
-                na::ErrorCode::OutcomeUnknown,
-                "Acceptance timed out; inspect this operation after reconnecting",
-            ))
-        }),
-        Err(e) => Err(e),
-    };
+    let result = observe_or_submit(node.as_ref(), &run).await;
     let reconciled = result.is_ok();
     let receipt = match result {
         Ok(r) => r,

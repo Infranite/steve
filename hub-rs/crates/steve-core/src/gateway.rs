@@ -430,22 +430,7 @@ impl LocalAcp {
         let text = std::sync::Mutex::new((None::<String>, String::new()));
         let usage = std::sync::Mutex::new(vec![]);
         let uncommitted = std::sync::Mutex::new(Vec::<UsageReport>::new());
-        let flush = || {
-            if let Some(account) = account {
-                let mut pending = uncommitted.lock().unwrap();
-                while let Some(report) = pending.first() {
-                    match account.report(report) {
-                        Ok(_) => {
-                            pending.remove(0);
-                        }
-                        Err(e) => {
-                            tracing::warn!("stats: local usage pending: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-        };
+        let flush = || flush_local_usage(account, &uncommitted);
         let event = |ev: EventBody| match ev {
             EventBody::MessageStarted {
                 message,
@@ -515,6 +500,27 @@ impl LocalAcp {
         Tried {
             reported_model: reported,
             ..Tried::of(reply, usage)
+        }
+    }
+}
+
+/// Commit pending local usage in FIFO order, retaining the failed head for the next flush.
+fn flush_local_usage(
+    account: Option<&crate::stats::AttemptAccount>,
+    uncommitted: &std::sync::Mutex<Vec<UsageReport>>,
+) {
+    if let Some(account) = account {
+        let mut pending = uncommitted.lock().unwrap();
+        while let Some(report) = pending.first() {
+            match account.report(report) {
+                Ok(_) => {
+                    pending.remove(0);
+                }
+                Err(e) => {
+                    tracing::warn!("stats: local usage pending: {e}");
+                    break;
+                }
+            }
         }
     }
 }
@@ -784,22 +790,7 @@ impl<M: OneModel> Fallback<M> {
                     return a;
                 }
                 Err(e) => {
-                    let e1 = js_head(&e.to_string(), 200).to_string();
-                    tracing::error!("model {m} failed: {e1}");
-                    a.failures.push(if r.timed_out {
-                        format!("{m}: {TIMED_OUT} {e1}")
-                    } else {
-                        format!("{m}: {e1}")
-                    });
-                    // a request that needs tools, from a caller that hands it on (a trigger
-                    // word's answer becomes an item): the next model has no tools either. Any
-                    // other caller falls back, as for every fast error
-                    let handed_on =
-                        matches!(e, CoreError::NeedsTools) && steve_modules::gateway::hands_on();
-                    a.result = Err(e);
-                    // a timeout is not the model's own fault (the provider or the harness is slow): the
-                    // next one would wait as long, so the chain ends here; fast errors fall back
-                    if r.timed_out || handed_on {
+                    if fallback_failure(&mut a, m, e, r.timed_out) {
                         break;
                     }
                 }
@@ -808,6 +799,25 @@ impl<M: OneModel> Fallback<M> {
         a.duration_ms = elapsed_ms(t0);
         a
     }
+}
+
+/// Record one failed attempt and decide whether timeout or handoff ends this fallback chain.
+fn fallback_failure(a: &mut Attempt, m: &str, e: CoreError, timed_out: bool) -> bool {
+    let e1 = js_head(&e.to_string(), 200).to_string();
+    tracing::error!("model {m} failed: {e1}");
+    a.failures.push(if timed_out {
+        format!("{m}: {TIMED_OUT} {e1}")
+    } else {
+        format!("{m}: {e1}")
+    });
+    // a request that needs tools, from a caller that hands it on (a trigger
+    // word's answer becomes an item): the next model has no tools either. Any
+    // other caller falls back, as for every fast error
+    let handed_on = matches!(e, CoreError::NeedsTools) && steve_modules::gateway::hands_on();
+    a.result = Err(e);
+    // a timeout is not the model's own fault (the provider or the harness is slow): the
+    // next one would wait as long, so the chain ends here; fast errors fall back
+    timed_out || handed_on
 }
 
 #[async_trait]
@@ -1172,54 +1182,7 @@ pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promot
             )
         })
         .collect();
-    let mut head: Vec<String> = vec![
-        ROUTE_RULES.trim_end().to_string(),
-        "Bots (id: role):".into(),
-    ];
-    head.extend(c.bots.iter().map(|b| format!("  {}: {}", b.id, b.role)));
-    head.push("For an item, pick \"steve\" unless the task clearly needs a specialised bot; work in a project with a default bot goes to that bot. For other kinds the bot does not matter.".into());
-    head.push("Projects (id: name — description · default bot). For an item: the project whose directory the work happens in; for research: the project to read; null if none fits:".into());
-    head.extend(c.projects.iter().map(|p| {
-        format!(
-            "  {}: {} — {}{}",
-            p.id,
-            p.name,
-            p.description,
-            p.default_bot
-                .as_deref()
-                .map(|b| format!(" · {b}"))
-                .unwrap_or_default()
-        )
-    }));
-    if c.operator {
-        head.push("In this conversation Steve also acts on the machine the Hub runs on, with the owner's own access (files anywhere, commands, the network). Looking at, organising, installing or checking things on this machine (\"看下本机的目录\", \"把下载目录里的截图归到一个文件夹\", \"装一下 ripgrep\", \"磁盘还剩多少\", \"上网搜一下…\") is research: Steve does it right in the conversation, never an item and never suggest. Changing a project's code or documents is still an item.".into());
-    }
-    if let Some(s) = &c.steve_project {
-        head.push(format!("Anything about Steve itself — its chat page, web UI, cards, Hub, bots, knowledge system, releases, design — is in project {s}."));
-    }
-    let (kinds, domains): (Vec<&Tag>, Vec<&Tag>) = c
-        .tags
-        .iter()
-        .partition(|t| t.cat == steve_store::kinds::KIND_CAT);
-    if !kinds.is_empty() {
-        head.push("Item category, required for an item: exactly ONE of these tag ids, first in tags, chosen by the item's main acceptance goal (a fix is bug, new or better behaviour is feat, a plan or explanation is doc, deploying or configuring is ops; chore only for upkeep, never as a default):".into());
-        head.extend(
-            kinds
-                .iter()
-                .map(|t| format!("  {}: {} · {}", t.id, t.name, t.description)),
-        );
-    }
-    head.push(format!(
-        "Domain tags (id: name · category · description), for items only, added after the category. Choose existing tags that fit; only if none of the non-project tags fits, propose ONE new tag with category in {} and a concrete description:",
-        TAG_CATS.join("/")
-    ));
-    head.extend(
-        domains
-            .iter()
-            .map(|t| format!("  {}: {} · {} · {}", t.id, t.name, t.cat, t.description)),
-    );
-    head.push("goal: the task, self-contained, in the user language, written as short Markdown a person can scan: first one sentence saying what will be done and what counts as done; then only the sections that apply, each a few short bullets: **背景** (why, at most two lines), **要做**, **验收** (how to check it is done), **不做/约束**. Keep it under about 12 lines; never paste a wall of text, logs or file lists into it (the conversation keeps those). For a short ordinary message whose meaning is plain, the goal may be that one sentence. title: names the work concretely, never just “按建议” or “好的”.".into());
-    head.push("Reply with ONLY one JSON object: {\"kind\":\"answer\"|\"research\"|\"item\"|\"suggest\"|\"ask\"|\"supplement\"|\"status\"|\"config\"|\"reroute\",\"confidence\":0.0-1.0,\"signals\":[\"explicit\"|\"change\"|\"deliverable\"|\"long\"|\"question\"|\"lookup\"|\"vague\"],\"offer\":{\"title\":\"\",\"goal\":\"\"} or null,\"item\":\"<item id or null>\",\"options\":[\"\"],\"title\":\"<= 24 chars, user language\",\"goal\":\"\",\"bot\":\"<bot id>\",\"project\":\"<project id or null>\",\"tags\":[\"<tag id>\"],\"newTags\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"reply\":\"one short sentence in the user language, without tags\",\"why\":\"one short sentence in the user language: why this kind\"}".into());
+    let mut head = route_instructions(c);
     let mut lines: Vec<String> = vec![];
     let context = texts
         .iter()
@@ -1298,6 +1261,59 @@ pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promot
     head.retain(|l| !l.is_empty());
     lines.retain(|l| !l.is_empty());
     with_static(&head.join("\n"), &lines.join("\n"))
+}
+
+/// Build the stable routing instructions and workspace catalog before conversation-specific context.
+fn route_instructions(c: &RouteCtx) -> Vec<String> {
+    let mut head: Vec<String> = vec![
+        ROUTE_RULES.trim_end().to_string(),
+        "Bots (id: role):".into(),
+    ];
+    head.extend(c.bots.iter().map(|b| format!("  {}: {}", b.id, b.role)));
+    head.push("For an item, pick \"steve\" unless the task clearly needs a specialised bot; work in a project with a default bot goes to that bot. For other kinds the bot does not matter.".into());
+    head.push("Projects (id: name — description · default bot). For an item: the project whose directory the work happens in; for research: the project to read; null if none fits:".into());
+    head.extend(c.projects.iter().map(|p| {
+        format!(
+            "  {}: {} — {}{}",
+            p.id,
+            p.name,
+            p.description,
+            p.default_bot
+                .as_deref()
+                .map(|b| format!(" · {b}"))
+                .unwrap_or_default()
+        )
+    }));
+    if c.operator {
+        head.push("In this conversation Steve also acts on the machine the Hub runs on, with the owner's own access (files anywhere, commands, the network). Looking at, organising, installing or checking things on this machine (\"看下本机的目录\", \"把下载目录里的截图归到一个文件夹\", \"装一下 ripgrep\", \"磁盘还剩多少\", \"上网搜一下…\") is research: Steve does it right in the conversation, never an item and never suggest. Changing a project's code or documents is still an item.".into());
+    }
+    if let Some(s) = &c.steve_project {
+        head.push(format!("Anything about Steve itself — its chat page, web UI, cards, Hub, bots, knowledge system, releases, design — is in project {s}."));
+    }
+    let (kinds, domains): (Vec<&Tag>, Vec<&Tag>) = c
+        .tags
+        .iter()
+        .partition(|t| t.cat == steve_store::kinds::KIND_CAT);
+    if !kinds.is_empty() {
+        head.push("Item category, required for an item: exactly ONE of these tag ids, first in tags, chosen by the item's main acceptance goal (a fix is bug, new or better behaviour is feat, a plan or explanation is doc, deploying or configuring is ops; chore only for upkeep, never as a default):".into());
+        head.extend(
+            kinds
+                .iter()
+                .map(|t| format!("  {}: {} · {}", t.id, t.name, t.description)),
+        );
+    }
+    head.push(format!(
+        "Domain tags (id: name · category · description), for items only, added after the category. Choose existing tags that fit; only if none of the non-project tags fits, propose ONE new tag with category in {} and a concrete description:",
+        TAG_CATS.join("/")
+    ));
+    head.extend(
+        domains
+            .iter()
+            .map(|t| format!("  {}: {} · {} · {}", t.id, t.name, t.cat, t.description)),
+    );
+    head.push("goal: the task, self-contained, in the user language, written as short Markdown a person can scan: first one sentence saying what will be done and what counts as done; then only the sections that apply, each a few short bullets: **背景** (why, at most two lines), **要做**, **验收** (how to check it is done), **不做/约束**. Keep it under about 12 lines; never paste a wall of text, logs or file lists into it (the conversation keeps those). For a short ordinary message whose meaning is plain, the goal may be that one sentence. title: names the work concretely, never just “按建议” or “好的”.".into());
+    head.push("Reply with ONLY one JSON object: {\"kind\":\"answer\"|\"research\"|\"item\"|\"suggest\"|\"ask\"|\"supplement\"|\"status\"|\"config\"|\"reroute\",\"confidence\":0.0-1.0,\"signals\":[\"explicit\"|\"change\"|\"deliverable\"|\"long\"|\"question\"|\"lookup\"|\"vague\"],\"offer\":{\"title\":\"\",\"goal\":\"\"} or null,\"item\":\"<item id or null>\",\"options\":[\"\"],\"title\":\"<= 24 chars, user language\",\"goal\":\"\",\"bot\":\"<bot id>\",\"project\":\"<project id or null>\",\"tags\":[\"<tag id>\"],\"newTags\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"reply\":\"one short sentence in the user language, without tags\",\"why\":\"one short sentence in the user language: why this kind\"}".into());
+    head
 }
 
 static TAG_NOTE: LazyLock<Regex> =
@@ -1406,51 +1422,8 @@ fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Opti
         Some(v) if truthy(v) => jstr(v),
         _ => text.to_string(),
     };
-    let tag_ids = match r.get("tags") {
-        None | Some(Value::Null) => vec![],
-        Some(Value::Array(a)) => {
-            /* known tags once each, and one category at most: the first named */
-            let mut v: Vec<String> = vec![];
-            let mut kind = false;
-            for x in a.iter().filter_map(Value::as_str) {
-                let Some(t) = c.tags.iter().find(|t| t.id == x) else {
-                    continue;
-                };
-                let is_kind = t.cat == steve_store::kinds::KIND_CAT;
-                if v.iter().any(|y| y == x) || (is_kind && kind) {
-                    continue;
-                }
-                kind |= is_kind;
-                if is_kind {
-                    v.insert(0, x.into());
-                } else {
-                    v.push(x.into());
-                }
-            }
-            v
-        }
-        Some(_) => return None,
-    };
-    let new_tags = match r.get("newTags") {
-        None | Some(Value::Null) => vec![],
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter(|t| {
-                t.get("name").is_some_and(truthy)
-                    && t.get("cat")
-                        .and_then(Value::as_str)
-                        .is_some_and(|x| TAG_CATS.contains(&x))
-                    && t.get("description").is_some_and(truthy)
-            })
-            .take(1)
-            .map(|t| NewTag {
-                name: jstr(&t["name"]),
-                cat: jstr(&t["cat"]),
-                description: jstr(&t["description"]),
-            })
-            .collect(),
-        Some(_) => return None,
-    };
+    let tag_ids = route_tag_ids(c, r.get("tags"))?;
+    let new_tags = route_new_tags(r.get("newTags"))?;
     let confidence = r
         .get("confidence")
         .and_then(Value::as_f64)
@@ -1513,6 +1486,59 @@ fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Opti
     })
 }
 
+/// Validate and normalize the router's tags list using its original ordering rules.
+fn route_tag_ids(c: &RouteCtx, value: Option<&Value>) -> Option<Vec<String>> {
+    Some(match value {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(a)) => {
+            /* known tags once each, and one category at most: the first named */
+            let mut v: Vec<String> = vec![];
+            let mut kind = false;
+            for x in a.iter().filter_map(Value::as_str) {
+                let Some(t) = c.tags.iter().find(|t| t.id == x) else {
+                    continue;
+                };
+                let is_kind = t.cat == steve_store::kinds::KIND_CAT;
+                if v.iter().any(|y| y == x) || (is_kind && kind) {
+                    continue;
+                }
+                kind |= is_kind;
+                if is_kind {
+                    v.insert(0, x.into());
+                } else {
+                    v.push(x.into());
+                }
+            }
+            v
+        }
+        Some(_) => return None,
+    })
+}
+
+/// Validate and normalize the router's newTags list using its original ordering rules.
+fn route_new_tags(value: Option<&Value>) -> Option<Vec<NewTag>> {
+    Some(match value {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter(|t| {
+                t.get("name").is_some_and(truthy)
+                    && t.get("cat")
+                        .and_then(Value::as_str)
+                        .is_some_and(|x| TAG_CATS.contains(&x))
+                    && t.get("description").is_some_and(truthy)
+            })
+            .take(1)
+            .map(|t| NewTag {
+                name: jstr(&t["name"]),
+                cat: jstr(&t["cat"]),
+                description: jstr(&t["description"]),
+            })
+            .collect(),
+        Some(_) => return None,
+    })
+}
+
 /// Route several messages the user sent in a row in one call (`route` purpose, fast tier). `None` when
 /// the call or its reply fails: the caller routes each alone, as before.
 pub async fn route_many(
@@ -1528,28 +1554,31 @@ pub async fn route_many(
     {
         Ok(Printed {
             text: raw, model, ..
-        }) => {
-            if c.debug {
-                tracing::info!("route batch raw: {raw}");
-            }
-            let rs = parse_routes(c, texts, &raw);
-            if rs.is_none() {
-                tracing::warn!("route batch unusable: {}", js_head(&raw, 200));
-            }
-            rs.map(|rs| {
-                rs.into_iter()
-                    .map(|r| Route {
-                        model: Some(model.clone()),
-                        ..r
-                    })
-                    .collect()
-            })
-        }
+        }) => received_routes(c, texts, &raw, model),
         Err(e) => {
             tracing::error!("route batch failed {e}");
             None
         }
     }
+}
+
+/// Interpret one successful batch reply and attach its answering model after validation.
+fn received_routes(c: &RouteCtx, texts: &[String], raw: &str, model: String) -> Option<Vec<Route>> {
+    if c.debug {
+        tracing::info!("route batch raw: {raw}");
+    }
+    let rs = parse_routes(c, texts, raw);
+    if rs.is_none() {
+        tracing::warn!("route batch unusable: {}", js_head(raw, 200));
+    }
+    rs.map(|rs| {
+        rs.into_iter()
+            .map(|r| Route {
+                model: Some(model.clone()),
+                ..r
+            })
+            .collect()
+    })
 }
 
 /// Route a message; any failure gives [`Route::fallback`], which never creates an item. Where Steve
@@ -1570,16 +1599,9 @@ pub async fn route(
         Ok(Printed {
             text: raw, model, ..
         }) => {
-            if c.debug {
-                tracing::info!("route raw: {raw}");
+            if let Some(r) = received_route(c, text, &raw, model, promote) {
+                return r;
             }
-            if let Some(r) = parse_route(c, text, &raw, promote) {
-                return Route {
-                    model: Some(model),
-                    ..r
-                };
-            }
-            tracing::warn!("route unusable: {}", js_head(&raw, 200));
         }
         Err(e) => tracing::error!("route failed {e}"),
     }
@@ -1599,6 +1621,27 @@ pub async fn route(
         r.project = None;
     }
     r
+}
+
+/// Interpret one successful routing reply; unusable output remains a caller-owned fallback.
+fn received_route(
+    c: &RouteCtx,
+    text: &str,
+    raw: &str,
+    model: String,
+    promote: bool,
+) -> Option<Route> {
+    if c.debug {
+        tracing::info!("route raw: {raw}");
+    }
+    if let Some(r) = parse_route(c, text, raw, promote) {
+        return Some(Route {
+            model: Some(model),
+            ..r
+        });
+    }
+    tracing::warn!("route unusable: {}", js_head(raw, 200));
+    None
 }
 
 /// Attachments of a chat message, as copied next to the print-mode run (its cwd is the scratch dir).
