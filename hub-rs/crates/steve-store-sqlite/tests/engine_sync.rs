@@ -24,7 +24,7 @@ fn store(dir: &std::path::Path, admin: bool) -> SqliteStore {
     .unwrap()
 }
 #[test]
-fn synchronous_root_guard_reads_own_transaction_and_rejects_nested_facade_lock() {
+fn synchronous_root_guard_reads_own_transaction_and_reuses_nested_facade_lock() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path(), false);
@@ -38,7 +38,16 @@ fn synchronous_root_guard_reads_own_transaction_and_rejects_nested_facade_lock()
             .unwrap(),
         7
     );
-    assert!(s.root_guard(Domain::Core, Lane::Admin).is_err());
+    let nested = s.root_guard(Domain::Core, Lane::Admin).unwrap();
+    assert!(std::ptr::eq(g.connection(), nested.connection()));
+    drop(nested); // Dropping a nested borrower must not roll back the outer transaction.
+    assert!(!g.is_autocommit());
+    assert_eq!(
+        g.query_row("SELECT x FROM engine_guard_test", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
     assert_eq!(
         s.engine(Domain::Core)
             .read_conn()

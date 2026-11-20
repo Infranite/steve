@@ -20,17 +20,30 @@ struct Staged {
 }
 
 impl Staged {
-    fn merge(&mut self, child: Staged) {
+    fn merge(&mut self, child: Self) {
         self.events.extend(child.events);
         self.diagnostics.extend(child.diagnostics);
         self.diagnostic_until = self.diagnostic_until.max(child.diagnostic_until);
         self.outbox |= child.outbox;
     }
+    fn flush(self, store: &Store) {
+        if self.diagnostic_until > 0 {
+            store.diagnostics().activate_until(self.diagnostic_until);
+        }
+        for diagnostic in self.diagnostics {
+            store.diagnostics().record(diagnostic);
+        }
+        if !self.events.is_empty() {
+            store.inner.bus.publish_batch(self.events);
+        }
+        if self.outbox {
+            store.inner.outbox_wake.notify_one();
+        }
+    }
 }
 
 struct ActiveWrite {
     conn: NonNull<Connection>,
-    frames: Vec<Staged>,
 }
 
 thread_local! {
@@ -111,41 +124,6 @@ impl Drop for RootScopeGuard {
             let mut list = cell.borrow_mut();
             if let Some(pos) = list.iter().position(|(id, _)| *id == store_id) {
                 list.swap_remove(pos);
-            }
-        });
-    }
-}
-
-struct NestedFrameGuard {
-    store_id: usize,
-    armed: bool,
-}
-
-impl NestedFrameGuard {
-    fn take(mut self) -> Staged {
-        self.armed = false;
-        let store_id = self.store_id;
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            let (_, entry) = list
-                .iter_mut()
-                .find(|(id, _)| *id == store_id)
-                .expect("active write entry must exist for nested frame");
-            entry.frames.pop().expect("nested staged frame must exist")
-        })
-    }
-}
-
-impl Drop for NestedFrameGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let store_id = self.store_id;
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if let Some((_, entry)) = list.iter_mut().find(|(id, _)| *id == store_id) {
-                let _ = entry.frames.pop();
             }
         });
     }
@@ -258,7 +236,7 @@ impl Store {
         let ptr = ACTIVE_WRITES.with(|cell| {
             let list = cell.borrow();
             list.iter()
-                .find(|(id, entry)| *id == store_id && !entry.frames.is_empty())
+                .find(|(id, _)| *id == store_id)
                 .map(|(_, entry)| entry.conn)
         })?;
         // SAFETY: `RootScopeGuard` keeps `ptr` live for the exact stack lifetime of the active
@@ -267,81 +245,68 @@ impl Store {
         Some(unsafe { ptr.as_ref() })
     }
 
-    pub(crate) fn try_stage_event(&self, e: BusEvent) -> Result<(), BusEvent> {
-        let store_id = self.inner_id();
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if let Some((_, entry)) = list.iter_mut().find(|(id, _)| *id == store_id)
-                && let Some(frame) = entry.frames.last_mut()
-            {
-                frame.events.push(e);
-                return Ok(());
-            }
-            Err(e)
-        })
+    fn defer_staged(&self, staged: Staged) -> Option<Staged> {
+        self.inner
+            .engine
+            .defer_until_commit(
+                steve_storage_api::Domain::Core,
+                self.inner_id(),
+                (self.clone(), staged),
+                |parent, child| parent.1.merge(child.1),
+                |(store, staged)| staged.flush(&store),
+            )
+            .err()
+            .map(|(_, staged)| staged)
     }
-
-    pub(crate) fn emit_event(&self, e: BusEvent) {
-        if let Err(e) = self.try_stage_event(e) {
-            self.inner.bus.publish_batch(vec![e]);
+    pub(crate) fn try_stage_event(&self, event: BusEvent) -> Result<(), BusEvent> {
+        match self.defer_staged(Staged {
+            events: vec![event],
+            ..Default::default()
+        }) {
+            None => Ok(()),
+            Some(mut staged) => Err(staged.events.pop().expect("unstaged event")),
         }
     }
-
+    pub(crate) fn emit_event(&self, event: BusEvent) {
+        if let Err(event) = self.try_stage_event(event) {
+            self.inner.bus.publish_batch(vec![event]);
+        }
+    }
     pub(crate) fn try_stage_diagnostic(
         &self,
-        r: crate::diagnostics::Record,
+        record: crate::diagnostics::Record,
     ) -> Result<(), crate::diagnostics::Record> {
-        let store_id = self.inner_id();
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if let Some((_, entry)) = list.iter_mut().find(|(id, _)| *id == store_id)
-                && let Some(frame) = entry.frames.last_mut()
-            {
-                frame.diagnostics.push(r);
-                return Ok(());
-            }
-            Err(r)
-        })
-    }
-
-    pub(crate) fn stage_diagnostic(&self, r: crate::diagnostics::Record) {
-        if let Err(r) = self.try_stage_diagnostic(r) {
-            let _ = self.diagnostics().record(r);
+        match self.defer_staged(Staged {
+            diagnostics: vec![record],
+            ..Default::default()
+        }) {
+            None => Ok(()),
+            Some(mut staged) => Err(staged.diagnostics.pop().expect("unstaged diagnostic")),
         }
     }
-
-    pub(crate) fn try_stage_diagnostic_until(&self, until: i64) -> bool {
-        let store_id = self.inner_id();
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if let Some((_, entry)) = list.iter_mut().find(|(id, _)| *id == store_id)
-                && let Some(frame) = entry.frames.last_mut()
-            {
-                frame.diagnostic_until = frame.diagnostic_until.max(until);
-                return true;
-            }
-            false
-        })
+    pub(crate) fn stage_diagnostic(&self, record: crate::diagnostics::Record) {
+        if let Err(record) = self.try_stage_diagnostic(record) {
+            self.diagnostics().record(record);
+        }
     }
-
+    pub(crate) fn try_stage_diagnostic_until(&self, until: i64) -> bool {
+        self.defer_staged(Staged {
+            diagnostic_until: until,
+            ..Default::default()
+        })
+        .is_none()
+    }
     pub(crate) fn stage_diagnostic_until(&self, until: i64) {
         if !self.try_stage_diagnostic_until(until) {
             self.diagnostics().activate_until(until);
         }
     }
-
     pub(crate) fn try_stage_outbox(&self) -> bool {
-        let store_id = self.inner_id();
-        ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if let Some((_, entry)) = list.iter_mut().find(|(id, _)| *id == store_id)
-                && let Some(frame) = entry.frames.last_mut()
-            {
-                frame.outbox = true;
-                return true;
-            }
-            false
+        self.defer_staged(Staged {
+            outbox: true,
+            ..Default::default()
         })
+        .is_none()
     }
 
     #[track_caller]
@@ -349,76 +314,31 @@ impl Store {
         &self,
         f: impl FnOnce(&Connection) -> Result<T, E>,
     ) -> Result<T, E> {
-        let store_id = self.inner_id();
+        let run = |c: &Connection| {
+            self.inner
+                .engine
+                .with_effect_scope(steve_storage_api::Domain::Core, || {
+                    let tx = WriteTx::begin(c).map_err(StoreError::from)?;
+                    let out = f(&tx)?;
+                    tx.commit().map_err(StoreError::from)?;
+                    Ok(out)
+                })
+        };
         if let Some(c) = self.active_conn() {
-            let sp = WriteTx::begin(c).map_err(StoreError::from)?;
-            ACTIVE_WRITES.with(|cell| {
-                let mut list = cell.borrow_mut();
-                let (_, entry) = list
-                    .iter_mut()
-                    .find(|(id, _)| *id == store_id)
-                    .expect("active write entry must exist");
-                entry.frames.push(Staged::default());
-            });
-            let frame_guard = NestedFrameGuard {
-                store_id,
-                armed: true,
-            };
-            let out = f(&sp)?;
-            sp.commit().map_err(StoreError::from)?;
-            let child = frame_guard.take();
-            ACTIVE_WRITES.with(|cell| {
-                let mut list = cell.borrow_mut();
-                let (_, entry) = list
-                    .iter_mut()
-                    .find(|(id, _)| *id == store_id)
-                    .expect("active write entry must exist");
-                entry
-                    .frames
-                    .last_mut()
-                    .expect("parent staged frame must exist")
-                    .merge(child);
-            });
-            return Ok(out);
+            return run(c);
         }
-
         let c = self.lock().map_err(E::from)?;
-        let tx = WriteTx::begin(&c).map_err(StoreError::from)?;
-        let conn_ptr = NonNull::from(&*c);
+        let store_id = self.inner_id();
         ACTIVE_WRITES.with(|cell| {
             cell.borrow_mut().push((
                 store_id,
                 ActiveWrite {
-                    conn: conn_ptr,
-                    frames: vec![Staged::default()],
+                    conn: NonNull::from(&*c),
                 },
             ));
         });
-        let root_guard = RootScopeGuard { store_id };
-        let out = f(&tx)?;
-        tx.commit().map_err(StoreError::from)?;
-        let staged = ACTIVE_WRITES.with(|cell| {
-            let mut list = cell.borrow_mut();
-            let pos = list
-                .iter()
-                .position(|(id, _)| *id == store_id)
-                .expect("root write entry must exist");
-            let (_, mut entry) = list.swap_remove(pos);
-            entry.frames.pop().unwrap_or_default()
-        });
-        drop(root_guard);
-
-        if staged.diagnostic_until > 0 {
-            self.diagnostics().activate_until(staged.diagnostic_until);
-        }
-        for event in staged.diagnostics {
-            self.diagnostics().record(event);
-        }
-        self.inner.bus.publish_batch(staged.events);
-        if staged.outbox {
-            self.inner.outbox_wake.notify_one();
-        }
-        Ok(out)
+        let _scope = RootScopeGuard { store_id };
+        run(&c)
     }
 
     /// Runs `f` inside an atomic, re-entrant SQLite write scope.
@@ -464,24 +384,114 @@ pub(crate) struct WrappedEffects(Staged);
 
 impl WrappedEffects {
     pub(crate) fn flush(self, store: &Store) {
-        let s = self.0;
-        if s.diagnostic_until > 0 {
-            store.stage_diagnostic_until(s.diagnostic_until);
+        if let Some(staged) = store.defer_staged(self.0) {
+            staged.flush(store);
         }
-        for d in s.diagnostics {
-            store.stage_diagnostic(d);
-        }
-        let mut immediate = Vec::new();
-        for e in s.events {
-            if let Err(e) = store.try_stage_event(e) {
-                immediate.push(e);
+    }
+}
+
+#[cfg(test)]
+mod commit_effect_tests {
+    use crate::{
+        NoPublisher, Store, WS,
+        diagnostics::{Record, RecordStatus},
+    };
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use steve_storage_api::{Domain, Lane};
+
+    #[test]
+    fn raw_and_typed_transactions_defer_diagnostic_queue_and_capture_cache() {
+        for typed in [false, true] {
+            for finish in ["ROLLBACK", "COMMIT", "panic"] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
+                store.ensure_workspace().unwrap();
+                store.with_conn(|c| {
+                    c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('effect-item','default',1,'I','run','',0,0)")?;
+                    Ok(())
+                }).unwrap();
+                let detail = || Record {
+                    workspace_id: WS.into(),
+                    item_id: Some("effect-item".into()),
+                    kind: "dependency.checked".into(),
+                    reason_code: "fixture_condition".into(),
+                    detail: true,
+                    ..Default::default()
+                };
+                let run = |c: &rusqlite::Connection| {
+                    c.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    store
+                        .atomic(|| -> Result<(), crate::StoreError> {
+                            store.stage_diagnostic_until(crate::now() + 60_000);
+                            store.stage_diagnostic(Record {
+                                detail: false,
+                                ..detail()
+                            });
+                            Ok(())
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        store.diagnostics().record(detail()),
+                        RecordStatus::Skipped,
+                        "uncommitted capture cache escaped"
+                    );
+                    assert_eq!(
+                        store.diagnostics().explain(WS, "effect-item").unwrap()["coverage"]["instance_pending"],
+                        0,
+                        "uncommitted diagnostic enqueued"
+                    );
+                    if finish == "panic" {
+                        panic!("diagnostic owner panic");
+                    }
+                    c.execute_batch(finish).unwrap();
+                };
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if typed {
+                        store
+                            .domain_store()
+                            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                                run(c);
+                                Ok(())
+                            })
+                            .unwrap();
+                    } else {
+                        let guard = store
+                            .domain_store()
+                            .root_guard(Domain::Core, Lane::Interactive)
+                            .unwrap();
+                        run(&guard);
+                    }
+                }));
+                assert_eq!(result.is_err(), finish == "panic");
+                assert_eq!(
+                    store.diagnostics().record(detail()),
+                    if finish == "COMMIT" {
+                        RecordStatus::Queued
+                    } else {
+                        RecordStatus::Skipped
+                    }
+                );
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let view = store.diagnostics().explain(WS, "effect-item").unwrap();
+                    if view["coverage"]["instance_pending"] == 0 {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "diagnostic worker did not drain: {view}"
+                    );
+                    std::thread::yield_now();
+                }
+                let records = store
+                    .diagnostics()
+                    .events(WS, "effect-item", crate::diagnostics::Filter::default())
+                    .unwrap();
+                assert_eq!(
+                    records["events"].as_array().unwrap().len(),
+                    usize::from(finish == "COMMIT")
+                );
             }
-        }
-        if !immediate.is_empty() {
-            store.inner.bus.publish_batch(immediate);
-        }
-        if s.outbox && !store.try_stage_outbox() {
-            store.inner.outbox_wake.notify_one();
         }
     }
 }

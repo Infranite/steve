@@ -131,7 +131,7 @@ fn source(
         move |kind: Kind, now: i64, after: Option<i64>| {
             let db = db.clone();
             async move {
-                tokio::task::spawn_blocking(move || {
+                steve_store::spawn_blocking(move || {
                     db.retention_slice(kind, now, DEFAULT_BUDGET, after)
                 })
                 .await
@@ -147,7 +147,7 @@ fn source(
                 if no_resume {
                     return Ok(false);
                 }
-                tokio::task::spawn_blocking(move || {
+                steve_store::spawn_blocking(move || {
                     // retain records the whole sweep's failures for /system/backup before
                     // this adapter returns only the continuation bit to the shared Source.
                     crate::backup::retain(&store, &home, now.max(0) as u64)

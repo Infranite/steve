@@ -225,7 +225,7 @@ impl FlowCx {
         f: impl FnOnce(&Store) -> FlowResult<R> + Send + 'static,
     ) -> FlowResult<R> {
         let store = self.store().clone();
-        tokio::task::spawn_blocking(move || f(&store))
+        steve_store::spawn_blocking(move || f(&store))
             .await
             .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
     }

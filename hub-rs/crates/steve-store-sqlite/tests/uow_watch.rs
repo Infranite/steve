@@ -469,8 +469,12 @@ fn synchronous_root_guard_owns_capture_and_publishes_once_on_release() {
             .unwrap();
         assert!(!ready_notify(&wake));
         assert!(!ready(&entity));
-        assert!(store.root_guard(Domain::Comms, Lane::Admin).is_err());
+        let nested = store.root_guard(Domain::Comms, Lane::Admin).unwrap();
+        assert!(std::ptr::eq(guard.connection(), nested.connection()));
         drop(guard);
+        assert!(!ready_notify(&wake));
+        assert!(!ready(&entity));
+        drop(nested); // Only the last same-Engine owner publishes the capture.
         assert!(ready_notify(&wake));
         assert!(!ready_notify(&wake));
         assert!(ready(&entity));

@@ -10,11 +10,63 @@ use rusqlite::{
     trace::{TraceEvent, TraceEventCodes},
 };
 use std::{
+    any::{Any, TypeId},
     cell::RefCell,
     collections::BTreeSet,
     sync::{Arc, Mutex, Weak},
 };
 use steve_storage_api::CommitWatches;
+
+// Owned facade attachments. Each physical commit remains a distinct batch.
+// Merge only after confirmation: merging across a savepoint before rollback
+// would contaminate its parent's attachment, which cannot then be truncated.
+type OwnedAttachment = Box<dyn Any + Send>;
+type MergeAttachment = Box<dyn Fn(&mut dyn Any, OwnedAttachment) + Send>;
+type PublishAttachment = Box<dyn FnOnce(OwnedAttachment) + Send>;
+
+pub(crate) struct Effect {
+    key: (TypeId, usize),
+    value: OwnedAttachment,
+    merge: MergeAttachment,
+    publish: PublishAttachment,
+}
+impl Effect {
+    pub(crate) fn new<T: Send + 'static>(
+        owner: usize,
+        value: T,
+        merge: fn(&mut T, T),
+        publish: fn(T),
+    ) -> Self {
+        Self {
+            key: (TypeId::of::<T>(), owner),
+            value: Box::new(value),
+            merge: Box::new(move |parent, child| {
+                merge(
+                    parent.downcast_mut::<T>().expect("attachment type"),
+                    *child.downcast::<T>().expect("attachment type"),
+                )
+            }),
+            publish: Box::new(move |value| {
+                publish(*value.downcast::<T>().expect("attachment type"))
+            }),
+        }
+    }
+}
+pub(crate) fn publish_effects(commits: Vec<Vec<Effect>>) {
+    for effects in commits {
+        let mut batches: Vec<Effect> = Vec::new();
+        for effect in effects {
+            if let Some(parent) = batches.iter_mut().find(|parent| parent.key == effect.key) {
+                (parent.merge)(&mut *parent.value, effect.value);
+            } else {
+                batches.push(effect);
+            }
+        }
+        for effect in batches {
+            (effect.publish)(effect.value);
+        }
+    }
+}
 
 #[derive(Default)]
 struct Changes {
@@ -22,11 +74,17 @@ struct Changes {
     candidate: BTreeSet<String>,
     committed: BTreeSet<String>,
     installed: bool,
+    updates_installed: bool,
+    next_effect: u64,
+    pending_effects: Vec<(u64, Effect)>,
+    candidate_effects: Vec<(u64, Effect)>,
+    confirmed_effects: Vec<Vec<Effect>>,
 }
 impl Changes {
     fn propose_commit(&mut self) {
         let tables = std::mem::take(&mut self.tables);
         self.candidate.extend(tables);
+        self.candidate_effects.append(&mut self.pending_effects);
     }
 }
 struct Active {
@@ -43,24 +101,38 @@ pub(crate) struct Capture<'a> {
     watches: &'a CommitWatches,
     changes: Arc<Mutex<Changes>>,
 }
-fn install(connection: &Connection, changes: &Arc<Mutex<Changes>>) -> rusqlite::Result<()> {
+fn install(
+    connection: &Connection,
+    changes: &Arc<Mutex<Changes>>,
+    tables: bool,
+) -> rusqlite::Result<()> {
+    if tables
+        && !changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .updates_installed
+    {
+        changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .updates_installed = true;
+        let changed = changes.clone();
+        connection.update_hook(Some(
+            move |_: Action, database: &str, table: &str, _: i64| {
+                if database == "main" {
+                    changed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .tables
+                        .insert(table.to_owned());
+                }
+            },
+        ))?;
+    }
     if changes.lock().unwrap_or_else(|e| e.into_inner()).installed {
         return Ok(());
     }
-    // Mark first so Drop also cleans up a partially installed set on error.
     changes.lock().unwrap_or_else(|e| e.into_inner()).installed = true;
-    let changed = changes.clone();
-    connection.update_hook(Some(
-        move |_: Action, database: &str, table: &str, _: i64| {
-            if database == "main" {
-                changed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .tables
-                    .insert(table.to_owned());
-            }
-        },
-    ))?;
     let changed = changes.clone();
     connection.commit_hook(Some(move || {
         let mut changed = changed.lock().unwrap_or_else(|e| e.into_inner());
@@ -73,6 +145,8 @@ fn install(connection: &Connection, changes: &Arc<Mutex<Changes>>) -> rusqlite::
         let mut changed = changed.lock().unwrap_or_else(|e| e.into_inner());
         changed.tables.clear();
         changed.candidate.clear();
+        changed.pending_effects.clear();
+        changed.candidate_effects.clear();
         // A later failed transaction must not erase earlier successful autocommits.
     }))?;
     // SQLite invokes PROFILE after sqlite3_step finishes, including after rollback
@@ -98,6 +172,12 @@ fn statement_finished(event: TraceEvent<'_>) {
                     let mut changed = changed.lock().unwrap_or_else(|e| e.into_inner());
                     let candidate = std::mem::take(&mut changed.candidate);
                     changed.committed.extend(candidate);
+                    let effects = std::mem::take(&mut changed.candidate_effects);
+                    if !effects.is_empty() {
+                        changed
+                            .confirmed_effects
+                            .push(effects.into_iter().map(|(_, effect)| effect).collect());
+                    }
                 }
             }
         });
@@ -125,7 +205,7 @@ impl<'a> Capture<'a> {
             });
         });
         if watches.has_subscribers() {
-            install(connection, &capture.changes)?;
+            install(connection, &capture.changes, true)?;
         }
         Ok(capture)
     }
@@ -143,7 +223,7 @@ impl<'a> Capture<'a> {
                 // before that borrow ends, including on unwind. Registration runs
                 // in the owning writer callback, outside SQLite hook execution.
                 let connection = unsafe { &*scope.connection };
-                install(connection, &changed).expect("install writer commit capture");
+                install(connection, &changed, true).expect("install writer commit capture");
                 // Earlier writes may predate the first subscriber and update hook.
                 // A later root rollback clears these conservative table names.
                 let mut changed = changed.lock().unwrap_or_else(|e| e.into_inner());
@@ -156,6 +236,36 @@ impl<'a> Capture<'a> {
                 }
             }
         });
+    }
+    pub(crate) fn defer(&self, effect: Effect) {
+        install(self.connection, &self.changes, false).expect("install facade commit capture");
+        let mut changed = self.changes.lock().unwrap_or_else(|e| e.into_inner());
+        let id = changed.next_effect;
+        changed.next_effect = id
+            .checked_add(1)
+            .expect("commit attachment sequence exhausted");
+        changed.pending_effects.push((id, effect));
+    }
+    pub(crate) fn effect_scope(&self) -> EffectScope {
+        let start = self
+            .changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_effect;
+        EffectScope {
+            changes: self.changes.clone(),
+            start,
+            accepted: false,
+        }
+    }
+    pub(crate) fn take_effects(&self) -> Vec<Vec<Effect>> {
+        std::mem::take(
+            &mut self
+                .changes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .confirmed_effects,
+        )
     }
     pub(crate) fn finish(self) {
         let tables: Vec<_> = self
@@ -171,6 +281,28 @@ impl<'a> Capture<'a> {
         self.watches.notify(&tables);
     }
 }
+// Paired with a savepoint owned by atomic/with_root. SQLite's rollback hook
+// does not observe ROLLBACK TO, so the owner discards its uncommitted attachments.
+// Never truncate confirmed effects: a callback can commit and begin another tx.
+pub(crate) struct EffectScope {
+    changes: Arc<Mutex<Changes>>,
+    start: u64,
+    accepted: bool,
+}
+impl EffectScope {
+    pub(crate) fn accept(mut self) {
+        self.accepted = true;
+    }
+}
+impl Drop for EffectScope {
+    fn drop(&mut self) {
+        if !self.accepted {
+            let mut changed = self.changes.lock().unwrap_or_else(|e| e.into_inner());
+            changed.pending_effects.retain(|(id, _)| *id < self.start);
+            changed.candidate_effects.retain(|(id, _)| *id < self.start);
+        }
+    }
+}
 impl Drop for Capture<'_> {
     fn drop(&mut self) {
         ACTIVE.with(|scopes| {
@@ -184,9 +316,16 @@ impl Drop for Capture<'_> {
             .unwrap_or_else(|e| e.into_inner())
             .installed
         {
-            let _ = self
-                .connection
-                .update_hook(None::<fn(Action, &str, &str, i64)>);
+            if self
+                .changes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .updates_installed
+            {
+                let _ = self
+                    .connection
+                    .update_hook(None::<fn(Action, &str, &str, i64)>);
+            }
             let _ = self.connection.commit_hook(None::<fn() -> bool>);
             let _ = self.connection.rollback_hook(None::<fn()>);
             self.connection.trace_v2(TraceEventCodes::empty(), None);
@@ -297,14 +436,27 @@ mod failed_candidates {
         let watches = CommitWatches::default();
         let count = Arc::new(AtomicUsize::new(0));
         watches.subscribe_hint(&["t".into()], Arc::new(Count(count.clone())));
+        let published = Arc::new(AtomicUsize::new(0));
+        let attachment = || {
+            Effect::new(
+                0,
+                published.clone(),
+                |_, _| {},
+                |seen| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
         for earlier_success in [true, false] {
             let capture = Capture::begin(&c, &watches).unwrap();
             if earlier_success {
+                capture.defer(attachment());
                 c.execute("INSERT INTO t VALUES(1)", []).unwrap();
             }
             // Inject failure after the production candidate transition. Unlike a
             // deferred FK violation, this actually reaches the commit hook; SQLite
             // then runs the real rollback and statement-finished callbacks.
+            capture.defer(attachment());
             let changed = capture.changes.clone();
             c.commit_hook(Some(move || {
                 changed.lock().unwrap().propose_commit();
@@ -314,6 +466,12 @@ mod failed_candidates {
             assert!(c.execute("INSERT INTO t VALUES(2)", []).is_err());
             assert!(c.is_autocommit());
             assert_eq!(count.load(Ordering::SeqCst), usize::from(!earlier_success));
+            publish_effects(capture.take_effects());
+            assert_eq!(
+                published.load(Ordering::SeqCst),
+                1,
+                "only the prior physical commit publishes its attachment"
+            );
             capture.finish();
             assert_eq!(
                 count.load(Ordering::SeqCst),

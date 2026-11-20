@@ -142,3 +142,379 @@ fn recognized_helpers_preserve_request_counter_and_record_zero_violations() {
         })
         .unwrap();
 }
+
+fn effect_event(id: &str) -> steve_store::BusEvent {
+    steve_types::BusEvent::Domain(steve_types::DomainEvent::Work(
+        steve_types::WorkEvent::Item {
+            id: id.into(),
+            ws: steve_store::WS.into(),
+        },
+    ))
+}
+
+fn pending(wake: &tokio::sync::Notify) -> bool {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    matches!(
+        std::pin::pin!(wake.notified()).poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(())
+    )
+}
+
+fn stage_effects(store: &Store, id: &str) {
+    store
+        .transaction(|tx| {
+            tx.execute("INSERT INTO root_effects VALUES(?)", [id])?;
+            tx.publish(effect_event(id));
+            steve_store::outbox::emit(
+                tx,
+                steve_store::WS,
+                "root.effect",
+                1,
+                &serde_json::json!({"id":id}),
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
+
+fn outer_effects(typed: bool, finish: &str) {
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::{Arc, Mutex},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let store = Store::open(
+        dir.path().join("steve.sqlite3"),
+        steve_store::FnPublisher(move |e| sink.lock().unwrap().push(e)),
+    )
+    .unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .with_conn(|c| Ok(c.execute_batch("CREATE TABLE root_effects(id TEXT)")?))
+        .unwrap();
+    events.lock().unwrap().clear();
+    let wake = store.outbox_wake();
+    let run = |c: &rusqlite::Connection| {
+        c.execute_batch("BEGIN IMMEDIATE").unwrap();
+        stage_effects(&store, "first");
+        // RELEASE is not a physical COMMIT, for either raw or typed root owners.
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "facade RELEASE published before outer {finish}"
+        );
+        assert!(
+            !pending(&wake),
+            "facade RELEASE woke outbox before outer {finish}"
+        );
+        if finish == "panic" {
+            panic!("outer owner panic");
+        }
+        c.execute_batch(finish).unwrap();
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if typed {
+            store
+                .domain_store()
+                .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                    run(c);
+                    Ok(())
+                })
+                .unwrap();
+        } else {
+            let guard = store
+                .domain_store()
+                .root_guard(Domain::Core, Lane::Interactive)
+                .unwrap();
+            run(&guard);
+        }
+    }));
+    assert_eq!(result.is_err(), finish == "panic");
+    let committed = finish == "COMMIT";
+    assert_eq!(
+        *events.lock().unwrap(),
+        if committed {
+            vec![effect_event("first")]
+        } else {
+            vec![]
+        }
+    );
+    assert_eq!(pending(&wake), committed);
+    assert!(!pending(&wake), "each successful transaction wakes once");
+    store
+        .with_conn(|c| {
+            assert!(c.is_autocommit());
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM root_effects", [], |r| r
+                    .get::<_, i64>(0))?,
+                i64::from(committed)
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM outbox_events WHERE topic='root.effect'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                i64::from(committed)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn raw_outer_rollback_discards_facade_effects() {
+    outer_effects(false, "ROLLBACK");
+}
+#[test]
+fn raw_outer_commit_publishes_facade_effects_once() {
+    outer_effects(false, "COMMIT");
+}
+#[test]
+fn raw_outer_panic_discards_facade_effects() {
+    outer_effects(false, "panic");
+}
+#[test]
+fn typed_outer_rollback_discards_facade_effects() {
+    outer_effects(true, "ROLLBACK");
+}
+#[test]
+fn typed_outer_commit_publishes_facade_effects_once() {
+    outer_effects(true, "COMMIT");
+}
+#[test]
+fn typed_outer_panic_discards_facade_effects() {
+    outer_effects(true, "panic");
+}
+
+fn tracked_root() -> (
+    tempfile::TempDir,
+    Store,
+    std::sync::Arc<std::sync::Mutex<Vec<steve_store::BusEvent>>>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let store = Store::open(
+        dir.path().join("steve.sqlite3"),
+        steve_store::FnPublisher(move |e| sink.lock().unwrap().push(e)),
+    )
+    .unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .with_conn(|c| Ok(c.execute_batch("CREATE TABLE root_effects(id TEXT)")?))
+        .unwrap();
+    events.lock().unwrap().clear();
+    (dir, store, events)
+}
+
+#[test]
+fn bridge_rollback_error_and_panic_discard_effects_inside_facade_outer_commit() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for panic in [false, true] {
+        let (_dir, store, events) = tracked_root();
+        // Reserve the typed revision before the facade opens its BEGIN.
+        store
+            .domain_store()
+            .with_root(Domain::Core, Lane::Interactive, |_, _, _| {
+                store
+                    .atomic(|| -> Result<(), StoreError> {
+                        stage_effects(&store, "kept");
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            store.domain_store().with_root(
+                                Domain::Core,
+                                Lane::Interactive,
+                                |_, _, _| -> Result<(), steve_storage_api::CommitError> {
+                                    stage_effects(&store, "discarded");
+                                    if panic {
+                                        panic!("nested bridge panic");
+                                    }
+                                    Err(steve_storage_api::CommitError::Fatal(
+                                        steve_storage_api::error(
+                                            steve_types::Code::Invalid,
+                                            "bridge failed",
+                                        ),
+                                    ))
+                                },
+                            )
+                        }));
+                        assert!(matches!(result, Err(_) | Ok(Err(_))));
+                        assert!(events.lock().unwrap().is_empty());
+                        store.reader(|c| {
+                            assert_eq!(
+                                c.query_row(
+                                    "SELECT group_concat(id) FROM root_effects",
+                                    [],
+                                    |r| r.get::<_, String>(0)
+                                )?,
+                                "kept"
+                            );
+                            Ok::<_, StoreError>(())
+                        })?;
+                        Ok(())
+                    })
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![effect_event("kept")]);
+        assert!(pending(&store.outbox_wake()));
+        assert!(!pending(&store.outbox_wake()));
+    }
+}
+
+#[test]
+fn one_guard_keeps_prior_commits_and_discards_later_rollbacks_and_leaks() {
+    let (_dir, store, events) = tracked_root();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "committed");
+    guard.execute_batch("COMMIT; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "rolled-back");
+    guard.execute_batch("ROLLBACK; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "leaked");
+    drop(guard);
+    assert_eq!(*events.lock().unwrap(), vec![effect_event("committed")]);
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT group_concat(id) FROM root_effects", [], |r| r
+                    .get::<_, String>(0))?,
+                "committed"
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert!(pending(&store.outbox_wake()));
+    assert!(!pending(&store.outbox_wake()));
+}
+
+#[test]
+fn raw_begin_without_reserved_revision_rejects_typed_bridge_without_mutating_metadata() {
+    let (_dir, store, events) = tracked_root();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    let before: Option<String> = guard
+        .query_row(
+            "SELECT value FROM meta WHERE domain='core' AND key='rev_reserved'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let result = store
+        .domain_store()
+        .with_root(Domain::Core, Lane::Interactive, |_, _, _| Ok(()));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("reserve revisions before opening a transaction")
+    );
+    assert!(!guard.is_autocommit());
+    guard.execute_batch("ROLLBACK").unwrap();
+    let after: Option<String> = guard
+        .query_row(
+            "SELECT value FROM meta WHERE domain='core' AND key='rev_reserved'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(before, after);
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn failed_physical_commit_never_publishes_facade_attachments() {
+    let (_dir, store, events) = tracked_root();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("CREATE TABLE effect_parent(id INTEGER PRIMARY KEY); CREATE TABLE effect_child(id REFERENCES effect_parent(id) DEFERRABLE INITIALLY DEFERRED); BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "rejected");
+    guard
+        .execute("INSERT INTO effect_child VALUES(99)", [])
+        .unwrap();
+    assert!(guard.execute_batch("COMMIT").is_err());
+    assert!(!guard.is_autocommit());
+    assert!(events.lock().unwrap().is_empty());
+    assert!(!pending(&store.outbox_wake()));
+    guard.execute_batch("ROLLBACK").unwrap();
+    drop(guard);
+    assert!(events.lock().unwrap().is_empty());
+    assert!(!pending(&store.outbox_wake()));
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM root_effects", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn committed_event_observer_can_read_and_reenter_the_same_root() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    // Clear the slot before teardown so this observer does not retain the Store.
+    let owner: Arc<Mutex<Option<Store>>> = Arc::default();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let (slot, sink) = (owner.clone(), observed.clone());
+    let store = Store::open(
+        dir.path().join("steve.sqlite3"),
+        steve_store::FnPublisher(move |event| {
+            let store = slot.lock().unwrap().clone();
+            if let Some(store) = store {
+                store
+                    .with_conn(|c| {
+                        assert!(c.is_autocommit());
+                        assert_eq!(
+                            c.query_row("SELECT count(*) FROM root_effects", [], |r| r
+                                .get::<_, i64>(0))?,
+                            1
+                        );
+                        c.execute("INSERT INTO observer_writes VALUES(1)", [])?;
+                        Ok(())
+                    })
+                    .unwrap();
+                sink.lock().unwrap().push(event);
+            }
+        }),
+    )
+    .unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .with_conn(|c| {
+            Ok(c.execute_batch(
+                "CREATE TABLE root_effects(id TEXT); CREATE TABLE observer_writes(x)",
+            )?)
+        })
+        .unwrap();
+    *owner.lock().unwrap() = Some(store.clone());
+    stage_effects(&store, "observed");
+    owner.lock().unwrap().take();
+    assert_eq!(*observed.lock().unwrap(), vec![effect_event("observed")]);
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM observer_writes", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}

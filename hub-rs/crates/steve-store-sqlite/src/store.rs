@@ -429,7 +429,11 @@ impl<E: Send + 'static> SqliteStore<E> {
     /// Legacy bridge seam: allocate before the callback opens a transaction. The callback owns
     /// COMMIT/rollback and pending events. SQL hooks record candidates; notifications
     /// leave only after the callback returns and successful statements are confirmed.
-    /// Nested operations reuse the revision. Independent writers are outside this registry.
+    /// Nested operations reuse the revision. A raw guard does not reserve one:
+    /// entering with an existing BEGIN and no enclosing typed revision is rejected.
+    /// Open BEGIN inside this callback, or pass a preissued revision to apply_in;
+    /// never reserve persistent metadata inside an uncommitted transaction.
+    /// Independent writers are outside this registry.
     /// Callbacks must preserve the writer's hooks/trace registration. Subscribe from
     /// the writer callback, outside SQL functions or SQLite hook execution.
     #[track_caller]
@@ -446,6 +450,12 @@ impl<E: Send + 'static> SqliteStore<E> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
         let (rev, revision_scope) = c.revision(&w.runner)?;
+        let effects = c
+            .state
+            .capture
+            .as_ref()
+            .expect("live capture")
+            .effect_scope();
         let owns_transaction = !c.nested || c.is_autocommit();
         // A nested bridge isolates its failure without rolling back its caller.
         let savepoint = if c.nested && !c.is_autocommit() {
@@ -471,6 +481,11 @@ impl<E: Send + 'static> SqliteStore<E> {
         } else {
             Ok(())
         };
+        if matches!(&outcome, Ok(Ok(_))) && !leaked {
+            effects.accept();
+        } else {
+            drop(effects);
+        }
         // RootGuard publishes confirmed commits once, after rollback cleanup.
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
@@ -534,9 +549,9 @@ impl<E: Send + 'static> SqliteStore<E> {
                         .map_err(crate::domains::sql_error)?;
                 let state = Rc::new(RootConnection {
                     capture: Some(capture),
-                    connection,
+                    connection: Some(connection),
                     revision: RefCell::new(None),
-                    _grant: Box::new(grant),
+                    grant: Some(Box::new(grant)),
                     _runner: Box::new(w.runner.clone()),
                     engine,
                 });
@@ -567,7 +582,64 @@ impl<E: Send + 'static> SqliteStore<E> {
         run: impl FnOnce(&rusqlite::Connection) -> T,
     ) -> Option<T> {
         let state = self.active_root(domain)?;
-        Some(run(&state.connection))
+        let result = run(state.connection.as_ref().expect("live connection"));
+        RootConnection::drain_last(&state);
+        Some(result)
+    }
+    /// Internal facade seam: enqueue an owned attachment only in an active SQL
+    /// transaction. The capture confirms physical COMMIT independently of hints.
+    /// Callers must use with_effect_scope for every savepoint they own. Raw SQL
+    /// savepoint owners must likewise provide a matching effect scope.
+    #[doc(hidden)]
+    pub fn defer_until_commit<T: Send + 'static>(
+        &self,
+        domain: Domain,
+        owner: usize,
+        value: T,
+        merge: fn(&mut T, T),
+        publish: fn(T),
+    ) -> Result<(), T> {
+        let Some(state) = self.active_root(domain) else {
+            return Err(value);
+        };
+        if state
+            .connection
+            .as_ref()
+            .expect("live connection")
+            .is_autocommit()
+        {
+            return Err(value);
+        }
+        state
+            .capture
+            .as_ref()
+            .expect("live capture")
+            .defer(crate::exec::watch::Effect::new(
+                owner, value, merge, publish,
+            ));
+        Ok(())
+    }
+    /// Internal savepoint attachment scope. Errors and unwinding discard only
+    /// attachments not yet confirmed by a physical COMMIT, never earlier commits.
+    #[doc(hidden)]
+    pub fn with_effect_scope<T, X>(
+        &self,
+        domain: Domain,
+        run: impl FnOnce() -> Result<T, X>,
+    ) -> Result<T, X> {
+        let state = self.active_root(domain);
+        let scope = state
+            .as_ref()
+            .map(|s| s.capture.as_ref().expect("live capture").effect_scope());
+        let result = run();
+        match scope {
+            Some(scope) if result.is_ok() => scope.accept(),
+            scope => drop(scope),
+        }
+        if let Some(state) = state {
+            RootConnection::drain_last(&state);
+        }
+        result
     }
     /// Explicit verification/bootstrap only. Existing production tables must already have their
     /// declared schema; registering descriptors never silently adds columns to legacy tables.
@@ -586,34 +658,72 @@ thread_local! {
 // Field order releases the physical mutex before the executor lease and Engine Arc.
 struct RootConnection {
     capture: Option<crate::exec::watch::Capture<'static>>,
-    connection: std::sync::MutexGuard<'static, rusqlite::Connection>,
+    connection: Option<std::sync::MutexGuard<'static, rusqlite::Connection>>,
     revision: RefCell<Option<Rc<RootRevision>>>,
-    _grant: Box<dyn std::any::Any>,
+    grant: Option<Box<dyn std::any::Any>>,
     _runner: Box<dyn std::any::Any>,
     engine: Arc<Engine>,
 }
+impl RootConnection {
+    fn drain_last(state: &Rc<Self>) {
+        if Rc::strong_count(state) != 1 {
+            return;
+        }
+        loop {
+            let connection = state.connection.as_ref().expect("live connection");
+            if !connection.is_autocommit() {
+                let _ = state.engine.rollback_root(connection);
+            }
+            let effects = state.capture.as_ref().expect("live capture").take_effects();
+            if effects.is_empty() {
+                break;
+            }
+            // Keep the lease and live root identity through publication. A sink
+            // may read/reenter; all new commits drain before the next writer turn.
+            crate::exec::watch::publish_effects(effects);
+        }
+    }
+}
 impl Drop for RootConnection {
     fn drop(&mut self) {
-        if !self.connection.is_autocommit() {
-            let _ = self.engine.rollback_root(&self.connection);
+        let connection = self.connection.as_ref().expect("live connection");
+        if !connection.is_autocommit() {
+            let _ = self.engine.rollback_root(connection);
         }
-        if let Some(capture) = self.capture.take() {
+        let effects = if let Some(capture) = self.capture.take() {
+            let effects = capture.take_effects();
             capture.finish();
-        }
+            effects
+        } else {
+            Vec::new()
+        };
+        // Normal final owners drain while their Rc is still live, so callbacks
+        // can reenter the same root. Keep writer ordering even during cleanup.
+        drop(self.connection.take());
+        crate::exec::watch::publish_effects(effects);
+        drop(self.grant.take());
     }
 }
 /// Thread-bound root authorization. The last same-Engine guard rolls back any
 /// leaked transaction, publishes confirmed hints once, releases the mutex, then
 /// returns the executor lease.
+/// Facade attachments retain each physical COMMIT as a separate event batch;
+/// later rollback cannot erase a prior batch. They drain under writer ownership
+/// while the root is still reentrant; table hints leave through Capture::finish.
 /// Borrowed connections cannot outlive their guard. Never hold one across await.
 pub struct RootGuard<'a, E: Send + 'static = ()> {
     state: Rc<RootConnection>,
     nested: bool,
     _store: PhantomData<&'a SqliteStore<E>>,
 }
+impl<E: Send + 'static> Drop for RootGuard<'_, E> {
+    fn drop(&mut self) {
+        RootConnection::drain_last(&self.state);
+    }
+}
 impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
-        &self.state.connection
+        self.state.connection.as_ref().expect("live connection")
     }
     fn revision(
         &self,
