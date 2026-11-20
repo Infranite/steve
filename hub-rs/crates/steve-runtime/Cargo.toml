@@ -10,7 +10,7 @@ description = "Steve's runtime facilities: clock, time zones, schedules, retry a
 default = ["tz", "schedule", "policy", "due", "jobs", "machine"]
 machine = []
 # Shared eventual conditions for dev-dependencies only.
-testkit = ["tokio/process", "tokio/rt"]
+testkit = ["tokio/process", "tokio/rt", "tokio/test-util"]
 tz = ["dep:chrono", "dep:chrono-tz", "dep:iana-time-zone"]
 schedule = ["tz", "dep:croner"]
 policy = ["dep:backon", "dep:rand"]

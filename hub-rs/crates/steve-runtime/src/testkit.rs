@@ -73,12 +73,16 @@ pub fn eventually_blocking<D: Description, F: FnMut() -> bool>(what: D, mut cond
     }
 }
 
-/// Observes a fixed negative window, normally with Tokio's current-thread clock paused.
+/// Observes a fixed negative window with Tokio's current-thread clock paused.
 /// Unlike `advance`, awaiting the virtual sleep lets the runtime visit intermediate deadlines
 /// and poll the tasks they wake before the window ends. Callers assert the absence of an effect
 /// after this returns; effects exactly at the end boundary and external I/O need their own
-/// synchronization. On an unpaused clock this waits real time, so it is not a condition waiter.
+/// synchronization. This is not a condition waiter.
+///
+/// # Panics
+/// Panics unless the clock is paused, so this cannot hide a wall-clock wait in a test.
 pub async fn quiet_for(window: Duration) {
+    tokio::time::advance(Duration::ZERO).await;
     tokio::time::sleep(window).await;
 }
 
@@ -154,6 +158,12 @@ mod tests {
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    #[tokio::test]
+    #[should_panic(expected = "time is not frozen")]
+    async fn quiet_window_rejects_an_unpaused_clock() {
+        quiet_for(Duration::from_millis(1)).await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn quiet_window_runs_timer_woken_tasks_before_returning() {

@@ -846,7 +846,8 @@ async fn supervisor_stable_success_and_supersession_reset_the_next_failure() {
             .expect("the supervisor must start another run")
     }
     async fn settled_success(h: &H) {
-        // Let the real supervisor consume the successful completion before replacing its fingerprint.
+        // Let the real supervisor consume the successful completion before replacing its fingerprint;
+        // eventually_sync polling also advances virtual time.
         steve_runtime::testkit::eventually_sync("the successful run settled", || {
             h.rt.running().is_empty()
         })
