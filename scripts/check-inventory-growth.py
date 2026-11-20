@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject new or growing inventory keys against a Git baseline.
 
-An Inventory-Growth: <reason> Git trailer in base..head records an explicit reviewed exception.
+An Inventory-Growth: <path>: <reason> Git trailer in base..head records a path-scoped review.
 The trailer is an audit marker, not proof of review: reviewers must assess the printed growth.
 Snapshots come from Git objects, so deleting and reinitializing a working file is no escape.
 """
@@ -96,11 +96,14 @@ def parse(path, text):
 
 def compare_snapshots(before, after):
     paths = sorted(path for path in before.keys() | after.keys() if is_inventory(path))
-    growth = []
+    changes = {}
     for path in paths:
         problems, _ = compare(parse(path, before.get(path, "")), parse(path, after.get(path, "")))
-        growth.extend(f"{path}: {problem}" for problem in problems)
-    return paths, growth
+        if path in before and path not in after:
+            problems.append("inventory file removed; retain an empty list or name its removal")
+        if problems:
+            changes[path] = problems
+    return paths, changes
 
 
 def git(repo, *args, input_text=None):
@@ -132,61 +135,106 @@ def growth_markers(repo, base, head):
         message = git(repo, "show", "-s", "--format=%B", commit)
         trailers = git(repo, "interpret-trailers", "--parse", input_text=message)
         for line in trailers.splitlines():
-            key, separator, reason = line.partition(":")
-            if separator and key.casefold() == "inventory-growth" and reason.strip():
-                markers.append((commit, reason.strip()))
+            key, separator, value = line.partition(":")
+            if not separator or key.casefold() != "inventory-growth":
+                continue
+            path, separator, reason = value.strip().partition(":")
+            path = path.strip()
+            if (separator and reason.strip() and is_inventory(path)
+                    and not PurePosixPath(path).is_absolute()
+                    and ".." not in PurePosixPath(path).parts
+                    and str(PurePosixPath(path)) == path):
+                markers.append({"commit": commit, "path": path, "reason": reason.strip()})
     return markers
 
 
-def event_base(name, event):
+def event_sha(name, event, keys):
+    value = event
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+        raise InventoryError(f"{name} has no valid {'.'.join(keys)} SHA")
+    return value
+
+
+def is_ancestor(repo, before, head):
+    result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", before, head], capture_output=True)
+    if result.returncode not in (0, 1):
+        raise InventoryError("cannot establish push ancestry; fetch the complete before/head history")
+    return result.returncode == 0
+
+
+def event_range(repo, name, event, head="HEAD"):
     if not isinstance(event, dict):
         raise InventoryError("GitHub event payload must be an object")
-    if name == "push":
-        return "HEAD^"
-    if name == "pull_request":
-        keys = ("pull_request", "base", "sha")
-    elif name == "merge_group":
-        keys = ("merge_group", "base_sha")
-    else:
+    if name not in ("push", "pull_request", "merge_group"):
         raise InventoryError(f"unsupported GitHub event {name!r}; use --base for local checks")
-    base = event
-    for key in keys:
-        base = base.get(key) if isinstance(base, dict) else None
-    if not isinstance(base, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", base):
-        raise InventoryError(f"{name} has no valid target-branch base SHA")
-    return base
+    head = resolve(repo, head)
+    if name == "push":
+        before = event_sha(name, event, ("before",))
+        if set(before) == {"0"}:
+            return {"base": f"{head}^", "head": head,
+                    "reason": "push before is all-zero (new branch); falling back to HEAD^"}
+        try:
+            before = resolve(repo, before)
+        except InventoryError:
+            if event.get("forced") is True:
+                return {"base": f"{head}^", "head": head,
+                        "reason": "payload confirms force push and before is unavailable; falling back to HEAD^"}
+            raise
+        if is_ancestor(repo, before, head):
+            return {"base": before, "head": head, "reason": "fast-forward push: before..HEAD"}
+        return {"base": f"{head}^", "head": head,
+                "reason": "push before is not an ancestor (force push); falling back to HEAD^"}
+    if name == "pull_request":
+        base = resolve(repo, event_sha(name, event, ("pull_request", "base", "sha")))
+        source = resolve(repo, event_sha(name, event, ("pull_request", "head", "sha")))
+        parents = git(repo, "show", "-s", "--format=%P", head).split()
+        if parents != [base, source]:
+            raise InventoryError(f"PR merge parents do not match payload: expected base {base} and head {source}; found {parents}")
+        return {"base": base, "head": head, "reason": "PR target snapshot; merge parents match base.sha/head.sha"}
+    base = event_sha(name, event, ("merge_group", "base_sha"))
+    return {"base": base, "head": head, "reason": "merge_group target base..HEAD"}
 
 
 def check(repo, base, head="HEAD"):
     base, head = resolve(repo, base), resolve(repo, head)
-    paths, growth = compare_snapshots(snapshot(repo, base), snapshot(repo, head))
-    return {"base": base, "head": head, "paths": paths, "growth": growth,
-            "markers": growth_markers(repo, base, head) if growth else []}
+    paths, changes = compare_snapshots(snapshot(repo, base), snapshot(repo, head))
+    markers = [marker for marker in growth_markers(repo, base, head) if marker["path"] in changes] if changes else []
+    reviewed = {marker["path"] for marker in markers}
+    return {"base": base, "head": head, "paths": paths, "changes": changes,
+            "growth": [f"{path}: {problem}" for path, problems in changes.items() for problem in problems],
+            "markers": markers, "unreviewed": sorted(changes.keys() - reviewed)}
 
 
 def main(argv=None):
     import os
     parser = argparse.ArgumentParser(description=__doc__)
     baseline = parser.add_mutually_exclusive_group(required=True)
-    baseline.add_argument("--base", help="target branch/commit; push checks use HEAD^")
+    baseline.add_argument("--base", help="explicit reviewed baseline, normally git merge-base origin/main HEAD")
     baseline.add_argument("--event-file", type=Path, help="GitHub payload; reads GITHUB_EVENT_NAME")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--repo", type=Path, default=ROOT)
     args = parser.parse_args(argv)
-    base = args.base
+    selection = {"base": args.base, "head": args.head, "reason": "explicit baseline"}
     if args.event_file:
-        base = event_base(os.environ.get("GITHUB_EVENT_NAME", ""),
-                          json.loads(args.event_file.read_text(encoding="utf-8")))
-    report = check(args.repo, base, args.head)
+        selection = event_range(args.repo, os.environ.get("GITHUB_EVENT_NAME", ""),
+                                json.loads(args.event_file.read_text(encoding="utf-8")), args.head)
+    print(f"baseline selection: {selection['reason']}", flush=True)
+    report = check(args.repo, selection["base"], selection["head"])
     print(f"inventory comparison: {report['base']}..{report['head']}; {len(report['paths'])} inventories")
-    for problem in report["growth"]:
-        print(problem)
-    if report["growth"] and not report["markers"]:
-        print("inventory growth requires a reviewed Inventory-Growth: <reason> commit trailer in this comparison range", file=sys.stderr)
+    for path in report["paths"]:
+        problems = report["changes"].get(path, [])
+        print(f"inventory {path}: " + ("review required" if problems else "no growth"))
+        for problem in problems:
+            print(f"  {problem}")
+    for marker in report["markers"]:
+        print(f"explicit Inventory-Growth marker {marker['commit']}: {marker['path']}: {marker['reason']}")
+    if report["unreviewed"]:
+        print("inventory changes require a reviewed Inventory-Growth: <path>: <reason> trailer for each path:\n"
+              + "\n".join(report["unreviewed"]), file=sys.stderr)
         return 1
-    for commit, reason in report["markers"]:
-        print(f"explicit Inventory-Growth marker {commit}: {reason}")
-    print("inventory comparison passed" + (" with an explicit growth exception" if report["growth"] else "; no growth"))
+    print("inventory comparison passed" + (" with path-scoped review markers" if report["changes"] else "; no growth"))
     return 0
 
 

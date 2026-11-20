@@ -184,7 +184,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
-          components: ${{ runner.os == 'Linux' && matrix.shard == 1 && 'rustfmt,clippy' || 'rustfmt' }}
+          components: ${{ runner.os == 'macOS' && matrix.shard == 1 && 'rustfmt,clippy' || 'rustfmt' }}
       # Formatting needs no build, so one shard checks it before compiling and fails within seconds.
       - name: Rust formatting (cargo fmt --check)
         if: runner.os == 'Linux' && matrix.shard == 1
@@ -221,10 +221,6 @@ jobs:
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --partition "$PARTITION" --message-format json > ci-artifacts/list.json
           cp hub-rs/target/cargo-timings/cargo-timing.html ci-artifacts/
-      # One Linux shard reuses this target directory; metric collection includes production lib/bin only.
-      - name: Guard production function structure
-        if: runner.os == 'Linux' && matrix.shard == 1
-        run: python3 scripts/structure_guard.py
       - name: Rust tests
         id: rust-tests
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
@@ -244,6 +240,11 @@ jobs:
           path: ci-artifacts/
           retention-days: 7
           if-no-files-found: error
+      # The inventory is measured on macOS. Preserve test reports even when this guard fails,
+      # and still check structure after test failures when compilation itself succeeded.
+      - name: Guard production function structure
+        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && runner.os == 'macOS' && matrix.shard == 1 }}
+        run: python3 scripts/structure_guard.py
       # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
       # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
       # A failing test does not keep a built dependency set from being cached. Every shard builds

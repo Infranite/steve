@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,11 +61,11 @@ class Snapshots(unittest.TestCase):
         for path in (f"{guard.HUB_TESTS}/layering.txt", "README.md", "web/test/i18n.test.mjs", f"{guard.SCHEMA}/core/0001_baseline.sql"):
             self.assertFalse(guard.is_inventory(path), path)
         paths, growth = guard.compare_snapshots({}, {f"{guard.HUB_TESTS}/layering.txt": "any reviewed target edit"})
-        self.assertEqual((paths, growth), ([], []))
+        self.assertEqual((paths, growth), ([], {}))
 
     def test_new_and_deleted_files_and_sqlite_count_sidecars(self):
         self.assertTrue(guard.compare_snapshots({}, {COUNT: "new.rs\t1\n"})[1])
-        self.assertFalse(guard.compare_snapshots({COUNT: "old.rs\t1\n"}, {})[1])
+        self.assertTrue(guard.compare_snapshots({COUNT: "old.rs\t1\n"}, {})[1])
         path = f"{guard.SQLITE_TESTS}/inventory_debt_comms.txt"
         self.assertTrue(self.growth("id\t1\n", "id\t2\n", path))
         self.assertFalse(guard.compare_snapshots({}, {COUNT: "# empty inventory\n"})[1])
@@ -95,26 +96,11 @@ class Snapshots(unittest.TestCase):
         self.assertEqual(guard.parse("web/test/guard-zh-compare.txt", text), {("src/a.ts", '"汉\u2028字"'): [1]})
 
 
-class Events(unittest.TestCase):
-    def test_pr_uses_the_target_sha_and_push_uses_the_first_parent(self):
-        sha = "a" * 40
-        self.assertEqual(guard.event_base("pull_request", {"pull_request": {"base": {"sha": sha}, "head": {"sha": "b" * 40}}}), sha)
-        self.assertEqual(guard.event_base("push", {"before": "c" * 40}), "HEAD^")
-        self.assertEqual(guard.event_base("merge_group", {"merge_group": {"base_sha": sha}}), sha)
-
-    def test_unsupported_or_missing_baselines_are_not_silently_skipped(self):
-        for name, event in (("workflow_dispatch", {}), ("pull_request", {}), ("pull_request", []),
-                            ("pull_request", {"pull_request": []}),
-                            ("merge_group", {"merge_group": {"base_sha": "bad"}})):
-            with self.assertRaises(guard.InventoryError):
-                guard.event_base(name, event)
 
 
 class Histories(unittest.TestCase):
     def setUp(self):
-        scratch = guard.ROOT / ".scratch"
-        scratch.mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(prefix="inventory-git-test-", dir=scratch)
+        self.temp = tempfile.TemporaryDirectory(prefix="inventory-git-test-")
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
         self.env = os.environ.copy()
@@ -127,7 +113,7 @@ class Histories(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.repo), "-c", "user.name=Inventory tests",
             "-c", "user.email=inventory-tests@users.noreply.github.com", "-c", "commit.gpgsign=false",
-            "-c", "core.hooksPath=/dev/null", *args], env=self.env, text=True, stderr=subprocess.PIPE).strip()
+            "-c", "core.hooksPath=/dev/null", "-c", "rebase.autoStash=false", "-c", "rebase.updateRefs=false", *args], env=self.env, text=True, stderr=subprocess.PIPE).strip()
 
     def put(self, path, body):
         target = self.repo / path
@@ -158,10 +144,10 @@ class Histories(unittest.TestCase):
 
     def test_review_marker_must_be_a_nonempty_trailer_in_this_range(self):
         self.put(COUNT, "a.rs\t3\n")
-        self.commit("Reviewed increase\n\nInventory-Growth: new reviewed source ownership")
+        self.commit(f"Reviewed increase\n\nInventory-Growth: {COUNT}: new reviewed source ownership")
         report = self.report()
         self.assertTrue(report["growth"])
-        self.assertEqual(report["markers"][0][1], "new reviewed source ownership")
+        self.assertEqual(report["markers"][0]["reason"], "new reviewed source ownership")
         self.base = self.git("rev-parse", "HEAD")
         self.put(COUNT, "a.rs\t4\n")
         self.commit("A later increase cannot inherit an older approval")
@@ -169,20 +155,20 @@ class Histories(unittest.TestCase):
         self.assertFalse(self.report()["markers"])
 
     def test_marker_in_subject_or_body_and_empty_reason_do_not_authorize_growth(self):
-        for message in ("Inventory-Growth: subject only", "Explain\n\nInventory-Growth: quoted in body\n\nUnrelated final paragraph", "Empty\n\nInventory-Growth:"):
+        for message in (f"Inventory-Growth: {COUNT}: subject only", f"Explain\n\nInventory-Growth: {COUNT}: quoted in body\n\nUnrelated final paragraph", f"Empty\n\nInventory-Growth: {COUNT}:", "Old format\n\nInventory-Growth: global exception"):
             self.put(COUNT, "a.rs\t3\n")
             self.commit(message)
             self.assertFalse(self.report()["markers"], message)
 
     def test_marker_cannot_authorize_bad_inventory_format(self):
         self.put(COUNT, "a.rs\t0\n")
-        self.commit("Bad data\n\nInventory-Growth: reason cannot bypass parsing")
+        self.commit(f"Bad data\n\nInventory-Growth: {COUNT}: reason cannot bypass parsing")
         with self.assertRaises(guard.InventoryError):
             self.report()
 
     def test_marker_example_in_a_file_is_not_a_commit_trailer(self):
         self.put(COUNT, "a.rs\t3\n")
-        self.put("README.md", "Inventory-Growth: documentation is not approval\n")
+        self.put("README.md", f"Inventory-Growth: {COUNT}: documentation is not approval\n")
         self.commit("Document the marker format")
         self.assertTrue(self.report()["growth"])
         self.assertFalse(self.report()["markers"])
@@ -193,31 +179,167 @@ class Histories(unittest.TestCase):
         command = [sys.executable, str(guard.ROOT / "scripts/check-inventory-growth.py"), "--repo", str(self.repo), "--base", self.base]
         result = subprocess.run(command, capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("requires a reviewed Inventory-Growth", result.stderr)
-        self.commit("Intentional approval\n\nInventory-Growth: acknowledge this candidate's source debt")
+        self.assertIn("Inventory-Growth: <path>: <reason>", result.stderr)
+        self.commit(f"Intentional approval\n\nInventory-Growth: {COUNT}: acknowledge this candidate's source debt")
         result = subprocess.run(command, capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("explicit growth exception", result.stdout)
+        self.assertIn("path-scoped review markers", result.stdout)
 
     def test_invalid_commit_fails_instead_of_treating_history_as_an_empty_inventory(self):
         with self.assertRaisesRegex(guard.InventoryError, "cannot resolve comparison commit"):
             guard.check(self.repo, "does-not-exist")
 
-    def test_event_payload_cli_uses_pr_target_and_handles_push(self):
+    def test_markers_name_each_growing_path_including_initial_imports(self):
+        other = "web/test/harness-parity.txt"
         self.put(COUNT, "a.rs\t3\n")
-        self.commit("Unmarked PR growth")
+        self.commit(f"Review A\n\nInventory-Growth: {COUNT}: reviewed increase")
+        self.put(other, 'src/a.ts\t"codex"\t1\n')
+        self.commit("Import B later without a marker")
+        report = self.report()
+        self.assertEqual(report["unreviewed"], [other])
+        self.commit(f"Review the new path\n\nInventory-Growth: {other}: initial import")
+        self.assertFalse(self.report()["unreviewed"])
+
+    def test_wildcard_does_not_cover_real_inventory_paths(self):
+        self.put(COUNT, "a.rs\t3\n")
+        self.commit(f"Not a path review\n\nInventory-Growth: {guard.HUB_TESTS}/*.txt: broad exception")
+        self.assertEqual(self.report()["unreviewed"], [COUNT])
+        self.assertFalse(self.report()["markers"])
+
+    def test_deleted_or_moved_inventory_needs_its_own_path_marker(self):
+        (self.repo / COUNT).unlink()
+        self.put("notes/counts.txt", "a.rs\t2\n")
+        self.commit("Move outside discovery rules")
+        report = self.report()
+        self.assertEqual(report["unreviewed"], [COUNT])
+        self.assertIn("inventory file removed", " ".join(report["growth"]))
+        self.commit("Wrong path\n\nInventory-Growth: notes/counts.txt: moved data is not the old inventory")
+        self.assertEqual(self.report()["unreviewed"], [COUNT])
+        self.commit(f"Review removal\n\nInventory-Growth: {COUNT}: guard retired and inventory removed")
+        self.assertFalse(self.report()["unreviewed"])
+
+    def test_even_an_empty_inventory_cannot_disappear_without_a_marker(self):
+        self.put(COUNT, "# keep empty inventories\n")
+        self.base = self.commit("Empty inventory")
+        (self.repo / COUNT).unlink()
+        self.commit("Remove empty file")
+        self.assertEqual(self.report()["unreviewed"], [COUNT])
+
+    def test_comparison_range_equals_reviewed_coverage_event_table(self):
+        # One table pins the four integration modes. Rebase rewrites commit IDs, not path reviews.
+        cases = [
+            ("PR", "pull_request", "merge", False),
+            ("rebase multi-commit push", "push", "rebase", False),
+            ("merge_group", "merge_group", "merge", False),
+            ("new branch first push", "push", "first", True),
+        ]
+        for label, name, mode, fallback in cases:
+            with self.subTest(event=label):
+                self.git("checkout", "-B", "trunk", self.base)
+                self.put("target.txt", label)
+                target = self.commit("Unrelated target-branch update")
+                self.git("checkout", "-B", "feature", self.base)
+                if mode == "first":
+                    self.put("branch.txt", label)
+                    reviewed_base = self.commit("Set up new branch")
+                    self.put(COUNT, "a.rs\t3\n")
+                    head = self.commit(f"Reviewed first-push change\n\nInventory-Growth: {COUNT}: {label}")
+                    event = {"before": "0" * 40}
+                    covered = {head}
+                else:
+                    self.put(COUNT, "a.rs\t3\n")
+                    first = self.commit(f"Reviewed growth in first commit\n\nInventory-Growth: {COUNT}: {label}")
+                    self.put("feature.txt", label)
+                    source = self.commit("Second commit has no growth marker")
+                    reviewed_base = target
+                    if mode == "rebase":
+                        self.git("rebase", target)
+                        head = self.git("rev-parse", "HEAD")
+                        rewritten = self.git("rev-parse", "HEAD^")
+                        self.assertNotEqual(rewritten, first)
+                        event = {"before": target}
+                        covered = {rewritten, head}
+                    else:
+                        self.git("checkout", "-B", "candidate", target)
+                        self.git("merge", "--no-ff", "--no-edit", source)
+                        head = self.git("rev-parse", "HEAD")
+                        event = ({"pull_request": {"base": {"sha": target}, "head": {"sha": source}}}
+                                 if name == "pull_request" else {"merge_group": {"base_sha": target}})
+                        covered = {first, source, head}
+                selection = guard.event_range(self.repo, name, event, head)
+                report = guard.check(self.repo, selection["base"], selection["head"])
+                self.assertEqual((report["base"], report["head"]), (reviewed_base, head))
+                self.assertEqual(set(self.git("rev-list", f"{report['base']}..{report['head']}").splitlines()), covered)
+                self.assertTrue(report["growth"])
+                self.assertFalse(report["unreviewed"])
+                self.assertEqual({marker["path"] for marker in report["markers"]}, {COUNT})
+                self.assertEqual("falling back to HEAD^" in selection["reason"], fallback)
+
+    def test_pr_merge_parents_must_match_both_payload_shas(self):
+        self.git("checkout", "-b", "feature")
+        self.put(COUNT, "a.rs\t3\n")
+        source = self.commit(f"Feature\n\nInventory-Growth: {COUNT}: reviewed feature")
+        self.git("checkout", "trunk")
+        self.put("target.txt", "target change")
+        target = self.commit("Target advanced")
+        self.git("merge", "--no-ff", "--no-edit", source)
+        for base, feature in [(self.base, source), (target, self.base)]:
+            event = {"pull_request": {"base": {"sha": base}, "head": {"sha": feature}}}
+            with self.assertRaisesRegex(guard.InventoryError, "PR merge parents"):
+                guard.event_range(self.repo, "pull_request", event)
+        with self.assertRaisesRegex(guard.InventoryError, "PR merge parents"):
+            guard.event_range(self.repo, "pull_request", {"pull_request": {"base": {"sha": self.base}, "head": {"sha": source}}}, source)
+
+    def test_force_push_falls_back_but_missing_before_history_does_not(self):
+        self.put(COUNT, "a.rs\t9\n")
+        abandoned = self.commit("Abandoned history")
+        self.git("checkout", "-B", "rewritten", self.base)
+        self.put(COUNT, "a.rs\t3\n")
+        head = self.commit(f"Replacement\n\nInventory-Growth: {COUNT}: reviewed replacement")
+        selection = guard.event_range(self.repo, "push", {"before": abandoned})
+        self.assertIn("force push", selection["reason"])
+        self.assertEqual(guard.resolve(self.repo, selection["base"]), self.base)
+        self.assertFalse(guard.check(self.repo, selection["base"])["unreviewed"])
+        with self.assertRaisesRegex(guard.InventoryError, "cannot resolve"):
+            guard.event_range(self.repo, "push", {"before": "f" * 40})
+        missing_force = guard.event_range(self.repo, "push", {"before": "f" * 40, "forced": True})
+        self.assertIn("payload confirms force push", missing_force["reason"])
+        self.assertEqual(guard.resolve(self.repo, missing_force["base"]), self.base)
         event = self.repo / ".git/event.json"
-        event.write_text(json.dumps({"pull_request": {"base": {"sha": self.base}}}))
-        command = [sys.executable, str(guard.ROOT / "scripts/check-inventory-growth.py"), "--repo", str(self.repo), "--event-file", str(event)]
-        env = dict(self.env, GITHUB_EVENT_NAME="pull_request")
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(f"inventory comparison: {self.base}..", result.stdout)
-        event.write_text(json.dumps({"before": "0" * 40}))
-        env["GITHUB_EVENT_NAME"] = "push"
-        result = subprocess.run(command, env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(f"inventory comparison: {self.base}..", result.stdout)
+        event.write_text(json.dumps({"before": abandoned}))
+        result = subprocess.run([sys.executable, str(guard.ROOT / "scripts/check-inventory-growth.py"),
+                                 "--repo", str(self.repo), "--event-file", str(event)],
+                                env=dict(self.env, GITHUB_EVENT_NAME="push"), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("force push", result.stdout)
+        self.assertIn("falling back to HEAD^", result.stdout)
+
+    def test_invalid_event_payloads_fail_closed(self):
+        for name, event in [("workflow_dispatch", {}), ("pull_request", []),
+                            ("pull_request", {"pull_request": []}),
+                            ("merge_group", {"merge_group": {"base_sha": "bad"}}),
+                            ("push", {}), ("push", {"before": "bad"})]:
+            with self.subTest(name=name, event=event), self.assertRaises(guard.InventoryError):
+                guard.event_range(self.repo, name, event)
+
+
+class WorkflowWiring(unittest.TestCase):
+    def test_macos_guard_runs_after_test_reports_even_when_tests_fail(self):
+        workflow = (guard.ROOT / ".github/workflows/ci.yml").read_text()
+        steps = re.split(r"(?m)^      - ", workflow)
+        guards = [step for step in steps if "run: python3 scripts/structure_guard.py" in step]
+        self.assertEqual(len(guards), 1)
+        condition = next(line for line in guards[0].splitlines() if line.strip().startswith("if:"))
+        for required in ("!cancelled()", "steps.rust-build.outcome == 'success'", "runner.os == 'macOS'", "matrix.shard == 1"):
+            self.assertIn(required, condition)
+        position = workflow.index("run: python3 scripts/structure_guard.py")
+        self.assertLess(workflow.index("id: rust-tests"), position)
+        self.assertLess(workflow.index("python3 scripts/nextest-summary.py"), position)
+        self.assertLess(workflow.index("uses: actions/upload-artifact@"), position)
+        components = re.findall(r"(?m)^\s+components: (.+)$", workflow)
+        self.assertEqual(len(components), 1)
+        self.assertIn("runner.os == 'macOS' && matrix.shard == 1", components[0])
+        self.assertIn("rustfmt,clippy", components[0])
 
 
 if __name__ == "__main__":
