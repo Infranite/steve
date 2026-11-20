@@ -185,7 +185,9 @@ pub fn open_store(
     time: Arc<Time>,
 ) -> steve_store_sqlite::store::SqliteStore<String> {
     open_sync_store(dir, registry, time.clone())
-        .with_runtime(runtime().handle().clone())
+        .with_runtime(
+            tokio::runtime::Handle::try_current().unwrap_or_else(|_| runtime().handle().clone()),
+        )
         .unwrap()
         .with_snapshot_clock(time)
         .unwrap()
