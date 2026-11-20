@@ -205,6 +205,55 @@ impl Staging {
         branch: Option<Branch>,
         progress: impl FnMut(&'static str, u8),
     ) -> Result<(), SetupError> {
+        let mut cmd = self.clone_command(&remote, branch.as_ref());
+        let mut child = cmd.spawn().map_err(|_| SetupError::Git)?;
+        let mut group = CloneGroup(child.id());
+        let stderr = child.stderr.take().ok_or(SetupError::Git)?;
+        let run = async {
+            // Read before wait so the leader cannot be reaped while we may still need to
+            // kill its process group (e.g. a hung credential helper or SSH subprocess).
+            let observed = observe(stderr, progress).await?;
+            let status = child.wait().await.map_err(|_| SetupError::Git)?;
+            group.0 = None;
+            if status.success() {
+                if observed.broken_head && branch.is_none() {
+                    Err(SetupError::DefaultBranch)
+                } else {
+                    Ok(())
+                }
+            } else {
+                Err(observed.failure)
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs(600), run).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if group.0.is_some() {
+                    drop(group);
+                    let _ = child.wait().await;
+                }
+                return Err(e);
+            }
+            Err(_) => {
+                drop(group);
+                let _ = child.wait().await;
+                return Err(SetupError::Timeout);
+            }
+        }
+        if let Some(b) = branch {
+            // Git's --branch also takes a tag. Detached HEAD is not a requested branch.
+            let head = tokio::fs::read(self.repo.join(".git/HEAD"))
+                .await
+                .map_err(|_| SetupError::Git)?;
+            if head != format!("ref: refs/heads/{}\n", b.0).as_bytes() {
+                return Err(SetupError::Branch);
+            }
+        }
+        Ok(())
+    }
+
+    /// Assemble the trusted clone command while retaining owner authentication context.
+    fn clone_command(&self, remote: &Remote, branch: Option<&Branch>) -> Command {
         let mut cmd = Command::new("git");
         cmd.current_dir(self.tmp.path())
             // An explicit, nonexistent GIT_DIR prevents discovery of a repository above
@@ -261,54 +310,11 @@ impl Staging {
             "--no-recurse-submodules",
             "--template=",
         ]);
-        if let Some(b) = &branch {
+        if let Some(b) = branch {
             cmd.args(["--branch", &b.0]);
         }
         cmd.arg("--").arg(&remote.0).arg(&self.repo);
-        let mut child = cmd.spawn().map_err(|_| SetupError::Git)?;
-        let mut group = CloneGroup(child.id());
-        let stderr = child.stderr.take().ok_or(SetupError::Git)?;
-        let run = async {
-            // Read before wait so the leader cannot be reaped while we may still need to
-            // kill its process group (e.g. a hung credential helper or SSH subprocess).
-            let observed = observe(stderr, progress).await?;
-            let status = child.wait().await.map_err(|_| SetupError::Git)?;
-            group.0 = None;
-            if status.success() {
-                if observed.broken_head && branch.is_none() {
-                    Err(SetupError::DefaultBranch)
-                } else {
-                    Ok(())
-                }
-            } else {
-                Err(observed.failure)
-            }
-        };
-        match tokio::time::timeout(Duration::from_secs(600), run).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                if group.0.is_some() {
-                    drop(group);
-                    let _ = child.wait().await;
-                }
-                return Err(e);
-            }
-            Err(_) => {
-                drop(group);
-                let _ = child.wait().await;
-                return Err(SetupError::Timeout);
-            }
-        }
-        if let Some(b) = branch {
-            // Git's --branch also takes a tag. Detached HEAD is not a requested branch.
-            let head = tokio::fs::read(self.repo.join(".git/HEAD"))
-                .await
-                .map_err(|_| SetupError::Git)?;
-            if head != format!("ref: refs/heads/{}\n", b.0).as_bytes() {
-                return Err(SetupError::Branch);
-            }
-        }
-        Ok(())
+        cmd
     }
 }
 

@@ -113,16 +113,10 @@ steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	101
 steve-node	crates/steve-node/src/actor.rs	cognitive_complexity	44,40,35
 steve-node	crates/steve-node/src/actor.rs	too_many_lines	413,204,171,114,106
-steve-node	crates/steve-node/src/adapter_updates.rs	cognitive_complexity	35
-steve-node	crates/steve-node/src/exec.rs	too_many_lines	128
-steve-node	crates/steve-node/src/git.rs	too_many_lines	183
 steve-node	crates/steve-node/src/harness_updates.rs	too_many_lines	166
-steve-node	crates/steve-node/src/inline_images.rs	cognitive_complexity	26
-steve-node	crates/steve-node/src/inline_images.rs	too_many_lines	106
 steve-node	crates/steve-node/src/job.rs	too_many_lines	175,166
 steve-node	crates/steve-node/src/lib.rs	cognitive_complexity	52
 steve-node	crates/steve-node/src/lib.rs	too_many_lines	171,153,140,139,134,126,121,118,117,114,105
-steve-node	crates/steve-node/src/project_setup.rs	too_many_lines	101
 steve-node	crates/steve-node/src/research.rs	too_many_lines	135,103
 steve-node	crates/steve-node/src/research_acp.rs	too_many_lines	251
 steve-node	crates/steve-node/src/scan.rs	cognitive_complexity	31
