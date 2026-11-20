@@ -2310,6 +2310,7 @@ impl SendAttempt<'_> {
         let space = &self.prepared.space;
         let claim = self.claim;
         let cap = self.cap();
+        // paused or to be authorized again: it waits (unclaimed) and goes out once resumed
         let waits = ch
             .store()
             .reader(|c| may_write_in(c, &row.ws, &space.connection_id, cap))
@@ -2362,6 +2363,9 @@ impl SendAttempt<'_> {
         let at = &self.prepared.at;
         let cap = self.cap();
         let claim = self.claim;
+        // Re-read live consent and the pinned recipient at the actual attempt boundary. No await
+        // separates this transaction from the adapter invocation. A completed PUT before this point
+        // wins; it cannot cancel an already-started external request.
         let attempted = ch.store().transaction(|tx| -> ChannelResult<_> {
             let now = ch.now();
             let ours:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id=? AND status='pending' AND sent=?)",params![row.id,claim],|r|r.get(0))?;
@@ -2563,6 +2567,7 @@ struct PreparedDelivery {
     knowledge: Vec<KnowledgeUse>,
     cx: CheckCx,
     approve: bool,
+    will_draft: bool,
     draft_model: Option<String>,
     later: bool,
 }
@@ -2648,6 +2653,9 @@ fn prepare_delivery(
     };
 
     let will_draft = approve || !direct_ok(p.mode, &req.auth);
+    // On your own account a draft waits for your approval anyway: only the local checks run now (for
+    // the basis), the check model runs after the draft is written, without hurry ([`check_later`]),
+    // and the card says so until it is done
     let later = p.mode == Mode::Own && will_draft && !cx.skip_model;
     Ok(Some(PreparedDelivery {
         p,
@@ -2655,6 +2663,7 @@ fn prepare_delivery(
         knowledge,
         cx,
         approve,
+        will_draft,
         draft_model,
         later,
     }))
@@ -2776,18 +2785,12 @@ impl Outbox {
         mut text: String,
     ) -> ChannelResult<CheckedDelivery> {
         let t = &req.target;
-        let p = &prepared.p;
         let cx = &prepared.cx;
-        let approve = prepared.approve;
         let audience = &prepared.audience;
         let knowledge = &prepared.knowledge;
         let draft_model = &prepared.draft_model;
         // 1. disclosure (and the rewrites)
-        let will_draft = approve || !direct_ok(p.mode, &req.auth);
-        // On your own account a draft waits for your approval anyway: only the local checks run now (for
-        // the basis), the check model runs after the draft is written, without hurry ([`check_later`]),
-        // and the card says so until it is done
-        let later = p.mode == Mode::Own && will_draft && !cx.skip_model;
+        let later = prepared.later;
         let now_cx = if later {
             CheckCx {
                 skip_model: true,
@@ -2808,7 +2811,7 @@ impl Outbox {
             && !later
             && req.generation.is_some()
             && !disclosure::not_run(&res)
-            && (!will_draft || ch.yolo_on(&t.ws))
+            && (!prepared.will_draft || ch.yolo_on(&t.ws))
         {
             for _ in 0..MAX_REWRITES {
                 let Some(judged) = rewrite_once(
@@ -3104,6 +3107,7 @@ impl Outbox {
             && !prepared.approve
             && direct_ok(prepared.p.mode, &req.auth);
         if !direct && req.purpose == Purpose::HandoffAck {
+            // the handoff's own decision already reaches you
             return Ok((Delivered::Skipped, Some(res)));
         }
         let write = DeliveryWrite {
@@ -3113,6 +3117,7 @@ impl Outbox {
             res: &res,
             rewrites: &rewrites,
             direct,
+            // said as you on your trigger word (its answer, its item's ack, progress and end)
             proxy: req.purpose == Purpose::Trigger || matches!(req.auth, Auth::Trigger { .. }),
             verdict: if prepared.later {
                 basis::CHECKING
@@ -3125,6 +3130,8 @@ impl Outbox {
             return Ok((delivered, Some(res)));
         }
         if let Some(decision_id) = decision {
+            // waiting for your approval is not “working on it”: the acknowledgement comes off, and
+            // the answer's own end (sent ✅ / failed ❌, `cleared → done | failed`) shows later
             if completes(req.purpose)
                 && let Some(source) = &req.target.source_message_id
             {
@@ -3201,6 +3208,7 @@ impl Outbox {
             row: &row,
             auth,
             prepared: &prepared,
+            // the claim's mark (`sent`): what a result must still find to be ours
             claim: now,
             again,
         };

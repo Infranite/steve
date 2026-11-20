@@ -7732,7 +7732,7 @@ async fn sg4_preflight_priorities_precede_validation_checks_and_sending() {
     }
 }
 
-// One existing audited fixture writer, shared by the old late-send scenario and the new tables.
+// Replaces the original late-send fixture write and serves the new tables through the same writer.
 fn sg4_message_state(h: &H, id: &str, status: &str, sent: Option<i64>, created: Option<i64>) {
     digest_env::write(h.env.store(), |c| {
         c.execute(
