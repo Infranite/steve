@@ -8,8 +8,9 @@
 #[path = "support/digest_env.rs"]
 mod digest_env;
 use digest_env::TestEnv;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_runtime::testkit::{eventually, eventually_sync};
 
 use axum::Router;
 use axum::body::Body;
@@ -135,15 +136,15 @@ async fn begin(h: &H, brand: &str) -> Value {
 /// Polls `GET :id` until the state is not in `while_in`.
 async fn settle(h: &H, id: &str, while_in: &[&str]) -> Value {
     let path = format!("/channels/feishu/registrations/{id}");
-    let mut last = Value::Null;
-    for _ in 0..300 {
-        last = send(&h.api, &me(), "GET", &path, None).await.1;
-        if !while_in.contains(&last["state"].as_str().unwrap_or_default()) {
-            return last;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("still {last}");
+    let last = Mutex::new(Value::Null);
+    eventually(format!("registration {id} leaves {while_in:?}"), || async {
+        let value = send(&h.api, &me(), "GET", &path, None).await.1;
+        let ready = !while_in.contains(&value["state"].as_str().unwrap_or_default());
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    last.into_inner().unwrap()
 }
 
 const ACTIVE: &[&str] = &["pending", "credentials_saved", "verifying"];
@@ -152,17 +153,20 @@ const ACTIVE: &[&str] = &["pending", "credentials_saved", "verifying"];
 /// error before the check claims it, so that alone is not the end of the check.
 async fn checked(h: &H, id: &str) -> Value {
     let path = format!("/channels/feishu/registrations/{id}");
-    let mut last = Value::Null;
-    for _ in 0..300 {
-        last = send(&h.api, &me(), "GET", &path, None).await.1;
-        let st = last["state"].as_str().unwrap_or_default();
-        let unchecked = st == "credentials_saved" && last["error_kind"].is_null();
-        if !["pending", "verifying"].contains(&st) && !unchecked {
-            return last;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("still {last}");
+    let last = Mutex::new(Value::Null);
+    eventually(
+        format!("registration {id} finishes credential verification"),
+        || async {
+            let value = send(&h.api, &me(), "GET", &path, None).await.1;
+            let st = value["state"].as_str().unwrap_or_default();
+            let unchecked = st == "credentials_saved" && value["error_kind"].is_null();
+            let ready = !["pending", "verifying"].contains(&st) && !unchecked;
+            *last.lock().unwrap() = value;
+            ready
+        },
+    )
+    .await;
+    last.into_inner().unwrap()
 }
 
 fn no_secrets(v: &Value) {
@@ -448,6 +452,8 @@ async fn a_cancel_first_means_never_bound() {
     );
     // the provider confirms afterwards: nothing is kept or bound
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
+    // Negative window: let the real HTTP fake's 150 ms delayed answer arrive after cancellation;
+    // observing "cancelled" immediately would not rule out a later credential/binding write.
     tokio::time::sleep(Duration::from_millis(600)).await;
     let after = settle(&h, &id, ACTIVE).await;
     assert_eq!(after["state"], "cancelled");
@@ -624,7 +630,16 @@ async fn a_stop_is_resumed_within_the_original_deadline() {
         .expect("begin");
     let id = s(&v["id"]);
     let expires = v["expires_at"].as_i64().expect("deadline");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    eventually_sync(
+        "the stopped Hub's first registration poll reached the fake",
+        || {
+            h.fake
+                .reg_calls()
+                .iter()
+                .any(|(_, action)| action == "poll")
+        },
+    )
+    .await;
     // the next Hub resumes it: same row, same deadline, no new begin
     h.fake.reg_polls(vec![h.fake.reg_issued("feishu")]);
     assert_eq!(h.regs.resume().expect("resume"), 1);
@@ -633,6 +648,12 @@ async fn a_stop_is_resumed_within_the_original_deadline() {
     assert_eq!(done["expires_at"].as_i64(), Some(expires));
     assert_eq!(begins(&h), 1);
     // an attempt whose deadline passed while stopped is not polled again
+    let initial_polls = h
+        .fake
+        .reg_calls()
+        .iter()
+        .filter(|(_, action)| action == "poll")
+        .count();
     let v = stopped
         .begin(
             &me(),
@@ -642,7 +663,18 @@ async fn a_stop_is_resumed_within_the_original_deadline() {
         .expect("begin");
     let id2 = s(&v["id"]);
     // its first (immediate) poll is done; then the deadline passes while “stopped”
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    eventually_sync(
+        "the second stopped attempt's initial poll reached the fake",
+        || {
+            h.fake
+                .reg_calls()
+                .iter()
+                .filter(|(_, action)| action == "poll")
+                .count()
+                > initial_polls
+        },
+    )
+    .await;
     h.env
         .store()
         .with_conn(|c| {
@@ -687,13 +719,10 @@ async fn a_member_who_left_gets_nothing_bound() {
         })
         .expect("leave");
     let mut last = Value::Null;
-    for _ in 0..200 {
+    eventually_sync("registration reports that the initiating member left", || {
         last = h.env.store().with_conn(|c| Ok(c.query_row("SELECT state, coalesce(error_kind, '') FROM chan_app_registrations WHERE id = ?", [&id], |r| Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?])))?)).expect("row");
-        if last[1] == "member_gone" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+        last[1] == "member_gone"
+    }).await;
     assert_eq!(last, json!(["credentials_saved", "member_gone"]));
     assert_eq!(count(&h, "SELECT count(*) FROM connections"), 0);
 }
@@ -730,14 +759,15 @@ async fn device(h: &H, body: Value) -> (u16, Value) {
 
 async fn device_done(h: &H, id: &str) -> Value {
     let path = format!("/channels/feishu/device/{id}");
-    for _ in 0..80 {
-        let v = send(&h.api, &me(), "GET", &path, None).await.1;
-        if v["status"] != "pending" {
-            return v;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    panic!("device login still pending");
+    let last = Mutex::new(Value::Null);
+    eventually(format!("device login {id} leaves pending"), || async {
+        let value = send(&h.api, &me(), "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    last.into_inner().unwrap()
 }
 
 fn granted(h: &H, account: &str) -> Vec<String> {
@@ -763,6 +793,8 @@ async fn a_device_login_cancelled_first_is_never_bound() {
     .await;
     assert_eq!(c["status"], "cancelled");
     assert!(h.fake.device_approve(&s(&v["user_code"])));
+    // Negative window: exceed two real device-poll intervals after approval to rule out late binding.
+    // This HTTP fake and its spawned credential work are not controlled by the Tokio test clock.
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(
         send(
@@ -982,14 +1014,15 @@ async fn a_device_login_never_replaces_another_members_own_connection() {
     assert_eq!(st, 200, "{v}");
     assert!(h.fake.device_approve(&s(&v["user_code"])));
     let path = format!("/channels/feishu/device/{}", s(&v["id"]));
-    let mut last = Value::Null;
-    for _ in 0..80 {
-        last = send(&h.api, &other, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    let last = Mutex::new(Value::Null);
+    eventually("the other member's device attempt finishes", || async {
+        let value = send(&h.api, &other, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "error", "{last}");
     let after: (String, String) = h
         .env

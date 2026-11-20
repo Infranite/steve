@@ -21,10 +21,10 @@ steve-channels/tests/fake_feishu_user.rs	3
 steve-channels/tests/feishu_f1.rs	1
 steve-channels/tests/feishu_f6.rs	1
 steve-channels/tests/feishu_f8.rs	1
-steve-channels/tests/feishu_registration.rs	9
+steve-channels/tests/feishu_registration.rs	2
 steve-channels/tests/feishu_ws.rs	2
 steve-channels/tests/im_conversations.rs	2
-steve-channels/tests/lifecycle.rs	14
+steve-channels/tests/lifecycle.rs	1
 steve-channels/tests/media.rs	2
 steve-channels/tests/owner_decisions.rs	4
 steve-channels/tests/owner_presence.rs	1
