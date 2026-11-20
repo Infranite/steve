@@ -901,16 +901,8 @@ fn health(e: &SourceError) -> Health {
 mod tests {
     use super::*;
 
-    #[test]
-    fn missing_cached_calendar_zone_uses_owner_policy_then_workspace_then_system() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(
-            "CREATE TABLE notification_policies(workspace_id, user_id, timezone);
-            CREATE TABLE settings(workspace_id, key, value);
-            INSERT INTO settings VALUES ('w','tz','\"Europe/London\"');",
-        )
-        .unwrap();
-        let mut cal = CalRow {
+    fn test_calendar() -> CalRow {
+        CalRow {
             id: "cal".into(),
             workspace_id: "w".into(),
             connection_id: "conn".into(),
@@ -932,7 +924,135 @@ mod tests {
             sync_state: "ok".into(),
             sync_error: None,
             gone: false,
+        }
+    }
+
+    #[test]
+    fn event_time_normalization_preserves_existing_boundaries() {
+        let c = Connection::open_in_memory().unwrap();
+        let mut cal = test_calendar();
+        cal.tz = Some("UTC".into());
+        let mut people = People {
+            c: &c,
+            ws: "w",
+            me: None,
+            cache: HashMap::new(),
         };
+        let timed = |end| Ok((false, 20, end, None, None));
+        let all_day = Ok((
+            true,
+            86_400_000,
+            172_800_000,
+            Some("1970-01-02"),
+            Some("1970-01-03"),
+        ));
+        let cases = [
+            ("timed", When::at(20), When::at(30), timed(30)),
+            ("missing end", When::at(20), When::default(), timed(20)),
+            ("earlier end", When::at(20), When::at(10), timed(20)),
+            (
+                "date end ignored for timed",
+                When::at(20),
+                When::day("1970-01-03"),
+                timed(20),
+            ),
+            (
+                "timestamp wins",
+                When {
+                    ms: Some(20),
+                    date: Some("bad".into()),
+                    tz: None,
+                },
+                When::at(30),
+                timed(30),
+            ),
+            (
+                "all day",
+                When::day("1970-01-02"),
+                When::day("1970-01-03"),
+                all_day,
+            ),
+            (
+                "missing date end",
+                When::day("1970-01-02"),
+                When::default(),
+                all_day,
+            ),
+            (
+                "bad date end",
+                When::day("1970-01-02"),
+                When::day("bad"),
+                all_day,
+            ),
+            (
+                "equal date end",
+                When::day("1970-01-02"),
+                When::day("1970-01-02"),
+                all_day,
+            ),
+            (
+                "earlier date end",
+                When::day("1970-01-02"),
+                When::day("1970-01-01"),
+                all_day,
+            ),
+            (
+                "timestamp end ignored for date",
+                When::day("1970-01-02"),
+                When::at(30),
+                all_day,
+            ),
+            (
+                "bad start",
+                When::day("bad"),
+                When::default(),
+                Err("bad start date"),
+            ),
+            (
+                "missing start",
+                When::default(),
+                When::at(30),
+                Err("event without a start"),
+            ),
+        ];
+        for (name, start, end, expected) in cases {
+            let event = RemoteEvent {
+                id: "event".into(),
+                start,
+                end,
+                ..Default::default()
+            };
+            let actual = normalize(&cal, &event, true, &mut people);
+            match expected {
+                Ok(expected) => {
+                    let (row, _) = actual.unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert_eq!(
+                        (
+                            row.all_day,
+                            row.start_ms,
+                            row.end_ms,
+                            row.start_date.as_deref(),
+                            row.end_date.as_deref()
+                        ),
+                        expected,
+                        "{name}"
+                    );
+                }
+                Err(expected) => assert_eq!(actual.err().as_deref(), Some(expected), "{name}"),
+            }
+        }
+    }
+
+    #[test]
+    fn missing_cached_calendar_zone_uses_owner_policy_then_workspace_then_system() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE notification_policies(workspace_id, user_id, timezone);
+            CREATE TABLE settings(workspace_id, key, value);
+            INSERT INTO settings VALUES ('w','tz','\"Europe/London\"');",
+        )
+        .unwrap();
+        let mut cal = test_calendar();
         for (name, date) in [
             ("America/New_York", "2026-03-08"),
             ("Europe/London", "2026-10-25"),
