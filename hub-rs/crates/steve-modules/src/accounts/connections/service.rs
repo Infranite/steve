@@ -2730,7 +2730,7 @@ impl Connections {
 struct ConnectionJob {
     c: Connections,
     health: bool,
-    next: Mutex<HashMap<String, i64>>,
+    next: steve_runtime::due::RowDeadlines,
 }
 const CONNECTION_BATCH: usize = 64;
 impl ConnectionJob {
@@ -2738,13 +2738,11 @@ impl ConnectionJob {
         Self {
             c,
             health,
-            next: Mutex::default(),
+            next: steve_runtime::due::RowDeadlines::default(),
         }
     }
     fn due_rows(&self, rows: Vec<ConnRow>) -> Vec<(i64, ConnRow)> {
-        let mut next = lock(&self.next);
-        let live: HashSet<_> = rows.iter().map(|r| r.id.as_str()).collect();
-        next.retain(|id, _| live.contains(id.as_str()));
+        self.next.retain_live(rows.iter().map(|r| r.id.as_str()));
         let mut due = Vec::new();
         for r in rows {
             let Some(p) = self.c.provider(&r.adapter) else {
@@ -2765,7 +2763,7 @@ impl ConnectionJob {
                 .health
                 .next_at
                 .max(token_due)
-                .max(*next.get(&r.id).unwrap_or(&0));
+                .max(self.next.not_before(&r.id).unwrap_or(0));
             due.push((at, r));
         }
         due.sort_by(|(a, x), (b, y)| (a, &x.id).cmp(&(b, &y.id)));
@@ -2807,7 +2805,7 @@ impl steve_runtime::due::DueSource for ConnectionJob {
         {
             let period = if self.health { 15 } else { 5 } * MINUTE;
             // Install a row-local floor even if reporting the provider error cannot be persisted.
-            lock(&self.next).insert(r.id.clone(), now.saturating_add(period));
+            self.next.defer(r.id.clone(), now.saturating_add(period));
             if self.health {
                 let p = self.c.provider(&r.adapter).expect("eligible provider");
                 let h = tokio::time::timeout(HEALTH_TIMEOUT, p.health(&self.c.cx_of(&r)))

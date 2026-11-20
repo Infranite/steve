@@ -1961,7 +1961,7 @@ pub struct Outbox {
     /// cards it leaves open never hold up the ones after them ([`Outbox::expire_stale`]).
     expiry_cursor: Mutex<Option<(i64, String)>>,
     // Transient per-row deferrals do not change claims or authorization. A restart retries immediately.
-    deferred: Mutex<std::collections::HashMap<String, i64>>,
+    deferred: steve_runtime::due::RowDeadlines,
     #[cfg(feature = "fake")]
     before_attempt: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
@@ -1977,7 +1977,7 @@ impl Outbox {
             rewriting: Arc::default(),
             converting: Arc::default(),
             expiry_cursor: Mutex::new(None),
-            deferred: Mutex::default(),
+            deferred: steve_runtime::due::RowDeadlines::default(),
             #[cfg(feature = "fake")]
             before_attempt: Mutex::new(None),
         }
@@ -3119,7 +3119,7 @@ impl Outbox {
     pub async fn send_due(&self, ch: &Channels) -> usize {
         // An explicit recovery pass must recheck freshly resumed connections immediately.
         // Background DueSource passes alone observe the transient per-row retry deadlines.
-        lock(&self.deferred).clear();
+        self.deferred.clear();
         self.maintain(ch).await;
         let sent = match self.send_ready(ch, ch.now()).await {
             Ok(n) => n,
@@ -3257,13 +3257,12 @@ impl Outbox {
     }
 
     fn retry_deadlines(&self, now: i64) -> String {
-        let mut deferred = lock(&self.deferred);
-        deferred.retain(|_, at| *at > now);
-        serde_json::to_string(&*deferred).expect("string deadlines serialize")
+        serde_json::to_string(&self.deferred.pending(now)).expect("string deadlines serialize")
     }
 
     fn defer_row(&self, id: &str, now: i64) {
-        lock(&self.deferred).insert(id.to_owned(), now + QUEUE_EVERY.as_millis() as i64);
+        self.deferred
+            .defer(id, now.saturating_add(QUEUE_EVERY.as_millis() as i64));
     }
 
     async fn send_ready(&self, ch: &Channels, now: i64) -> ChannelResult<usize> {

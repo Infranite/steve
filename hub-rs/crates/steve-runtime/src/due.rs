@@ -8,6 +8,9 @@ use crate::{Clock, policy::Backoff};
 use std::{fmt, future::Future, sync::Arc, time::Duration};
 use tokio::sync::Notify;
 
+mod row_deadlines;
+pub use row_deadlines::RowDeadlines;
+
 /// The longest sleep: a writer that forgot to wake the loop, a restore, a wall-clock step or a system
 /// sleep is noticed within this.
 pub const FALLBACK: Duration = Duration::from_secs(60);
@@ -24,6 +27,9 @@ impl fmt::Display for DueError {
 impl std::error::Error for DueError {}
 
 /// Work kept in a domain's own table, due at known times.
+///
+/// A row's next due time has exactly two homes: a column in storage, or [`RowDeadlines`].
+/// Do not add another private per-row deadline map.
 ///
 /// The contract (checked by [`contract::check`]):
 /// - `next_due` is the earliest due time of rows that can still run (dead letters excluded).

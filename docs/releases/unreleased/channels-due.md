@@ -6,3 +6,7 @@ limits, retry hints, authorization checks and rate limits retain their behavior.
 Approved sends now wait for the latest linked personal-notification attempt deadline
 before becoming eligible, rather than using that deadline only to order the queue.
 This usually adds about ten seconds when a notification attempt is pending.
+
+Channel-send deferrals and connection-job cadence now share the runtime's per-row
+not-before ledger, retaining their existing waiting periods and restart/recovery
+behavior. These fences do not cache business data or introduce another scheduler.

@@ -1448,3 +1448,26 @@ fn ttl_maps_follow_aliases_value_structs_and_locks_without_counting_connections(
         .collect()
     );
 }
+
+#[test]
+fn r3e_shared_row_deadlines_are_not_ttl_caches_but_raw_lookalikes_still_are() {
+    let fixture = r#"
+        use steve_runtime::due::RowDeadlines as SharedRows;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        type Rows = Arc<SharedRows>;
+        struct Queues { next: SharedRows, deferred: Rows }
+        struct RowDeadlines { rows: Mutex<HashMap<String, i64>> }
+        fn age(now: i64, at: i64) { let _ = now - at; }
+    "#;
+    let actual: BTreeSet<_> = scan_sources(&[Source {
+        rel: "fixture/src/lib.rs".into(),
+        module: "".into(),
+        items: syn::parse_file(fixture).unwrap().items,
+    }])
+    .into_keys()
+    .filter(|(_, category, _)| category == "ttl-cache")
+    .map(|(_, _, field)| field)
+    .collect();
+    assert_eq!(actual, BTreeSet::from(["RowDeadlines::rows".to_owned()]));
+}

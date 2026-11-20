@@ -23,7 +23,6 @@ steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::De
 steve-channels/src/adapters/feishu/ratelimit.rs	ttl-cache	adapters::feishu::ratelimit::Limiter::buckets	1
 steve-channels/src/adapters/feishu/self_poll.rs	timer-loop	adapters::feishu::self_poll::SelfPoller::run	1
 steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner::serve	1
-steve-channels/src/outbound.rs	ttl-cache	outbound::Outbox::deferred	1
 steve-core/src/yolo/engine.rs	ttl-cache	yolo::engine::Inner::errors	1
 steve-digest/src/job.rs	timer-loop	job::run	1
 steve-flow/src/ingest.rs	timer-loop	ingest::Poller::run	1
@@ -88,7 +87,6 @@ steve-mail/src/sync.rs	timer-loop	sync::Mail::run_jobs	1
 steve-mail/src/sync.rs	timer-loop	sync::Mail::start	1
 steve-modules/src/accounts/connections/pending.rs	ttl-cache	accounts::connections::pending::PendingStates::map	1
 steve-modules/src/accounts/connections/service.rs	timer-loop	accounts::connections::service::Connections::device_start	1
-steve-modules/src/accounts/connections/service.rs	ttl-cache	accounts::connections::service::ConnectionJob::next	1
 steve-modules/src/accounts/connections/service.rs	ttl-cache	accounts::connections::service::Inner::minted	1
 steve-modules/src/caps/a2a.rs	timer-loop	caps::a2a::Capabilities::a2a_call	1
 steve-modules/src/vault/use.rs	timer-loop	vault::use::SecretUses::claim	1
