@@ -884,3 +884,50 @@ fn failed_ledger_deletion_rolls_back_everything() {
     drop(c);
     assert_eq!(Writer::open(&p).unwrap().1, 8);
 }
+
+fn version_of(path: &Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn upgrade_preflight_is_read_only_and_leaves_no_writer_or_transaction_held() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("node.sqlite3");
+    drop(v3(&path, true, false, 3));
+    assert!(crate::journal::Journal::needs_upgrade(&path).unwrap());
+    assert_eq!(version_of(&path), 3);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").unwrap();
+    drop(c);
+    drop(crate::journal::Writer::open(&path).unwrap());
+    assert_eq!(version_of(&path), 4);
+    assert!(!crate::journal::Journal::needs_upgrade(&path).unwrap());
+    assert!(!crate::journal::Journal::needs_upgrade(&d.path().join("new.sqlite3")).unwrap());
+}
+
+#[test]
+fn preflight_refuses_live_legacy_processes_without_migrating() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("node.sqlite3");
+    let c = v3(&path, true, false, 3);
+    c.execute("UPDATE procs SET pgid=1", []).unwrap();
+    drop(c);
+    assert!(crate::journal::Journal::needs_upgrade(&path).is_err());
+    assert_eq!(version_of(&path), 3);
+}
+
+#[test]
+fn a_nonzero_legacy_version_cannot_bypass_the_handoff_with_a_missing_ledger() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("node.sqlite3");
+    let c = Connection::open(&path).unwrap();
+    assert!(!crate::journal::Journal::needs_upgrade(&path).unwrap());
+    for version in 1..4 {
+        c.pragma_update(None, "user_version", version).unwrap();
+        assert!(crate::journal::Journal::needs_upgrade(&path).unwrap());
+        assert_eq!(version_of(&path), version);
+    }
+}

@@ -129,6 +129,39 @@ impl Drop for Journal {
 }
 
 impl Journal {
+    /// Read-only preflight, before any asynchronous upgrade wait or journal writer exists.
+    pub fn needs_upgrade(path: &Path) -> ApiResult<bool> {
+        if !path.try_exists().map_err(internal)? {
+            return Ok(false);
+        }
+        let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(internal)?;
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .map_err(internal)?;
+        if version > VERSION {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "journal needs a newer Node",
+            ));
+        }
+        let exists = |table: &str| -> ApiResult<bool> {
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |r| r.get(0),
+            )
+            .map_err(internal)
+        };
+        // Match initialize's fresh-database branch exactly. A nonzero legacy version is
+        // never a new database, even if a damaged ledger is missing its ops table.
+        let needed = version < VERSION && (version != 0 || exists("ops")?);
+        if needed && exists("procs")? {
+            schema::require_legacy_processes_gone(&c)?;
+        }
+        Ok(needed)
+    }
+
     pub fn open(path: &Path) -> ApiResult<(Self, u64)> {
         let (writer, incarnation) = Writer::open(path)?;
         let metrics = writer.metrics.clone();

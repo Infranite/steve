@@ -10,8 +10,9 @@
 //! 2. `switch` ([`UpgradeSwitch`]): refused while the Node runs work, unless forced. A helper
 //!    (`steve-node upgrade-switch <op>`, this binary, outside the service's process group and
 //!    systemd unit) stops the service, points it at the new release (`steve node update`'s own
-//!    path), starts it, and waits for the new Node to link to the Hub ([`note_linked`]). If it does
-//!    not within the time the Hub gave, it goes back to the release it switched from.
+//!    path), starts it, and waits for `linked` ([`note_linked`] or a pre-migration claim).
+//!    A migrating Node waits for the helper's receipt before opening its journal; the helper's
+//!    success does not prove Hub connectivity. Without a claim the legacy helper rolls back.
 //!
 //! Every step is written to `<home>/updates/node/<op>.json` before it is taken; asking again
 //! answers what is written, never runs a step twice.
@@ -158,6 +159,164 @@ pub fn note_linked(home: &Path) {
             set_phase(home, &mut r, "linked", None);
         }
     }
+}
+
+/// Wait before opening an irreversible journal. `linked` tells an old helper to commit;
+/// only its receipt, or verified absence AND the actual service release, permits migration.
+/// No elapsed-time inference is safe: a paused helper can still roll back when resumed.
+pub async fn claim_switch_before_journal_upgrade(home: &Path) -> anyhow::Result<()> {
+    let Some(me) = own_build() else {
+        // A dev build cannot identify a related operation. Only a verified empty record set
+        // permits migration; uncertainty waits for a real stop just as a release build does.
+        loop {
+            if all_switch_records(home).is_ok_and(|rows| rows.is_empty()) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    wait_for_switch(
+        home,
+        &me,
+        |r| helper_process::absent(home, r),
+        || Ok(service_release(home).is_some()),
+    )
+    .await
+}
+
+async fn wait_for_switch(
+    home: &Path,
+    me: &BuildIdentity,
+    mut absent: impl FnMut(&Record) -> anyhow::Result<bool>,
+    mut current: impl FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    let mut reported = false;
+    loop {
+        // Read/query failures remain a wait, never an empty record set or missing process.
+        if switch_permits_upgrade(home, me, &mut absent, &mut current).unwrap_or(false) {
+            return Ok(());
+        }
+        if !reported {
+            tracing::warn!("waiting for a verified Node upgrade handoff; journal remains unopened");
+            reported = true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn all_switch_records(home: &Path) -> anyhow::Result<Vec<Record>> {
+    let dir = match std::fs::read_dir(home.join(DIR)) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+    let mut related = vec![];
+    for entry in dir {
+        let path = entry?.path();
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let r: Record = serde_json::from_slice(&std::fs::read(&path)?)?;
+        anyhow::ensure!(
+            r.state.operation == r.request.operation,
+            "conflicting upgrade operation"
+        );
+        anyhow::ensure!(
+            path == record_path(home, op_name(&r.state.operation)?),
+            "conflicting upgrade filename"
+        );
+        anyhow::ensure!(
+            r.state.version == r.request.build.version,
+            "conflicting upgrade build"
+        );
+        anyhow::ensure!(
+            matches!(
+                r.state.phase.as_str(),
+                "staging"
+                    | "staged"
+                    | "switching"
+                    | "linked"
+                    | "succeeded"
+                    | "rolled_back"
+                    | "failed"
+                    | "abandoned"
+            ),
+            "unknown upgrade phase"
+        );
+        // Neither phase can have spawned a helper: abandon is accepted only while staged.
+        // Validate the whole record first, then exclude these pre-switch operations from
+        // handoff/conflict checks. A previous abandoned attempt must not veto a later receipt.
+        if !matches!(r.state.phase.as_str(), "staged" | "abandoned") {
+            related.push(r);
+        }
+    }
+    anyhow::ensure!(
+        related.iter().filter(|r| !r.state.is_terminal()).count() <= 1,
+        "conflicting unfinished upgrades in this installation"
+    );
+    Ok(related)
+}
+
+fn switch_permits_upgrade(
+    home: &Path,
+    me: &BuildIdentity,
+    absent: &mut impl FnMut(&Record) -> anyhow::Result<bool>,
+    current: &mut impl FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<bool> {
+    let rows = all_switch_records(home)?;
+    // A manually installed repair has a different build. It may proceed only after any old
+    // operation that can still roll this home back is proven gone AND this service is current.
+    for other in rows.iter().filter(|r| {
+        r.request.build != *me && matches!(r.state.phase.as_str(), "switching" | "linked")
+    }) {
+        if !current()? || !absent(other)? {
+            return Ok(false);
+        }
+    }
+    let related: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.request.build == *me)
+        .collect();
+    if related.is_empty() {
+        return Ok(true);
+    }
+    let active: Vec<_> = related.iter().filter(|r| !r.state.is_terminal()).collect();
+    anyhow::ensure!(
+        active.len() <= 1,
+        "conflicting unfinished upgrades for this build"
+    );
+    // A terminal record does not override a changed service definition or an active operation.
+    let Some(r) = active.first() else {
+        // Order only already-terminal operations; age never proves a helper gone, and even
+        // a newer old receipt cannot take precedence over the active operation above.
+        let latest = related.iter().max_by_key(|r| r.state.updated.0).unwrap();
+        return Ok(current()?
+            && matches!(
+                latest.state.phase.as_str(),
+                "succeeded" | "rolled_back" | "failed"
+            ));
+    };
+    let mut r = (*r).clone();
+    if r.state.phase == "switching" {
+        r.state.phase = "linked".into();
+        r.state.error = None;
+        r.state.updated = Timestamp(now());
+        save(home, &r)?;
+    }
+    if !current()? || r.state.phase != "linked" || !absent(&r)? {
+        return Ok(false);
+    }
+    // Observe the same operation AND service again after the process scan. Manual update with
+    // a residual switching record must pass this same conjunction, never the automatic-path guess.
+    let after: Vec<_> = all_switch_records(home)?
+        .into_iter()
+        .filter(|r| r.request.build == *me)
+        .collect();
+    Ok(after
+        .iter()
+        .any(|x| x.request == r.request && x.state.phase == "linked")
+        && after.iter().filter(|x| !x.state.is_terminal()).count() == 1
+        && current()?)
 }
 
 /// A Node installed as a service from a release bundle, running from the release its service
@@ -743,6 +902,585 @@ pub fn run_switch(
     Ok(r.state)
 }
 
+/// Native, complete process inspection. Errors deliberately cannot prove absence. Only argv
+/// structure and the installation home are retained; complete argv/environments are never logged.
+mod helper_process {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    fn invalid() -> std::io::Error {
+        std::io::Error::other("cannot establish upgrade helper identity")
+    }
+
+    pub(super) fn absent(home: &Path, record: &Record) -> anyhow::Result<bool> {
+        let gone = scan(home, record, &mut inspect)?;
+        // Linux absence is not yet validated against released helpers/systemd scopes.
+        // Fail closed there; a real succeeded receipt still permits the normal upgrade.
+        Ok(gone && !cfg!(target_os = "linux"))
+    }
+
+    fn scan(
+        home: &Path,
+        record: &Record,
+        inspect: &mut impl FnMut(libc::pid_t, &Path) -> std::io::Result<Option<Process>>,
+    ) -> anyhow::Result<bool> {
+        let home = home.canonicalize()?;
+        let old = record
+            .previous_release
+            .as_ref()
+            .ok_or_else(invalid)?
+            .join("bin/steve-node")
+            .canonicalize()?;
+        let op = op_name(&record.state.operation)?;
+        let snapshot: std::collections::BTreeSet<_> = pids()?.into_iter().collect();
+        for &pid in &snapshot {
+            let inspected = inspect(pid, &old);
+            let process = match inspected {
+                Ok(process) => process,
+                // ESRCH alone proves this enumerated process is gone, not an inspection error.
+                Err(_)
+                    if unsafe { libc::kill(pid, 0) } == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if let Some((exe, args, env)) = process
+                && relevant(&exe, &args, &old, op)?
+            {
+                let homes: Vec<_> = env
+                    .split(|b| *b == 0)
+                    .filter_map(|e| e.strip_prefix(b"STEVE_HOME="))
+                    .collect();
+                anyhow::ensure!(
+                    homes.len() == 1,
+                    "cannot establish helper installation home"
+                );
+                let found = Path::new(OsStr::from_bytes(homes[0])).canonicalize()?;
+                if found == home {
+                    return Ok(false);
+                }
+            }
+        }
+        // A scope wrapper may have forked the helper during inspection. Recheck enumeration
+        // before claiming absence; an unseen new process makes this scan inconclusive.
+        if pids()?.iter().any(|pid| !snapshot.contains(pid)) {
+            return Err(invalid().into());
+        }
+        Ok(true)
+    }
+
+    fn relevant(exe: &Path, args: &[OsString], old: &Path, op: &str) -> std::io::Result<bool> {
+        let invoked = Path::new(args.first().ok_or_else(invalid)?);
+        if invoked.as_os_str().is_empty()
+            || (invoked.file_name() != exe.file_name() && invoked.canonicalize()? != exe)
+        {
+            return Err(invalid());
+        }
+        // A same-operation helper at another Node path is not absence: record/path
+        // conflicts must still keep migration blocked. A canonical renamed binary also counts.
+        if exe == old || exe.file_name() == Some(OsStr::new("steve-node")) {
+            let command = args.get(1).ok_or_else(invalid)?;
+            if command != "upgrade-switch" {
+                return Ok(false);
+            }
+            let operation = args.get(2).ok_or_else(invalid)?;
+            if operation != op {
+                return Ok(false);
+            }
+            if args.len() != 3 {
+                return Err(invalid());
+            }
+            return Ok(true);
+        }
+        if exe == Path::new("/usr/bin/systemd-run") {
+            let unit = format!("--unit=steve-node-upgrade-{op}");
+            if !args.iter().any(|a| a.as_os_str() == OsStr::new(&unit)) {
+                return Ok(false);
+            }
+            let expected: Vec<OsString> = ["--user", "--scope", "--collect", "--quiet"]
+                .into_iter()
+                .map(Into::into)
+                .chain([
+                    unit.into(),
+                    old.as_os_str().into(),
+                    "upgrade-switch".into(),
+                    op.into(),
+                ])
+                .collect();
+            if args.get(1..) != Some(expected.as_slice()) {
+                return Err(invalid());
+            }
+            return Ok(true); // wrapper not yet exec'd: it can still create the helper
+        }
+        Ok(false)
+    }
+
+    type Process = (PathBuf, Vec<OsString>, Vec<u8>);
+
+    fn candidate(exe: &Path, old: &Path) -> bool {
+        exe == old
+            || matches!(
+                exe.file_name().and_then(OsStr::to_str),
+                Some("steve-node" | "systemd-run")
+            )
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn nul_fields(bytes: &[u8]) -> std::io::Result<Vec<OsString>> {
+        if bytes.is_empty() || bytes.last() != Some(&0) {
+            return Err(invalid());
+        }
+        Ok(bytes[..bytes.len() - 1]
+            .split(|b| *b == 0)
+            .map(|s| OsString::from_vec(s.into()))
+            .collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pids() -> std::io::Result<Vec<libc::pid_t>> {
+        // PROC_UID_ONLY from libproc.h, not a command-name filter or a ps text snapshot.
+        const UID_ONLY: u32 = 4;
+        for capacity in [4096, 16384, 65536] {
+            let mut pids = vec![0; capacity];
+            let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32;
+            let n = unsafe {
+                libc::proc_listpids(UID_ONLY, libc::getuid(), pids.as_mut_ptr().cast(), size)
+            };
+            if n <= 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if n == size {
+                continue;
+            } // possible truncation: grow, never call it absence
+            if n % 4 != 0 || n > size {
+                return Err(invalid());
+            }
+            pids.truncate(n as usize / 4);
+            pids.retain(|pid| *pid > 0);
+            return Ok(pids);
+        }
+        Err(invalid())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stamp(pid: libc::pid_t) -> std::io::Result<(u64, u64)> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        if n != size || info.pbi_uid != unsafe { libc::getuid() } {
+            return Err(invalid());
+        }
+        Ok((info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn inspect(pid: libc::pid_t, old: &Path) -> std::io::Result<Option<Process>> {
+        let before = stamp(pid)?;
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if n <= 0 || n as usize >= path.len() {
+            return Err(invalid());
+        }
+        let end = path.iter().position(|b| *b == 0).ok_or_else(invalid)?;
+        let exe = PathBuf::from(OsStr::from_bytes(&path[..end]));
+        if !exe.is_absolute() {
+            return Err(invalid());
+        }
+        if !candidate(&exe, old) {
+            return Ok(None);
+        }
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut bytes = vec![0u8; 1024 * 1024];
+        let mut len = bytes.len();
+        let n = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                bytes.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if n != 0 || len >= bytes.len() {
+            return Err(invalid());
+        }
+        bytes.truncate(len);
+        let (args, env) = mac_arguments(&bytes)?;
+        if stamp(pid)? != before {
+            return Err(invalid());
+        }
+        Ok(Some((exe, args, env)))
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn mac_arguments(bytes: &[u8]) -> std::io::Result<(Vec<OsString>, Vec<u8>)> {
+        let argc = i32::from_ne_bytes(bytes.get(..4).ok_or_else(invalid)?.try_into().unwrap());
+        if argc <= 0 {
+            return Err(invalid());
+        }
+        let mut rest = &bytes[4..];
+        let end = rest.iter().position(|b| *b == 0).ok_or_else(invalid)?;
+        rest = &rest[end..]; // kernel's executable path, followed by NUL padding
+        while rest.first() == Some(&0) {
+            rest = &rest[1..];
+        }
+        let mut args = vec![];
+        for _ in 0..argc {
+            let end = rest.iter().position(|b| *b == 0).ok_or_else(invalid)?;
+            args.push(OsString::from_vec(rest[..end].into()));
+            rest = &rest[end + 1..];
+        }
+        if rest.last() != Some(&0) {
+            return Err(invalid());
+        }
+        Ok((args, rest.into()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pids() -> std::io::Result<Vec<libc::pid_t>> {
+        use std::os::unix::fs::MetadataExt;
+        let mut pids = vec![];
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            match entry.metadata() {
+                Ok(meta) if meta.uid() == unsafe { libc::getuid() } => pids.push(pid),
+                Ok(_) => {}
+                Err(_)
+                    if unsafe { libc::kill(pid, 0) } == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(pids)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inspect(pid: libc::pid_t, old: &Path) -> std::io::Result<Option<Process>> {
+        let dir = PathBuf::from(format!("/proc/{pid}"));
+        let before = std::fs::read(dir.join("stat"))?;
+        let exe = std::fs::read_link(dir.join("exe"))?;
+        // A running, replaced/unlinked helper can still roll back; Linux appends this marker
+        // to its executable link. Never skip it merely because the basename gained a suffix.
+        let exe = PathBuf::from(OsStr::from_bytes(
+            exe.as_os_str()
+                .as_bytes()
+                .strip_suffix(b" (deleted)")
+                .unwrap_or(exe.as_os_str().as_bytes()),
+        ));
+        if !candidate(&exe, old) {
+            return Ok(None);
+        }
+        let args = nul_fields(&std::fs::read(dir.join("cmdline"))?)?;
+        let env = std::fs::read(dir.join("environ"))?;
+        if env.last() != Some(&0) {
+            return Err(invalid());
+        }
+        let after = std::fs::read(dir.join("stat"))?;
+        // Compare starttime, not CPU/state fields that change while inspected.
+        let start = |bytes: &[u8]| -> Option<Vec<u8>> {
+            let end = bytes.iter().rposition(|b| *b == b')')?;
+            bytes[end + 1..]
+                .split(|b| b.is_ascii_whitespace())
+                .filter(|s| !s.is_empty())
+                .nth(19)
+                .map(Into::into)
+        };
+        if start(&before).is_none() || start(&before) != start(&after) {
+            return Err(invalid());
+        }
+        Ok(Some((exe, args, env)))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn pids() -> std::io::Result<Vec<libc::pid_t>> {
+        Err(invalid())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn inspect(_: libc::pid_t, _: &Path) -> std::io::Result<Option<Process>> {
+        Err(invalid())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn complete_native_arguments_distinguish_operations_and_systemd_scopes() {
+            let old = Path::new("/fixture/releases/old/bin/steve-node");
+            let args = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(
+                relevant(
+                    old,
+                    &args(&["steve-node", "upgrade-switch", "op_1"]),
+                    old,
+                    "op_1"
+                )
+                .unwrap()
+            );
+            assert!(
+                !relevant(
+                    old,
+                    &args(&["steve-node", "upgrade-switch", "op_2"]),
+                    old,
+                    "op_1"
+                )
+                .unwrap()
+            );
+            assert!(relevant(old, &args(&["steve-node", "upgrade-switch"]), old, "op_1").is_err());
+            assert!(relevant(old, &args(&["", "upgrade-switch", "op_1"]), old, "op_1").is_err());
+            assert!(relevant(old, &args(&["upgrade-switch", "op_1"]), old, "op_1").is_err());
+            let wrapper = Path::new("/usr/bin/systemd-run");
+            let mut scope = args(&[
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--unit=steve-node-upgrade-op_1",
+                "/fixture/releases/old/bin/steve-node",
+                "upgrade-switch",
+                "op_1",
+            ]);
+            assert!(relevant(wrapper, &scope, old, "op_1").unwrap());
+            assert!(!relevant(wrapper, &scope, old, "op_2").unwrap());
+            scope.pop();
+            assert!(relevant(wrapper, &scope, old, "op_1").is_err());
+        }
+
+        #[test]
+        fn truncated_or_ambiguous_native_snapshots_never_mean_absent() {
+            assert!(nul_fields(b"steve-node\0upgrade-switch\0op_1").is_err());
+            let mut bytes = 3i32.to_ne_bytes().to_vec();
+            bytes.extend_from_slice(
+                b"/fixture/steve-node\0\0steve-node\0upgrade-switch\0op_1\0STEVE_HOME=/fixture\0",
+            );
+            let (args, env) = mac_arguments(&bytes).unwrap();
+            assert_eq!(args.len(), 3);
+            assert!(env.starts_with(b"STEVE_HOME="));
+            for end in 0..bytes.len() {
+                assert!(mac_arguments(&bytes[..end]).is_err(), "truncated at {end}");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        #[ignore = "Ubuntu systemd scope, sudo -n and verified v0.5.0 STEVE_TEST_RELEASE_NODE required"]
+        async fn published_linux_helper_in_systemd_scope_requires_complete_native_evidence() {
+            use steve_runtime::testkit::{eventually_sync, process::Command};
+            assert_eq!(std::env::var("STEVE_LINUX_HELPER_E2E").as_deref(), Ok("1"));
+            assert_ne!(unsafe { libc::getuid() }, 0, "run nextest as the CI user");
+            let binary = PathBuf::from(
+                std::env::var_os("STEVE_TEST_RELEASE_NODE").expect("verified release fixture"),
+            )
+            .canonicalize()
+            .unwrap();
+            assert_eq!(binary.file_name().unwrap(), "steve-node");
+            let home = tempfile::tempdir().unwrap();
+            let op = format!("nup_linux_{}", std::process::id());
+            let unit = format!("steve-node-upgrade-{op}");
+            let record: Record = serde_json::from_value(serde_json::json!({
+                "state":{"operation":op,"phase":"linked","version":"0.6.0","previous":"0.5.0","error":null,"updated":1},
+                "request":{"operation":op,"build":{"version":"0.6.0","commit":"a".repeat(40),"target":"x86_64-unknown-linux-gnu"},
+                    "artifact":"fixture","size":1,"sha256":"a".repeat(64),"health_secs":1},
+                "previous_release":binary.parent().unwrap().parent().unwrap()
+            })).unwrap();
+            // The tracer stops the real ELF at exec's SIGTRAP, BEFORE main. Never continue it:
+            // no old helper can perform an InstalledService action. EXITKILL also covers a
+            // killed tracer; normal teardown kills/reaps only this tracer's own child.
+            const TRACER: &str = r#"
+import ctypes, os, pathlib, signal, sys, time
+c = ctypes.CDLL(None, use_errno=True)
+c.ptrace.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+c.ptrace.restype = ctypes.c_long
+home, binary, op = map(str, sys.argv[1:])
+p = os.fork()
+if p == 0:
+    if c.ptrace(0, 0, None, None) != 0: os._exit(98)
+    os.execve(binary, [binary, 'upgrade-switch', op], os.environ)
+try:
+    _, status = os.waitpid(p, 0)
+    assert os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP
+    assert c.ptrace(0x4200, p, None, 0x00100000) == 0
+    pathlib.Path(home, 'ready.tmp').write_text(f'{p} {os.getpid()}')
+    os.replace(pathlib.Path(home, 'ready.tmp'), pathlib.Path(home, 'ready'))
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if pathlib.Path(home, 'stop').exists(): break
+        if pathlib.Path(home, 'deny').exists():
+            assert c.prctl(4, 0, 0, 0, 0) == 0
+            pathlib.Path(home, 'denied').touch()
+        time.sleep(0.02)
+finally:
+    try: os.kill(p, signal.SIGKILL)
+    except ProcessLookupError: pass
+    try: os.waitpid(p, 0)
+    except ChildProcessError: pass
+"#;
+            struct Stop(PathBuf);
+            impl Drop for Stop {
+                fn drop(&mut self) {
+                    let _ = std::fs::write(self.0.join("stop"), b"");
+                }
+            }
+            let mut scope = Command::new("sudo")
+                .args([
+                    "-n",
+                    "/usr/bin/systemd-run",
+                    "--scope",
+                    "--collect",
+                    "--quiet",
+                ])
+                .arg(format!("--unit={unit}"))
+                .args([
+                    "/usr/bin/setpriv",
+                    "--reuid",
+                    &unsafe { libc::getuid() }.to_string(),
+                    "--regid",
+                    &unsafe { libc::getgid() }.to_string(),
+                    "--clear-groups",
+                    "/usr/bin/env",
+                ])
+                .arg(format!("HOME={}", home.path().display()))
+                .arg(format!("STEVE_HOME={}", home.path().display()))
+                .args([
+                    "STEVE_VAULT_KEYSTORE=file",
+                    "STEVE_BACKUP=off",
+                    "STEVE_NO_RESUME=1",
+                    "/usr/bin/python3",
+                    "-c",
+                    TRACER,
+                ])
+                .arg(home.path())
+                .arg(&binary)
+                .arg(&op)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("sudo/systemd-run/setpriv fixture unavailable");
+            // Dropped before `scope`, even on assertion failure. The tracer has its own bounded
+            // cleanup as well because a system scope is outside testkit's process group.
+            let stop = Stop(home.path().into());
+            eventually_sync(
+                "released helper exec-stopped inside the systemd scope",
+                || {
+                    assert!(
+                        scope.try_wait().unwrap().is_none(),
+                        "systemd scope/tracer failed"
+                    );
+                    home.path().join("ready").exists()
+                },
+            )
+            .await;
+            let ids: Vec<i32> = std::fs::read_to_string(home.path().join("ready"))
+                .unwrap()
+                .split_whitespace()
+                .map(|s| s.parse().unwrap())
+                .collect();
+            assert_eq!(ids.len(), 2);
+            let old = binary.as_path();
+            let (exe, args, env) = inspect(ids[0], old)
+                .unwrap()
+                .expect("actual released helper");
+            assert!(relevant(&exe, &args, old, &op).unwrap());
+            assert!(!relevant(&exe, &args, old, "nup_another_operation").unwrap());
+            assert!(
+                pids().unwrap().contains(&ids[0]),
+                "helper belongs to the inspected user"
+            );
+            assert!(
+                env.split(|b| *b == 0)
+                    .any(|e| e == format!("STEVE_HOME={}", home.path().display()).as_bytes())
+            );
+            assert!(
+                std::fs::read_to_string(format!("/proc/{}/cgroup", ids[0]))
+                    .unwrap()
+                    .contains(&format!("/{unit}.scope"))
+            );
+            assert!(!scan(home.path(), &record, &mut inspect).unwrap());
+            let another_home = tempfile::tempdir().unwrap();
+            eventually_sync("a different installation is distinct", || {
+                scan(another_home.path(), &record, &mut inspect).is_ok_and(|gone| gone)
+            })
+            .await;
+            // Query failures and truncated native data must propagate as unknown, including
+            // at the same scan boundary that gates migration, rather than become absence.
+            assert!(
+                scan(home.path(), &record, &mut |_, _| Err(
+                    std::io::Error::other("query failed")
+                ))
+                .is_err()
+            );
+            assert!(
+                scan(home.path(), &record, &mut |_, _| Err(nul_fields(
+                    b"steve-node\0upgrade-switch\0truncated"
+                )
+                .unwrap_err()))
+                .is_err()
+            );
+            std::fs::write(home.path().join("deny"), b"").unwrap();
+            eventually_sync(
+                "same-user native query really denied by non-dumpable tracer",
+                || home.path().join("denied").exists(),
+            )
+            .await;
+            assert_eq!(
+                std::fs::read_link(format!("/proc/{}/exe", ids[1]))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert!(inspect(ids[1], old).is_err());
+            assert!(
+                scan(home.path(), &record, &mut |pid, old| {
+                    if pid == ids[1] {
+                        inspect(pid, old)
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .is_err()
+            );
+            drop(stop);
+            eventually_sync("scope tracer kills and reaps its released helper", || {
+                scope.try_wait().unwrap().is_some()
+            })
+            .await;
+            assert!(scope.wait().unwrap().success());
+            assert_eq!(unsafe { libc::kill(ids[0], 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            eventually_sync(
+                "native scan confirms absence after scope/helper exit",
+                || scan(home.path(), &record, &mut inspect).is_ok_and(|gone| gone),
+            )
+            .await;
+            // This CI evidence does not silently enable production: that needs a reviewed
+            // follow-up once this opt-in test has actually passed on Linux.
+            assert!(!absent(home.path(), &record).unwrap());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1249,6 +1987,496 @@ mod tests {
         assert_eq!(svc.calls.last().unwrap(), "start");
     }
 
+    /// The service around a release that upgrades the journal (its schema version, as text) when
+    /// it starts and then, like the unguarded old path, never links. This failure reproduction
+    /// deliberately migrates without waiting; the previous release cannot read that journal.
+    struct Upgrading {
+        current: PathBuf,
+        journal: PathBuf,
+        old_started: Option<bool>,
+    }
+
+    impl ServiceOps for Upgrading {
+        fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn update(&mut self, release: &Path) -> anyhow::Result<()> {
+            self.current = release.to_owned();
+            Ok(())
+        }
+        fn start(&mut self) -> anyhow::Result<()> {
+            let version: u32 = std::fs::read_to_string(&self.journal)?.parse()?;
+            if self.current.ends_with("new") {
+                if version < 4 {
+                    std::fs::write(&self.journal, "4")?;
+                }
+            } else {
+                // "journal needs a newer Node", again and again
+                self.old_started = Some(version <= 3);
+            }
+            Ok(())
+        }
+    }
+
+    fn upgrading(home: &Path, op: &str) -> Upgrading {
+        switching(home, op);
+        let journal = home.join("journal-version");
+        std::fs::write(&journal, "3").unwrap();
+        Upgrading {
+            current: home.join("releases/old"),
+            journal,
+            old_started: None,
+        }
+    }
+
+    #[test]
+    fn going_back_after_the_journal_upgrade_leaves_a_node_that_cannot_start() {
+        // what a helper does when the new release does not claim the switch
+        let home = tempfile::tempdir().unwrap();
+        let mut svc = upgrading(home.path(), "nup_stuck");
+        let s = run_switch(
+            home.path(),
+            "nup_stuck",
+            &mut svc,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(s.phase, "rolled_back");
+        assert_eq!(std::fs::read_to_string(&svc.journal).unwrap(), "4");
+        assert_eq!(svc.old_started, Some(false));
+    }
+
+    fn inert_harness(home: &Path) {
+        std::fs::write(
+            home.join("harness.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "adapters":{"claude-code":"/usr/bin/false","codex":"/usr/bin/false"},
+                "node":"/usr/bin/false","claude_executable":"/usr/bin/false"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn fixture_sql(path: &Path, sql: &str) -> i64 {
+        let output = steve_runtime::testkit::process::Command::new("python3")
+            .arg("-c").arg("import sqlite3,sys; c=sqlite3.connect(sys.argv[1],timeout=0); c.executescript(sys.argv[2]); print(c.execute('PRAGMA user_version').fetchone()[0]); c.close()")
+            .arg(path).arg(sql).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_real_journal_waits_for_the_helper_receipt_with_only_home_locked() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = crate::config::Home(temp.path().into());
+        inert_harness(temp.path());
+        let path = home.local().join("node.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let schema = include_str!("../../steve-node/src/journal/fixtures/v3.sql");
+        assert_eq!(
+            fixture_sql(
+                &path,
+                &format!(
+                    "{schema}\nINSERT INTO meta(key,value) VALUES('journal_id',123),('incarnation',0); PRAGMA user_version=3;"
+                )
+            ),
+            3
+        );
+        // A previous drain timeout never switched this build. It must neither veto the
+        // current handoff nor keep this actual v3 journal unopened after its receipt.
+        switching(temp.path(), "nup_abandoned");
+        let mut abandoned = load(temp.path(), "nup_abandoned").unwrap().unwrap();
+        abandoned.state.phase = "abandoned".into();
+        abandoned.previous_release = None;
+        save(temp.path(), &abandoned).unwrap();
+        switching(temp.path(), "nup_sqlite");
+        let record = load(temp.path(), "nup_sqlite").unwrap().unwrap();
+        let config = || {
+            let mut c = home
+                .node_config(NodeId::new("node-journal-test").unwrap())
+                .unwrap();
+            c.acp.user_home = temp.path().into();
+            c.acp.codex_home = temp.path().join("codex");
+            c.acp.node = "/usr/bin/false".into();
+            c.acp.claude_executable = "/usr/bin/false".into();
+            c
+        };
+        let opening = LocalNode::open_upgrading(config(), async {
+            wait_for_switch(
+                temp.path(),
+                &record.request.build,
+                |_| Ok(false),
+                || Ok(true),
+            )
+            .await
+            .map_err(|_| err(ErrorCode::Offline, "handoff not verified"))
+        });
+        let acknowledge = async {
+            steve_runtime::testkit::eventually(
+                "linked is persisted before any migration",
+                || async {
+                    load(temp.path(), "nup_sqlite")
+                        .unwrap()
+                        .unwrap()
+                        .state
+                        .phase
+                        == "linked"
+                },
+            )
+            .await;
+            // This would fail inside the prototype's long-lived SQLite write transaction.
+            assert_eq!(fixture_sql(&path, "BEGIN IMMEDIATE; ROLLBACK;"), 3);
+            assert!(matches!(LocalNode::open(config()), Err(e) if e.code == ErrorCode::Conflict));
+            let mut receipt = load(temp.path(), "nup_sqlite").unwrap().unwrap();
+            receipt.state.phase = "succeeded".into();
+            save(temp.path(), &receipt).unwrap();
+        };
+        let (node, _) = tokio::join!(opening, acknowledge);
+        let node = node.unwrap();
+        assert_eq!(fixture_sql(&path, ""), 4);
+        node.shutdown().await;
+        drop(node);
+    }
+
+    #[test]
+    fn linked_requires_both_a_gone_helper_and_the_actual_current_service() {
+        for gone in [false, true] {
+            for current in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                switching(home.path(), "nup_gate");
+                let me = load(home.path(), "nup_gate")
+                    .unwrap()
+                    .unwrap()
+                    .request
+                    .build;
+                let allowed =
+                    switch_permits_upgrade(home.path(), &me, &mut |_| Ok(gone), &mut || {
+                        assert_eq!(
+                            load(home.path(), "nup_gate").unwrap().unwrap().state.phase,
+                            "linked"
+                        );
+                        Ok(current)
+                    })
+                    .unwrap();
+                assert_eq!(allowed, gone && current);
+                assert_eq!(
+                    load(home.path(), "nup_gate").unwrap().unwrap().state.phase,
+                    "linked"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn receipts_require_the_actual_service_but_unswitched_operations_are_unrelated() {
+        for phase in [
+            "succeeded",
+            "rolled_back",
+            "failed",
+            "abandoned",
+            "staged",
+            "staging",
+        ] {
+            for current in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                switching(home.path(), "nup_receipt");
+                let mut r = load(home.path(), "nup_receipt").unwrap().unwrap();
+                r.state.phase = phase.into();
+                save(home.path(), &r).unwrap();
+                assert_eq!(
+                    switch_permits_upgrade(
+                        home.path(),
+                        &r.request.build,
+                        &mut |_| panic!("terminal records are not an absence scan"),
+                        &mut || Ok(current)
+                    )
+                    .unwrap(),
+                    matches!(phase, "staged" | "abandoned")
+                        || (current && matches!(phase, "succeeded" | "rolled_back" | "failed"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_abandoned_attempt_cannot_veto_a_later_receipt_for_the_same_build() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_first");
+        let mut abandoned = load(home.path(), "nup_first").unwrap().unwrap();
+        abandoned.state.phase = "abandoned".into();
+        abandoned.previous_release = None;
+        // Even a later update to a pre-switch record cannot change which handoff matters.
+        abandoned.state.updated = Timestamp(i64::MAX);
+        save(home.path(), &abandoned).unwrap();
+        let before = std::fs::read(record_path(home.path(), "nup_first")).unwrap();
+        switching(home.path(), "nup_second");
+        let mut receipt = load(home.path(), "nup_second").unwrap().unwrap();
+        receipt.state.phase = "succeeded".into();
+        save(home.path(), &receipt).unwrap();
+        for current in [false, true] {
+            assert_eq!(
+                switch_permits_upgrade(
+                    home.path(),
+                    &receipt.request.build,
+                    &mut |_| panic!("a receipt does not need helper absence"),
+                    &mut || Ok(current)
+                )
+                .unwrap(),
+                current
+            );
+        }
+        assert_eq!(
+            before,
+            std::fs::read(record_path(home.path(), "nup_first")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_previous_receipt_cannot_override_the_current_switching_operation() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_previous");
+        let mut receipt = load(home.path(), "nup_previous").unwrap().unwrap();
+        receipt.state.phase = "succeeded".into();
+        receipt.state.updated = Timestamp(i64::MAX);
+        save(home.path(), &receipt).unwrap();
+        switching(home.path(), "nup_current");
+        let me = receipt.request.build;
+        let mut checked_current = false;
+        assert!(
+            !switch_permits_upgrade(
+                home.path(),
+                &me,
+                &mut |r| {
+                    assert_eq!(r.state.operation.as_str(), "nup_current");
+                    checked_current = true;
+                    Ok(false)
+                },
+                &mut || Ok(true)
+            )
+            .unwrap()
+        );
+        assert!(checked_current);
+        assert_eq!(
+            load(home.path(), "nup_current")
+                .unwrap()
+                .unwrap()
+                .state
+                .phase,
+            "linked"
+        );
+    }
+
+    #[test]
+    fn a_staged_operation_does_not_conflict_with_an_actual_switch() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_staged");
+        let mut staged = load(home.path(), "nup_staged").unwrap().unwrap();
+        staged.state.phase = "staged".into();
+        staged.previous_release = None;
+        staged.request.build = build("9.9.9");
+        staged.state.version = staged.request.build.version.clone();
+        save(home.path(), &staged).unwrap();
+        switching(home.path(), "nup_switch");
+        let current = load(home.path(), "nup_switch").unwrap().unwrap();
+        for gone in [false, true] {
+            assert_eq!(
+                switch_permits_upgrade(
+                    home.path(),
+                    &current.request.build,
+                    &mut |r| {
+                        assert_eq!(r.state.operation.as_str(), "nup_switch");
+                        Ok(gone)
+                    },
+                    &mut || Ok(true)
+                )
+                .unwrap(),
+                gone
+            );
+        }
+        // Corrupt pre-switch records are still uncertainty, never silently ignored.
+        staged.state.version = "mismatched".into();
+        save(home.path(), &staged).unwrap();
+        assert!(
+            switch_permits_upgrade(
+                home.path(),
+                &current.request.build,
+                &mut |_| Ok(true),
+                &mut || Ok(true)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_manual_update_to_the_same_build_rechecks_a_residual_switch_against_the_service() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_manual");
+        let mut residual = load(home.path(), "nup_manual").unwrap().unwrap();
+        // Both the operator's candidate and the residual request name exactly this build.
+        let me = residual.request.build.clone();
+        let current_release = home.path().join("releases/new");
+        let old_release = home.path().join("releases/old");
+        std::fs::create_dir_all(current_release.join("bin")).unwrap();
+        std::fs::create_dir_all(old_release.join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            std::env::current_exe().unwrap(),
+            current_release.join("bin/steve-node"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", old_release.join("bin/steve-node")).unwrap();
+        std::fs::create_dir_all(home.path().join("services")).unwrap();
+        for (release, current) in [(&old_release, false), (&current_release, true)] {
+            std::fs::write(
+                home.path().join("services/node.json"),
+                serde_json::to_vec(&serde_json::json!({"release":release})).unwrap(),
+            )
+            .unwrap();
+            for evidence in [None, Some(false), Some(true)] {
+                residual.state.phase = "switching".into();
+                residual.state.updated = Timestamp(i64::MIN / 2);
+                save(home.path(), &residual).unwrap();
+                let result = switch_permits_upgrade(
+                    home.path(),
+                    &me,
+                    &mut |r| {
+                        assert_eq!(r.request.build, me);
+                        assert_eq!(r.state.operation, residual.state.operation);
+                        evidence.ok_or_else(|| anyhow::anyhow!("native process query inconclusive"))
+                    },
+                    &mut || Ok(service_release(home.path()).is_some()),
+                );
+                assert_eq!(
+                    result.is_ok_and(|allowed| allowed),
+                    current && evidence == Some(true)
+                );
+                assert_eq!(
+                    load(home.path(), "nup_manual")
+                        .unwrap()
+                        .unwrap()
+                        .state
+                        .phase,
+                    "linked"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn linked_restarts_recheck_and_never_rewrite_or_infer_absence_from_age() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_restart");
+        let mut r = load(home.path(), "nup_restart").unwrap().unwrap();
+        r.state.phase = "linked".into();
+        r.state.updated = Timestamp(i64::MIN / 2);
+        save(home.path(), &r).unwrap();
+        let before = std::fs::read(record_path(home.path(), "nup_restart")).unwrap();
+        for _ in 0..2 {
+            assert!(
+                !switch_permits_upgrade(
+                    home.path(),
+                    &r.request.build,
+                    &mut |_| Ok(false),
+                    &mut || Ok(true)
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            switch_permits_upgrade(
+                home.path(),
+                &r.request.build,
+                &mut |_| anyhow::bail!("process query failed"),
+                &mut || Ok(true)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            before,
+            std::fs::read(record_path(home.path(), "nup_restart")).unwrap()
+        );
+        assert!(
+            switch_permits_upgrade(
+                home.path(),
+                &r.request.build,
+                &mut |_| Ok(true),
+                &mut || Ok(true)
+            )
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn receipts_and_verified_absence_allow_without_any_additional_wait() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_ready");
+        let mut r = load(home.path(), "nup_ready").unwrap().unwrap();
+        for phase in ["switching", "linked", "succeeded"] {
+            r.state.phase = phase.into();
+            save(home.path(), &r).unwrap();
+            tokio::time::timeout(
+                Duration::ZERO,
+                wait_for_switch(home.path(), &r.request.build, |_| Ok(true), || Ok(true)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn read_failures_and_conflicts_are_never_absence_including_manual_update() {
+        let home = tempfile::tempdir().unwrap();
+        let me = build("1.2.3");
+        assert!(
+            switch_permits_upgrade(home.path(), &me, &mut |_| Ok(true), &mut || Ok(true)).unwrap()
+        );
+        switching(home.path(), "nup_first");
+        let mut r = load(home.path(), "nup_first").unwrap().unwrap();
+        let me = r.request.build.clone();
+        // A manual update to another build does not make this old helper harmless.
+        let other = build("9.9.9");
+        assert!(
+            !switch_permits_upgrade(home.path(), &other, &mut |_| Ok(false), &mut || Ok(true))
+                .unwrap()
+        );
+        assert!(
+            !switch_permits_upgrade(home.path(), &other, &mut |_| Ok(true), &mut || Ok(false))
+                .unwrap()
+        );
+        assert!(
+            switch_permits_upgrade(home.path(), &other, &mut |_| Ok(true), &mut || Ok(true))
+                .unwrap()
+        );
+        switching(home.path(), "nup_second");
+        assert!(
+            switch_permits_upgrade(home.path(), &me, &mut |_| Ok(true), &mut || Ok(true)).is_err()
+        );
+        assert!(
+            switch_permits_upgrade(home.path(), &other, &mut |_| Ok(true), &mut || Ok(true))
+                .is_err(),
+            "foreign conflicts cannot become no record for this build"
+        );
+        std::fs::remove_file(record_path(home.path(), "nup_second")).unwrap();
+        r.state.operation = OperationId::new("another_operation").unwrap();
+        save(home.path(), &r).unwrap();
+        assert!(
+            switch_permits_upgrade(home.path(), &me, &mut |_| Ok(true), &mut || Ok(true)).is_err()
+        );
+        std::fs::write(record_path(home.path(), "broken"), b"{").unwrap();
+        assert!(
+            switch_permits_upgrade(home.path(), &me, &mut |_| Ok(true), &mut || Ok(true)).is_err()
+        );
+    }
+
     #[test]
     fn a_restart_settles_what_it_left_unfinished() {
         let home = tempfile::tempdir().unwrap();
@@ -1275,5 +2503,236 @@ mod tests {
                 .phase,
             "failed"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires the checksum-verified v0.5.0 release in STEVE_TEST_RELEASE_NODE"]
+    async fn published_helper_is_identified_by_operation_home_and_native_process_state() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let binary =
+            PathBuf::from(std::env::var_os("STEVE_TEST_RELEASE_NODE").expect("release fixture"));
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_native");
+        let mut record = load(home.path(), "nup_native").unwrap().unwrap();
+        record.previous_release = Some(binary.parent().unwrap().parent().unwrap().into());
+        let current_release = home.path().join("releases/new");
+        std::fs::create_dir_all(current_release.join("bin")).unwrap();
+        // The actual running test executable stands in for this release's executable; this
+        // tests service_release's real canonical-file comparison without executing a test alias.
+        std::os::unix::fs::symlink(
+            std::env::current_exe().unwrap(),
+            current_release.join("bin/steve-node"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.path().join("services")).unwrap();
+        let point_service = |release: &Path| {
+            std::fs::write(
+                home.path().join("services/node.json"),
+                serde_json::to_vec(&serde_json::json!({"release":release})).unwrap(),
+            )
+            .unwrap()
+        };
+        point_service(&current_release);
+        save(home.path(), &record).unwrap();
+        let path = CString::new(binary.as_os_str().as_bytes()).unwrap();
+        let args = [
+            path.clone(),
+            CString::new("upgrade-switch").unwrap(),
+            CString::new("nup_native").unwrap(),
+        ];
+        let mut argv: Vec<_> = args.iter().map(|s| s.as_ptr().cast_mut()).collect();
+        argv.push(std::ptr::null_mut());
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(k, _)| k != "STEVE_HOME")
+            .map(|(k, v)| CString::new([k.as_bytes(), b"=", v.as_bytes()].concat()).unwrap())
+            .collect();
+        env.push(
+            CString::new([b"STEVE_HOME=", home.path().as_os_str().as_bytes()].concat()).unwrap(),
+        );
+        let mut envp: Vec<_> = env.iter().map(|s| s.as_ptr().cast_mut()).collect();
+        envp.push(std::ptr::null_mut());
+        struct Suspended(libc::pid_t);
+        impl Drop for Suspended {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+                let mut status = 0;
+                while unsafe { libc::waitpid(self.0, &mut status, 0) } < 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                }
+            }
+        }
+        // Start the actual released Mach-O suspended BEFORE main. Its argv/env are real, but
+        // no InstalledService action can run; no installed service is created or stopped.
+        let mut attr = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::posix_spawnattr_init(&mut attr) }, 0);
+        assert_eq!(
+            unsafe {
+                libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_START_SUSPENDED as i16)
+            },
+            0
+        );
+        let mut pid = 0;
+        let result = unsafe {
+            libc::posix_spawn(
+                &mut pid,
+                path.as_ptr(),
+                std::ptr::null(),
+                &attr,
+                argv.as_ptr(),
+                envp.as_ptr(),
+            )
+        };
+        unsafe {
+            libc::posix_spawnattr_destroy(&mut attr);
+        }
+        assert_eq!(result, 0);
+        let process = Suspended(pid);
+        assert!(
+            !helper_process::absent(home.path(), &record).unwrap(),
+            "paused is still present"
+        );
+        let permits = || {
+            switch_permits_upgrade(
+                home.path(),
+                &record.request.build,
+                &mut |r| helper_process::absent(home.path(), r),
+                &mut || Ok(service_release(home.path()).is_some()),
+            )
+        };
+        assert!(
+            !permits().unwrap(),
+            "current service alone cannot permit a paused helper"
+        );
+        let mut other = record.clone();
+        other.state.operation = OperationId::new("nup_other").unwrap();
+        other.request.operation = other.state.operation.clone();
+        steve_runtime::testkit::eventually_sync("another operation is distinct", || {
+            helper_process::absent(home.path(), &other).is_ok_and(|gone| gone)
+        })
+        .await;
+        let other_home = tempfile::tempdir().unwrap();
+        steve_runtime::testkit::eventually_sync("another home is distinct", || {
+            helper_process::absent(other_home.path(), &record).is_ok_and(|gone| gone)
+        })
+        .await;
+        drop(process);
+        steve_runtime::testkit::eventually_sync("reaped helper is gone", || {
+            helper_process::absent(home.path(), &record).is_ok_and(|gone| gone)
+        })
+        .await;
+        point_service(record.previous_release.as_ref().unwrap());
+        assert!(
+            !permits().unwrap(),
+            "helper absence alone cannot permit another service release"
+        );
+        point_service(&current_release);
+        steve_runtime::testkit::eventually_sync(
+            "native absence and the actual current service permit together",
+            || permits().is_ok_and(|allowed| allowed),
+        )
+        .await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires the checksum-verified v0.5.0 release in STEVE_TEST_RELEASE_NODE"]
+    async fn published_reader_accepts_retained_v3_and_rejects_the_real_v4_migration() {
+        let binary =
+            PathBuf::from(std::env::var_os("STEVE_TEST_RELEASE_NODE").expect("release fixture"));
+        let home = tempfile::tempdir().unwrap();
+        // Reaching its loopback connection proves LocalNode::open succeeded in that binary.
+        let journal = home.path().join("node/local/node.sqlite3");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let schema = include_str!("../../steve-node/src/journal/fixtures/v3.sql");
+        assert_eq!(
+            fixture_sql(
+                &journal,
+                &format!(
+                    "{schema}\nINSERT INTO meta(key,value) VALUES('journal_id',123),('incarnation',0); PRAGMA user_version=3;"
+                )
+            ),
+            3
+        );
+        inert_harness(home.path());
+        let identity = steve_node_wire::Identity::generate().unwrap();
+        identity
+            .save(&home.path().join("node/identity.key"))
+            .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let pairing = serde_json::json!({"hub_url":format!("http://{}",listener.local_addr().unwrap()),
+            "hub_id":"hub-native","node_id":"node-native","pin":null,"loopback":true,"hub_key":null,"name":"test"});
+        std::fs::write(
+            home.path().join("node/node.json"),
+            serde_json::to_vec(&pairing).unwrap(),
+        )
+        .unwrap();
+        let mut old = steve_runtime::testkit::process::Command::new(&binary)
+            .arg("run")
+            .env("HOME", home.path())
+            .env("STEVE_HOME", home.path())
+            .env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut accepted = None;
+        steve_runtime::testkit::eventually_sync(
+            "released v0.5.0 Node opens the retained v3 journal",
+            || {
+                assert!(
+                    old.try_wait().unwrap().is_none(),
+                    "the old reader must start"
+                );
+                if let Ok((socket, _)) = listener.accept() {
+                    accepted = Some(socket);
+                }
+                accepted.is_some()
+            },
+        )
+        .await;
+        assert_eq!(unsafe { libc::kill(old.id() as i32, libc::SIGTERM) }, 0);
+        steve_runtime::testkit::eventually_sync("released old Node stops", || {
+            old.try_wait().unwrap().is_some()
+        })
+        .await;
+        assert!(old.wait().unwrap().success());
+        assert_eq!(fixture_sql(&journal, ""), 3);
+        // Reproduce the original unguarded open, using the actual migration rather than a
+        // version-number stand-in. The new guarded dial path cannot do this before its receipt.
+        {
+            let mut cfg = crate::config::Home(home.path().into())
+                .node_config(NodeId::new("node-native").unwrap())
+                .unwrap();
+            cfg.acp.user_home = home.path().into();
+            cfg.acp.codex_home = home.path().join("codex");
+            cfg.acp.node = "/usr/bin/false".into();
+            cfg.acp.claude_executable = "/usr/bin/false".into();
+            let node = LocalNode::open(cfg).unwrap();
+            node.shutdown().await;
+            drop(node);
+        }
+        assert_eq!(fixture_sql(&journal, ""), 4);
+        let mut old_v4 = steve_runtime::testkit::process::Command::new(&binary)
+            .arg("run")
+            .env("HOME", home.path())
+            .env("STEVE_HOME", home.path())
+            .env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        steve_runtime::testkit::eventually_sync(
+            "released old Node rejects the migrated journal",
+            || old_v4.try_wait().unwrap().is_some(),
+        )
+        .await;
+        assert!(!old_v4.wait().unwrap().success());
+        assert_eq!(fixture_sql(&journal, ""), 4);
     }
 }
