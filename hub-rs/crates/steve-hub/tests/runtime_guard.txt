@@ -88,6 +88,7 @@ steve-mail/src/sync.rs	timer-loop	sync::Mail::run_jobs	1
 steve-mail/src/sync.rs	timer-loop	sync::Mail::start	1
 steve-modules/src/accounts/connections/pending.rs	ttl-cache	accounts::connections::pending::PendingStates::map	1
 steve-modules/src/accounts/connections/service.rs	timer-loop	accounts::connections::service::Connections::device_start	1
+steve-modules/src/accounts/connections/service.rs	ttl-cache	accounts::connections::service::ConnectionJob::next	1
 steve-modules/src/accounts/connections/service.rs	ttl-cache	accounts::connections::service::Inner::minted	1
 steve-modules/src/caps/a2a.rs	timer-loop	caps::a2a::Capabilities::a2a_call	1
 steve-modules/src/vault/use.rs	timer-loop	vault::use::SecretUses::claim	1
