@@ -673,7 +673,8 @@ mod remote_tests {
     #[test]
     fn only_project_less_items_whose_sessions_all_ran_there_go_to_an_active_remote_node() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let cwd = dir.path().join("scratch/i1");
         exec(
@@ -745,7 +746,8 @@ mod bot_tests {
     #[test]
     fn the_steve_dev_bot_binds_in_auto() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, StoreError>(|tx| {
@@ -767,7 +769,8 @@ mod bot_tests {
     #[test]
     fn binding_requires_current_membership_and_enabled_bot_not_its_home_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, StoreError>(|tx| {
@@ -821,7 +824,8 @@ mod bot_tests {
     fn a_binding_starts_in_the_mode_the_legacy_runner_would() {
         use steve_core::yolo::agent::{Level, harness_mode, perm_mode};
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let bots = [
             Some("plan"),
@@ -916,7 +920,8 @@ mod bot_tests {
     #[test]
     fn an_auto_bot_session_binds_to_a_remote_node_in_auto() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, StoreError>(|tx| {
@@ -969,7 +974,8 @@ mod host_tests {
             _ => None,
         })
         .unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         // the rollback: STEVE_NODE_MODE=off builds no Node; neither does an unset mode on a
         // STEVE_NO_RESUME copy
@@ -1111,7 +1117,8 @@ mod host_tests {
             _ => None,
         })
         .unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
         let mut jobs = vec![];
@@ -1237,7 +1244,8 @@ mod host_tests {
             _ => None,
         })
         .unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store.transaction::<_, StoreError>(|tx| {
             tx.execute_batch(

@@ -8,7 +8,7 @@ use steve_store_sqlite::backup::Reason;
 fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     let home = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
-    let db = data.path().join("elsewhere.sqlite3");
+    let db = data.path().join("steve.sqlite3");
     let store = steve_store::Store::open(&db, steve_store::NoPublisher).unwrap();
     let root = home.path().join("backups");
     std::fs::write(home.path().join("steve.env"), "fixture").unwrap();
@@ -54,7 +54,8 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
 fn channel_backup_does_not_acquire_the_legacy_writer_mutex() {
     let home = tempfile::tempdir().unwrap();
     let store =
-        steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
+        steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)
+            .unwrap();
     let port = ChannelBackup::new(home.path().to_owned(), store.path().to_owned());
     let (held, ready) = mpsc::channel();
     let (release, wait) = mpsc::channel();

@@ -218,7 +218,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let keep = seen.clone();
         let store = Store::open(
-            dir.path().join("t.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(move |e| keep.lock().unwrap().push(e)),
         )
         .unwrap();

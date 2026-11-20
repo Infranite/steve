@@ -726,7 +726,7 @@ pub(crate) mod tests {
     pub(crate) async fn fixture(files: Vec<steve_store::FileRef>) -> Host {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(
-            dir.path().join("hub.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(|_| {}),
         )
         .unwrap();

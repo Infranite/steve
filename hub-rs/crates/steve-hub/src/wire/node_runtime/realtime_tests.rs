@@ -22,7 +22,8 @@ struct Collected {
 impl Collected {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         // receipt times come from this clock, so a slow machine cannot push them past `at`
         let clock = Arc::new(FakeClock::new(steve_store::now()));

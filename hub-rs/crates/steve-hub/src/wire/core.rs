@@ -2380,7 +2380,7 @@ mod recovery_tests {
     #[test]
     fn an_unreadable_binding_is_not_bound_for_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         assert!(!super::bound_for_recovery(&store, "s1"));
         store
             .with_conn(|c| Ok(c.execute_batch("DROP TABLE runtime_sessions")?))
@@ -2401,7 +2401,7 @@ mod routed_tests {
     use steve_store::{NoPublisher, Store};
 
     fn routed(dir: &std::path::Path) -> super::RoutedRuntime {
-        let store = Store::open(dir.join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.join("steve.sqlite3"), NoPublisher).unwrap();
         let host = Arc::new(super::HubHost {
             store: store.clone(),
             data_dir: dir.into(),
@@ -2918,7 +2918,7 @@ mod prepared_dir_tests {
 
     fn t() -> T {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         let projects = dir.path().join("projects");
         std::fs::create_dir_all(projects.join("p1")).unwrap();
         let node = steve_node::LocalNode::open(steve_node::NodeConfig {

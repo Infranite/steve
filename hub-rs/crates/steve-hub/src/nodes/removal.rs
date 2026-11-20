@@ -633,7 +633,8 @@ mod tests {
 
     fn fixture(removable: bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .transaction::<_, steve_store::StoreError>(|tx| {

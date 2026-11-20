@@ -9,7 +9,7 @@ use steve_store::{
 const AT: i64 = 1_793_491_200_000;
 fn setup() -> (tempfile::TempDir, Store, String) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(dir.path().join("bill.sqlite"), NoPublisher).unwrap();
+    let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
     // AT is 2026-11-01 00:00 UTC and the queries ask for that day: say so, not the host's zone
     s.settings()
@@ -231,7 +231,7 @@ fn same_model_and_cross_model_retries_reopen_replay_and_rebuild_keep_one_call() 
             .unwrap();
         check(&s);
         drop(s);
-        let s = Store::open(dir.path().join("bill.sqlite"), NoPublisher).unwrap();
+        let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
         assert!(
             !s.stats()
                 .gateway_report(
@@ -547,7 +547,7 @@ fn local_inbox_and_caller_failure_recover_after_projection_failure_and_reopen() 
     })
     .unwrap();
     drop(s);
-    let s = Store::open(dir.path().join("bill.sqlite"), NoPublisher).unwrap();
+    let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.transaction(|tx| {
         tx.execute_batch("DROP TRIGGER fail_projection")?;
         Ok::<_, steve_store::StoreError>(())

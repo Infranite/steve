@@ -21,7 +21,7 @@ struct Case {
 
 fn fixture() -> (tempfile::TempDir, Store, String, String, String) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(dir.path().join("ledger.sqlite"), NoPublisher).unwrap();
+    let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
     s.bots()
         .seed(
@@ -151,7 +151,7 @@ fn same_inputs_match_after_every_durable_restart_and_one_shot_projection() {
                     .unwrap()
             );
             drop(s);
-            s = Store::open(dir.path().join("ledger.sqlite"), NoPublisher).unwrap();
+            s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
             let reports = merged_usage(case.reports[..end].iter().cloned(), &case.fallback_model);
             let raw = Tried::of(Ok(("ok".into(), None)), reports.clone());
             let twice = Tried::of(

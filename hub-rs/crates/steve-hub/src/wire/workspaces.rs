@@ -598,7 +598,8 @@ mod tests {
     /// `remote`: remote Nodes are listened for (a fleet with no Node linked).
     fn local(remote: bool) -> T {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         local_in(dir, store, remote)
     }

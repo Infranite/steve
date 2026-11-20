@@ -846,7 +846,7 @@ fn retry_fixture() -> (
     Arc<Seen>,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
     store.transaction::<_, StoreError>(|tx| {
         tx.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'retry','run','执行',1,1);

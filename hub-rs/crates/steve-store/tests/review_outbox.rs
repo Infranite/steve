@@ -35,7 +35,7 @@ impl Consumer for Probe {
 }
 fn db() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
-    let s = Store::open(d.path().join("review.sqlite3"), NoPublisher).unwrap();
+    let s = Store::open(d.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.with_conn(|c| {
         c.execute_batch("CREATE TABLE review_effects(id TEXT UNIQUE, ws TEXT)")?;
         Ok(())

@@ -624,7 +624,7 @@ mod tests {
     /// A Hub in `root` with its local Node on (commands allowed), the secrets channel connected,
     /// and a session working in `root/work`.
     fn hub_at(root: &std::path::Path) -> T {
-        let store = Store::open(root.join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store = Store::open(root.join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {

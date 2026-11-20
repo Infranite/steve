@@ -9,7 +9,7 @@ const DAY: &str = "2026-11-01";
 
 fn fixture() -> (tempfile::TempDir, Store, String, Vec<String>, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(dir.path().join("ledger.sqlite"), NoPublisher).unwrap();
+    let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
     s.bots()
         .seed(
@@ -168,7 +168,7 @@ fn live_snapshots_final_cancel_restart_and_replay_share_one_total() {
         .unwrap();
     totals(&s, &item, &sessions, 25);
     drop(s);
-    let s = Store::open(dir.path().join("ledger.sqlite"), NoPublisher).unwrap();
+    let s = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     assert!(!s.stats().usage_report(&turns[0], &a, "m", DAY).unwrap());
     // The other session runs concurrently; its report id can be identical without collision.
     s.stats().usage_report(&turns[1], &a, "m", DAY).unwrap();

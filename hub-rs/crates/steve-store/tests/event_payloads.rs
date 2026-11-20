@@ -314,7 +314,9 @@ fn standalone_database_snapshot_contains_every_payload() {
     s.events()
         .add(&id, "tool_call_update", data.clone())
         .unwrap();
-    let snapshot = t.dir.path().join("snapshot.sqlite3");
+    let snapshot_dir = t.dir.path().join("snapshot");
+    std::fs::create_dir(&snapshot_dir).unwrap();
+    let snapshot = snapshot_dir.join("steve.sqlite3");
     s.with_conn(|c| {
         c.execute("VACUUM INTO ?", [snapshot.to_str().unwrap()])?;
         Ok(())

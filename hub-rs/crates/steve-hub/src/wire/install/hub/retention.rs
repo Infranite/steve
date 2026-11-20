@@ -241,7 +241,7 @@ mod tests {
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
         assert!(cfg.no_resume);
         let db = steve_store::Store::open(
-            home.path().join("retention.sqlite3"),
+            home.path().join("steve.sqlite3"),
             steve_store::NoPublisher,
         )
         .unwrap();

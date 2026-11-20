@@ -224,7 +224,7 @@ fn legacy_flow_matches_old_store_open() {
     let directory =
         std::env::temp_dir().join(format!("steve-schema-equivalence-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
-    let path = directory.join("legacy.sqlite3");
+    let path = directory.join("steve.sqlite3");
     let store = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
     let c = Connection::open(&path).unwrap();
     equivalent(&legacy(), &c, false);

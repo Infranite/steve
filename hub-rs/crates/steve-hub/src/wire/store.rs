@@ -1001,7 +1001,7 @@ mod event_page_tests {
     #[test]
     fn transcript_entries_are_transparent_and_all_readers_use_bounded_pages() {
         let dir = tempfile::tempdir().unwrap();
-        let store = s::Store::open(dir.path().join("test.sqlite3"), s::NoPublisher).unwrap();
+        let store = s::Store::open(dir.path().join("steve.sqlite3"), s::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let id = store
             .sessions()
@@ -1064,7 +1064,7 @@ mod event_page_tests {
     #[test]
     fn unsupported_formats_are_visible_and_keep_the_page_cursor() {
         let dir = tempfile::tempdir().unwrap();
-        let store = s::Store::open(dir.path().join("test.sqlite3"), s::NoPublisher).unwrap();
+        let store = s::Store::open(dir.path().join("steve.sqlite3"), s::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let id = store
             .sessions()
@@ -1118,7 +1118,7 @@ mod workflow_summary_tests {
     #[test]
     fn state_extras_identify_paused_current_graph_and_ignore_old_cycle_failures() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.sqlite3");
+        let path = dir.path().join("steve.sqlite3");
         let store = s::Store::open(&path, s::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let c = rusqlite::Connection::open(&path).unwrap();

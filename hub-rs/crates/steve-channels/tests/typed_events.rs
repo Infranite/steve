@@ -22,7 +22,7 @@ impl Publisher for Capture {
 fn nudge_uses_each_decisions_workspace_and_discards_rolled_back_events() {
     let dir = tempfile::tempdir().unwrap();
     let capture = Capture::default();
-    let store = Store::open(dir.path().join("store.db"), capture.clone()).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), capture.clone()).unwrap();
     let _audit = digest_audit::Audit(store.clone());
     store.ensure_workspace().unwrap();
     store.transaction(|tx| {
