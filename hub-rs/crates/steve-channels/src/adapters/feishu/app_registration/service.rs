@@ -973,3 +973,7 @@ impl Registrations {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/sg21/registration.rs"]
+mod sg21;

@@ -1,0 +1,6023 @@
+[
+  {
+    "name": "schema1/plain",
+    "text": "Header\nplain",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "plain"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/plain",
+    "text": "Header\nplain",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "plain"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/plain",
+    "text": "Header\nplain",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "plain"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/plain",
+    "text": "Header\nplain",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "plain"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/plain",
+    "text": "Header\nplain",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "plain"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/text",
+    "text": "Header\ntext",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "text"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/text",
+    "text": "Header\ntext",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "text"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/text",
+    "text": "Header\ntext",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "text"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/text",
+    "text": "Header\ntext",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "text"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/text",
+    "text": "Header\ntext",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "text"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/md",
+    "text": "Header\nhello @Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "hello @Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/md",
+    "text": "Header\nhello @Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "hello @Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/md",
+    "text": "Header\nhello @Ada",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "hello @Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/md",
+    "text": "Header\nhello @Ada",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "hello @Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/md",
+    "text": "Header\nhello @Ada",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "hello @Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/markdown-inline",
+    "text": "Header\ninline@Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inline@Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/markdown-inline",
+    "text": "Header\ninline@Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inline@Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/markdown-inline",
+    "text": "Header\ninline@Ada",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inline@Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/markdown-inline",
+    "text": "Header\ninline@Ada",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inline@Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/markdown-inline",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/markdown-content",
+    "text": "Header\n**words**",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "**words**"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/markdown-content",
+    "text": "Header\n**words**",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "**words**"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/markdown-content",
+    "text": "Header\n**words**",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "**words**"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/markdown-content",
+    "text": "Header\n**words**",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "**words**"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/markdown-content",
+    "text": "Header\n**words**",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "**words**"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/markdown-fallback",
+    "text": "Header\nfallback",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "fallback"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/markdown-fallback",
+    "text": "Header\nfallback",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "fallback"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/markdown-fallback",
+    "text": "Header\nfallback",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "fallback"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/markdown-fallback",
+    "text": "Header\nfallback",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "fallback"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/markdown-fallback",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/div",
+    "text": "Header\nmain\nfield\n[extra]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "main\nfield"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "extra",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/div",
+    "text": "Header\nmain\nfield\n[extra]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "main\nfield"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "extra",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/div",
+    "text": "Header\nmain\nfield\n[extra]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "main\nfield"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "extra",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/div",
+    "text": "Header\nmain\nfield\n[extra]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "main\nfield"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "extra",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/div",
+    "text": "Header\nmain",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "main"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/notation",
+    "text": "Header\nsmall",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "small"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/notation",
+    "text": "Header\nsmall",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "small"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/notation",
+    "text": "Header\nsmall",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "small"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/notation",
+    "text": "Header\nsmall",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "small"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/notation",
+    "text": "Header\nsmall",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "small"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/note",
+    "text": "Header\nnote []",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "note []"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/note",
+    "text": "Header\nnote []",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "note []"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/note",
+    "text": "Header\nnote []",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "note []"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/note",
+    "text": "Header\nnote []",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "note []"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/note",
+    "text": "Header\nnote []",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "note",
+          "text": "note []"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/hr",
+    "text": "Header\n---",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "hr"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/hr",
+    "text": "Header\n---",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "hr"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/hr",
+    "text": "Header\n---",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "hr"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/hr",
+    "text": "Header\n---",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "hr"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/hr",
+    "text": "Header\n---",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "hr"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/br",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/br",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/br",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/br",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/br",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/heading",
+    "text": "Header\nTitle",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 6,
+          "text": "Title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/heading",
+    "text": "Header\nTitle",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 6,
+          "text": "Title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/heading",
+    "text": "Header\nTitle",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 6,
+          "text": "Title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/heading",
+    "text": "Header\nTitle",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 6,
+          "text": "Title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/heading",
+    "text": "Header\nTitle",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/heading-text",
+    "text": "Header\nsmall title",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 1,
+          "text": "small title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/heading-text",
+    "text": "Header\nsmall title",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 1,
+          "text": "small title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/heading-text",
+    "text": "Header\nsmall title",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 1,
+          "text": "small title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/heading-text",
+    "text": "Header\nsmall title",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 1,
+          "text": "small title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/heading-text",
+    "text": "Header\nsmall title",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "small title"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/columns-buttons",
+    "text": "Header\n[one] [two]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "one",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            },
+            {
+              "text": "two",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/columns-buttons",
+    "text": "Header\n[one] [two]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "one",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            },
+            {
+              "text": "two",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/columns-buttons",
+    "text": "Header\n[one] [two]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "one",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            },
+            {
+              "text": "two",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/columns-buttons",
+    "text": "Header\n[one] [two]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "one",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            },
+            {
+              "text": "two",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/columns-buttons",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/one-column",
+    "text": "Header\none",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "one"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/one-column",
+    "text": "Header\none",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "one"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/one-column",
+    "text": "Header\none",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "one"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/one-column",
+    "text": "Header\none",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "one"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/one-column",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/two-columns",
+    "text": "Header\none\ntwo",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "columns",
+          "columns": [
+            [
+              {
+                "t": "markdown",
+                "text": "one"
+              }
+            ],
+            [
+              {
+                "t": "markdown",
+                "text": "two"
+              }
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/two-columns",
+    "text": "Header\none\ntwo",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "columns",
+          "columns": [
+            [
+              {
+                "t": "markdown",
+                "text": "one"
+              }
+            ],
+            [
+              {
+                "t": "markdown",
+                "text": "two"
+              }
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/two-columns",
+    "text": "Header\none\ntwo",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "columns",
+          "columns": [
+            [
+              {
+                "t": "markdown",
+                "text": "one"
+              }
+            ],
+            [
+              {
+                "t": "markdown",
+                "text": "two"
+              }
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/two-columns",
+    "text": "Header\none\ntwo",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "columns",
+          "columns": [
+            [
+              {
+                "t": "markdown",
+                "text": "one"
+              }
+            ],
+            [
+              {
+                "t": "markdown",
+                "text": "two"
+              }
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/two-columns",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/repeat",
+    "text": "Header\nrepeated",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "repeated"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/repeat",
+    "text": "Header\nrepeated",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "repeated"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/repeat",
+    "text": "Header\nrepeated",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "repeated"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/repeat",
+    "text": "Header\nrepeated",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "repeated"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/repeat",
+    "text": "Header\nrepeated",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "repeated"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/actions-interleaved",
+    "text": "Header\n[before]\nwrite＿＿\n[after]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "before",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        },
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "write＿＿"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "after",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/actions-interleaved",
+    "text": "Header\n[before]\nwrite＿＿\n[after]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "before",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        },
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "write＿＿"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "after",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/actions-interleaved",
+    "text": "Header\n[before]\nwrite＿＿\n[after]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "before",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        },
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "write＿＿"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "after",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/actions-interleaved",
+    "text": "Header\n[before]\nwrite＿＿\n[after]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "before",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        },
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "write＿＿"
+        },
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "after",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/actions-interleaved",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/callback",
+    "text": "Header\n[execute]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "execute",
+              "style": "primary",
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/callback",
+    "text": "Header\n[execute]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "execute",
+              "style": "primary",
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/callback",
+    "text": "Header\n[execute]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "execute",
+              "style": "primary",
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/callback",
+    "text": "Header\n[execute]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "execute",
+              "style": "primary",
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/callback",
+    "text": "Header\n[execute]",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "execute",
+              "style": "primary",
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/open-url",
+    "text": "Header\n[safe](https://example.invalid/card)",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "safe",
+              "style": null,
+              "disabled": false,
+              "callback": false,
+              "url": "https://example.invalid/card"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/open-url",
+    "text": "Header\n[safe](https://example.invalid/card)",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "safe",
+              "style": null,
+              "disabled": false,
+              "callback": false,
+              "url": "https://example.invalid/card"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/open-url",
+    "text": "Header\n[safe](https://example.invalid/card)",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "safe",
+              "style": null,
+              "disabled": false,
+              "callback": false,
+              "url": "https://example.invalid/card"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/open-url",
+    "text": "Header\n[safe](https://example.invalid/card)",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "safe",
+              "style": null,
+              "disabled": false,
+              "callback": false,
+              "url": "https://example.invalid/card"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/open-url",
+    "text": "Header\n[safe]",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "safe",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/unsafe-url",
+    "text": "Header\n[按钮]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "按钮",
+              "style": null,
+              "disabled": true,
+              "callback": false
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/unsafe-url",
+    "text": "Header\n[按钮]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "按钮",
+              "style": null,
+              "disabled": true,
+              "callback": false
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/unsafe-url",
+    "text": "Header\n[按钮]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "按钮",
+              "style": null,
+              "disabled": true,
+              "callback": false
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/unsafe-url",
+    "text": "Header\n[按钮]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "按钮",
+              "style": null,
+              "disabled": true,
+              "callback": false
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/unsafe-url",
+    "text": "Header\n[]",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "buttons",
+          "items": [
+            {
+              "text": "",
+              "style": null,
+              "disabled": false,
+              "callback": true
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/image",
+    "text": "Header\n[图片：alt]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "alt"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/image",
+    "text": "Header\n[图片：alt]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "alt"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/image",
+    "text": "Header\n[图片：alt]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "alt"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/image",
+    "text": "Header\n[图片：alt]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "alt"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/image",
+    "text": "Header\n[图片：图片]",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "图片"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/image-grid",
+    "text": "Header\n[图片：2 张图片]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "2 张图片"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/image-grid",
+    "text": "Header\n[图片：2 张图片]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "2 张图片"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/image-grid",
+    "text": "Header\n[图片：2 张图片]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "2 张图片"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/image-grid",
+    "text": "Header\n[图片：2 张图片]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "image",
+          "alt": "2 张图片"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/image-grid",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/chart",
+    "text": "Header\n[图表：Trend，3 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "Trend",
+          "summary": "3 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/chart",
+    "text": "Header\n[图表：Trend，3 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "Trend",
+          "summary": "3 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/chart",
+    "text": "Header\n[图表：Trend，3 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "Trend",
+          "summary": "3 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/chart",
+    "text": "Header\n[图表：Trend，3 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "Trend",
+          "summary": "3 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/chart",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/chart-object",
+    "text": "Header\n[图表：图表，1 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "图表",
+          "summary": "1 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/chart-object",
+    "text": "Header\n[图表：图表，1 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "图表",
+          "summary": "1 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/chart-object",
+    "text": "Header\n[图表：图表，1 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "图表",
+          "summary": "1 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/chart-object",
+    "text": "Header\n[图表：图表，1 个数据点]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "chart",
+          "title": "图表",
+          "summary": "1 个数据点"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/chart-object",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/audio",
+    "text": "Header\n[音频]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "audio"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/audio",
+    "text": "Header\n[音频]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "audio"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/audio",
+    "text": "Header\n[音频]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "audio"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/audio",
+    "text": "Header\n[音频]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "audio"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/audio",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/video",
+    "text": "Header\n[视频]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "video"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/video",
+    "text": "Header\n[视频]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "video"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/video",
+    "text": "Header\n[视频]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "video"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/video",
+    "text": "Header\n[视频]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "media",
+          "kind": "video"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/video",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/panel",
+    "text": "Header\nMore\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "More",
+          "expanded": true,
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/panel",
+    "text": "Header\nMore\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "More",
+          "expanded": true,
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/panel",
+    "text": "Header\nMore\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "More",
+          "expanded": true,
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/panel",
+    "text": "Header\nMore\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "More",
+          "expanded": true,
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/panel",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inside"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/panel-default",
+    "text": "Header\n详情",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "详情",
+          "expanded": false,
+          "blocks": []
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/panel-default",
+    "text": "Header\n详情",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "详情",
+          "expanded": false,
+          "blocks": []
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/panel-default",
+    "text": "Header\n详情",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "详情",
+          "expanded": false,
+          "blocks": []
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/panel-default",
+    "text": "Header\n详情",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "panel",
+          "title": "详情",
+          "expanded": false,
+          "blocks": []
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/panel-default",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/form",
+    "text": "Header\nName：＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "form",
+          "blocks": [
+            {
+              "t": "control",
+              "kind": "input",
+              "text": "Name：＿＿＿＿"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/form",
+    "text": "Header\nName：＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "form",
+          "blocks": [
+            {
+              "t": "control",
+              "kind": "input",
+              "text": "Name：＿＿＿＿"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/form",
+    "text": "Header\nName：＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "form",
+          "blocks": [
+            {
+              "t": "control",
+              "kind": "input",
+              "text": "Name：＿＿＿＿"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/form",
+    "text": "Header\nName：＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "form",
+          "blocks": [
+            {
+              "t": "control",
+              "kind": "input",
+              "text": "Name：＿＿＿＿"
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/form",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/clickable",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "clickable",
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ],
+          "url": "https://example.invalid/"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/clickable",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "clickable",
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ],
+          "url": "https://example.invalid/"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/clickable",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "clickable",
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ],
+          "url": "https://example.invalid/"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/clickable",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "group",
+          "kind": "clickable",
+          "blocks": [
+            {
+              "t": "markdown",
+              "text": "inside"
+            }
+          ],
+          "url": "https://example.invalid/"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/clickable",
+    "text": "Header\ninside",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "inside"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/person",
+    "text": "Header\nAda",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/person",
+    "text": "Header\nAda",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/person",
+    "text": "Header\nAda",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/person",
+    "text": "Header\nAda",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/person",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/person-fallback",
+    "text": "Header\ndisplay",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "display"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/person-fallback",
+    "text": "Header\ndisplay",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "display"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/person-fallback",
+    "text": "Header\ndisplay",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "display"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/person-fallback",
+    "text": "Header\ndisplay",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "display"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/person-fallback",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/people",
+    "text": "Header\nAda、unknown",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada、unknown"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/people",
+    "text": "Header\nAda、unknown",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada、unknown"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/people",
+    "text": "Header\nAda、unknown",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada、unknown"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/people",
+    "text": "Header\nAda、unknown",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "Ada、unknown"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/people",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/inline",
+    "text": "Header\n[link](https://example.invalid/)",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "[link](https://example.invalid/)"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/inline",
+    "text": "Header\n[link](https://example.invalid/)",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "[link](https://example.invalid/)"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/inline",
+    "text": "Header\n[link](https://example.invalid/)",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "[link](https://example.invalid/)"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/inline",
+    "text": "Header\n[link](https://example.invalid/)",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "[link](https://example.invalid/)"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/inline",
+    "text": "Header\n[link](https://example.invalid/)",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "[link](https://example.invalid/)"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/list",
+    "text": "Header\n3. ordered\n            - nested",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "3. ordered\n            - nested"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/list",
+    "text": "Header\n3. ordered\n            - nested",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "3. ordered\n            - nested"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/list",
+    "text": "Header\n3. ordered\n            - nested",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "3. ordered\n            - nested"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/list",
+    "text": "Header\n3. ordered\n            - nested",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "3. ordered\n            - nested"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/list",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/quote-content",
+    "text": "Header\n> one\n> two",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> one\n> two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/quote-content",
+    "text": "Header\n> one\n> two",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> one\n> two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/quote-content",
+    "text": "Header\n> one\n> two",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> one\n> two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/quote-content",
+    "text": "Header\n> one\n> two",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> one\n> two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/quote-content",
+    "text": "Header\none\ntwo",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "one\ntwo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/quote-elements",
+    "text": "Header\n> quoted",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> quoted"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/quote-elements",
+    "text": "Header\n> quoted",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> quoted"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/quote-elements",
+    "text": "Header\n> quoted",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> quoted"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/quote-elements",
+    "text": "Header\n> quoted",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "> quoted"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/quote-elements",
+    "text": "Header\nquoted",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "quoted"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/code",
+    "text": "Header\n```rust\nlet x = 1;\n```",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "```rust\nlet x = 1;\n```"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/code",
+    "text": "Header\n```rust\nlet x = 1;\n```",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "```rust\nlet x = 1;\n```"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/code",
+    "text": "Header\n```rust\nlet x = 1;\n```",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "```rust\nlet x = 1;\n```"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/code",
+    "text": "Header\n```rust\nlet x = 1;\n```",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "```rust\nlet x = 1;\n```"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/code",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/fallback",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/fallback",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/fallback",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/fallback",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/fallback",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/unknown-text",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/unknown-text",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/unknown-text",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/unknown-text",
+    "text": "Header\nkept",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": "kept"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/unknown-text",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/unknown-children",
+    "text": "Header\nchild",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "child"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/unknown-children",
+    "text": "Header\nchild",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "child"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/unknown-children",
+    "text": "Header\nchild",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "child"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/unknown-children",
+    "text": "Header\nchild",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "child"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/unknown-children",
+    "text": "Header\nchild",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "child"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/unknown-empty",
+    "text": "Header\n[不支持的卡片内容]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": ""
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/unknown-empty",
+    "text": "Header\n[不支持的卡片内容]",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": ""
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/unknown-empty",
+    "text": "Header\n[不支持的卡片内容]",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": ""
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/unknown-empty",
+    "text": "Header\n[不支持的卡片内容]",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "unknown",
+          "tag": "future_widget",
+          "text": ""
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/unknown-empty",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/table",
+    "text": "Header\n| A |\n|---|\n| one |\n| two |",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "table",
+          "columns": [
+            "A"
+          ],
+          "rows": [
+            [
+              "one"
+            ],
+            [
+              "two"
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/table",
+    "text": "Header\n| A |\n|---|\n| one |\n| two |",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "table",
+          "columns": [
+            "A"
+          ],
+          "rows": [
+            [
+              "one"
+            ],
+            [
+              "two"
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/table",
+    "text": "Header\n| A |\n|---|\n| one |\n| two |",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "table",
+          "columns": [
+            "A"
+          ],
+          "rows": [
+            [
+              "one"
+            ],
+            [
+              "two"
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/table",
+    "text": "Header\n| A |\n|---|\n| one |\n| two |",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "table",
+          "columns": [
+            "A"
+          ],
+          "rows": [
+            [
+              "one"
+            ],
+            [
+              "two"
+            ]
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/table",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/overflow",
+    "text": "Header\n⋮ one、two",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "overflow",
+          "text": "⋮ one、two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/overflow",
+    "text": "Header\n⋮ one、two",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "overflow",
+          "text": "⋮ one、two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/overflow",
+    "text": "Header\n⋮ one、two",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "overflow",
+          "text": "⋮ one、two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/overflow",
+    "text": "Header\n⋮ one、two",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "overflow",
+          "text": "⋮ one、two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/overflow",
+    "text": "Header\n⋮ one、two",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "overflow",
+          "text": "⋮ one、two"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-camel",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-camel",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-camel",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-camel",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-camel",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-snake",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-snake",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-snake",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-snake",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-snake",
+    "text": "Header\n{✓Alpha / ✓Beta}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Alpha / ✓Beta}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-person",
+    "text": "Header\n{✓Ada / ✓unlisted}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Ada / ✓unlisted}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-person",
+    "text": "Header\n{✓Ada / ✓unlisted}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Ada / ✓unlisted}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-person",
+    "text": "Header\n{✓Ada / ✓unlisted}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Ada / ✓unlisted}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-person",
+    "text": "Header\n{✓Ada / ✓unlisted}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Ada / ✓unlisted}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-person",
+    "text": "Header\n{✓Ada / ✓unlisted}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓Ada / ✓unlisted}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/multi-person",
+    "text": "Header\n{✓Ada}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓Ada}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/multi-person",
+    "text": "Header\n{✓Ada}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓Ada}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/multi-person",
+    "text": "Header\n{✓Ada}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓Ada}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/multi-person",
+    "text": "Header\n{✓Ada}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓Ada}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/multi-person",
+    "text": "Header\n{✓Ada}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓Ada}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/multi-static",
+    "text": "Header\n{✓v}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓v}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/multi-static",
+    "text": "Header\n{✓v}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓v}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/multi-static",
+    "text": "Header\n{✓v}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓v}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/multi-static",
+    "text": "Header\n{✓v}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓v}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/multi-static",
+    "text": "Header\n{✓v}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "multi_select",
+          "text": "{✓v}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-placeholder",
+    "text": "Header\n{Pick}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{Pick}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-placeholder",
+    "text": "Header\n{Pick}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{Pick}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-placeholder",
+    "text": "Header\n{Pick}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{Pick}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-placeholder",
+    "text": "Header\n{Pick}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{Pick}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-placeholder",
+    "text": "Header\n{Pick}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{Pick}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-empty",
+    "text": "Header\n{请选择}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{请选择}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-empty",
+    "text": "Header\n{请选择}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{请选择}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-empty",
+    "text": "Header\n{请选择}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{请选择}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-empty",
+    "text": "Header\n{请选择}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{请选择}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-empty",
+    "text": "Header\n{请选择}",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{请选择}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/select-images",
+    "text": "Header\n{2 张图片可选}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select_img",
+          "text": "{2 张图片可选}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/select-images",
+    "text": "Header\n{2 张图片可选}",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select_img",
+          "text": "{2 张图片可选}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/select-images",
+    "text": "Header\n{2 张图片可选}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select_img",
+          "text": "{2 张图片可选}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/select-images",
+    "text": "Header\n{2 张图片可选}",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "select_img",
+          "text": "{2 张图片可选}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/select-images",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/input-default",
+    "text": "Header\nName：Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/input-default",
+    "text": "Header\nName：Ada",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/input-default",
+    "text": "Header\nName：Ada",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/input-default",
+    "text": "Header\nName：Ada",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/input-default",
+    "text": "Header\nName：Ada",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：Ada"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/input-camel",
+    "text": "Header\nvalue",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "value"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/input-camel",
+    "text": "Header\nvalue",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "value"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/input-camel",
+    "text": "Header\nvalue",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "value"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/input-camel",
+    "text": "Header\nvalue",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "value"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/input-camel",
+    "text": "Header\nvalue",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "value"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/input-placeholder",
+    "text": "Header\nName：write＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：write＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/input-placeholder",
+    "text": "Header\nName：write＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：write＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/input-placeholder",
+    "text": "Header\nName：write＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：write＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/input-placeholder",
+    "text": "Header\nName：write＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：write＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/input-placeholder",
+    "text": "Header\nName：write＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "Name：write＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/input-empty",
+    "text": "Header\n＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "＿＿＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/input-empty",
+    "text": "Header\n＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "＿＿＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/input-empty",
+    "text": "Header\n＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "＿＿＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/input-empty",
+    "text": "Header\n＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "＿＿＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/input-empty",
+    "text": "Header\n＿＿＿＿",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "input",
+          "text": "＿＿＿＿"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/date",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/date",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/date",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/date",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/date",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/date-alias",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/date-alias",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/date-alias",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/date-alias",
+    "text": "Header\n📅 2026-11-21",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 2026-11-21"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/date-alias",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/time",
+    "text": "Header\n🕐 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/time",
+    "text": "Header\n🕐 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/time",
+    "text": "Header\n🕐 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/time",
+    "text": "Header\n🕐 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/time",
+    "text": "Header\n🕐 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/datetime",
+    "text": "Header\n📅 2026-11-21 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "datetime",
+          "text": "📅 2026-11-21 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/datetime",
+    "text": "Header\n📅 2026-11-21 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "datetime",
+          "text": "📅 2026-11-21 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/datetime",
+    "text": "Header\n📅 2026-11-21 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "datetime",
+          "text": "📅 2026-11-21 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/datetime",
+    "text": "Header\n📅 2026-11-21 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "datetime",
+          "text": "📅 2026-11-21 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/datetime",
+    "text": "Header\n📅 2026-11-21 12:34",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "datetime",
+          "text": "📅 2026-11-21 12:34"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/time-placeholder",
+    "text": "Header\n🕐 later",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 later"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/time-placeholder",
+    "text": "Header\n🕐 later",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 later"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/time-placeholder",
+    "text": "Header\n🕐 later",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 later"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/time-placeholder",
+    "text": "Header\n🕐 later",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 later"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/time-placeholder",
+    "text": "Header\n🕐 later",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "time",
+          "text": "🕐 later"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/date-empty",
+    "text": "Header\n📅 请选择",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 请选择"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/date-empty",
+    "text": "Header\n📅 请选择",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 请选择"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/date-empty",
+    "text": "Header\n📅 请选择",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 请选择"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/date-empty",
+    "text": "Header\n📅 请选择",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "date",
+          "text": "📅 请选择"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/date-empty",
+    "text": "Header",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/checked",
+    "text": "Header\n[x] done",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[x] done"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/checked",
+    "text": "Header\n[x] done",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[x] done"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/checked",
+    "text": "Header\n[x] done",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[x] done"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/checked",
+    "text": "Header\n[x] done",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[x] done"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/checked",
+    "text": "Header\n[x] done",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[x] done"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema1/unchecked",
+    "text": "Header\n[ ] todo",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[ ] todo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "schema2/unchecked",
+    "text": "Header\n[ ] todo",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[ ] todo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw/unchecked",
+    "text": "Header\n[ ] todo",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[ ] todo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "user_dsl/unchecked",
+    "text": "Header\n[ ] todo",
+    "attachment": {
+      "type": "card",
+      "format": "user_dsl",
+      "schema": 2,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[ ] todo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "flattened/unchecked",
+    "text": "Header\n[ ] todo",
+    "attachment": {
+      "type": "card",
+      "format": "flattened",
+      "schema": null,
+      "title": "Header",
+      "blocks": [
+        {
+          "t": "control",
+          "kind": "checker",
+          "text": "[ ] todo"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "raw-property-aliases",
+    "text": "raw property\n{✓raw option}",
+    "attachment": {
+      "type": "card",
+      "format": "raw",
+      "schema": 2,
+      "title": null,
+      "blocks": [
+        {
+          "t": "note",
+          "text": "raw property"
+        },
+        {
+          "t": "control",
+          "kind": "select",
+          "text": "{✓raw option}"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "i18n-order",
+    "text": "中文\n中",
+    "attachment": {
+      "type": "card",
+      "format": "schema",
+      "schema": 1,
+      "title": "中文",
+      "blocks": [
+        {
+          "t": "markdown",
+          "text": "中"
+        }
+      ],
+      "truncated": false
+    }
+  }
+]
