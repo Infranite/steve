@@ -165,14 +165,12 @@ steve-hub	crates/steve-hub/src/wire/outbox.rs	cognitive_complexity	31
 steve-hub	crates/steve-hub/src/wire/outside_mcp.rs	too_many_lines	138
 steve-hub	crates/steve-hub/src/wire/research.rs	too_many_lines	147,113
 steve-hub	crates/steve-hub/src/wire/tool_service.rs	cognitive_complexity	33
-steve-install	crates/steve-install/src/main.rs	cognitive_complexity	50
-steve-install	crates/steve-install/src/main.rs	too_many_lines	315
 steve-install	crates/steve-install/src/output.rs	cognitive_complexity	100
 steve-install	crates/steve-install/src/output.rs	too_many_lines	230
 steve-install	crates/steve-install/src/release.rs	too_many_lines	149
 steve-install	crates/steve-install/src/service.rs	too_many_lines	120
-steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	71,34,28
-steve-install	crates/steve-install/src/setup.rs	too_many_lines	401,143,114
+steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	34,28
+steve-install	crates/steve-install/src/setup.rs	too_many_lines	143,114
 steve-install	crates/steve-install/src/setup/reconfigure.rs	cognitive_complexity	30
 steve-install	crates/steve-install/src/setup/reconfigure.rs	too_many_lines	114,110
 steve-install	crates/steve-install/src/signing.rs	too_many_lines	154
