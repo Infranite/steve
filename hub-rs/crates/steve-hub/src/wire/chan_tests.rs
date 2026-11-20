@@ -27,6 +27,7 @@ use steve_modules::testkit::{ME, WS, caller};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 use steve_modules::{Modules, Registry};
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 /// The models of the gateway: `tool` reaches for a tool on the chat answer, `next` would answer it.
 /// Every call is recorded as (model, what it was).
@@ -300,12 +301,10 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         .unwrap();
     // a reply drafted for someone else's message is no hand-off: its model reached for a tool,
     // the next model wrote it
-    for _ in 0..500 {
-        if models.answers().len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually_sync("both fallback model answers are recorded", || {
+        models.answers().len() >= 2
+    })
+    .await;
     assert_eq!(models.answers(), ["tool", "next"]);
     models.calls.lock().unwrap().clear();
     let items = || count(&store, "SELECT count(*) FROM items");
@@ -319,12 +318,7 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         )
         .await
         .unwrap();
-    for _ in 0..500 {
-        if items() > before {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    eventually_sync("the trigger handoff creates its item", || items() > before).await;
     // what else would follow (a second hand-off, a late answer) has had its time
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(items(), before + 1, "exactly one item");
@@ -425,23 +419,25 @@ async fn run_research(h: &ChannelFixture) -> steve_store::Message {
         .await
         .unwrap();
     let conv = steve_channels::conversations::conv_space(&inbound.space_id);
-    for _ in 0..500 {
-        if let Some(m) = h
+    let mut reply = None;
+    let diagnostic = on_timeout(|| async {
+        format!(
+            "research reply never settled: {:?}",
+            h.store.messages().list(WS, &conv, 50).unwrap()
+        )
+    });
+    eventually_sync(diagnostic, || {
+        reply = h
             .store
             .messages()
             .list(WS, &conv, 50)
             .unwrap()
             .into_iter()
-            .find(|m| m.author == "steve" && m.meta.get("chan_out").is_some())
-        {
-            return m;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!(
-        "research reply never settled: {:?}",
-        h.store.messages().list(WS, &conv, 50).unwrap()
-    );
+            .find(|m| m.author == "steve" && m.meta.get("chan_out").is_some());
+        reply.is_some()
+    })
+    .await;
+    reply.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]

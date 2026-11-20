@@ -54,17 +54,13 @@ async fn a_linked_node_is_sampled_with_its_round_trip() {
 async fn a_remote_disk_short_of_space_is_said_once_per_episode() {
     let h = Hub::start().await;
     let (_id, node) = h.paired("u1").await;
-    let put = |free: u64| {
+    let mut sample_at = steve_hub::nodes::now();
+    let mut put = |free: u64| {
+        sample_at += 1;
         let data = serde_json::json!({"at": 1, "roots": [{"root": "r", "display": "~/code", "free": free, "total": 100u64 << 30}], "sessions": 0}).to_string();
         h.store
             .transaction(|tx| {
-                steve_store::nodes::vitals_put(
-                    tx,
-                    node.as_str(),
-                    steve_hub::nodes::now(),
-                    None,
-                    &data,
-                )
+                steve_store::nodes::vitals_put(tx, node.as_str(), sample_at, None, &data)
             })
             .unwrap();
     };
@@ -74,10 +70,8 @@ async fn a_remote_disk_short_of_space_is_said_once_per_episode() {
     vitals::warn_low_disks(&h.store, low).await;
     vitals::warn_low_disks(&h.store, low).await;
     assert_eq!(notices(), 1, "once");
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     put(50 << 30);
     vitals::warn_low_disks(&h.store, low).await;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     put(1 << 30);
     vitals::warn_low_disks(&h.store, low).await;
     assert_eq!(notices(), 2, "again after it had room");

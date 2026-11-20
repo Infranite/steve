@@ -1202,15 +1202,21 @@ async fn a_node_session_shows_its_status_and_harness_id() {
 
 /// Polls the upgrade drain (`POST`, as `ops/local-release.py` does) until it reports `ready`.
 async fn drained(h: &Home, token: &str, secs: u64) -> Option<Value> {
-    let end = std::time::Instant::now() + Duration::from_secs(secs);
-    while std::time::Instant::now() < end {
-        let d = drain(h, "POST", token).await;
-        if d["ready"] == true {
-            return Some(d);
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    None
+    let observed = std::sync::Mutex::new(None);
+    tokio::time::timeout(
+        Duration::from_secs(secs),
+        steve_runtime::testkit::eventually("the upgrade drain is ready", || async {
+            let d = drain(h, "POST", token).await;
+            let ready = d["ready"] == true;
+            if ready {
+                *observed.lock().unwrap() = Some(d);
+            }
+            ready
+        }),
+    )
+    .await
+    .ok()?;
+    observed.into_inner().unwrap()
 }
 
 /// The upgrade drain waits for Node work (L3, D1): a running turn, and a turn waiting for a

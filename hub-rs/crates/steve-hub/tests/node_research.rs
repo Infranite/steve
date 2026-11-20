@@ -894,9 +894,18 @@ async fn stop_and_shutdown_end_the_harness() {
     let r = request(&w, "tr_s", "default", &hanging("慢慢读"));
     let stop = r.stop.clone();
     let a = node.adapter.clone();
-    let run = tokio::spawn(async move { a.research(r, &Seen::default()).await });
+    let seen = Arc::new(Seen::default());
+    let during_run = seen.clone();
+    let run = tokio::spawn(async move { a.research(r, &*during_run).await });
     let pid = w.pid().await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    eventually_sync("the partial draft reaches the caller before Stop", || {
+        seen.text
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.starts_with("写到一半"))
+    })
+    .await;
     stop.store(true, Ordering::SeqCst);
     let out = tokio::time::timeout(Duration::from_secs(20), run)
         .await

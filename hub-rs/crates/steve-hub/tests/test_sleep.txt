@@ -40,7 +40,7 @@ steve-hub/src/nodes/removal.rs	1
 steve-hub/src/nodes/upgrade.rs	2
 steve-hub/src/plugins/run.rs	1
 steve-hub/src/upgrades/tests.rs	4
-steve-hub/src/wire/chan_tests.rs	4
+steve-hub/src/wire/chan_tests.rs	1
 steve-hub/src/wire/core.rs	2
 steve-hub/src/wire/diagnostics.rs	1
 steve-hub/src/wire/flow_cmd.rs	4
@@ -58,7 +58,7 @@ steve-hub/tests/item_actions.rs	1
 steve-hub/tests/modules.rs	6
 steve-hub/tests/n2_acceptance.rs	1
 steve-hub/tests/node_devices.rs	1
-steve-hub/tests/node_e2e.rs	10
+steve-hub/tests/node_e2e.rs	9
 steve-hub/tests/node_faults.rs	7
 steve-hub/tests/node_harness/mod.rs	2
 steve-hub/tests/node_install.rs	5
@@ -66,16 +66,12 @@ steve-hub/tests/node_ledger.rs	2
 steve-hub/tests/node_pairing.rs	2
 steve-hub/tests/node_perf.rs	4
 steve-hub/tests/node_real.rs	6
-steve-hub/tests/node_research.rs	1
 steve-hub/tests/node_runtime.rs	32
-steve-hub/tests/node_tailcat.rs	1
-steve-hub/tests/node_vitals.rs	2
 steve-hub/tests/outbox_wired.rs	2
 steve-hub/tests/recovery_ready.rs	5
 steve-hub/tests/review_jobs.rs	11
 steve-hub/tests/stream_resume.rs	1
 steve-hub/tests/thread_routing_api.rs	5
-steve-hub/tests/updates_api.rs	1
 steve-hub/tests/wired/mod.rs	4
 steve-hub/tests/workspaces_api.rs	1
 steve-hub/tests/yolo_e2e.rs	4
@@ -99,7 +95,7 @@ steve-modules/tests/vault_use.rs	3
 steve-node-cli/src/dial.rs	1
 steve-node-cli/src/remove.rs	3
 steve-node-wire/tests/common/mod.rs	1
-steve-node-wire/tests/wire_faults.rs	12
+steve-node-wire/tests/wire_faults.rs	1
 steve-node/src/harness_login.rs	1
 steve-node/src/procs.rs	3
 steve-node/tests/exec.rs	6

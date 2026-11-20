@@ -3,8 +3,6 @@
 
 mod node_harness;
 
-use std::time::Duration;
-
 use node_harness::*;
 use serde_json::{Value, json};
 use steve_hub::nodes::tailcat::{self, Tailcat};
@@ -151,17 +149,15 @@ async fn the_owner_puts_the_node_routes_and_only_them_behind_tailcat() {
     )
     .await;
     assert_eq!((s, v["enabled"].clone()), (200, json!(false)));
-    let mut closed = false;
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_err()
-        {
-            closed = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let closed = steve_runtime::testkit::eventually(
+        "the Node-only listener ends after switch-off",
+        || async {
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+        },
+    )
+    .await;
     assert!(closed, "the Node-only listener outlived the switch");
     let (s, _) = call(
         &h,
