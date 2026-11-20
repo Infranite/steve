@@ -668,6 +668,7 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
     );
     cb.payload = json!({ "claim": "CL-OTHER" });
     e.flow.ingest(WS, None, cb).await.unwrap();
+    // Negative window: a nonmatching callback must not wake the waiting run later.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(run_status(&e, &run), "waiting");
     // the right one does
@@ -1195,21 +1196,22 @@ async fn dry_runs_from_an_event_keep_it_and_history_filters_them() {
     assert_eq!(st, 400, "{v}");
 }
 
-/// Holds the store's writer on another thread for `ms`; returns once it is held.
-fn hold_writer(e: &FlowEnv, ms: u64) -> std::thread::JoinHandle<()> {
+/// Holds the store's writer until the caller releases it; returns once it is held.
+fn hold_writer(e: &FlowEnv) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
     let store = e.flow.store().clone();
     let (held, rx) = std::sync::mpsc::channel();
+    let (release, resumed) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
         store
             .transaction(|_| -> steve_store::Result<()> {
                 held.send(()).unwrap();
-                std::thread::sleep(Duration::from_millis(ms));
+                resumed.recv().unwrap();
                 Ok(())
             })
             .unwrap();
     });
     rx.recv().unwrap();
-    t
+    (release, t)
 }
 
 #[tokio::test]
@@ -1218,7 +1220,7 @@ async fn an_ingest_given_up_on_mid_write_still_drives_its_runs() {
     let id = create_flow(&e, "邮件分诊", r1()).await;
     enable(&e, &id).await;
     // the caller stops waiting (a poll timeout, a dropped hook request) while the write waits
-    let holder = hold_writer(&e, 300);
+    let (release, holder) = hold_writer(&e);
     let ev = mail(
         "cut",
         "GitHub：PR #12 新评论",
@@ -1226,6 +1228,7 @@ async fn an_ingest_given_up_on_mid_write_still_drives_its_runs() {
     );
     let r = tokio::time::timeout(Duration::from_millis(50), e.flow.ingest(WS, None, ev)).await;
     assert!(r.is_err(), "the ingest was cut off");
+    release.send(()).unwrap();
     holder.join().unwrap();
     // the commit landed and the work after it ran: the run is driven and the event settled
     eventually_sync(

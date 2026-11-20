@@ -926,6 +926,7 @@ async fn connecting_starts_the_long_connection_and_syncs_chats_without_a_restart
             ws: WS.into(),
         },
     ));
+    // Negative window: a repeated channel event must not open a delayed second websocket.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_connects_total(), 1);
 
@@ -1117,14 +1118,15 @@ async fn fake_device_codes_can_be_approved_over_http() {
     let body: Value = r.json().await.expect("json");
     assert_eq!(body["user_code"], v["user_code"]);
     let path = format!("/channels/feishu/device/{}", s(&v["id"]));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&api, &me, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&api, &me, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     // a code that is not pending any more
     let r = http

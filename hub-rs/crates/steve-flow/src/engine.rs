@@ -1176,8 +1176,8 @@ mod tests {
     /// limit, while the writer itself is free for the end of the run.
     #[test]
     fn a_dry_run_cut_off_mid_write_waits_for_the_write_before_it_ends() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .start_paused(true)
             .max_blocking_threads(1)
             .enable_all()
             .build()
@@ -1216,14 +1216,34 @@ mod tests {
             .store()
             .transaction(|tx| open_run(tx, &f, "dry_run", ctx, None, true, None, 0, now))
             .unwrap();
-        let busy = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(300)));
-        drive_dry(&e.flow, &id, Duration::from_millis(50))
-            .await
-            .unwrap();
+        let (release, resumed) = std::sync::mpsc::channel();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let busy = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            resumed.recv().unwrap();
+        });
+        ready.await.unwrap();
+        let driven = drive_dry(&e.flow, &id, Duration::from_millis(50));
+        tokio::pin!(driven);
+        // Poll once to register the deadline and queue the write behind the occupied pool.
+        std::future::poll_fn(|cx| {
+            let _ = std::future::Future::poll(driven.as_mut(), cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::time::advance(Duration::from_millis(300)).await;
+        // Observe the timeout while the pool remains blocked, before allowing the write to land.
+        std::future::poll_fn(|cx| {
+            let _ = std::future::Future::poll(driven.as_mut(), cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        driven.await.unwrap();
         // the cut-off step landed before the run was ended, and nothing lands after
         let at_end = steps(&e, &id);
         busy.await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
         assert_eq!(at_end, 1);
         assert_eq!(steps(&e, &id), at_end);
         let run = e

@@ -590,16 +590,17 @@ async fn matching_triggers_open_runs_and_the_event_settles() {
     assert!(event_ids.iter().all(|x| *x == id));
 
     // the graphs are only a trigger: both runs end without a result, so the event is `recorded`
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("both triggered graphs settle as recorded", || async {
         let (_, v) = get(&e, ME, &format!("/signals/{id}")).await;
-        if v["outcome"] == "recorded" && v["runs"][1]["status"] == "done" {
-            assert_eq!(v["runs"].as_array().unwrap().len(), 2);
-            assert_eq!(v["flow"]["name"], "邮件分诊");
-            return;
-        }
-    }
-    panic!("event never settled");
+        let ready = v["outcome"] == "recorded" && v["runs"][1]["status"] == "done";
+        *last.lock().unwrap() = v;
+        ready
+    })
+    .await;
+    let v = last.into_inner().unwrap();
+    assert_eq!(v["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(v["flow"]["name"], "邮件分诊");
 }
 
 #[tokio::test]
@@ -737,18 +738,17 @@ async fn waiting_event_nodes_are_found() {
     quiet.actor = None;
     quiet.wake = false;
     ingest::ingest(&flow, WS, Some(&con), quiet).await.unwrap();
+    // Negative window: the muted event must not enqueue a delayed resume callback.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(spy.0.lock().unwrap().is_empty(), "not woken");
     // `flow` has no adapters: the type defaults are “on”
     let mut ev = FakeEventAdapter::event("mail.reply", "m", "INBOX", "回复");
     ev.actor = None;
     let r = ingest::ingest(&flow, WS, Some(&con), ev).await.unwrap();
-    for _ in 0..50 {
-        if !spy.0.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the matching event resumes its wait node", || {
+        !spy.0.lock().unwrap().is_empty()
+    })
+    .await;
     assert_eq!(
         *spy.0.lock().unwrap(),
         vec![("run_w".into(), "w".into(), r.id().unwrap().to_string())]
@@ -875,6 +875,9 @@ async fn signal_events_are_coalesced() {
             .unwrap()
             .to_string();
     }
+    // Freeze only after the real ingest writes completed. The existing observation window now
+    // runs in virtual time, visiting intermediate timer deadlines rather than jumping past them.
+    tokio::time::pause();
     tokio::time::sleep(signals::COALESCE + Duration::from_millis(200)).await;
     let sig: Vec<BusEvent> = e
         .env

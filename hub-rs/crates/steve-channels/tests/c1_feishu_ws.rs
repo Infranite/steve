@@ -164,13 +164,18 @@ async fn start(h: &H) -> LongConnection {
 /// its event and its outcome is written after that, so a query joining them waits for both.
 async fn row(h: &H, sql: &str, p: &str) -> Vec<Value> {
     let t0 = std::time::Instant::now();
-    loop {
-        if let Some(r) = q(h, sql, p).into_iter().next() {
-            return r;
+    let mut found = None;
+    steve_runtime::testkit::eventually_sync(format!("{sql}: row for {p}"), || {
+        found = q(h, sql, p).into_iter().next();
+        if found.is_some() {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "{sql}: no row for {p}");
+            false
         }
-        assert!(t0.elapsed() < T, "{sql}: no row for {p}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await;
+    found.unwrap()
 }
 
 const MSGS: &str = "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in'";
@@ -268,6 +273,19 @@ async fn group_mention_over_the_long_connection() {
 
     // a repeat of the same event_id: acked, processed once
     assert!(h.fake.ws_redeliver(&id));
+    steve_runtime::testkit::eventually_sync(
+        "the second delivery is acknowledged before the duplicate observation window",
+        || {
+            h.fake
+                .ws_deliveries_of(&id)
+                .iter()
+                .filter(|d| d.ack.is_some())
+                .count()
+                >= 2
+        },
+    )
+    .await;
+    // Negative window: an acknowledged redelivery must not produce a delayed duplicate row.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(h.fake.ws_deliveries_of(&id).len(), 2);
     assert_eq!(n(&h, MSGS), 1);
@@ -278,17 +296,22 @@ async fn group_mention_over_the_long_connection() {
     let lc = start(&h).await;
     assert!(h.fake.ws_redeliver(&id));
     let t0 = std::time::Instant::now();
-    while h
-        .fake
-        .ws_deliveries_of(&id)
-        .iter()
-        .filter(|d| d.ack.is_some())
-        .count()
-        < 3
-    {
-        assert!(t0.elapsed() < T, "third delivery acked");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the third delivery is acknowledged", || {
+        if h.fake
+            .ws_deliveries_of(&id)
+            .iter()
+            .filter(|d| d.ack.is_some())
+            .count()
+            >= 3
+        {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "third delivery acked");
+            false
+        }
+    })
+    .await;
+    // Negative window: an acknowledged redelivery must not produce a delayed duplicate row.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(n(&h, MSGS), 1);
     assert_eq!(n(&h, EVENTS), 1);
@@ -390,10 +413,15 @@ async fn the_bot_run_reports_the_connection_healthy_once_connected() {
     let (_tx, rx) = tokio::sync::mpsc::channel(16);
     drop(rt.start(rx));
     let t0 = std::time::Instant::now();
-    while status(&h) != json!("ok") {
-        assert!(t0.elapsed() < T, "still {}", status(&h));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the reauthorized connection becomes healthy", || {
+        if status(&h) == json!("ok") {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "still {}", status(&h));
+            false
+        }
+    })
+    .await;
     let fails = q(
         &h,
         "SELECT json_extract(health, '$.fails') FROM connections WHERE id = ?",

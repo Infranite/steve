@@ -322,12 +322,18 @@ async fn space_info_failure_falls_back_to_the_payload() {
 #[tokio::test(flavor = "multi_thread")]
 async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     let h = setup();
-    push(&h, FakeChannel::message("G1", "m0", "ualice", "hi")).await;
+    h.env.clock.advance_to(steve_store::now());
+    let message = |space: &str, id: &str, from: &str, text: &str| {
+        let mut m = FakeChannel::message(space, id, from, text);
+        m.created = h.env.clock.advance(1);
+        m
+    };
+    push(&h, message("G1", "m0", "ualice", "hi")).await;
 
     // the connection's own account
     let own = push(
         &h,
-        FakeChannel::message("G1", "m1", FakeChannel::BOT, "我是机器人自己发的"),
+        message("G1", "m1", FakeChannel::BOT, "我是机器人自己发的"),
     )
     .await;
     assert_eq!(own.next, Next::Own);
@@ -349,7 +355,7 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     );
 
     // another bot: only recorded …
-    let mut m = FakeChannel::message("G1", "m2", "umonitor", "【监控】CPU 90%");
+    let mut m = message("G1", "m2", "umonitor", "【监控】CPU 90%");
     m.sender.is_bot = true;
     let other = push(&h, m).await;
     assert_eq!(other.next, Next::Record(LABEL_BOT));
@@ -386,15 +392,15 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    let mut m = FakeChannel::message("G1", "m3", "umonitor", "【监控】恢复");
+    let mut m = message("G1", "m3", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
     // … but between two people's messages a bot gets one answer: once Steve answered it, the bot's next
     // messages (a reply to Steve or a new @) are only recorded, so two bots never answer each other forever
     // a draft waiting for approval is no answer yet
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    h.env.clock.advance(5);
     let out = |id: &str, status: &str| {
-        let at = steve_store::now();
+        let at = h.env.modules.clock.now();
         h.env
             .store()
             .transaction(|c| -> Result<(), steve_store::StoreError> {
@@ -410,7 +416,7 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
     };
     out("draft1", "draft");
     out("pending1", "pending");
-    let mut m = FakeChannel::message("G1", "m3b", "umonitor", "【监控】仍在恢复");
+    let mut m = message("G1", "m3b", "umonitor", "【监控】仍在恢复");
     m.sender.is_bot = true;
     assert_eq!(
         push(&h, m).await.next,
@@ -418,14 +424,14 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         "a draft, or a message not sent yet, is no answer"
     );
     // a message Steve sent (here a flow's, no reply reference) is
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    h.env.clock.advance(5);
     out("steve1", "sent");
     let answered = Next::Record(steve_channels::inbound::LABEL_BOT_ANSWERED);
-    let mut m = FakeChannel::message("G1", "m4", "umonitor", "收到");
+    let mut m = message("G1", "m4", "umonitor", "收到");
     m.sender.is_bot = true;
     m.reply_to = Some("fm_steve1".into());
     assert_eq!(push(&h, m).await.next, answered);
-    let mut m = FakeChannel::message("G1", "m5", "umonitor", "【监控】又告警了");
+    let mut m = message("G1", "m5", "umonitor", "【监控】又告警了");
     m.sender.is_bot = true;
     assert_eq!(
         push(&h, m).await.next,
@@ -433,10 +439,10 @@ async fn own_bot_messages_are_not_processed_other_bots_only_recorded() {
         "a new message, no reply: still one answer"
     );
     // a person speaks: the bot may be answered again
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    let p = push(&h, FakeChannel::message("G1", "m6", "ualice", "看下")).await;
+    h.env.clock.advance(5);
+    let p = push(&h, message("G1", "m6", "ualice", "看下")).await;
     assert_eq!(p.next, Next::Handle);
-    let mut m = FakeChannel::message("G1", "m7", "umonitor", "【监控】恢复");
+    let mut m = message("G1", "m7", "umonitor", "【监控】恢复");
     m.sender.is_bot = true;
     assert_eq!(push(&h, m).await.next, Next::Handle);
 }

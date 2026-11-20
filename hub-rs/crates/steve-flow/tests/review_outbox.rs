@@ -77,12 +77,10 @@ async fn committed_wait_wakeup_recovers_without_after_commit() {
         )
         .await
         .unwrap();
-    for _ in 0..100 {
-        if q::<i64>(&e, "SELECT count(*) FROM flow_runs WHERE status='waiting'") == 1 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the committed run reaches waiting", || {
+        q::<i64>(&e, "SELECT count(*) FROM flow_runs WHERE status='waiting'") == 1
+    })
+    .await;
     assert_eq!(q::<i64>(&e, "SELECT count(*) FROM flow_waits"), 1);
     let ev = event(&e, WS);
     apply_without_after(&e, &ev);

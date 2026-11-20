@@ -779,15 +779,23 @@ async fn pollers_start_for_connections_with_receive_and_stop() {
     assert_eq!(all.start_all().await, 0, "already running");
     // the first round runs at once
     let t = std::time::Instant::now();
-    while count(
-        &h,
-        "SELECT count(*) FROM chan_cursors WHERE connection_id = ?",
-        &h.self_con,
-    ) < MY_CHATS as i64
-    {
-        assert!(t.elapsed() < Duration::from_secs(10), "no first round");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "all self-poll cursors finish their first round",
+        || {
+            if count(
+                &h,
+                "SELECT count(*) FROM chan_cursors WHERE connection_id = ?",
+                &h.self_con,
+            ) >= MY_CHATS as i64
+            {
+                true
+            } else {
+                assert!(t.elapsed() < Duration::from_secs(10), "no first round");
+                false
+            }
+        },
+    )
+    .await;
     assert_eq!(all.running().await, vec![h.self_con.clone()]);
     assert!(all.stop(&h.self_con).await);
     assert!(all.running().await.is_empty());

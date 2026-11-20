@@ -724,8 +724,12 @@ async fn a_revoked_token_needs_reauthorization_without_a_reconnect_loop() {
     let (rt, tx) = h.runtime();
     eventually_sync("reauth", || h.status(&id) == "reauth").await;
     h.publish(&tx);
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    eventually_sync("the revoked connection's run has stopped", || {
+        rt.running().is_empty()
+    })
+    .await;
     let refused = h.fake.with(|w| w.refused_upgrades);
+    // Negative window: once the revoked run stops, prove no later redial occurs.
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
         h.fake.with(|w| w.refused_upgrades),

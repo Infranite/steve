@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use axum::Router;
 use axum::body::Bytes;

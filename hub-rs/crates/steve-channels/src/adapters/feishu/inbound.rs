@@ -1003,7 +1003,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn worker_keeps_chat_order_but_does_not_wait_on_other_chats() {
         let (done, mut out) = tokio::sync::mpsc::unbounded_channel();
         let gate = Arc::new(tokio::sync::Notify::new());
@@ -1030,7 +1030,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(next(&mut out).await, "b1", "chat B ran while A was busy");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::advance(std::time::Duration::from_millis(50)).await;
         assert!(out.try_recv().is_err(), "a2 waits for a1");
         gate.notify_one();
         assert_eq!(next(&mut out).await, "a1");

@@ -3678,6 +3678,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     decide(&h, &decision_id, "rewrite", "").expect("rewrite");
     undo(&h, &decision_id).expect("undo");
     h.outbox.send_due(&h.ch).await;
+    // Negative window: the queue must not start a delayed rewrite/check after undo or refusal.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(rewrites(), 0);
     assert_eq!(decision_of(&h, &message_id), decision_id);
@@ -3685,13 +3686,11 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     // the queue finds the choice in the store (a restart does not lose it) and rewrites on a task of its own
     h.outbox.send_due(&h.ch).await;
     let mut again = decision_of(&h, &message_id);
-    for _ in 0..200 {
-        if again != decision_id {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    steve_runtime::testkit::eventually_sync("the rewrite creates a new review card", || {
         again = decision_of(&h, &message_id);
-    }
+        again != decision_id
+    })
+    .await;
     assert_ne!(again, decision_id, "a new card");
     assert_eq!(rewrites(), 1);
     nothing_sent(&h);
@@ -5656,7 +5655,8 @@ fn restore_review_permission(h: &H, managed: bool, message: &str) {
 }
 
 async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) {
-    for _ in 0..200 {
+    let mut result = None;
+    steve_runtime::testkit::eventually_sync("the rewrite reopens human review", || {
         let old = h
             .env
             .store()
@@ -5675,11 +5675,14 @@ async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) 
             assert_eq!(d.kind, "approve");
             assert_eq!(d.status, "open");
             assert_eq!(d.result["recovery_review"], true);
-            return (message.into(), decision);
+            result = Some((message.into(), decision));
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("rewrite did not reopen a human review");
+    })
+    .await;
+    result.unwrap()
 }
 
 /// Real Engine -> actual module handler -> Outbox -> adapter: disclosure pass and restored
@@ -6101,7 +6104,8 @@ async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (Strin
         "duplicate answer cannot create a second rewrite"
     );
     h.outbox.send_due(&h.ch).await;
-    for _ in 0..200 {
+    let mut result = None;
+    steve_runtime::testkit::eventually_sync("recovery produces a replacement review draft", || {
         let d = h
             .env
             .store()
@@ -6110,11 +6114,14 @@ async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (Strin
             .unwrap();
         if let Some(next) = d.result["draft_message"].as_str() {
             assert_eq!(status(h, old), "discarded");
-            return (next.into(), decision_of(h, next));
+            result = Some((next.into(), decision_of(h, next)));
+            true
+        } else {
+            false
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("rewrite did not produce a review card");
+    })
+    .await;
+    result.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6817,6 +6824,7 @@ async fn a_draft_you_approved_while_it_was_checked_stays_unchecked() {
         steve_channels::outbound::R_DEALT_FIRST
     );
     h.outbox.send_due(&h.ch).await;
+    // Negative window: the queue must not start a delayed rewrite/check after undo or refusal.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(basis_of(&h, &m).verdict, "unchecked");
     // and one you said no to
@@ -7168,12 +7176,11 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
             queue.send_due(&h.ch).await;
             assert_eq!(status(&h, &next), "draft");
         } else {
-            for _ in 0..200 {
-                if status(&h, &old) == "discarded" {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            steve_runtime::testkit::eventually_sync(
+                "the superseded outbound draft is discarded",
+                || status(&h, &old) == "discarded",
+            )
+            .await;
             assert_eq!(status(&h, &old), "discarded");
             assert_eq!(
                 count(

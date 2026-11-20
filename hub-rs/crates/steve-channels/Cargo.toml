@@ -7,7 +7,7 @@ description = "Channels, external personas and the Feishu adapter"
 
 [features]
 # In-process fake of the Feishu open platform for tests; never used in the Hub binary.
-fake = ["axum/ws"]
+fake = ["axum/ws", "steve-runtime/testkit"]
 
 [[bin]]
 name = "steve-fake-feishu"

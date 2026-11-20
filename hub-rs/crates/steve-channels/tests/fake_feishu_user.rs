@@ -278,7 +278,9 @@ async fn device_flow() {
             true,
         )
         .await;
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(5)).await;
+    tokio::time::resume();
     assert_eq!(
         poll(s(&d["device_code"]).to_string()).await["error"],
         "expired_token"
@@ -445,7 +447,9 @@ async fn send_as_user_needs_scope_and_is_rate_limited() {
     assert_eq!(v["code"], codes::IM_BOT_NOT_IN_CHAT);
 
     // 5 per second per user: the 6th in the window fails, then it recovers.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    tokio::time::resume();
     let mut codes_seen = Vec::new();
     for i in 0..6 {
         let v = u
@@ -454,7 +458,9 @@ async fn send_as_user_needs_scope_and_is_rate_limited() {
         codes_seen.push(v["code"].as_i64().unwrap());
     }
     assert_eq!(codes_seen, [0, 0, 0, 0, 0, codes::IM_SEND_RATE_LIMITED]);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    tokio::time::resume();
     let v = u
         .post(
             &ut,

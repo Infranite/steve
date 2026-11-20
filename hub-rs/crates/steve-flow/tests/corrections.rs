@@ -2,8 +2,6 @@
 //! ignored; undoing the changeset brings the old graph back; correcting an event no flow handled
 //! makes a `correction` flow; “转成事项” makes the event's outcome `item`.
 
-use std::time::Duration;
-
 use serde_json::{Value, json};
 use steve_flow::testkit::FlowEnv;
 use steve_flow::{EventSink, RawEvent};
@@ -52,13 +50,10 @@ fn outcome(e: &FlowEnv, id: &str) -> String {
 }
 
 async fn settled(e: &FlowEnv, id: &str, want: &str) {
-    for _ in 0..100 {
-        if outcome(e, id) == want {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("event {id}: outcome {} (wanted {want})", outcome(e, id));
+    steve_runtime::testkit::eventually_sync(format!("event {id} outcome becomes {want}"), || {
+        outcome(e, id) == want
+    })
+    .await;
 }
 
 /// `t → d (digest)`, enabled.

@@ -606,14 +606,15 @@ async fn user_connects_by_device_code() {
     assert_eq!(s, 404);
 
     assert!(h.fake.device_approve(&code));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&h.api, &me, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&h.api, &me, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     let acc = last["account_id"].as_str().expect("acc");
     let a = one(

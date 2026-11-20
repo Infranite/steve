@@ -183,13 +183,18 @@ async fn push(h: &H, env: Value) -> String {
     let id = h.fake.ws_push_envelope(env);
     h.fake.ws_wait_acked(&id, T).await.expect("acked");
     let t0 = std::time::Instant::now();
-    loop {
-        if let Some(id) = stored_message(h, &ext) {
-            return id;
+    let mut stored = None;
+    steve_runtime::testkit::eventually_sync(format!("message {ext} is stored and linked"), || {
+        stored = stored_message(h, &ext);
+        if stored.is_some() {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "message {ext} never stored and linked");
+            false
         }
-        assert!(t0.elapsed() < T, "message {ext} never stored and linked");
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
+    })
+    .await;
+    stored.unwrap()
 }
 
 /// An envelope of the p2p image fixture with another type and content.
@@ -448,10 +453,15 @@ async fn started(
     let p = path.to_string();
     let req = tokio::spawn(async move { get_on(&api, who, &p).await });
     let t0 = std::time::Instant::now();
-    while h.fake.requests_to(Endpoint::GetResource).len() == before {
-        assert!(t0.elapsed() < T, "the download never reached Feishu");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the resource download reaches Feishu", || {
+        if h.fake.requests_to(Endpoint::GetResource).len() > before {
+            true
+        } else {
+            assert!(t0.elapsed() < T, "the download never reached Feishu");
+            false
+        }
+    })
+    .await;
     req
 }
 

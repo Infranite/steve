@@ -429,14 +429,15 @@ async fn bot_first_then_device_code_merges_too() {
     assert_eq!(st, 200, "{v}");
     assert!(h.fake.device_approve(&s(&v["user_code"])));
     let path = format!("/channels/feishu/device/{}", s(&v["id"]));
-    let mut last = Value::Null;
-    for _ in 0..40 {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = send(&h.api, &me_c, "GET", &path, None).await.1;
-        if last["status"] != "pending" {
-            break;
-        }
-    }
+    let last = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually("device login finishes", || async {
+        let value = send(&h.api, &me_c, "GET", &path, None).await.1;
+        let ready = value["status"] != "pending";
+        *last.lock().unwrap() = value;
+        ready
+    })
+    .await;
+    let last = last.into_inner().unwrap();
     assert_eq!(last["status"], "ok", "{last}");
     assert_eq!(s(&last["account_id"]), first.account_id);
     assert_eq!(

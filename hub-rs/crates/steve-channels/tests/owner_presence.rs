@@ -371,7 +371,7 @@ async fn drafted(h: &H, id: &str) -> (String, String) {
 
 /// Runs the queue until no draft's disclosure check is still running.
 async fn checked(h: &H) {
-    for _ in 0..500 {
+    steve_runtime::testkit::eventually("all draft disclosure checks finish", || async {
         let waiting: i64 = h
             .env
             .store()
@@ -386,12 +386,13 @@ async fn checked(h: &H) {
             })
             .unwrap();
         if waiting == 0 {
-            return;
+            true
+        } else {
+            h.outbox.send_due(&h.ch).await;
+            false
         }
-        h.outbox.send_due(&h.ch).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("a disclosure check did not finish");
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------- gate 1: before drafting

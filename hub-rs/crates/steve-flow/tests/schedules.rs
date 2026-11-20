@@ -767,12 +767,10 @@ async fn run_now_keeps_next_at() {
     assert_eq!(st, 200);
     let run_id = v["run_id"].as_str().unwrap().to_string();
     // the route spawned the drive; driving again is a no-op once it is done
-    for _ in 0..100 {
-        if runs_of(&e, &id)[0].status != "running" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("the scheduled run leaves running", || {
+        runs_of(&e, &id)[0].status != "running"
+    })
+    .await;
     drive(&e.flow, &run_id).await.unwrap();
     let rs = runs_of(&e, &id);
     assert_eq!(

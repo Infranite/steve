@@ -109,7 +109,10 @@ async fn event_is_delivered_and_acked_within_3s() {
     assert_eq!(f.ws_deliveries_of(&id).len(), 1);
 
     // Pinged right away and then every PingInterval; pongs keep the connection alive.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    steve_runtime::testkit::eventually_sync("three heartbeat pings are received", || {
+        f.ws_connections()[0].pings >= 3
+    })
+    .await;
     assert!(f.ws_connections()[0].pings >= 3);
     assert_eq!(f.ws_connects_total(), 1);
     c.stop().await.unwrap();
@@ -150,10 +153,11 @@ async fn reconnects_after_drop_and_after_ping_timeout() {
 
     // Half-dead connection: no pongs, no frames. Read deadline 2×1 s + 0.3 s.
     f.ws_set_silent(true);
-    let deadline = std::time::Instant::now() + Duration::from_secs(6);
-    while f.ws_connects_total() < 3 && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "the silent connection is noticed and redialled",
+        || f.ws_connects_total() >= 3,
+    )
+    .await;
     assert_eq!(
         f.ws_connects_total(),
         3,

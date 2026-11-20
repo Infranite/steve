@@ -1361,12 +1361,10 @@ async fn a_slow_reaction_api_does_not_hold_the_answer() {
         1,
         "handed to the conversation at once"
     );
-    for _ in 0..50 {
-        if h.fake.reactions_on("s1") == [ReactionKind::Ack] {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually_sync("s1 receives its final Ack reaction", || {
+        h.fake.reactions_on("s1") == [ReactionKind::Ack]
+    })
+    .await;
     assert_eq!(h.fake.reactions_on("s1"), [ReactionKind::Ack]);
 }
 
@@ -1387,12 +1385,10 @@ async fn an_answer_before_the_slow_ack_still_ends_done() {
         1,
         "answered without waiting for the reaction"
     );
-    for _ in 0..60 {
-        if h.fake.reactions_on("s2") == [ReactionKind::Done] {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually_sync("s2 receives its final Done reaction", || {
+        h.fake.reactions_on("s2") == [ReactionKind::Done]
+    })
+    .await;
     assert_eq!(h.fake.reactions_on("s2"), [ReactionKind::Done]);
     assert_eq!(state(&h, &i.message_id), "done");
 }
