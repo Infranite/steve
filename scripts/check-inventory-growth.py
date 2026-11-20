@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject new or growing inventory keys against a Git baseline.
 
-An Inventory-Growth: <path>: <reason> Git trailer in base..head records a path-scoped review.
+Inventory-Growth trailers bind reviews to an exact key result or an initial file blob.
 The trailer is an audit marker, not proof of review: reviewers must assess the printed growth.
 Snapshots come from Git objects, so deleting and reinitializing a working file is no escape.
 """
@@ -94,20 +94,39 @@ def parse(path, text):
     return entries
 
 
+def value_text(values):
+    return ",".join(map(str, values))
+
+
+def describe(change):
+    if change["kind"] == "removed":
+        return "inventory file removed; retain an empty list or name its removal"
+    return (f"{' '.join(change['key'])} = {value_text(change['head'])} "
+            f"(baseline {value_text(change['before']) or 'absent'})")
+
+
 def compare_snapshots(before, after):
     paths = sorted(path for path in before.keys() | after.keys() if is_inventory(path))
     changes = {}
     for path in paths:
-        problems, _ = compare(parse(path, before.get(path, "")), parse(path, after.get(path, "")))
+        listed, current = parse(path, before.get(path, "")), parse(path, after.get(path, ""))
+        problems = []
+        for key in sorted(listed.keys() | current.keys()):
+            was = {key: listed[key]} if key in listed else {}
+            now = {key: current[key]} if key in current else {}
+            growth, _ = compare(was, now)
+            if growth:
+                problems.append({"kind": "budget", "key": key, "before": listed.get(key, []),
+                                 "head": current[key]})
         if path in before and path not in after:
-            problems.append("inventory file removed; retain an empty list or name its removal")
+            problems.append({"kind": "removed"})
         if problems:
             changes[path] = problems
     return paths, changes
 
 
 def git(repo, *args, input_text=None):
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+    result = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", *args], capture_output=True,
                             input=None if input_text is None else input_text.encode("utf-8"))
     if result.returncode:
         raise InventoryError(f"git {args[0]} failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
@@ -138,14 +157,80 @@ def growth_markers(repo, base, head):
             key, separator, value = line.partition(":")
             if not separator or key.casefold() != "inventory-growth":
                 continue
-            path, separator, reason = value.strip().partition(":")
-            path = path.strip()
-            if (separator and reason.strip() and is_inventory(path)
-                    and not PurePosixPath(path).is_absolute()
-                    and ".." not in PurePosixPath(path).parts
-                    and str(PurePosixPath(path)) == path):
-                markers.append({"commit": commit, "path": path, "reason": reason.strip()})
+            markers.append({"commit": commit, "text": value.strip()})
     return markers
+
+
+def valid_path(path):
+    return (is_inventory(path) and not PurePosixPath(path).is_absolute()
+            and ".." not in PurePosixPath(path).parts and str(PurePosixPath(path)) == path)
+
+
+def path_history_blobs(repo, base, head, path):
+    blobs = set()
+    commits = git(repo, "log", "--full-history", "--format=%H", f"{base}..{head}", "--", path).splitlines()
+    for commit in commits:
+        entry = git(repo, "ls-tree", commit, "--", path)
+        if entry:
+            _, kind, blob = entry.split("\t", 1)[0].split()
+            if kind == "blob":
+                blobs.add(blob)
+    return blobs
+
+
+def import_baselines(repo, base, head, before, after, markers):
+    effective, imports, notes, history = dict(before), {}, [], {}
+    pattern = re.compile(r"^(\S+):\s*import ([0-9a-fA-F]{40}):\s*(\S.*)$")
+    for marker in markers:
+        match = pattern.fullmatch(marker["text"])
+        if not match:
+            continue
+        path, blob, reason = match.groups()
+        blob = blob.lower()
+        if not valid_path(path):
+            continue
+        if path in before or path not in after:
+            notes.append(f"ignored import {path}: only a newly introduced, retained inventory can use an import anchor")
+            continue
+        if path not in history:
+            history[path] = path_history_blobs(repo, base, head, path)
+        if blob not in history[path]:
+            notes.append(f"ignored import {path}: blob {blob} is not in this path's history within the comparison range")
+            continue
+        if path in imports and imports[path]["blob"] != blob:
+            raise InventoryError(f"conflicting import anchors for {path}; keep one reviewed baseline blob")
+        effective[path] = git(repo, "cat-file", "blob", blob)
+        imports[path] = {"kind": "import", "commit": marker["commit"], "path": path,
+                         "blob": blob, "reason": reason}
+    return effective, list(imports.values()), notes
+
+
+def authorize(changes, markers):
+    applied, covered = [], set()
+    required = [(path, index, change) for path, items in changes.items() for index, change in enumerate(items)]
+    for marker in markers:
+        matches = []
+        for path, index, change in required:
+            if change["kind"] == "removed":
+                prefix = f"{path}:"
+            else:
+                prefix = f"{path} {' '.join(change['key'])} = {value_text(change['head'])}:"
+            if marker["text"].startswith(prefix):
+                reason = marker["text"][len(prefix):].strip()
+                if reason and not (change["kind"] == "removed" and reason.startswith("import ")):
+                    matches.append((len(prefix), path, index, change, reason))
+        if not matches:
+            continue
+        longest = max(item[0] for item in matches)
+        matches = [item for item in matches if item[0] == longest]
+        if len(matches) != 1:
+            raise InventoryError("ambiguous inventory review key; use the exact result printed by the comparator")
+        _, path, index, change, reason = matches[0]
+        covered.add((path, index))
+        applied.append({"kind": change["kind"], "commit": marker["commit"], "path": path,
+                        "reason": reason, "key": change.get("key"), "head": change.get("head")})
+    missing = [(path, change) for path, index, change in required if (path, index) not in covered]
+    return applied, missing
 
 
 def event_sha(name, event, keys):
@@ -199,12 +284,22 @@ def event_range(repo, name, event, head="HEAD"):
 
 def check(repo, base, head="HEAD"):
     base, head = resolve(repo, base), resolve(repo, head)
-    paths, changes = compare_snapshots(snapshot(repo, base), snapshot(repo, head))
-    markers = [marker for marker in growth_markers(repo, base, head) if marker["path"] in changes] if changes else []
-    reviewed = {marker["path"] for marker in markers}
+    before, after = snapshot(repo, base), snapshot(repo, head)
+    _, preliminary = compare_snapshots(before, after)
+    candidates = growth_markers(repo, base, head) if preliminary else []
+    effective, imports, notes = import_baselines(repo, base, head, before, after, candidates)
+    paths, changes = compare_snapshots(effective, after)
+    markers, missing = authorize(changes, candidates)
+    totals = {}
+    for path in paths:
+        was, now = parse(path, effective.get(path, "")), parse(path, after.get(path, ""))
+        total = (lambda rows: sum(map(len, rows.values()))) if path == STRUCTURE else (lambda rows: sum(v[0] for v in rows.values()))
+        totals[path] = {"baseline": total(was), "head": total(now)}
     return {"base": base, "head": head, "paths": paths, "changes": changes,
-            "growth": [f"{path}: {problem}" for path, problems in changes.items() for problem in problems],
-            "markers": markers, "unreviewed": sorted(changes.keys() - reviewed)}
+            "growth": [f"{path}: {describe(change)}" for path, items in changes.items() for change in items],
+            "markers": imports + markers, "notes": notes, "totals": totals,
+            "unreviewed": sorted({path for path, _ in missing}),
+            "unreviewed_changes": [f"{path}: {describe(change)}" for path, change in missing]}
 
 
 def main(argv=None):
@@ -227,14 +322,24 @@ def main(argv=None):
         problems = report["changes"].get(path, [])
         print(f"inventory {path}: " + ("review required" if problems else "no growth"))
         for problem in problems:
-            print(f"  {problem}")
+            print(f"  {describe(problem)}")
+    for note in report["notes"]:
+        print(note)
     for marker in report["markers"]:
-        print(f"explicit Inventory-Growth marker {marker['commit']}: {marker['path']}: {marker['reason']}")
+        if marker["kind"] == "import":
+            detail = f"{marker['path']}: import {marker['blob']}"
+        elif marker["kind"] == "removed":
+            detail = f"{marker['path']}: removal"
+        else:
+            detail = f"{marker['path']} {' '.join(marker['key'])} = {value_text(marker['head'])}"
+        print(f"explicit Inventory-Growth marker {marker['commit']}: {detail}: {marker['reason']}")
+    for path, counts in report["totals"].items():
+        print(f"reference totals {path}: {counts['baseline']} -> {counts['head']}; counts can cancel, key budgets decide")
     if report["unreviewed"]:
-        print("inventory changes require a reviewed Inventory-Growth: <path>: <reason> trailer for each path:\n"
-              + "\n".join(report["unreviewed"]), file=sys.stderr)
+        print("inventory changes require a reviewed Inventory-Growth key/result (or named removal):\n"
+              + "\n".join(report["unreviewed_changes"]), file=sys.stderr)
         return 1
-    print("inventory comparison passed" + (" with path-scoped review markers" if report["changes"] else "; no growth"))
+    print("inventory comparison passed" + (" with exact-result review markers" if report["changes"] else "; no growth"))
     return 0
 
 

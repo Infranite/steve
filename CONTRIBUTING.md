@@ -43,13 +43,25 @@ CI tests the structure parser and inventory comparator in the Python job. The fi
 
 `python3 scripts/check-inventory-growth.py --base "$(git merge-base origin/main HEAD)"` compares committed inventory snapshots; it does not read a rewritten working copy. In CI, a pull request uses its target branch SHA and verifies that the tested merge commit has exactly the payload base and head as its two parents. A fast-forward push compares `before..HEAD`, covering every rebased commit in that push. Only an all-zero before (new branch) or a confirmed non-ancestor before (force push) falls back to `HEAD^`; the log states the reason. Missing before history fails unless the payload explicitly confirms a force push; that fallback is also logged. A merge queue run uses its base SHA. Count inventories under `steve-hub/tests/`, SQLite inventory sidecars and schema debt/trigger lists, the two web inventories, and `hub-rs/structure.txt` may only shrink. `layering.txt` is the reviewed target segment and is excluded. Structure values use the same descending-multiset comparison as the structure guard. Schema debt identities are `(kind, id)`, and trigger identities are names; editing their descriptive metadata does not add an identity. Layering debt includes the removal wave and owner in its key, so reassignment or postponement requires an explicit review too.
 
-Every path that grows or whose inventory file disappears needs its own nonempty Git trailer in a commit of the candidate's comparison range:
+CI uses the same budget comparison as the local structure guard: for each key, the number of values cannot increase, and the descending values cannot exceed their baseline bounds. Normal reductions need no approval. The comparison does not infer function identities from anonymous numbers or from a global count.
+
+A reviewed budget increase needs a Git trailer naming the path, key and **complete head result**:
 
 ```text
-Inventory-Growth: hub-rs/structure.txt: why this path needs new keys or larger values
+Inventory-Growth: hub-rs/structure.txt example crates/example/src/x.rs too_many_lines = 120,110: why this result is required
 ```
 
-Use the exact repository-relative path, not a wildcard; repeat the trailer for each affected path. Initial imports use the same path-specific format. Separate trailers from the commit body with a blank line. CI prints every inventory, each increase or missing file, and every marker's commit, path and reason. The marker records intent; reviewers must assess the change, and it is not an automatic proof of approval. A marker for one path cannot authorize another path, and a marker already in the baseline cannot authorize later growth. Keep empty inventory files; deleting one or moving it outside discovery rules also requires naming its original path. Deleting a list and recreating it with INIT, or editing it by hand, does not bypass this comparison. Introducing inventories for the first time, including the first reform branch candidate into main, requires naming each new nonempty inventory path; there is no separate global initialization approval. Malformed or duplicate entries fail even with a marker.
+Copy the key and result printed by the comparator. Structure results are descending comma-separated lists; count inventories use a single count. The authorization applies only to that key with exactly that result. If the result changes again while still above the baseline budget, it needs a new authorization. A path-only marker cannot approve growth, nor can a marker for another key or an older result.
+
+For the first import of a nonempty inventory, review a particular Git blob and anchor that version:
+
+```text
+Inventory-Growth: hub-rs/structure.txt: import 0b5a8a36ebd3aeacc6e30c96a93437b7c40ef8ea: reviewed initial macOS budget
+```
+
+Use the full 40-character blob id. The comparator verifies that this blob appeared at this exact path within the candidate's comparison history, then uses its contents as that new path's baseline. Later increases still need the key/result form; reductions do not. Imports do not reset a path already present in the target baseline, and conflicting import anchors fail. This also applies to the first reform branch candidate into main: the import anchor approves its snapshot, not every later change to the file.
+
+Keep empty inventory files. Removing a file or moving it outside discovery requires naming its original path with a removal reason (`Inventory-Growth: <path>: <removal reason>`); this form cannot authorize budget growth. Separate trailers from the commit body with a blank line. Markers are considered only in the comparison range, and the log prints each key's required result and every applied marker. Marker presence records intent; reviewers must assess the change. Deleting and INIT-recreating a list, or editing it by hand, cannot bypass the Git snapshot comparison. Malformed data fails even with a marker. Global totals are reference information because increases and reductions can cancel.
 
 To test only what a change can affect, `python3 scripts/affected.py` prints the `-p` arguments for cargo: the crates holding a changed file and every crate that depends on them, dev-dependencies included (`--list` names them). Its base is the merge base with `origin/main`, or `$STEVE_AFFECTED_BASE`, or its first argument. A `Cargo.lock` change touches only the crates that use a package version it added.
 

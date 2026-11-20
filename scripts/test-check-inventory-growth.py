@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Inventory comparison on constructed snapshots and isolated Git histories; no Cargo builds."""
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 
 spec = importlib.util.spec_from_file_location("inventory_growth", Path(__file__).with_name("check-inventory-growth.py"))
 guard = importlib.util.module_from_spec(spec)
@@ -17,6 +20,83 @@ COUNT = f"{guard.HUB_TESTS}/test_sleep.txt"
 DEBT = f"{guard.SCHEMA}/debt_stream.txt"
 TRIGGERS = f"{guard.SCHEMA}/triggers.tsv"
 STRUCTURE = guard.STRUCTURE
+
+
+# Complete structure.txt at 955f19fe; Git blob 1f2dad5392047ad9cbeb75eaed67f46f9020c2da.
+W36_BASE_BLOB = '1f2dad5392047ad9cbeb75eaed67f46f9020c2da'
+W36_BASE_TEXT = zlib.decompress(base64.b64decode(
+    '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'
+    'f/8/s1m8qA=='
+)).decode("utf-8")
+
+# Complete structure.txt at 7f689912d; Git blob e70b43f3feb60a5428afa67e1df1d1a0833109b6.
+W36_HEAD_BLOB = 'e70b43f3feb60a5428afa67e1df1d1a0833109b6'
+W36_HEAD_TEXT = zlib.decompress(base64.b64decode(
+    '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'
+    'f1IovKA='
+)).decode("utf-8")
 
 
 class Snapshots(unittest.TestCase):
@@ -37,6 +117,15 @@ class Snapshots(unittest.TestCase):
         for values in ("301,120", "300,121", "300,120,101"):
             self.assertTrue(self.growth(old, f"a\tf.rs\ttoo_many_lines\t{values}\n", STRUCTURE))
         self.assertTrue(self.growth(old, "a\tnew.rs\ttoo_many_lines\t101\n", STRUCTURE))
+
+    def test_w36v_complete_historical_files_shrink_without_any_marker(self):
+        for text, expected in [(W36_BASE_TEXT, W36_BASE_BLOB), (W36_HEAD_TEXT, W36_HEAD_BLOB)]:
+            raw = text.encode("utf-8")
+            digest = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw, usedforsecurity=False).hexdigest()
+            self.assertEqual(digest, expected)
+        paths, changes = guard.compare_snapshots({STRUCTURE: W36_BASE_TEXT}, {STRUCTURE: W36_HEAD_TEXT})
+        self.assertEqual(paths, [STRUCTURE])
+        self.assertEqual(changes, {})
 
     def test_schema_metadata_preserves_stable_debt_and_trigger_identities(self):
         self.assertFalse(self.growth("write\tstream/write/1\told reason\n", "write\tstream/write/1\tnew reason\n", DEBT))
@@ -144,7 +233,7 @@ class Histories(unittest.TestCase):
 
     def test_review_marker_must_be_a_nonempty_trailer_in_this_range(self):
         self.put(COUNT, "a.rs\t3\n")
-        self.commit(f"Reviewed increase\n\nInventory-Growth: {COUNT}: new reviewed source ownership")
+        self.commit(f"Reviewed increase\n\nInventory-Growth: {COUNT} a.rs = 3: new reviewed source ownership")
         report = self.report()
         self.assertTrue(report["growth"])
         self.assertEqual(report["markers"][0]["reason"], "new reviewed source ownership")
@@ -155,20 +244,20 @@ class Histories(unittest.TestCase):
         self.assertFalse(self.report()["markers"])
 
     def test_marker_in_subject_or_body_and_empty_reason_do_not_authorize_growth(self):
-        for message in (f"Inventory-Growth: {COUNT}: subject only", f"Explain\n\nInventory-Growth: {COUNT}: quoted in body\n\nUnrelated final paragraph", f"Empty\n\nInventory-Growth: {COUNT}:", "Old format\n\nInventory-Growth: global exception"):
+        for message in (f"Inventory-Growth: {COUNT} a.rs = 3: subject only", f"Explain\n\nInventory-Growth: {COUNT} a.rs = 3: quoted in body\n\nUnrelated final paragraph", f"Empty\n\nInventory-Growth: {COUNT}:", "Old format\n\nInventory-Growth: global exception"):
             self.put(COUNT, "a.rs\t3\n")
             self.commit(message)
             self.assertFalse(self.report()["markers"], message)
 
     def test_marker_cannot_authorize_bad_inventory_format(self):
         self.put(COUNT, "a.rs\t0\n")
-        self.commit(f"Bad data\n\nInventory-Growth: {COUNT}: reason cannot bypass parsing")
+        self.commit(f"Bad data\n\nInventory-Growth: {COUNT} a.rs = 3: reason cannot bypass parsing")
         with self.assertRaises(guard.InventoryError):
             self.report()
 
     def test_marker_example_in_a_file_is_not_a_commit_trailer(self):
         self.put(COUNT, "a.rs\t3\n")
-        self.put("README.md", f"Inventory-Growth: {COUNT}: documentation is not approval\n")
+        self.put("README.md", f"Inventory-Growth: {COUNT} a.rs = 3: documentation is not approval\n")
         self.commit("Document the marker format")
         self.assertTrue(self.report()["growth"])
         self.assertFalse(self.report()["markers"])
@@ -179,11 +268,11 @@ class Histories(unittest.TestCase):
         command = [sys.executable, str(guard.ROOT / "scripts/check-inventory-growth.py"), "--repo", str(self.repo), "--base", self.base]
         result = subprocess.run(command, capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("Inventory-Growth: <path>: <reason>", result.stderr)
-        self.commit(f"Intentional approval\n\nInventory-Growth: {COUNT}: acknowledge this candidate's source debt")
+        self.assertIn("Inventory-Growth key/result", result.stderr)
+        self.commit(f"Intentional approval\n\nInventory-Growth: {COUNT} a.rs = 3: acknowledge this candidate's source debt")
         result = subprocess.run(command, capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("path-scoped review markers", result.stdout)
+        self.assertIn("exact-result review markers", result.stdout)
 
     def test_invalid_commit_fails_instead_of_treating_history_as_an_empty_inventory(self):
         with self.assertRaisesRegex(guard.InventoryError, "cannot resolve comparison commit"):
@@ -192,13 +281,26 @@ class Histories(unittest.TestCase):
     def test_markers_name_each_growing_path_including_initial_imports(self):
         other = "web/test/harness-parity.txt"
         self.put(COUNT, "a.rs\t3\n")
-        self.commit(f"Review A\n\nInventory-Growth: {COUNT}: reviewed increase")
+        self.commit(f"Review A\n\nInventory-Growth: {COUNT} a.rs = 3: reviewed increase")
         self.put(other, 'src/a.ts\t"codex"\t1\n')
         self.commit("Import B later without a marker")
         report = self.report()
         self.assertEqual(report["unreviewed"], [other])
-        self.commit(f"Review the new path\n\nInventory-Growth: {other}: initial import")
+        self.commit(f'Review the new path\n\nInventory-Growth: {other} src/a.ts "codex" = 1: explicit new key')
         self.assertFalse(self.report()["unreviewed"])
+
+    def test_generic_path_marker_cannot_authorize_an_existing_key(self):
+        self.put(COUNT, "a.rs\t3\n")
+        self.commit(f"Old path approval\n\nInventory-Growth: {COUNT}: no key or head result")
+        self.assertEqual(self.report()["unreviewed"], [COUNT])
+
+    def test_authorization_is_the_whole_head_result_not_a_permanent_key_budget(self):
+        self.put(COUNT, "a.rs\t3\n")
+        self.commit(f"Review this result\n\nInventory-Growth: {COUNT} a.rs = 3: approved result")
+        self.assertFalse(self.report()["unreviewed"])
+        self.put(COUNT, "a.rs\t4\n")
+        self.commit("The same key changes again")
+        self.assertEqual(self.report()["unreviewed"], [COUNT])
 
     def test_wildcard_does_not_cover_real_inventory_paths(self):
         self.put(COUNT, "a.rs\t3\n")
@@ -225,6 +327,93 @@ class Histories(unittest.TestCase):
         self.commit("Remove empty file")
         self.assertEqual(self.report()["unreviewed"], [COUNT])
 
+    def test_import_anchor_does_not_hide_offsetting_per_key_growth_table(self):
+        initial = "pkg\tx.rs\ttoo_many_lines\t120\npkg\ty.rs\ttoo_many_lines\t130\n"
+        changed = "pkg\tx.rs\ttoo_many_lines\t120,110\n"
+        larger = "pkg\tx.rs\ttoo_many_lines\t125,110\n"
+        self.put(STRUCTURE, initial)
+        first = self.commit("Initial structure snapshot")
+        blob = self.git("rev-parse", f"{first}:{STRUCTURE}")
+        cases = [
+            ("no marker", first, changed, None, True),
+            ("import only", self.base, None, f"{STRUCTURE}: import {blob}: reviewed initial content", True),
+            ("partial result", self.base, None, f"{STRUCTURE} pkg x.rs too_many_lines = 110: not the complete result", True),
+            ("exact A result", self.base, None, f"{STRUCTURE} pkg x.rs too_many_lines = 120,110: review A", False),
+            ("A changes again", self.base, larger, None, True),
+        ]
+        for label, base, body, marker, blocked in cases:
+            with self.subTest(case=label):
+                if body is not None:
+                    self.put(STRUCTURE, body)
+                self.commit(label + (f"\n\nInventory-Growth: {marker}" if marker else ""))
+                report = guard.check(self.repo, base)
+                self.assertEqual(report["totals"][STRUCTURE], {"baseline": 2, "head": 2})
+                self.assertEqual([c["key"] for c in report["changes"][STRUCTURE]], [("pkg", "x.rs", "too_many_lines")])
+                self.assertEqual(bool(report["unreviewed"]), blocked)
+                if label == "import only":
+                    self.assertEqual([m["blob"] for m in report["markers"] if m["kind"] == "import"], [blob])
+
+    def test_import_blob_must_be_full_length_and_appear_at_that_path_in_range(self):
+        text = "pkg\tx.rs\ttoo_many_lines\t300\n"
+        self.put("elsewhere.txt", text)
+        other = self.commit("A blob stored at another path")
+        wrong = self.git("rev-parse", f"{other}:elsewhere.txt")
+        self.put(STRUCTURE, "pkg\tx.rs\ttoo_many_lines\t120\n")
+        self.commit(f"Wrong path anchor\n\nInventory-Growth: {STRUCTURE}: import {wrong}: not this path")
+        report = self.report()
+        self.assertEqual(report["unreviewed"], [STRUCTURE])
+        self.assertTrue(any("not in this path's history" in note for note in report["notes"]))
+        actual = self.git("rev-parse", f"HEAD:{STRUCTURE}")
+        self.commit(f"Short hash is not an import anchor\n\nInventory-Growth: {STRUCTURE}: import {actual[:12]}: incomplete")
+        self.assertEqual(self.report()["unreviewed"], [STRUCTURE])
+        # An object from before the comparison range cannot silently become an import baseline.
+        prior = self.base
+        self.base = self.git("rev-parse", "HEAD")
+        self.put("older.txt", text)
+        self.commit("Later history")
+        self.assertNotIn(wrong, guard.path_history_blobs(self.repo, self.base, "HEAD", STRUCTURE))
+        self.base = prior
+
+    def test_import_anchor_before_the_range_is_not_accepted_for_a_reintroduced_path(self):
+        self.put(STRUCTURE, "pkg\tx.rs\ttoo_many_lines\t300\n")
+        old = self.commit("Earlier inventory")
+        blob = self.git("rev-parse", f"{old}:{STRUCTURE}")
+        (self.repo / STRUCTURE).unlink()
+        self.base = self.commit("Retire that inventory")
+        self.put(STRUCTURE, "pkg\tx.rs\ttoo_many_lines\t120\n")
+        self.commit(f"Reintroduction\n\nInventory-Growth: {STRUCTURE}: import {blob}: this blob is outside the range")
+        report = self.report()
+        self.assertEqual(report["unreviewed"], [STRUCTURE])
+        self.assertTrue(any("not in this path's history" in note for note in report["notes"]))
+
+    def test_conflicting_valid_import_anchors_cannot_silently_choose_a_larger_budget(self):
+        self.put(STRUCTURE, "pkg\tx.rs\ttoo_many_lines\t120\n")
+        first = self.commit("First snapshot")
+        a = self.git("rev-parse", f"{first}:{STRUCTURE}")
+        self.put(STRUCTURE, "pkg\tx.rs\ttoo_many_lines\t300\n")
+        second = self.commit("Second snapshot")
+        b = self.git("rev-parse", f"{second}:{STRUCTURE}")
+        self.commit(f"Conflicting reviews\n\nInventory-Growth: {STRUCTURE}: import {a}: first\nInventory-Growth: {STRUCTURE}: import {b}: second")
+        with self.assertRaisesRegex(guard.InventoryError, "conflicting import anchors"):
+            self.report()
+
+    def test_import_does_not_replace_an_existing_inventory_baseline(self):
+        self.put(COUNT, "a.rs\t3\n")
+        commit = self.commit("Existing inventory grows")
+        blob = self.git("rev-parse", f"{commit}:{COUNT}")
+        self.commit(f"Not a first import\n\nInventory-Growth: {COUNT}: import {blob}: cannot reset existing budget")
+        report = self.report()
+        self.assertEqual(report["unreviewed"], [COUNT])
+        self.assertTrue(any("only a newly introduced" in note for note in report["notes"]))
+
+    def test_result_key_can_include_colons_and_reason_can_include_equal_signs(self):
+        path = f"{guard.HUB_TESTS}/runtime_guard.txt"
+        self.put(path, "file.rs\ttimer\timpl Runner::run\t1\n")
+        self.base = self.commit("Original key")
+        self.put(path, "file.rs\ttimer\timpl Runner::run\t2\n")
+        self.commit(f"Specific result\n\nInventory-Growth: {path} file.rs timer impl Runner::run = 2: reason = 7: still data")
+        self.assertFalse(self.report()["unreviewed"])
+
     def test_comparison_range_equals_reviewed_coverage_event_table(self):
         # One table pins the four integration modes. Rebase rewrites commit IDs, not path reviews.
         cases = [
@@ -243,12 +432,12 @@ class Histories(unittest.TestCase):
                     self.put("branch.txt", label)
                     reviewed_base = self.commit("Set up new branch")
                     self.put(COUNT, "a.rs\t3\n")
-                    head = self.commit(f"Reviewed first-push change\n\nInventory-Growth: {COUNT}: {label}")
+                    head = self.commit(f"Reviewed first-push change\n\nInventory-Growth: {COUNT} a.rs = 3: {label}")
                     event = {"before": "0" * 40}
                     covered = {head}
                 else:
                     self.put(COUNT, "a.rs\t3\n")
-                    first = self.commit(f"Reviewed growth in first commit\n\nInventory-Growth: {COUNT}: {label}")
+                    first = self.commit(f"Reviewed growth in first commit\n\nInventory-Growth: {COUNT} a.rs = 3: {label}")
                     self.put("feature.txt", label)
                     source = self.commit("Second commit has no growth marker")
                     reviewed_base = target
@@ -278,7 +467,7 @@ class Histories(unittest.TestCase):
     def test_pr_merge_parents_must_match_both_payload_shas(self):
         self.git("checkout", "-b", "feature")
         self.put(COUNT, "a.rs\t3\n")
-        source = self.commit(f"Feature\n\nInventory-Growth: {COUNT}: reviewed feature")
+        source = self.commit(f"Feature\n\nInventory-Growth: {COUNT} a.rs = 3: reviewed feature")
         self.git("checkout", "trunk")
         self.put("target.txt", "target change")
         target = self.commit("Target advanced")
@@ -295,7 +484,7 @@ class Histories(unittest.TestCase):
         abandoned = self.commit("Abandoned history")
         self.git("checkout", "-B", "rewritten", self.base)
         self.put(COUNT, "a.rs\t3\n")
-        head = self.commit(f"Replacement\n\nInventory-Growth: {COUNT}: reviewed replacement")
+        head = self.commit(f"Replacement\n\nInventory-Growth: {COUNT} a.rs = 3: reviewed replacement")
         selection = guard.event_range(self.repo, "push", {"before": abandoned})
         self.assertIn("force push", selection["reason"])
         self.assertEqual(guard.resolve(self.repo, selection["base"]), self.base)
