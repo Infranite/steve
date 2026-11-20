@@ -152,27 +152,59 @@ fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild
     let group = process.id().context("spawned child has no PID")?;
     Ok(HubChild { process, group })
 }
+/// Observe exit without releasing the leader's PID (and therefore its process-group number).
+fn exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == 0 {
+            #[cfg(target_os = "macos")]
+            let observed = info.si_pid;
+            #[cfg(not(target_os = "macos"))]
+            let observed = unsafe { info.si_pid() };
+            return Ok(observed != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
 async fn stop(child: &mut HubChild) -> Result<()> {
+    let Some(pid) = child.id() else {
+        // A previous wait already released this identity; never signal its cached group.
+        return Ok(());
+    };
     let group = child.group as i32;
-    if child.try_wait()?.is_none() {
+    if !exited_unreaped(pid)? {
         unsafe {
             libc::kill(-group, libc::SIGTERM);
         }
-        if tokio::time::timeout(Duration::from_secs(15), child.wait())
-            .await
-            .is_err()
-        {
-            unsafe {
-                libc::kill(-group, libc::SIGKILL);
+        let observed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if exited_unreaped(pid)? {
+                    return Ok::<_, std::io::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            child.kill().await?;
-            child.wait().await?;
+        })
+        .await;
+        if let Ok(result) = observed {
+            result?;
         }
     }
-    // A group may outlive its leader; remove descendants even when wait() already reaped the Hub.
+    // The live or zombie leader still pins the group. Clear descendants before reaping it.
     unsafe {
         libc::kill(-group, libc::SIGKILL);
     }
+    child.wait().await?;
     Ok(())
 }
 
@@ -692,6 +724,66 @@ server.serve_forever()
         fs::set_permissions(dir.join("bin/steve-hub"), fs::Permissions::from_mode(0o755)).unwrap();
         dir
     }
+    #[tokio::test]
+    async fn exit_observation_keeps_the_leader_waitable() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        steve_runtime::testkit::eventually_sync("leader exited without reaping", || {
+            exited_unreaped(pid).unwrap()
+        })
+        .await;
+        assert!(
+            exited_unreaped(pid).unwrap(),
+            "a second observation still sees it"
+        );
+        assert_eq!(child.wait().await.unwrap().code(), Some(23));
+        assert_eq!(
+            exited_unreaped(pid).unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_clears_descendants_before_reaping_and_ignores_a_reused_group() {
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("descendant");
+        let process = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "/bin/sleep 600 & printf '%s' \"$!\" > \"$1\"; exit 0",
+                "fixture",
+            ])
+            .arg(&ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = process.id().unwrap();
+        let mut child = HubChild { process, group };
+        steve_runtime::testkit::eventually_sync("leader exited with a live descendant", || {
+            ready.exists() && exited_unreaped(group).unwrap()
+        })
+        .await;
+        let descendant: i32 = fs::read_to_string(ready).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+        stop(&mut child).await.unwrap();
+        assert!(child.id().is_none());
+        steve_runtime::testkit::eventually_sync(
+            "the old group and its descendant are gone",
+            || unsafe { libc::kill(descendant, 0) == -1 && libc::kill(-(group as i32), 0) == -1 },
+        )
+        .await;
+        let mut canary = Command::new("/bin/sleep").arg("600").spawn().unwrap();
+        child.group = canary.id().unwrap();
+        stop(&mut child).await.unwrap();
+        assert!(canary.try_wait().unwrap().is_none());
+        canary.kill().await.unwrap();
+    }
+
     #[tokio::test]
     async fn health_rejects_http_failure_even_when_maintenance_identity_matches() {
         let home = tempfile::tempdir().unwrap();
