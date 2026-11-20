@@ -865,3 +865,382 @@ fn r3_deferred_rollback_then_write_commit_control() {
         vec![vec![effect_event("write-commit")]]
     );
 }
+
+// A0 is an independent callback feasibility probe, not Store wiring or a fix for
+// either raw-savepoint regression above. Keep all FFI inside this test module.
+#[cfg(test)]
+mod a0_probe {
+    use rusqlite::{Connection, ffi, hooks::Authorization};
+    use std::{
+        cell::RefCell,
+        ffi::{c_char, c_int, c_void},
+        panic::{AssertUnwindSafe, catch_unwind},
+        ptr,
+        sync::{Arc, Mutex},
+    };
+
+    type Log = Arc<Mutex<Vec<String>>>;
+    thread_local! {
+        static SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    // All fallible Rust work in callbacks is caught before returning to SQLite.
+    // SQLite owns each Tab/empty cursor after the corresponding Box::into_raw;
+    // xDisconnect/xDestroy and xClose respectively reclaim those exact boxes.
+    #[repr(C)]
+    struct Tab {
+        base: ffi::sqlite3_vtab,
+        callbacks: Log,
+    }
+
+    fn boundary(f: impl FnOnce() -> c_int) -> c_int {
+        catch_unwind(AssertUnwindSafe(f)).unwrap_or(ffi::SQLITE_ERROR)
+    }
+
+    unsafe extern "C" fn connect(
+        db: *mut ffi::sqlite3,
+        aux: *mut c_void,
+        _: c_int,
+        _: *const *const c_char,
+        out: *mut *mut ffi::sqlite3_vtab,
+        _: *mut *mut c_char,
+    ) -> c_int {
+        boundary(|| unsafe {
+            let rc = ffi::sqlite3_declare_vtab(db, c"CREATE TABLE x(token)".as_ptr());
+            if rc != ffi::SQLITE_OK {
+                return rc;
+            }
+            let callbacks = (&*aux.cast::<Log>()).clone();
+            callbacks.lock().unwrap().push("connect".into());
+            let tab = Box::new(Tab {
+                base: std::mem::zeroed(),
+                callbacks,
+            });
+            *out = Box::into_raw(tab).cast();
+            ffi::SQLITE_OK
+        })
+    }
+
+    unsafe extern "C" fn disconnect(tab: *mut ffi::sqlite3_vtab) -> c_int {
+        boundary(|| unsafe {
+            let tab = Box::from_raw(tab.cast::<Tab>());
+            tab.callbacks.lock().unwrap().push("disconnect".into());
+            ffi::SQLITE_OK
+        })
+    }
+
+    unsafe extern "C" fn destroy_aux(aux: *mut c_void) {
+        // No unwind can cross SQLite's void destructor boundary either.
+        let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+            let callbacks = Box::from_raw(aux.cast::<Log>());
+            callbacks.lock().unwrap().push("destroy_aux".into());
+        }));
+    }
+
+    unsafe extern "C" fn best_index(
+        _: *mut ffi::sqlite3_vtab,
+        _: *mut ffi::sqlite3_index_info,
+    ) -> c_int {
+        ffi::SQLITE_OK
+    }
+
+    unsafe extern "C" fn open(
+        tab: *mut ffi::sqlite3_vtab,
+        out: *mut *mut ffi::sqlite3_vtab_cursor,
+    ) -> c_int {
+        boundary(|| unsafe {
+            *out = Box::into_raw(Box::new(ffi::sqlite3_vtab_cursor { pVtab: tab }));
+            ffi::SQLITE_OK
+        })
+    }
+
+    unsafe extern "C" fn close(cursor: *mut ffi::sqlite3_vtab_cursor) -> c_int {
+        boundary(|| unsafe {
+            drop(Box::from_raw(cursor));
+            ffi::SQLITE_OK
+        })
+    }
+
+    unsafe extern "C" fn filter(
+        _: *mut ffi::sqlite3_vtab_cursor,
+        _: c_int,
+        _: *const c_char,
+        _: c_int,
+        _: *mut *mut ffi::sqlite3_value,
+    ) -> c_int {
+        ffi::SQLITE_OK
+    }
+
+    unsafe extern "C" fn next(_: *mut ffi::sqlite3_vtab_cursor) -> c_int {
+        ffi::SQLITE_OK
+    }
+
+    unsafe extern "C" fn eof(_: *mut ffi::sqlite3_vtab_cursor) -> c_int {
+        1 // The participant has no rows or backing storage.
+    }
+
+    unsafe extern "C" fn column(
+        _: *mut ffi::sqlite3_vtab_cursor,
+        ctx: *mut ffi::sqlite3_context,
+        _: c_int,
+    ) -> c_int {
+        unsafe { ffi::sqlite3_result_null(ctx) };
+        ffi::SQLITE_OK
+    }
+
+    unsafe extern "C" fn rowid(
+        _: *mut ffi::sqlite3_vtab_cursor,
+        out: *mut ffi::sqlite3_int64,
+    ) -> c_int {
+        unsafe { *out = 0 };
+        ffi::SQLITE_OK
+    }
+
+    fn record(tab: *mut ffi::sqlite3_vtab, label: &str) -> c_int {
+        boundary(|| unsafe {
+            (*tab.cast::<Tab>())
+                .callbacks
+                .lock()
+                .unwrap()
+                .push(label.into());
+            ffi::SQLITE_OK
+        })
+    }
+
+    unsafe extern "C" fn update(
+        tab: *mut ffi::sqlite3_vtab,
+        _: c_int,
+        _: *mut *mut ffi::sqlite3_value,
+        out: *mut ffi::sqlite3_int64,
+    ) -> c_int {
+        // Required by the writable-module ABI, but zero-row enlist must not call it.
+        if !out.is_null() {
+            unsafe { *out = 1 };
+        }
+        record(tab, "update")
+    }
+    unsafe extern "C" fn begin(tab: *mut ffi::sqlite3_vtab) -> c_int {
+        record(tab, "begin")
+    }
+    unsafe extern "C" fn sync(tab: *mut ffi::sqlite3_vtab) -> c_int {
+        record(tab, "sync")
+    }
+    unsafe extern "C" fn commit(tab: *mut ffi::sqlite3_vtab) -> c_int {
+        record(tab, "commit")
+    }
+    unsafe extern "C" fn rollback(tab: *mut ffi::sqlite3_vtab) -> c_int {
+        record(tab, "rollback")
+    }
+
+    // Drop order is deliberate: Connection disconnects tables and destroys aux
+    // before the boxed module is freed. sqlite3_create_module_v2 takes ownership
+    // of aux (including on failure), but borrows the stable module pointer.
+    struct Probe {
+        conn: Connection,
+        _module: Box<ffi::sqlite3_module>,
+    }
+
+    impl Probe {
+        fn register(conn: Connection, callbacks: &Log) -> Self {
+            let mut module: Box<ffi::sqlite3_module> = Box::new(unsafe { std::mem::zeroed() });
+            module.iVersion = 1; // First-gate probe only; no savepoint protocol yet.
+            // Equal xCreate/xConnect makes this eponymous: no schema DDL needed.
+            module.xCreate = Some(connect);
+            module.xConnect = Some(connect);
+            module.xBestIndex = Some(best_index);
+            module.xDisconnect = Some(disconnect);
+            module.xDestroy = Some(disconnect);
+            module.xOpen = Some(open);
+            module.xClose = Some(close);
+            module.xFilter = Some(filter);
+            module.xNext = Some(next);
+            module.xEof = Some(eof);
+            module.xColumn = Some(column);
+            module.xRowid = Some(rowid);
+            module.xUpdate = Some(update);
+            module.xBegin = Some(begin);
+            module.xSync = Some(sync);
+            module.xCommit = Some(commit);
+            module.xRollback = Some(rollback);
+            let aux = Box::into_raw(Box::new(callbacks.clone())).cast();
+            let rc = unsafe {
+                ffi::sqlite3_create_module_v2(
+                    conn.handle(),
+                    c"a0_participant".as_ptr(),
+                    &*module,
+                    aux,
+                    Some(destroy_aux),
+                )
+            };
+            assert_eq!(rc, ffi::SQLITE_OK);
+            Self {
+                conn,
+                _module: module,
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Observation {
+        query_only: bool,
+        counters: (i64, i64, i64),
+        main_schema: Vec<(String, String, Option<String>)>,
+        temp_schema: Vec<(String, String, Option<String>)>,
+        autocommit: bool,
+        txn_state: c_int,
+    }
+
+    fn observe(c: &Connection) -> Observation {
+        let schema = |sql| {
+            c.prepare(sql)
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        Observation {
+            query_only: c.query_row("PRAGMA query_only", [], |r| r.get(0)).unwrap(),
+            counters: c
+                .query_row(
+                    "SELECT changes(), total_changes(), last_insert_rowid()",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap(),
+            main_schema: schema("SELECT type,name,sql FROM main.sqlite_schema ORDER BY type,name"),
+            temp_schema: schema("SELECT type,name,sql FROM temp.sqlite_schema ORDER BY type,name"),
+            autocommit: c.is_autocommit(),
+            txn_state: unsafe { ffi::sqlite3_txn_state(c.handle(), ptr::null()) },
+        }
+    }
+
+    fn logs(auth: &Log) -> (Vec<String>, Vec<String>) {
+        (
+            SQL.with(|sql| std::mem::take(&mut *sql.borrow_mut())),
+            std::mem::take(&mut *auth.lock().unwrap()),
+        )
+    }
+
+    #[test]
+    fn a0_real_store_query_only_publish_control() {
+        // Establish that the query_only case is part of the real Store contract,
+        // without installing the experimental module or replacing Store hooks.
+        let (_dir, store, batches) = super::r3_fixture();
+        let guard = store
+            .domain_store()
+            .root_guard(super::Domain::Core, super::Lane::Interactive)
+            .unwrap();
+        guard.execute_batch("PRAGMA query_only=ON").unwrap();
+        let before = observe(guard.connection());
+        guard.execute_batch("BEGIN DEFERRED").unwrap();
+        super::r3_publish_only(&store, "a0-query-only");
+        assert!(batches.0.lock().unwrap().is_empty());
+        guard.execute_batch("COMMIT").unwrap();
+        assert_eq!(observe(guard.connection()), before);
+        drop(guard);
+        println!(
+            "A0 real Store query_only publish-only batches={:?}",
+            *batches.0.lock().unwrap()
+        );
+        assert_eq!(
+            *batches.0.lock().unwrap(),
+            vec![vec![super::effect_event("a0-query-only")]]
+        );
+    }
+
+    #[test]
+    fn a0_query_only_first_enlist_is_readonly_counterexample() {
+        let conn = Connection::open_in_memory().unwrap();
+        let source: String = conn
+            .query_row("SELECT sqlite_source_id()", [], |r| r.get(0))
+            .unwrap();
+        println!("A0 bundled SQLite {} source={source}", rusqlite::version());
+        let auth: Log = Arc::default();
+        let auth_log = auth.clone();
+        conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+            auth_log.lock().unwrap().push(format!("{context:?}"));
+            Authorization::Allow
+        }))
+        .unwrap();
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(|event| {
+                if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+                    SQL.with(|log| log.borrow_mut().push(sql.into()));
+                }
+            }),
+        );
+        conn.execute_batch("PRAGMA query_only=ON").unwrap();
+        let initial = observe(&conn);
+        assert!(initial.query_only);
+        logs(&auth);
+
+        // No-prototype control on this exact physical connection. A publish-only
+        // transaction needs no SQL at stage time (real Store control is above).
+        conn.execute_batch("BEGIN DEFERRED").unwrap();
+        let control_open = observe(&conn);
+        conn.execute_batch("COMMIT").unwrap();
+        let control_committed = observe(&conn);
+        let control_logs = logs(&auth);
+        assert_eq!(initial, control_committed);
+        println!("A0 control open={control_open:?} committed={control_committed:?}");
+        println!("A0 control SQL/auth={control_logs:#?}");
+
+        assert_eq!(observe(&conn), initial);
+        let observation_logs = logs(&auth);
+        let callbacks: Log = Arc::default();
+        let probe = Probe::register(conn, &callbacks);
+        let c = &probe.conn;
+        let registered = observe(c);
+        let registration_logs = logs(&auth);
+        assert_eq!(registered, initial);
+        assert_eq!(registration_logs, observation_logs);
+        assert!(callbacks.lock().unwrap().is_empty());
+        println!("A0 registered={registered:?} SQL/auth={registration_logs:#?}");
+
+        c.execute_batch("BEGIN DEFERRED").unwrap();
+        let prototype_open = observe(c);
+        assert_eq!(prototype_open, control_open);
+        // Try the least invasive writable enlist: zero rows, no metadata, no
+        // xUpdate/rowid assignment. Do not toggle query_only or restore counters.
+        let err = c
+            .execute("INSERT INTO a0_participant SELECT 1 WHERE 0", [])
+            .unwrap_err();
+        let after_enlist = observe(c);
+        let enlist_logs = logs(&auth);
+        println!("A0 first enlist error={err:?} after={after_enlist:?}");
+        println!("A0 first enlist SQL/auth={enlist_logs:#?}");
+        println!("A0 callbacks={:?}", *callbacks.lock().unwrap());
+        assert_eq!(
+            err.sqlite_error().unwrap().extended_code,
+            ffi::SQLITE_READONLY
+        );
+        assert_eq!(after_enlist, control_open);
+        assert_eq!(*callbacks.lock().unwrap(), vec!["connect"]);
+        assert!(
+            enlist_logs
+                .1
+                .iter()
+                .any(|line| line.contains("Insert") && line.contains("a0_participant"))
+        );
+        c.execute_batch("COMMIT").unwrap();
+        let prototype_committed = observe(c);
+        println!(
+            "A0 prototype committed={prototype_committed:?} SQL/auth={:#?}",
+            logs(&auth)
+        );
+        assert_eq!(prototype_committed, control_committed);
+        assert_eq!(*callbacks.lock().unwrap(), vec!["connect"]);
+        println!(
+            "A0 ELIMINATED: first writable enlist is SQLITE_READONLY under query_only=ON; no transaction callbacks. Stop before savepoint/buffer experiments."
+        );
+        // probe drops its connection (and SQLite-owned boxes) before the module.
+        drop(probe);
+        assert_eq!(
+            *callbacks.lock().unwrap(),
+            vec!["connect", "disconnect", "destroy_aux"]
+        );
+        println!("A0 teardown callbacks={:?}", *callbacks.lock().unwrap());
+    }
+}
