@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use tokio::time::Instant as IdleInstant;
+
 use serde_json::{Value, json};
 use steve_acp::normalize::{CommandFact, ToolFact};
 
@@ -164,7 +166,7 @@ struct State {
     files: Vec<String>,
     stop: Option<r::RunStatus>,
     output: u64,
-    last_event: Option<Instant>,
+    last_event: Option<IdleInstant>,
     session: Option<String>,
 }
 
@@ -369,7 +371,9 @@ impl LocalNode {
         spawned: &(dyn Fn(u32) -> bool + Send + Sync),
         budget_epoch: u64,
     ) -> (r::ResearchOutcome, Option<Stop>, Vec<(Subject, EventBody)>) {
-        let started = Instant::now();
+        // The idle budget and its polling interval must share the runtime's monotonic clock.
+        // Real elapsed time below is only for reporting actual execution duration.
+        let (started, idle_started) = (Instant::now(), IdleInstant::now());
         let run_id = workspace::dir_name(exec.attempt().as_str());
         let mut out = outcome(run_id.clone(), plan.model.clone(), r::RunStatus::Done);
         // the harness's own state, where it declares one (its configuration, logins, history)
@@ -433,7 +437,7 @@ impl LocalNode {
             state.lock().unwrap().session = Some(session.into());
         };
         let activity = || {
-            state.lock().unwrap().last_event = Some(Instant::now());
+            state.lock().unwrap().last_event = Some(IdleInstant::now());
         };
         let mcp = req.mcp.as_ref().map_or_else(
             || json!([]),
@@ -498,7 +502,7 @@ impl LocalNode {
             let original = vec![(Subject::Execution(exec.clone()), body.clone())];
             {
                 let mut state = state.lock().unwrap();
-                state.last_event = Some(Instant::now());
+                state.last_event = Some(IdleInstant::now());
                 state.output += output_bytes(&original);
                 state.event(&body, budget);
             }
@@ -533,7 +537,7 @@ impl LocalNode {
                         why = Some(stop);
                         break None;
                     }
-                    if state.last_event.unwrap_or(started).elapsed() >= budget.idle {
+                    if state.last_event.unwrap_or(idle_started).elapsed() >= budget.idle {
                         failure = Some(r::RunStatus::Budget(r::BudgetHit::Idle));
                         break None;
                     }

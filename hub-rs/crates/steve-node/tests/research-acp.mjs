@@ -1,5 +1,7 @@
 // A protocol peer, without an LLM. All names are arbitrary to exercise the ACP baseline.
 import readline from "node:readline";
+import fs from "node:fs";
+import path from "node:path";
 
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const update = value => send({
@@ -8,8 +10,53 @@ const update = value => send({
 });
 const text = value => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: value } });
 const reply = (id, result) => send({ jsonrpc: "2.0", id, result });
+const barriers = new Map();
+const control = process.argv[2];
+const barrier = step => {
+  const id = `fixture-barrier-${step}`;
+  barriers.set(id, step);
+  // FIFO after the preceding update, but this unavailable client RPC causes neither activity
+  // nor a tool/event. Its error response proves Node has consumed the update.
+  send({ jsonrpc: "2.0", id, method: "fixture/barrier", params: {} });
+};
+const controlled = (id, thought) => {
+  fs.mkdirSync(control, { recursive: true });
+  let step = 0;
+  // Filesystem notifications can be coalesced or missed. The command remains in this mailbox
+  // until its ACP round trip is acknowledged, so observe its state with a sleeping timer.
+  const poller = setInterval(() => {
+    const file = path.join(control, "release");
+    if (!fs.existsSync(file)) return;
+    const command = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (command.step <= step) return;
+    step = command.step;
+    if (command.action === "finish") {
+      clearInterval(poller);
+      text("完成");
+      reply(id, { stopReason: "end_turn" });
+      return;
+    }
+    if (command.action === "thought") {
+      update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "private-thought" } });
+    } else if (command.action !== "check") {
+      throw new Error(`unknown control action: ${command.action}`);
+    }
+    barrier(step);
+  }, 5);
+  fs.writeFileSync(path.join(control, "pid"), String(process.pid));
+  update(thought
+    ? { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "private-thought" } }
+    : { sessionUpdate: "available_commands_update", availableCommands: [] });
+  barrier(0);
+};
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const req = JSON.parse(line);
+  if (!req.method && barriers.has(req.id)) {
+    if (req.error?.code !== -32601) throw new Error("barrier unexpectedly supported");
+    fs.writeFileSync(path.join(control, "ack"), String(barriers.get(req.id)));
+    barriers.delete(req.id);
+    continue;
+  }
   if (req.method === "initialize") {
     reply(req.id, { protocolVersion: 1, agentCapabilities: {} });
   } else if (req.method === "session/new" || req.method === "session/load") {
@@ -18,19 +65,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     } });
   } else if (req.method === "session/prompt") {
     const prompt = req.params.prompt.filter(p => p.type === "text").map(p => p.text).join("\n");
-    if (prompt === "idle") continue;
-    if (prompt === "thought") {
-      // 30 thoughts 100 ms apart: together twice the job's idle limit, each gap a fifteenth of it,
-      // so only "thoughts are activity" can finish the job, even on a heavily loaded machine.
-      let count = 0;
-      const timer = setInterval(() => {
-        update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "private-thought" } });
-        if (++count === 30) {
-          clearInterval(timer);
-          text("完成");
-          reply(req.id, { stopReason: "end_turn" });
-        }
-      }, 100);
+    if (prompt === "idle" || prompt === "thought") {
+      controlled(req.id, prompt === "thought");
       continue;
     }
     text("我先");

@@ -27,13 +27,24 @@ impl T {
     }
 
     fn acp_node_for(&self, harness: &str) -> LocalNode {
+        self.acp_node_with_bootstrap(harness, None)
+    }
+
+    fn acp_node_with_bootstrap(&self, harness: &str, bootstrap: Option<&Path>) -> LocalNode {
         let mut cfg = self.config(2);
         // A wrapper is executable regardless of whether an adapter entry point ends in .js.
         let wrapper = self.root.join("research-acp.sh");
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/research-acp.mjs");
+        let bootstrap_env = bootstrap
+            .map(|module| format!("export NODE_OPTIONS='--import={}'\n", module.display()))
+            .unwrap_or_default();
         std::fs::write(
             &wrapper,
-            format!("#!/bin/sh\nexec node '{}'\n", fake.display()),
+            format!(
+                "#!/bin/sh\n{bootstrap_env}exec node '{}' '{}'\n",
+                fake.display(),
+                self.root.join("acp-control").display()
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -202,10 +213,15 @@ impl T {
             } = r.state
             {
                 // its events reach the Hub too
-                while !self.ended().contains(&c) {
-                    assert!(t0.elapsed() < Duration::from_secs(20), "no AttemptEnded");
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
+                eventually_sync("AttemptEnded reaches the Hub", || {
+                    let ended = self.ended().contains(&c);
+                    assert!(
+                        ended || t0.elapsed() < Duration::from_secs(20),
+                        "no AttemptEnded"
+                    );
+                    ended
+                })
+                .await;
                 return c;
             }
             assert!(
@@ -394,7 +410,8 @@ async fn acp_research_streams_before_completion_and_keeps_reads_usage_and_contin
     n.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Tokio test-util is supplied by the workspace; isolated runs use --features tokio/test-util.
+#[tokio::test]
 async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
     for (name, expected) in [
         (
@@ -411,38 +428,193 @@ async fn acp_research_keeps_read_only_tool_budget_and_idle_limits() {
                 hit: BudgetHit::Tools,
             },
         ),
-        (
-            "idle",
-            JobEnd::Budget {
-                hit: BudgetHit::Idle,
-            },
-        ),
-        ("thought", JobEnd::Done),
     ] {
         let t = T::new();
         let n = t.acp_node();
         let mut spec = acp_job("a_acp", name);
         research(&mut spec).budget.max_tools = Some(1);
-        research(&mut spec).budget.idle_ms = match name {
-            "idle" => 800,
-            // the script's thoughts span twice this, 100 ms apart (see research-acp.mjs)
-            "thought" => 1_500,
-            _ => 600_000,
-        };
         n.start_job(now_cmd("acp_limit", spec)).await.unwrap();
         let c = t.end_of(&n, "acp_limit").await;
         assert_eq!(c.job.unwrap().end, expected, "{name}");
-        if name == "thought" {
-            assert_eq!(
-                c.result,
-                vec![Part::Text {
-                    text: "完成".into()
-                }]
-            );
-            assert!(!t.bodies().iter().any(|e| matches!(e, EventBody::TextDelta { text, .. } if text.contains("private-thought"))));
-        }
         n.shutdown().await;
     }
+    controlled_acp_idle("idle", false).await;
+    controlled_acp_idle("thought", true).await;
+    controlled_acp_idle("thought", false).await;
+}
+
+#[tokio::test]
+async fn acp_idle_control_survives_lost_filesystem_notifications() {
+    let t = T::new();
+    let bootstrap = t.root.join("drop-notifications.mjs");
+    // A persistent command must still be consumed when no filesystem notification arrives.
+    // Keep the same Node/ACP barrier, clock boundaries and watchdog as the ordinary test.
+    std::fs::write(
+        &bootstrap,
+        "import fs from 'node:fs'; fs.watch = () => ({ close() {} });\n",
+    )
+    .unwrap();
+    let n = t.acp_node_with_bootstrap("sample-adapter", Some(&bootstrap));
+    controlled_acp_idle_on(t, n, "thought", true).await;
+}
+
+/// Keep external I/O from auto-advancing paused Tokio time. Only the test moves the clock;
+/// real time below is the existing I/O/deadlock watchdog, never an idle-budget assertion.
+struct FrozenTime(std::sync::mpsc::Sender<()>);
+
+impl FrozenTime {
+    fn new() -> Self {
+        tokio::time::pause();
+        let (release, wait) = std::sync::mpsc::channel();
+        // Tokio's documented pause semantics inhibit auto-advance while a blocking task is
+        // outstanding. Park on a channel instead of keeping an async task permanently runnable:
+        // a yield loop consumes a core and competes with the external adapter under gate load.
+        tokio::task::spawn_blocking(move || {
+            let _ = wait.recv();
+        });
+        Self(release)
+    }
+
+    async fn wait_for_io(&self) {
+        // A Tokio sleep would wait for virtual time to move. This real sleep only paces I/O
+        // observation, leaving both the virtual cutoff and the wall-clock watchdog unchanged.
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(2)))
+            .await
+            .unwrap();
+    }
+
+    async fn until(&self, what: &str, ready: impl Fn() -> bool) {
+        let started = Instant::now();
+        while !ready() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "timed out: {what}"
+            );
+            self.wait_for_io().await;
+        }
+    }
+
+    async fn release(&self, control: &Path, step: usize, action: &str) {
+        // Publish a complete command before the peer polls its durable mailbox.
+        std::fs::write(
+            control.join("next"),
+            json!({"step": step, "action": action}).to_string(),
+        )
+        .unwrap();
+        std::fs::rename(control.join("next"), control.join("release")).unwrap();
+        if action != "finish" {
+            let started = Instant::now();
+            loop {
+                let ack = std::fs::read_to_string(control.join("ack")).ok();
+                if ack.as_deref() == Some(step.to_string().as_str()) {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "timed out: Node consumed the ACP control barrier; step={step} action={action} ack={ack:?} adapter_alive={}",
+                    alive(pid_of(&control.join("pid")))
+                );
+                self.wait_for_io().await;
+            }
+        }
+    }
+
+    async fn completion(&self, node: &LocalNode, op: &str) -> Completion {
+        let started = Instant::now();
+        loop {
+            let receipt = node.operation(OperationId::new(op).unwrap()).await.unwrap();
+            if let Observed::Finished {
+                result: Some(OperationResult::Execution(completion)),
+                ..
+            } = receipt.state
+            {
+                return completion;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "{op} did not finish at the frozen idle cutoff: {:?}",
+                receipt.state
+            );
+            self.wait_for_io().await;
+        }
+    }
+}
+
+impl Drop for FrozenTime {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+        tokio::time::resume();
+    }
+}
+
+async fn controlled_acp_idle(prompt: &str, finish: bool) {
+    let t = T::new();
+    let n = t.acp_node();
+    controlled_acp_idle_on(t, n, prompt, finish).await;
+}
+
+async fn controlled_acp_idle_on(t: T, n: LocalNode, prompt: &str, finish: bool) {
+    let control = t.root.join("acp-control");
+    let clock = FrozenTime::new();
+    let mut spec = acp_job("a_acp_idle", prompt);
+    research(&mut spec).budget.idle_ms = 800;
+    research(&mut spec).budget.max_tools = Some(1);
+    n.start_job(now_cmd("acp_idle", spec)).await.unwrap();
+    clock
+        .until("Node consumed the initial ACP activity", || {
+            std::fs::read_to_string(control.join("ack")).ok().as_deref() == Some("0")
+        })
+        .await;
+    let child = pid_of(&control.join("pid"));
+    let mut step = 0;
+    let pulses = if prompt == "thought" { 6 } else { 1 };
+    for pulse in 0..pulses {
+        tokio::time::advance(Duration::from_millis(799)).await;
+        step += 1;
+        // The no-activity round trip also proves the biased idle tick ran at this time.
+        clock.release(&control, step, "check").await;
+        assert!(alive(child), "{prompt}: idle limit has not arrived");
+        assert_eq!(
+            n.operation(OperationId::new("acp_idle").unwrap())
+                .await
+                .unwrap()
+                .state,
+            Observed::Running,
+            "{prompt}"
+        );
+        if pulse + 1 < pulses {
+            step += 1;
+            clock.release(&control, step, "thought").await;
+        }
+    }
+    let expected = if finish {
+        clock.release(&control, step + 1, "finish").await;
+        JobEnd::Done
+    } else {
+        // One millisecond to the idle limit, plus its existing 100 ms polling interval.
+        // Freeze here: eventual wall-clock expiry cannot make this assertion pass.
+        tokio::time::advance(Duration::from_millis(101)).await;
+        JobEnd::Budget {
+            hit: BudgetHit::Idle,
+        }
+    };
+    let completion = clock.completion(&n, "acp_idle").await;
+    assert_eq!(completion.job.as_ref().unwrap().end, expected, "{prompt}");
+    assert!(!alive(child), "the ended attempt must reap its adapter");
+    drop(clock);
+    assert_eq!(t.end_of(&n, "acp_idle").await, completion);
+    if finish {
+        assert_eq!(
+            completion.result,
+            vec![Part::Text {
+                text: "完成".into()
+            }]
+        );
+    }
+    assert!(!t.bodies().iter().any(|e| matches!(e,
+        EventBody::TextDelta { text, .. } if text.contains("private-thought")
+    )));
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1596,28 +1768,16 @@ async fn a_slow_fetch_does_not_move_the_jobs_deadline() {
     let child = pid_of(&t.log("pid"));
     assert_eq!(t.spawns(), 1);
 
-    tokio::time::pause();
-    // External process I/O must not make a paused runtime auto-advance past the assertion point.
-    let awake = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
-    });
+    let clock = FrozenTime::new();
     tokio::time::advance(deadline - tokio::time::Instant::now() - Duration::from_millis(100)).await;
     assert!(alive(child), "the original deadline has not arrived");
     tokio::time::advance(Duration::from_millis(1_099)).await;
     // Hold time below deadline + 1 s while the OS reaps the child. Resetting the budget after
     // the 1.5 s fetch would leave it running here, regardless of CPU scheduling or cleanup time.
-    let waiting = Instant::now();
-    while alive(child) {
-        assert!(
-            waiting.elapsed() < Duration::from_secs(15),
-            "the fetch moved the job's deadline"
-        );
-        tokio::task::yield_now().await;
-    }
-    tokio::time::resume();
-    awake.abort();
+    clock
+        .until("the fetch moved the job's deadline", || !alive(child))
+        .await;
+    drop(clock);
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
     assert_eq!(
