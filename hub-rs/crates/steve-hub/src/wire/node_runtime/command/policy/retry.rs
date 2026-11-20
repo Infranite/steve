@@ -91,10 +91,15 @@ mod tests {
             jitter_ms: 0,
             source: HintSource::CommandReceipt,
         };
-        let Decision::Schedule { at, .. } = rule.decide(Retry::Now) else {
-            panic!("expected wait")
+        assert_eq!(rule.decide(Retry::Now), Decision::Stop(Refusal::Deadline));
+        let Decision::Schedule { at, .. } = SameOperation {
+            immediate_retries: 0,
+            ..rule
+        }
+        .decide(Retry::Now) else {
+            panic!("expected immediate send")
         };
-        assert_eq!(at.due, HubTime(10));
+        assert_eq!(at.due, HubTime(0));
         assert_eq!(at.status(HubTime(10)), Due::Expired);
         assert_eq!(
             SameOperation {

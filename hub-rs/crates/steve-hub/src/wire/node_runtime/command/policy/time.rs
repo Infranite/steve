@@ -80,11 +80,12 @@ pub fn schedule(
     i64::try_from(candidate).map_err(|_| Refusal::InvalidTime)?;
     let lower = i128::from(now.0) + i128::from(jitter_ms);
     let due = candidate.max(i128::from(now.0)) + i128::from(jitter_ms);
-    let due = match deadline {
-        Some(end) if now >= end => return Err(Refusal::Deadline),
-        Some(end) => due.max(lower).min(i128::from(end.0)),
-        None => due.max(lower),
-    };
+    let due = due.max(lower);
+    // An exclusive ceiling cannot supply a send slot. Do not manufacture a plan at the
+    // deadline (or squeeze it to deadline - 1); the rule already knows it must not send.
+    if deadline.is_some_and(|end| now >= end || due >= i128::from(end.0)) {
+        return Err(Refusal::Deadline);
+    }
     Ok(Schedule {
         due: HubTime(i64::try_from(due).map_err(|_| Refusal::InvalidTime)?),
         deadline,

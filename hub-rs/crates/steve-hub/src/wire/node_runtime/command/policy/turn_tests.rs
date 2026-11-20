@@ -253,13 +253,7 @@ fn a_past_hint_uses_now_plus_jitter_and_never_sends_at_the_ceiling() {
             ..base
         }
         .decide(retry);
-        if now >= 901_000 {
-            assert_eq!(decision, Decision::Stop(Refusal::Deadline));
-        } else {
-            let wait = at(decision);
-            assert_eq!(wait.due, HubTime(901_000));
-            assert_eq!(wait.status(HubTime(901_000)), Due::Expired);
-        }
+        assert_eq!(decision, Decision::Stop(Refusal::Deadline));
     }
 }
 
@@ -280,12 +274,48 @@ fn positive_and_negative_node_skew_are_clamped_by_hub_bounds() {
             },
             ..base
         };
+        if skew == 2_000_000 {
+            assert_eq!(
+                rule.decide(Retry::Later {
+                    after_ms: Some(30_000)
+                }),
+                Decision::Stop(Refusal::Deadline)
+            );
+            continue;
+        }
         let wait = at(rule.decide(Retry::Later {
             after_ms: Some(30_000),
         }));
         assert_eq!(wait.due, HubTime(expected));
         assert!(wait.due >= base.now && wait.due <= wait.deadline.unwrap());
     }
+}
+
+#[test]
+fn recovery_at_or_past_the_ceiling_never_creates_a_send_plan() {
+    let intent = intent();
+    let rows = rows(&intent, 0);
+    let rule = capacity(&intent, &rows);
+    // Event at 2000, deadline at 901000: exact recovery, later recovery, jitter crossing.
+    for after_ms in [899_000, 899_001, 898_999] {
+        assert_eq!(
+            rule.decide(Retry::Later {
+                after_ms: Some(after_ms)
+            }),
+            Decision::Stop(Refusal::Deadline)
+        );
+    }
+    // A genuinely earlier recovery may send; it was not squeezed down from the ceiling.
+    let before = at(TurnCapacity {
+        jitter_ms: 0,
+        ..rule
+    }
+    .decide(Retry::Later {
+        after_ms: Some(898_999),
+    }));
+    assert_eq!(before.due, HubTime(900_999));
+    assert_eq!(before.status(HubTime(900_999)), Due::Ready);
+    assert_eq!(before.status(HubTime(901_000)), Due::Expired);
 }
 
 #[test]
