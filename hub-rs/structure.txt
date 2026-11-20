@@ -24,7 +24,7 @@ steve-channels	crates/steve-channels/src/adapters/feishu/self_poll.rs	too_many_l
 steve-channels	crates/steve-channels/src/adapters/feishu/ws.rs	cognitive_complexity	37,34
 steve-channels	crates/steve-channels/src/channel_accounts.rs	cognitive_complexity	30
 steve-channels	crates/steve-channels/src/channel_accounts.rs	too_many_lines	198
-steve-channels	crates/steve-channels/src/cleanup.rs	too_many_lines	110,104
+steve-channels	crates/steve-channels/src/cleanup.rs	too_many_lines	107,104
 steve-channels	crates/steve-channels/src/compose.rs	too_many_lines	183,139
 steve-channels	crates/steve-channels/src/conversations.rs	cognitive_complexity	28
 steve-channels	crates/steve-channels/src/conversations.rs	too_many_lines	274,118
@@ -43,7 +43,7 @@ steve-channels	crates/steve-channels/src/membership.rs	too_many_lines	164
 steve-channels	crates/steve-channels/src/names.rs	cognitive_complexity	72,30
 steve-channels	crates/steve-channels/src/names.rs	too_many_lines	387
 steve-channels	crates/steve-channels/src/outbound.rs	cognitive_complexity	53,37,29
-steve-channels	crates/steve-channels/src/outbound.rs	too_many_lines	422,309,148,125,124
+steve-channels	crates/steve-channels/src/outbound.rs	too_many_lines	419,309,140,124,117
 steve-channels	crates/steve-channels/src/reactions.rs	cognitive_complexity	32
 steve-channels	crates/steve-channels/src/replies.rs	too_many_lines	136,124
 steve-channels	crates/steve-channels/src/respond.rs	cognitive_complexity	78
@@ -95,13 +95,12 @@ steve-core	crates/steve-core/src/yolo/shell.rs	too_many_lines	203
 steve-digest	crates/steve-digest/src/alerts.rs	too_many_lines	102
 steve-digest	crates/steve-digest/src/brief.rs	cognitive_complexity	28
 steve-digest	crates/steve-digest/src/brief.rs	too_many_lines	140
-steve-digest	crates/steve-digest/src/candidates.rs	too_many_lines	180
+steve-digest	crates/steve-digest/src/candidates.rs	too_many_lines	162
 steve-digest	crates/steve-digest/src/changes.rs	too_many_lines	166
 steve-digest	crates/steve-digest/src/conv.rs	too_many_lines	118,102
 steve-digest	crates/steve-digest/src/facts.rs	cognitive_complexity	33
 steve-digest	crates/steve-digest/src/facts.rs	too_many_lines	251
 steve-digest	crates/steve-digest/src/todo_tools.rs	too_many_lines	162
-steve-digest	crates/steve-digest/src/window.rs	too_many_lines	101
 steve-flow	crates/steve-flow/src/corrections.rs	too_many_lines	139
 steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29,27
 steve-flow	crates/steve-flow/src/engine.rs	too_many_lines	333

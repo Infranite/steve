@@ -280,29 +280,7 @@ pub fn find(
                 );
             }
         }
-        let viewer = crate::conv::owner_viewer(c, ws)?.unwrap_or_else(|| Viewer::bare(ws, ""));
-        let scope = viewer.sql("m");
-        let mut parameters = vec![Sql::Text(expr), Sql::Text(ws.into()), Sql::Integer(now)];
-        parameters.extend(scope.params);
-        let rows: Vec<(String, String, String, f64)> = c
-            .prepare_cached(&format!(
-                "SELECT m.id, m.text, m.status, bm25(kb_fts) AS s FROM kb_fts JOIN kb_chunks k ON k.id = kb_fts.rowid
-                   JOIN mems m ON m.id = k.obj_id
-                  WHERE kb_fts MATCH ? AND k.obj_type = 'mem' AND m.workspace_id = ? AND m.status IN ('confirmed', 'candidate') AND m.level <> 'never' AND (m.valid_until IS NULL OR m.valid_until > ?) AND {}
-                  ORDER BY s LIMIT 6", scope.sql
-            ))?
-            .query_map(rusqlite::params_from_iter(parameters), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (id, text, status, s) in rows {
-            acc.add(
-                "mem",
-                &id,
-                &crate::cut(&text, 120),
-                Some(status),
-                "fulltext",
-                (-s).clamp(0.0, 10.0) / 10.0,
-            );
-        }
+        add_memory_candidates(c, ws, expr, now, &mut acc)?;
     }
 
     let mut all: Vec<Candidate> = acc.out.into_values().collect();
@@ -322,6 +300,39 @@ pub fn find(
         x.score = (x.score * 100.0).round() / 100.0;
     }
     Ok(all)
+}
+
+fn add_memory_candidates(
+    c: &Connection,
+    ws: &str,
+    expr: String,
+    now: i64,
+    acc: &mut Acc,
+) -> Result<()> {
+    let viewer = crate::conv::owner_viewer(c, ws)?.unwrap_or_else(|| Viewer::bare(ws, ""));
+    let scope = viewer.sql("m");
+    let mut parameters = vec![Sql::Text(expr), Sql::Text(ws.into()), Sql::Integer(now)];
+    parameters.extend(scope.params);
+    let rows: Vec<(String, String, String, f64)> = c
+        .prepare_cached(&format!(
+            "SELECT m.id, m.text, m.status, bm25(kb_fts) AS s FROM kb_fts JOIN kb_chunks k ON k.id = kb_fts.rowid
+               JOIN mems m ON m.id = k.obj_id
+              WHERE kb_fts MATCH ? AND k.obj_type = 'mem' AND m.workspace_id = ? AND m.status IN ('confirmed', 'candidate') AND m.level <> 'never' AND (m.valid_until IS NULL OR m.valid_until > ?) AND {}
+              ORDER BY s LIMIT 6", scope.sql
+        ))?
+        .query_map(rusqlite::params_from_iter(parameters), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, text, status, s) in rows {
+        acc.add(
+            "mem",
+            &id,
+            &crate::cut(&text, 120),
+            Some(status),
+            "fulltext",
+            (-s).clamp(0.0, 10.0) / 10.0,
+        );
+    }
+    Ok(())
 }
 
 /// Candidates as stored in a packet.

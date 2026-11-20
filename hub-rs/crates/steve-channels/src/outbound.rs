@@ -1217,18 +1217,7 @@ async fn rewrite_draft(
         }
         let mut row = row.clone();
         if recovering && !matches!(new, Some(disclosure::Rewrite::Empty)) {
-            // A changed payload must never reuse a UUID that reached the provider. Retain both
-            // its disclosure basis and composer provenance when an invalid rewrite reopens it.
-            let next = uid("cm");
-            tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
-                SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
-                params![next, now, row.id])?;
-            digest::sync_message(tx, DigestSource::ChanMessage, &next, None)?;
-            set_status(tx, &row.id, &["draft"], DISCARDED)?;
-            tx.execute("UPDATE output_deliveries SET message_id=? WHERE message_id=?", params![next, row.id])?;
-            tx.execute("UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?", params![next, decision_id])?;
-            messages::event(tx, &row.ws, &row.space_id, &row.id);
-            row.id = next;
+            replace_recovery_draft(tx, &mut row, decision_id, now)?;
         }
         let mut q = format!("{}发到「{}」", l.p.speaker, spaces::display_title(tx, &l.p.space)?);
         let text = match (&new, &checked) {
@@ -1305,6 +1294,33 @@ async fn rewrite_draft(
         messages::event(tx, &row.ws, &row.space_id, &row.id);
         Ok(())
     })
+}
+
+fn replace_recovery_draft(
+    tx: &Tx,
+    row: &mut OutRow,
+    decision_id: &str,
+    now: i64,
+) -> ChannelResult<()> {
+    // A changed payload must never reuse a UUID that reached the provider. Retain both
+    // its disclosure basis and composer provenance when an invalid rewrite reopens it.
+    let next = uid("cm");
+    tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by,basis_id,composed)
+        SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by,basis_id,composed FROM chan_messages WHERE id=?",
+        params![next, now, row.id])?;
+    digest::sync_message(tx, DigestSource::ChanMessage, &next, None)?;
+    set_status(tx, &row.id, &["draft"], DISCARDED)?;
+    tx.execute(
+        "UPDATE output_deliveries SET message_id=? WHERE message_id=?",
+        params![next, row.id],
+    )?;
+    tx.execute(
+        "UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?",
+        params![next, decision_id],
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    row.id = next;
+    Ok(())
 }
 
 /// The flagged draft could not be rewritten at all (its space or account is gone, the store failed): its
@@ -2488,27 +2504,7 @@ impl Outbox {
                 .optional()?
                 .unwrap_or(false);
             if !live {
-                crate::messages::set_status(
-                    tx,
-                    &row.id,
-                    "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
-                    [&row.id],
-                )?;
-                if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
-                    tx.execute(
-                        "UPDATE decisions SET status = 'resolved', result = ?, resolved = ? WHERE id = ?",
-                        params![json!({"dismissed": true, "why": "connection_gone"}).to_string(), now, d.id],
-                    )?;
-                }
-                base::audit(
-                    tx,
-                    &row.ws,
-                    "steve",
-                    "chan_message.send.orphaned",
-                    &row.id,
-                    &json!({"space": row.space_id}),
-                )?;
-                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                fail_orphaned_message(tx, &row, now)?;
                 return Ok(Err(SendOutcome::Skipped));
             }
             // you answered yourself since, the sender's later message took it into its turn, or the
@@ -4026,6 +4022,52 @@ fn drop_for_you(
     Ok(())
 }
 
+fn fail_orphaned_message(tx: &Tx, row: &OutRow, now: i64) -> ChannelResult<()> {
+    crate::messages::set_status(
+        tx,
+        &row.id,
+        "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ?",
+        [&row.id],
+    )?;
+    if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
+        tx.execute(
+            "UPDATE decisions SET status = 'resolved', result = ?, resolved = ? WHERE id = ?",
+            params![
+                json!({"dismissed": true, "why": "connection_gone"}).to_string(),
+                now,
+                d.id
+            ],
+        )?;
+    }
+    base::audit(
+        tx,
+        &row.ws,
+        "steve",
+        "chan_message.send.orphaned",
+        &row.id,
+        &json!({"space": row.space_id}),
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    Ok(())
+}
+
+fn approve_message_text(tx: &Tx, message: &str, decision: &str, text: &str) -> ChannelResult<()> {
+    crate::messages::set_status(
+        tx,
+        message,
+        "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
+        params![text, message],
+    )?;
+    // Undo reopens this card: its formal draft must match the edited outbound body.
+    tx.execute(
+        "UPDATE decisions SET draft = ? WHERE id = ?",
+        params![text, decision],
+    )?;
+    // approved before its check finished: the record says so
+    basis::checking_stopped(tx, message, R_DEALT_FIRST)?;
+    Ok(())
+}
+
 /// The authorization is your own approval (a decision a person answered, not YOLO): what you
 /// approved goes out even after you spoke, it is yours.
 fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
@@ -4108,19 +4150,7 @@ impl MessageDecisions {
                 } else {
                     now + send_delay_ms(tx, &row)?
                 };
-                crate::messages::set_status(
-                    tx,
-                    &row.id,
-                    "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
-                    params![text, row.id],
-                )?;
-                // Undo reopens this card: its formal draft must match the edited outbound body.
-                tx.execute(
-                    "UPDATE decisions SET draft = ? WHERE id = ?",
-                    params![text, d.id],
-                )?;
-                // approved before its check finished: the record says so
-                basis::checking_stopped(tx, &row.id, R_DEALT_FIRST)?;
+                approve_message_text(tx, &row.id, &d.id, &text)?;
                 base::audit(
                     tx,
                     cx.ws,

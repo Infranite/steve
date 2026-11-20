@@ -583,6 +583,20 @@ const SPACE_OWNED: [&str; 5] = [
     "space_identities",
 ];
 
+fn delete_messages(tx: &Connection, ids: &str) -> ChannelResult<()> {
+    let digest_messages = steve_store_sqlite::digest::Source::ChanMessage
+        .messages(tx, steve_store_sqlite::digest::MessageFilter::IdsJson(ids))?
+        .into_iter()
+        .map(|m| (m.scope, m.id))
+        .collect::<Vec<_>>();
+    tx.execute(
+        "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
+        [ids],
+    )?;
+    steve_store_sqlite::digest::remove_message(tx, digest_messages)?;
+    Ok(())
+}
+
 fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     let decisions = json_ids(&p.decisions);
     // Preserve the historical ledger; deleting a decision explicitly ends its undo.
@@ -641,19 +655,7 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
           learned_space_id = CASE WHEN learned_space_id IN (SELECT value FROM json_each(?1)) THEN NULL ELSE learned_space_id END",
         [&spaces],
     )?;
-    let digest_messages = steve_store_sqlite::digest::Source::ChanMessage
-        .messages(
-            tx,
-            steve_store_sqlite::digest::MessageFilter::IdsJson(&msgs),
-        )?
-        .into_iter()
-        .map(|m| (m.scope, m.id))
-        .collect::<Vec<_>>();
-    tx.execute(
-        "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
-        [&msgs],
-    )?;
-    steve_store_sqlite::digest::remove_message(tx, digest_messages)?;
+    delete_messages(tx, &msgs)?;
     for table in SPACE_OWNED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE space_id IN (SELECT value FROM json_each(?1))"),

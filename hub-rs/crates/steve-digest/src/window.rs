@@ -146,6 +146,14 @@ pub fn run_conv(
     run_conv_step(tx, ws, conv, now, b, manual, rep, &mut || {})
 }
 
+fn backlog_floor(now: i64, days: i64) -> i64 {
+    if days > 0 {
+        now.saturating_sub(days.saturating_mul(DAY_MS))
+    } else {
+        0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_conv_step(
     tx: &Tx,
@@ -161,11 +169,7 @@ fn run_conv_step(
         return Ok(());
     };
     let p = profile::profile(tx, ws, &info)?;
-    let initial_since = if b.backlog_days > 0 {
-        now.saturating_sub(b.backlog_days.saturating_mul(DAY_MS))
-    } else {
-        0
-    };
+    let initial_since = backlog_floor(now, b.backlog_days);
     let mut k = if let Some(k) = cursor(tx, ws, conv)? {
         k
     } else {
