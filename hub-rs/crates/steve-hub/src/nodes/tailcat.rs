@@ -193,21 +193,9 @@ async fn tunnel(me: Weak<Tailcat>, program: PathBuf, key: PathBuf, port: u16) {
                 if let Some(err) = child.stderr.take() {
                     let mut lines = BufReader::new(err).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
-                        if let Some(a) = tailcat::address_in(&line) {
-                            let Some(t) = me.upgrade() else { return };
-                            t.note(|s| {
-                                s.address = Some(a.to_string());
-                                s.up = true;
-                                s.error = None;
-                            });
-                            tracing::info!(
-                                "remote Nodes reach this Hub at {}",
-                                tailcat::hub_url(a, port)
-                            );
-                            backoff = Duration::from_secs(1);
-                        } else {
-                            tracing::debug!("tailcat: {line}");
-                        }
+                        let Some(()) = report_tunnel_line(&me, &line, port, &mut backoff) else {
+                            return;
+                        };
                         last = line;
                     }
                 }
@@ -228,6 +216,30 @@ async fn tunnel(me: Weak<Tailcat>, program: PathBuf, key: PathBuf, port: u16) {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(60));
     }
+}
+
+fn report_tunnel_line(
+    me: &Weak<Tailcat>,
+    line: &str,
+    port: u16,
+    backoff: &mut Duration,
+) -> Option<()> {
+    if let Some(a) = tailcat::address_in(&line) {
+        let Some(t) = me.upgrade() else { return None };
+        t.note(|s| {
+            s.address = Some(a.to_string());
+            s.up = true;
+            s.error = None;
+        });
+        tracing::info!(
+            "remote Nodes reach this Hub at {}",
+            tailcat::hub_url(a, port)
+        );
+        *backoff = Duration::from_secs(1);
+    } else {
+        tracing::debug!("tailcat: {line}");
+    }
+    Some(())
 }
 
 /// Turns it back on at boot when the owner left it on; a failure is logged and shown in Devices.

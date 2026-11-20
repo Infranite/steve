@@ -573,6 +573,19 @@ impl Shared {
 
     /// Answers from the reader itself (stale, unknown kind): never waits, so a full lane drops
     /// the answer and its sender meets its deadline.
+    fn receive_response(&self, env: Envelope, schema: Schema) {
+        // a late answer of another generation never reaches a caller
+        if env.generation != self.generation {
+            return;
+        }
+        let Some(re) = env.re else { return };
+        if let Some(p) = self.pending.lock().unwrap().remove(&re)
+            && p.schema == schema
+        {
+            let _ = p.tx.send(env.p);
+        }
+    }
+
     fn respond_now(&self, re: String, outcome: Outcome, generation: u64, schema: Schema) {
         if let Some(text) =
             self.response_payload(re, "", schema.outcome(outcome), generation, schema)
@@ -807,18 +820,7 @@ async fn reader(
             }
         };
         match env.t {
-            Kind::Res => {
-                // a late answer of another generation never reaches a caller
-                if env.generation != s.generation {
-                    continue;
-                }
-                let Some(re) = env.re else { continue };
-                if let Some(p) = s.pending.lock().unwrap().remove(&re)
-                    && p.schema == schema
-                {
-                    let _ = p.tx.send(env.p);
-                }
-            }
+            Kind::Res => s.receive_response(env, schema),
             Kind::Req => {
                 if env.generation != s.generation {
                     if refuse_other_generation(&s, env, schema) {

@@ -221,25 +221,9 @@ async fn serve_after(
         previous: Mutex::new(None),
         incarnation: Mutex::new(None),
     };
-    let hub = svc.identity.get().map(|k| k.as_ref());
-    // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
-    let pins: Vec<String> = svc
-        .pin
-        .iter()
-        .flat_map(|p| p.split(','))
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect();
-    let accepted =
-        handshake::accept_as(&mut sink, &mut stream, &svc.hub_id, &admit, hub, &pins).await;
-    drop(unproven);
-    let (hello, admitted) = match accepted {
-        Ok(x) => x,
-        Err(e) if e.code == handshake::REPORTED => return,
-        Err(e) => {
-            tracing::info!("node link refused: {e}");
-            return;
-        }
+    let Some((hello, admitted)) = accept_link(&svc, &admit, &mut sink, &mut stream, unproven).await
+    else {
+        return;
     };
     let node = NodeId::new(hello.node_id.clone()).expect("handshake validated the node id");
     let generation = admitted.generation;
@@ -304,6 +288,34 @@ async fn serve_after(
     remote.detach(generation);
 }
 
+async fn accept_link(
+    svc: &NodeService,
+    admit: &Admit,
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    unproven: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Option<(Hello, Admitted)> {
+    let hub = svc.identity.get().map(|k| k.as_ref());
+    // the pins of this Hub's certificate (STEVE_NODE_TLS_PIN, the next one's too while changing it)
+    let pins: Vec<String> = svc
+        .pin
+        .iter()
+        .flat_map(|p| p.split(','))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let accepted = handshake::accept_as(sink, stream, &svc.hub_id, admit, hub, &pins).await;
+    drop(unproven);
+    match accepted {
+        Ok(x) => Some(x),
+        Err(e) if e.code == handshake::REPORTED => None,
+        Err(e) => {
+            tracing::info!("node link refused: {e}");
+            None
+        }
+    }
+}
+
 /// How long the Hub waits for a Node to say what machine it is.
 const HOST_ASK: Duration = Duration::from_secs(15);
 
@@ -345,6 +357,10 @@ async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
     if conn.is_closed() {
         return;
     }
+    remember_host(&svc, &node, host).await;
+}
+
+async fn remember_host(svc: &NodeService, node: &NodeId, host: HostInfo) {
     let Ok(text) = serde_json::to_string(&host) else {
         return;
     };

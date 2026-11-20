@@ -47,10 +47,7 @@ steve-hub	crates/steve-hub/src/extension.rs	cognitive_complexity	41
 steve-hub	crates/steve-hub/src/extension.rs	too_many_lines	217
 steve-hub	crates/steve-hub/src/nodes/install.rs	cognitive_complexity	29,26
 steve-hub	crates/steve-hub/src/nodes/install.rs	too_many_lines	154
-steve-hub	crates/steve-hub/src/nodes/listener.rs	cognitive_complexity	30,26
-steve-hub	crates/steve-hub/src/nodes/tailcat.rs	cognitive_complexity	29
 steve-hub	crates/steve-hub/src/nodes/upgrade.rs	too_many_lines	136
-steve-hub	crates/steve-hub/src/nodes/vitals.rs	cognitive_complexity	33
 steve-hub	crates/steve-hub/src/plugins/mod.rs	cognitive_complexity	28
 steve-hub	crates/steve-hub/src/upgrades/maintenance.rs	too_many_lines	105
 steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	cognitive_complexity	32
@@ -62,14 +59,12 @@ steve-hub	crates/steve-hub/src/wire/node_binding.rs	too_many_lines	139
 steve-hub	crates/steve-hub/src/wire/node_runtime.rs	too_many_lines	115
 steve-hub	crates/steve-hub/src/wire/node_runtime/apply.rs	cognitive_complexity	33
 steve-hub	crates/steve-hub/src/wire/node_runtime/apply.rs	too_many_lines	174,163,151
-steve-hub	crates/steve-hub/src/wire/node_runtime/heads.rs	too_many_lines	106
 steve-hub	crates/steve-hub/src/wire/node_runtime/lifecycle.rs	cognitive_complexity	26
 steve-hub	crates/steve-hub/src/wire/node_runtime/lifecycle.rs	too_many_lines	151
 steve-hub	crates/steve-hub/src/wire/node_runtime/send.rs	cognitive_complexity	29
 steve-hub	crates/steve-hub/src/wire/node_runtime/send.rs	too_many_lines	152,136,117
 steve-hub	crates/steve-hub/src/wire/node_tools.rs	too_many_lines	207
 steve-hub	crates/steve-hub/src/wire/outbox.rs	cognitive_complexity	31
-steve-hub	crates/steve-hub/src/wire/research.rs	too_many_lines	147,113
 steve-install	crates/steve-install/src/release.rs	too_many_lines	149
 steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	34,28
 steve-install	crates/steve-install/src/setup.rs	too_many_lines	143,114
@@ -81,7 +76,6 @@ steve-node	crates/steve-node/src/actor.rs	cognitive_complexity	44,40,35
 steve-node	crates/steve-node/src/actor.rs	too_many_lines	413,204,171,114,106
 steve-node	crates/steve-node/src/lib.rs	cognitive_complexity	52
 steve-node	crates/steve-node/src/lib.rs	too_many_lines	171,153,140,139,134,126,121,118,117,114,105
-steve-node-wire	crates/steve-node-wire/src/conn.rs	too_many_lines	108
 steve-stats	crates/steve-stats/src/metrics.rs	too_many_lines	347,107
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
