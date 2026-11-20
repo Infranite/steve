@@ -1,9 +1,13 @@
 //! One writer, four FIFO lanes, and caller-thread root grants sharing the same scheduler.
 //! The connection moves between the scheduler and a thread-local Rc lease. No Send/Sync
 //! implementation or connection pointer is needed, even for a Send + !Sync SQLite connection.
+#[cfg(feature = "conformance")]
+#[path = "access_log.rs"]
+pub mod access_log;
 #[cfg(test)]
 mod maintenance_tests;
 mod schedule;
+pub(crate) mod watch;
 pub use schedule::{Head, LANES, Lane, Scheduler, index, name, target};
 
 use std::any::Any;

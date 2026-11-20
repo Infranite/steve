@@ -11,6 +11,7 @@ pub mod ops;
 pub mod query;
 pub mod registry;
 pub mod retention;
+pub mod retry;
 pub mod snapshot;
 pub mod transfer;
 pub mod uow;
@@ -73,6 +74,16 @@ pub enum Isolation {
 #[async_trait]
 pub trait DomainStore: Send + Sync {
     fn hello(&self) -> &Hello;
+    /// UNSTABLE: freeze after the first contract-based DueSource is exercised.
+    /// A data-free hint for re-querying due work, never a business decision or event.
+    /// Commits through the same Store and its clones do not lose wakeups; hints may
+    /// coalesce or over-fire. Independent connections, other Store instances, other
+    /// processes and remote backends may remain silent. Correctness requires
+    /// the consumer's 60-second polling fallback. Root rollbacks never wake watchers.
+    fn watch(&self, _entities: &[EntityName]) -> CommitWatch {
+        CommitWatch::new()
+    }
+
     async fn query(&self, q: AnyQuery) -> Result<AnyOutput, Error>;
     async fn snapshot(&self, domain: Domain, qs: Vec<AnyQuery>) -> Result<Vec<AnyOutput>, Error>;
     async fn begin_snapshot(&self, domain: Domain, lane: Lane) -> Result<LeaseId, Error>;
@@ -89,6 +100,109 @@ pub trait DomainStore: Send + Sync {
     ) -> Result<ExportBatch, Error>;
     async fn import(&self, batch: ExportBatch) -> Result<ImportReport, Error>;
     async fn retention(&self, entity: String, budget: Budget) -> Result<RetentionReport, Error>;
+}
+
+/// Contract entity name, resolved by each backend to its physical table.
+pub type EntityName = String;
+
+/// UNSTABLE, data-free, coalescing commit hint. One owned subscription, one waiter.
+#[derive(Default)]
+pub struct CommitWatch(std::sync::Arc<std::sync::Mutex<WatchState>>);
+#[derive(Default)]
+struct WatchState {
+    pending: bool,
+    waker: Option<std::task::Waker>,
+}
+impl CommitWatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Weak consumer adapter for backend table registries. Holding this adapter
+    /// does not keep the subscription alive after the consumer drops its watch.
+    pub fn hint(&self) -> std::sync::Arc<dyn CommitHint> {
+        std::sync::Arc::new(WatchHint(std::sync::Arc::downgrade(&self.0)))
+    }
+    /// Wait for a hint; a commit before this call retains one permit.
+    pub async fn changed(&self) {
+        std::future::poll_fn(|cx| {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if std::mem::take(&mut state.pending) {
+                std::task::Poll::Ready(())
+            } else {
+                state.waker = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    }
+}
+/// Backend notification adapter. Registries hold adapters strongly, while adapters
+/// hold their consumer weakly. Both the contract watch and legacy host wake handles
+/// use this one subscription registry and publication path.
+pub trait CommitHint: Send + Sync {
+    fn is_alive(&self) -> bool;
+    fn notify(&self);
+}
+struct WatchHint(std::sync::Weak<std::sync::Mutex<WatchState>>);
+impl CommitHint for WatchHint {
+    fn is_alive(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+    fn notify(&self) {
+        if let Some(watch) = self.0.upgrade() {
+            let waker = {
+                let mut state = watch.lock().unwrap_or_else(|e| e.into_inner());
+                state.pending = true;
+                state.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+}
+/// Backend helper keyed by backend-local subscription names. DomainStore adapters
+/// resolve entity names first. All callbacks run outside the subscription-list lock.
+#[derive(Default)]
+pub struct CommitWatches(std::sync::Mutex<Vec<WatchEntry>>);
+type WatchEntry = (Vec<EntityName>, std::sync::Arc<dyn CommitHint>);
+impl CommitWatches {
+    pub fn subscribe(&self, entities: &[EntityName]) -> CommitWatch {
+        let watch = CommitWatch::new();
+        self.subscribe_into(entities, &watch);
+        watch
+    }
+    /// Attach another backend partition to the same data-free subscription.
+    pub fn subscribe_into(&self, entities: &[EntityName], watch: &CommitWatch) {
+        self.subscribe_hint(entities, watch.hint());
+    }
+    pub fn subscribe_hint(&self, keys: &[String], hint: std::sync::Arc<dyn CommitHint>) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|(_, w)| w.is_alive());
+        entries.push((keys.to_vec(), hint));
+    }
+    pub fn has_subscribers(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|(_, w)| w.is_alive())
+    }
+    pub fn notify(&self, entities: &[EntityName]) {
+        let watchers: Vec<_> = {
+            let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            entries.retain(|(_, w)| w.is_alive());
+            entries
+                .iter()
+                .filter(|(names, _)| names.iter().any(|n| entities.contains(n)))
+                .map(|(_, w)| w.clone())
+                .collect()
+        };
+        for watch in watchers {
+            // Consumer callbacks cannot change a durable commit's outcome.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.notify()));
+        }
+    }
 }
 
 /// Construct a transport-neutral error without exposing backend details or private paths.

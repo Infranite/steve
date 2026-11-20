@@ -98,6 +98,7 @@ pub struct MemStore {
     clock: Arc<dyn Clock>,
     instance: u64,
     state: Mutex<State>,
+    watches: CommitWatches,
 }
 fn invalid(detail: &str) -> Error {
     error(Code::Invalid, detail)
@@ -238,6 +239,7 @@ impl MemStore {
             clock,
             instance: INSTANCE.fetch_add(1, AtomicOrdering::Relaxed),
             state: Mutex::new(State::default()),
+            watches: CommitWatches::default(),
         })
     }
     fn offers(descriptions: &BTreeMap<String, EntityDesc>) -> Vec<DomainOffer> {
@@ -300,6 +302,7 @@ impl MemStore {
     fn validate_descriptor(e: &EntityDesc) -> Result<(), Error> {
         let names: BTreeSet<_> = e.fields.iter().map(|f| &f.name).collect();
         if e.key.is_empty()
+            || e.fields.iter().any(|field| field.name == "rev")
             || names.len() != e.fields.len()
             || e.key.iter().any(|k| !names.contains(k))
             || e.indexes
@@ -1028,9 +1031,13 @@ impl DomainStore for MemStore {
         }
         Ok(())
     }
+    fn watch(&self, entities: &[EntityName]) -> CommitWatch {
+        self.watches.subscribe(entities)
+    }
     async fn commit(&self, uow: UnitOfWork) -> Result<Committed, CommitError> {
         uow.validate_age(self.clock.now())?;
         uow.verify_digest().map_err(fatal)?;
+        uow.validate_cursor_idempotency().map_err(fatal)?;
         self.validate_references(&uow).map_err(fatal)?;
         let natural = self.natural_key(&uow)?;
         let mut state = self
@@ -1040,6 +1047,8 @@ impl DomainStore for MemStore {
         let key = (uow.domain, uow.id.issued_at.0, uow.id.key.clone());
         let receipt = if let Some(natural) = &natural {
             state.natural.get(natural)
+        } else if uow.idempotency == Idempotency::Cursor {
+            None
         } else {
             state.receipts.get(&key)
         };
@@ -1069,7 +1078,9 @@ impl DomainStore for MemStore {
         state.data = candidate;
         state.rev = rev.0;
         let now = self.clock.now().0;
-        if i128::from(now) - i128::from(state.last_cleanup) >= 86_400_000 {
+        if uow.idempotency != Idempotency::Cursor
+            && i128::from(now) - i128::from(state.last_cleanup) >= 86_400_000
+        {
             state
                 .receipts
                 .retain(|key, _| i128::from(now) - i128::from(key.1) <= 31 * 86_400_000);
@@ -1077,9 +1088,19 @@ impl DomainStore for MemStore {
         }
         if let Some(natural) = natural {
             state.natural.insert(natural, receipt);
-        } else {
+        } else if uow.idempotency != Idempotency::Cursor {
             state.receipts.insert(key, receipt);
         }
+        // Compare committed candidate rows, including named operations and side effects.
+        // Notifying unchanged registered entities is a permitted extra hint.
+        let touched: Vec<_> = self
+            .entities
+            .values()
+            .filter(|e| e.domain == uow.domain)
+            .map(|e| e.name.clone())
+            .collect();
+        drop(state);
+        self.watches.notify(&touched);
         Ok(result)
     }
     async fn commit_many(&self, uows: Vec<UnitOfWork>) -> Vec<Result<Committed, CommitError>> {
@@ -1310,6 +1331,9 @@ impl DomainStore for MemStore {
         state.natural.extend(metadata.natural);
         state.rev = state.rev.max(batch.session.rev.0);
         state.imported.insert(batch.id.clone(), batch.digest);
+        drop(state);
+        self.watches
+            .notify(std::slice::from_ref(&batch.entity.name));
         Ok(ImportReport {
             batch_id: batch.id,
             imported: batch.rows.len() as u64,
@@ -1463,6 +1487,10 @@ impl DomainStore for MemStore {
                 .insert(entity.clone(), last.expect("positive budget"));
         } else {
             state.retention_after.remove(&entity);
+        }
+        drop(state);
+        if !eligible.is_empty() {
+            self.watches.notify(std::slice::from_ref(&entity));
         }
         let elapsed = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
         Ok(RetentionReport {
