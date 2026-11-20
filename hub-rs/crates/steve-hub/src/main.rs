@@ -12,18 +12,7 @@ fn main() -> anyhow::Result<()> {
         )),
         Some("--stats-snapshot") => Some(steve_hub::stats_snapshot::main(&args[1..])),
         Some("--build-info") => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "version": option_env!("STEVE_BUILD_VERSION"),
-                    "commit": option_env!("STEVE_BUILD_COMMIT"),
-                    "target": env!("STEVE_BUILD_TARGET"),
-                    "schema": steve_store::db::SCHEMA_VERSION,
-                    "check_config": true,
-                    "upgrade_runner": {"journal": 1, "kinds": ["release_bundle", "local_release"], "native": true},
-                    "native_install": 1
-                })
-            );
+            println!("{}", steve_hub::build_info()?);
             Some(0)
         }
         _ => None,

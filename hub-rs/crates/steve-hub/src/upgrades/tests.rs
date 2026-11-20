@@ -14,11 +14,7 @@ fn fixture() -> Manifest {
         hub_version: "0.2.0".into(),
         web_version: "0.2.0".into(),
         api_protocol: 1,
-        schema: Schema {
-            min_read: 1,
-            max_read: 1,
-            target: 1,
-        },
+        storage: steve_store_sqlite::compat::StorageCapabilities::compiled(),
         assets: vec![],
     }
 }
@@ -1245,4 +1241,96 @@ async fn the_supervisor_asks_the_candidate_about_this_environment_before_drainin
         .await
         .expect("an older candidate is not asked");
     assert!(!asked.exists());
+}
+
+/// The Hub reads the exact candidate/SQLite matrix used by the installer,
+/// Python gate and publisher. No fake gate substitutes a scalar schema check.
+#[test]
+fn release_storage_uses_the_shared_gate_matrix() {
+    let data: Value = serde_json::from_str(include_str!(
+        "../../../steve-install/tests/storage_matrix.json"
+    ))
+    .unwrap();
+    for case in data["cases"].as_array().unwrap() {
+        let mut candidate = serde_json::to_value(fixture()).unwrap();
+        candidate
+            .as_object_mut()
+            .unwrap()
+            .extend(data["manifest"].as_object().unwrap().clone());
+        if let Some(patch) = case["patch"].as_object() {
+            for (path, replacement) in patch {
+                let (parent, key) = path.rsplit_once('/').unwrap();
+                let object = candidate
+                    .pointer_mut(parent)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                if replacement.is_null() {
+                    object.remove(key);
+                } else {
+                    object.insert(key.into(), replacement.clone());
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("steve.sqlite3");
+        if case["missing"] != true {
+            let connection = rusqlite::Connection::open(&db).unwrap();
+            let base = format!("{}_sql", case["base"].as_str().unwrap());
+            connection
+                .execute_batch(&format!(
+                    "{}{}",
+                    data[&base].as_str().unwrap_or(""),
+                    case["sql"].as_str().unwrap()
+                ))
+                .unwrap();
+        }
+        fs::write(
+            temp.path().join("release.json"),
+            serde_json::to_vec(&candidate).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read(&db).ok();
+        let parsed = serde_json::from_value::<Manifest>(candidate.clone());
+        assert_eq!(
+            parsed.is_ok(),
+            steve_install::release::storage_capabilities(&candidate).is_ok(),
+            "{}",
+            case["name"]
+        );
+        let allowed = parsed.is_ok_and(|m| client::validate_manifest(&m, "0.2.0").is_ok())
+            && steve_install::release::check_schema(&db, temp.path()).is_ok();
+        assert_eq!(
+            allowed,
+            case["allowed"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(fs::read(&db).ok(), before, "{}", case["name"]);
+    }
+}
+
+#[test]
+fn bundle_storage_must_match_the_selected_release() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = fixture();
+    let mut embedded = manifest.clone();
+    embedded.storage.core.target += 1;
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    let bytes = serde_json::to_vec(&embedded).unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "release.json", bytes.as_slice())
+        .unwrap();
+    let bytes = archive.into_inner().unwrap().finish().unwrap();
+    assert!(
+        client::unpack(&bytes, temp.path(), &manifest)
+            .unwrap_err()
+            .to_string()
+            .contains("storage mismatch")
+    );
 }
