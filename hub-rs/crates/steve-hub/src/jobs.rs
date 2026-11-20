@@ -5,7 +5,8 @@ use steve_runtime::{FirstRun, SystemClock, Task, every};
 
 use crate::api::AppState;
 
-/// The Hub owns task lifetimes; this is an ownership bag, not a scheduler.
+/// The Hub owns already-spawned task handles. Lane scopes belong around business
+/// futures before spawn, never around this ownership bag or its JoinHandle polling.
 #[derive(Default)]
 pub struct Tasks {
     state: Mutex<TaskState>,

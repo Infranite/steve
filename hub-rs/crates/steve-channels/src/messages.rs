@@ -582,13 +582,13 @@ pub fn retention(m: Modules) -> steve_runtime::Task {
         steve_runtime::FirstRun::Immediate,
         move || {
             let m = m.clone();
-            async move {
+            steve_store::lane::background(async move {
                 match m.blocking(|m| sweep(m, m.clock.now())).await {
                     Ok(n) if n > 0 => tracing::info!(purged = n, "channels.retention"),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("channels.retention: {e}"),
                 }
-            }
+            })
         },
     )
 }

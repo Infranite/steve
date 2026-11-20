@@ -1,6 +1,7 @@
 //! One writer, four FIFO lanes, and caller-thread root grants sharing the same scheduler.
 //! The connection moves between the scheduler and a thread-local Rc lease. No Send/Sync
 //! implementation or connection pointer is needed, even for a Send + !Sync SQLite connection.
+pub mod context;
 #[cfg(test)]
 mod maintenance_tests;
 mod schedule;
@@ -15,7 +16,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use steve_storage_api::uow::CommitError;
+pub use steve_storage_api::uow::CommitError;
 use tokio::sync::oneshot;
 
 pub const QUEUE_LIMIT: usize = 1024;
@@ -200,6 +201,9 @@ pub struct RootGrant<C: Send + 'static, R: BatchRunner<C>> {
     nested: bool,
 }
 impl<C: Send + 'static, R: BatchRunner<C>> RootGrant<C, R> {
+    pub fn lane(&self) -> Lane {
+        self.lease.lane
+    }
     pub fn is_nested(&self) -> bool {
         self.nested
     }
@@ -296,6 +300,10 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
     }
     pub fn queue_depth(&self, lane: Lane) -> usize {
         lock(&self.shared().state).queues[index(lane)].len()
+    }
+    #[track_caller]
+    pub fn grant_current(&self) -> Result<RootGrant<C, R>, GrantError> {
+        self.grant(context::current())
     }
     #[track_caller]
     pub fn grant(&self, lane: Lane) -> Result<RootGrant<C, R>, GrantError> {

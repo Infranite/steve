@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use repo::*;
+pub use steve_store_sqlite::exec::context as lane;
 pub use steve_types::BusEvent;
 pub use tx::Tx;
 pub use types::*;
@@ -482,7 +483,7 @@ pub(crate) fn read_snapshot<T>(
 
 // Shared lock-boundary mechanics; recorder installation belongs to the embedding application.
 pub mod instrumentation {
-    /// Whether the Hub installed its in-memory recorder. Off: one flag load, no clock or TLS.
+    /// Optional timing/request counters; scheduling context and unset diagnostics stay active.
     static LOCK_METRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     pub fn enable_lock_metrics() {
@@ -508,21 +509,26 @@ pub mod instrumentation {
         }
     }
 
-    /// Carry only this request's counter into synchronous work on another thread. Like i18n's
-    /// carrier, sync_scope restores the worker's previous context on return or unwind.
+    /// Carry lane even with lock metrics disabled; never carry writer or transaction TLS.
     pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
+        let lane = crate::lane::capture();
         let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             REQUEST_CALLS.try_with(std::sync::Arc::clone).ok()
         } else {
             None
         };
-        move || match calls {
-            Some(calls) => REQUEST_CALLS.sync_scope(calls, f),
-            None => f(),
+        move || {
+            crate::lane::with_context(lane, || match calls {
+                Some(calls) => REQUEST_CALLS.sync_scope(calls, f),
+                None => f(),
+            })
         }
     }
 
+    #[track_caller]
     pub(crate) fn store_acquired() {
+        // Record unclassified legacy acquisitions even when timing metrics are disabled.
+        let _ = crate::lane::current();
         if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }

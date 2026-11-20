@@ -21,7 +21,9 @@ pub struct Job {
 }
 impl Job {
     pub fn new(name: &'static str, future: impl Future<Output = ()> + Send + 'static) -> Self {
-        Self::task(name, move || steve_runtime::spawn(name, future))
+        Self::task(name, move || {
+            steve_runtime::spawn(name, steve_store::lane::background(future))
+        })
     }
     pub fn task(
         name: &'static str,

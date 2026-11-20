@@ -722,7 +722,7 @@ pub async fn run(
     backup: Option<Arc<dyn PreDestructiveBackup>>,
 ) -> ApiResult<Summary> {
     let (ch2, v2, t2) = (ch.clone(), v.clone(), t.clone());
-    tokio::task::spawn_blocking(steve_i18n::carry(move || -> ApiResult<Summary> {
+    tokio::task::spawn_blocking(steve_store::instrumentation::carry(steve_i18n::carry(move || -> ApiResult<Summary> {
         let (ch, v, t) = (ch2, v2, t2);
         // fail before the backup when there is nothing to clean
         ch.store().reader(|c| plan(c, &v, &t, level).map(|_| ()))?;
@@ -771,7 +771,7 @@ pub async fn run(
         out.backup = Some(file);
         tracing::info!(level = ?level, spaces = out.spaces, messages = out.messages, contacts = out.contacts, "channels: cleanup done");
         Ok(out)
-    }))
+    })))
     .await
     .map_err(|_| ApiError::Internal("任务失败".into()))?
 }

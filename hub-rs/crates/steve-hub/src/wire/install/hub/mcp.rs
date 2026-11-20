@@ -19,7 +19,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
         jobs.push(Job::task("library.sweep", move || {
             steve_runtime::every("library.sweep", clock, std::time::Duration::from_secs(60), steve_runtime::FirstRun::Immediate, move || {
                 let library = library.clone();
-                async move { let _ = tokio::task::spawn_blocking(move || library.sweep()).await; }
+                steve_store::lane::background(async move { let _ = tokio::task::spawn_blocking(move || library.sweep()).await; })
             })
         }));
     }

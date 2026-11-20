@@ -652,7 +652,7 @@ pub fn wire_assembly(
             steve_runtime::FirstRun::AfterPeriod,
             move || {
                 caches.sample_gauges();
-                std::future::ready(())
+                steve_store::lane::background(std::future::ready(()))
             },
         )
     }));

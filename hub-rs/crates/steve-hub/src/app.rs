@@ -14,6 +14,11 @@ use crate::api::{self, AppState};
 use crate::backend::BackendError;
 use crate::error::json_response;
 
+/// Public HTTP entry; admin's independent router can use `scope(Lane::Admin, ...)`.
+pub async fn interactive_lane(req: Request, next: Next) -> Response {
+    steve_store::lane::scope(steve_store::lane::Lane::Interactive, next.run(req)).await
+}
+
 /// Whether the TCP peer is this machine: 127/8, `::1` or an IPv4-mapped 127/8 (main.ts and auth.ts match
 /// `^(127\.|::1|::ffff:127\.)` on the text, which also let `::1234:…` through).
 pub fn is_loopback(addr: &SocketAddr) -> bool {
@@ -238,6 +243,7 @@ pub fn app(
         // CORS answers preflight before login; outer metrics also observes these short responses.
         .layer(middleware::from_fn_with_state(st, crate::access::cors))
         .layer(middleware::from_fn(crate::metrics::http))
+        .layer(middleware::from_fn(interactive_lane))
 }
 
 fn health_routes(st: &AppState) -> Router {

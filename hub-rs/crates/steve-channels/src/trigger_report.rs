@@ -230,11 +230,11 @@ pub fn run(ch: Channels, outbox: Arc<Outbox>) -> steve_runtime::Task {
         steve_runtime::FirstRun::Immediate,
         move || {
             let (ch, outbox) = (ch.clone(), outbox.clone());
-            async move {
+            steve_store::lane::background(async move {
                 if let Err(e) = sweep(&ch, &outbox).await {
                     tracing::warn!("trigger reports: {e}");
                 }
-            }
+            })
         },
     )
 }
