@@ -281,6 +281,10 @@ class ImportMarkers(unittest.TestCase):
     def test_rg4b_run_three_to_two_columns_among_imports_prints_no_markers(self):
         self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\t0\n", "src/a.rs\t2\n")
 
+    def test_rg4b_crlf_run_downgrade_among_imports_prints_no_markers(self):
+        self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt",
+                          "\r\nsrc/a.rs\t2\t0\r\n", "\r\nsrc/a.rs\t2\r\n")
+
     def test_rg4b_due_growth_among_imports_prints_no_markers(self):
         self.mixed_growth(f"{guard.HUB_TESTS}/due_wake_sites.txt", "src/a.rs\t2\n", "src/a.rs\t3\n")
 

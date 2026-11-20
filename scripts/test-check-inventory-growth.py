@@ -214,6 +214,9 @@ class Snapshots(unittest.TestCase):
                 self.assertEqual([(x["key"], x["before"], x["head"]) for x in changes],
                                  [(("src/a.rs", "bare"), [0], [1])])
         self.assertFalse(self.growth("src/a.rs\t2\t1\n", "src/a.rs\t1\t0\n", RUN_OWNERSHIP))
+        changes = self.growth("src/a.rs\t2\t1\n", "src/a.rs\t3\t0\n", RUN_OWNERSHIP)[RUN_OWNERSHIP]
+        self.assertEqual([(x["key"], x["before"], x["head"]) for x in changes],
+                         [(("src/a.rs", "total"), [2], [3])])
 
     def test_rg4b_new_family_formats_fail_closed(self):
         for path, text in [(DIGEST_WRITES, "table\tsrc/a.rs\t0\n"),
@@ -222,6 +225,8 @@ class Snapshots(unittest.TestCase):
                            (RUN_OWNERSHIP, "src/a.rs\t2\t-1\n"),
                            (RUN_OWNERSHIP, "src/a.rs\t1\t2\n"),
                            (RUN_OWNERSHIP, "src/a.rs\t2\t0\t1\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\nsrc/b.rs\t2\t0\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\t0\nsrc/b.rs\t2\n"),
                            (DUE_WAKE, "src/a.rs\tother\t1\n"),
                            (DUE_WAKE, "src/a.rs\t0\n")]:
             with self.subTest(path=path, text=text), self.assertRaises(guard.InventoryError):
@@ -621,6 +626,42 @@ class Histories(unittest.TestCase):
                         lines.append(f"Inventory-Growth: {RUN_OWNERSHIP} {guard.key_text(change['key'])} = {guard.value_text(change['head'])}: reviewed new column budget")
                 self.commit("Explicit layout and key review\n\n" + "\n".join(lines))
                 self.assertEqual(self.comparator_cli(base).returncode, 0)
+
+    def assert_run_layout(self, before, after, formats, bare_before, bare_after):
+        self.put(RUN_OWNERSHIP, before)
+        base = self.commit("Run layout baseline with exact line endings")
+        self.put(RUN_OWNERSHIP, after)
+        self.commit("Run layout after line ending or column change")
+        self.assertEqual(guard.snapshot(self.repo, base)[RUN_OWNERSHIP], before)
+        self.assertEqual(guard.snapshot(self.repo, "HEAD")[RUN_OWNERSHIP], after)
+        report = guard.check(self.repo, base)
+        actual = [(c["before_format"], c["head_format"])
+                  for c in report["changes"].get(RUN_OWNERSHIP, []) if c["kind"] == "format"]
+        self.assertEqual(actual, formats)
+        self.assertEqual(report["totals"][RUN_OWNERSHIP],
+                         {"baseline": 2, "head": 2, "bare_baseline": bare_before, "bare_head": bare_after})
+        result = self.comparator_cli(base)
+        self.assertEqual(result.returncode, 1 if formats else 0, result.stderr)
+        if formats:
+            self.assertIn(RUN_OWNERSHIP, report["unreviewed"])
+            old, new = formats[0]
+            self.assertIn(f"format changed {old}->{new}", result.stderr)
+        else:
+            self.assertEqual(report["changes"], {})
+            self.assertEqual(report["unreviewed"], [])
+
+    def test_rg4b_crlf_blank_line_cannot_hide_three_to_two_columns(self):
+        self.assert_run_layout("\r\nsrc/a.rs\t2\t0\r\n", "\r\nsrc/a.rs\t2\r\n",
+                               [(3, 2)], 0, None)
+
+    def test_rg4b_crlf_blank_line_cannot_hide_two_to_three_columns(self):
+        self.assert_run_layout("\r\nsrc/a.rs\t2\r\n", "\r\nsrc/a.rs\t2\t0\r\n",
+                               [(2, 3)], None, 0)
+
+    def test_rg4b_adding_only_crlf_blank_lines_preserves_layout_and_totals(self):
+        for row, bare in [("src/a.rs\t2\r\n", None), ("src/a.rs\t2\t0\r\n", 0)]:
+            with self.subTest(bare=bare):
+                self.assert_run_layout(row, "\r\n" + row, [], bare, bare)
 
     def test_rg4b_a_layout_review_cannot_authorize_later_inventory_removal(self):
         self.put(RUN_OWNERSHIP, "src/a.rs\t2\n")

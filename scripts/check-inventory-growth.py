@@ -52,10 +52,9 @@ def nonnegative(text):
     return int(text)
 
 
-def run_columns(text):
-    """A missing legacy bare column is unknown, never an implicit zero budget."""
-    return next((len(line.removesuffix("\r").split("\t")) for line in text.split("\n")
-                 if line and not line.startswith("#")), None)
+def run_columns(entries):
+    """Infer the validated layout; a missing legacy bare column remains unknown."""
+    return None if not entries else (3 if any(key[-1] == "bare" for key in entries) else 2)
 
 
 def parse(path, text):
@@ -158,7 +157,7 @@ def compare_snapshots(before, after):
         listed, current = parse(path, before.get(path, "")), parse(path, after.get(path, ""))
         problems = []
         if path == RUN_OWNERSHIP and path in before and path in after:
-            old_format, new_format = run_columns(before[path]), run_columns(after[path])
+            old_format, new_format = run_columns(listed), run_columns(current)
             if old_format is not None and new_format is not None and old_format != new_format:
                 problems.append({"kind": "format", "before_format": old_format, "head_format": new_format})
         for key in sorted(listed.keys() | current.keys()):
@@ -353,8 +352,8 @@ def check(repo, base, head="HEAD"):
         if path == RUN_OWNERSHIP:
             axis = lambda rows, name: sum(v[0] for key, v in rows.items() if key[-1] == name)
             totals[path] = {"baseline": axis(was, "total"), "head": axis(now, "total"),
-                            "bare_baseline": axis(was, "bare") if run_columns(effective.get(path, "")) == 3 else None,
-                            "bare_head": axis(now, "bare") if run_columns(after.get(path, "")) == 3 else None}
+                            "bare_baseline": axis(was, "bare") if run_columns(was) == 3 else None,
+                            "bare_head": axis(now, "bare") if run_columns(now) == 3 else None}
         else:
             totals[path] = {"baseline": total(was), "head": total(now)}
     return {"base": base, "head": head, "paths": paths, "changes": changes,
