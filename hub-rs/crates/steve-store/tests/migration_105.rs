@@ -1,7 +1,8 @@
 //! A sweep-log key includes the scope revision and target.
+#[path = "common/current.rs"]
+mod current;
 
 use rusqlite::Connection;
-use steve_store::db;
 
 fn one<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
@@ -9,8 +10,8 @@ fn one<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
 
 #[test]
 fn sweep_log_keys_include_scope_and_target() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     let n: i64 = one(&c, "SELECT COUNT(*) FROM item_would_do");
     assert_eq!(n, 0, "starts empty");
     let insert = |id: &str, scope: i64, target: &str| {

@@ -19,6 +19,7 @@ tokio = { version = "=1.54.1", features = ["time", "rt"] }
 tracing = "=0.1.44"
 
 [dev-dependencies]
+steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-node-api = { path = "../steve-node-api" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", features = ["time", "rt", "macros"] }

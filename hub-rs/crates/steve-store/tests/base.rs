@@ -8,7 +8,7 @@ use serde_json::json;
 use steve_store::base::{
     self, Level, ObjRef, Viewer, Visibility, changesets, decisions, links, mems, tags,
 };
-use steve_store::{NewDecision, Store, StoreError, db};
+use steve_store::{NewDecision, Store, StoreError};
 
 const A: &str = "usr_a";
 const B: &str = "usr_b";
@@ -67,7 +67,7 @@ fn empty_database_gets_the_current_version_with_builtin_attributes() {
     let t = fresh();
     t.store
         .with_conn(|c| {
-            assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+            assert_eq!(count(c, "SELECT count(*) FROM domain_schema"), 3);
             assert_eq!(
                 count(
                     c,

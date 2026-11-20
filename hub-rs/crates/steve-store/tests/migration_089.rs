@@ -1,12 +1,13 @@
 //! Current channel settings and connection lifetime constraints.
+#[path = "common/current.rs"]
+mod current;
 
 use rusqlite::Connection;
-use steve_store::db;
 
 #[test]
 fn write_blocks_default_to_the_connection_and_follow_its_deletion() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     c.execute_batch(
         "PRAGMA foreign_keys=ON;
          INSERT INTO workspaces(id,name,created) VALUES ('w','w',1);

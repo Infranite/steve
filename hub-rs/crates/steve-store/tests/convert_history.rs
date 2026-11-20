@@ -1,10 +1,7 @@
-#[path = "common/history.rs"]
+#[path = "../../steve-store-sqlite/tests/common/history.rs"]
 mod history;
 use rusqlite::Connection;
-use steve_store_sqlite::{
-    convert::{self, Outcome},
-    migrate, schema,
-};
+use steve_store_sqlite::{migrate, schema};
 
 fn columns(c: &Connection, table: &str) -> Vec<String> {
     c.prepare(&format!("PRAGMA table_info({table})"))
@@ -22,7 +19,7 @@ fn physical_tables(c: &Connection) -> Vec<(String, i64, String)> {
 fn historical_order_converts_without_rebuild_and_item_session_repositories_read_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("steve.sqlite3");
-    let mut c = Connection::open(&path).unwrap();
+    let c = Connection::open(&path).unwrap();
     history::after_050(&c);
     let items = columns(&c, "items");
     let sessions = columns(&c, "sessions");
@@ -41,29 +38,20 @@ fn historical_order_converts_without_rebuild_and_item_session_repositories_read_
     );
     assert_eq!(items[33], "design_gate");
     assert_eq!(&sessions[21..], ["reasoning_effort", "first_tool_at"]);
-    schema::verify_baseline(&c).unwrap();
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('owner','w','fixture','fixture','owner',0);").unwrap();
-    // Open the old facade BEFORE conversion: reopening it afterward would replay the
-    // old runner against deleted version tables. Reads below use its actual from_row.
-    let store = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
-    let before = physical_tables(&c);
-    assert!(matches!(
-        convert::convert(&mut c).unwrap(),
-        Outcome::Converted {
-            deleted_tokens: 0,
-            deleted_clients: 0,
-            deleted_sessions: 0,
-            ..
-        }
-    ));
-    migrate::check_versions(&c, true).unwrap();
-    assert_eq!(physical_tables(&c), before);
-    assert_eq!(columns(&c, "items"), items);
-    assert_eq!(columns(&c, "sessions"), sessions);
     c.execute_batch("INSERT INTO items(id,workspace_id,no,kind,title,status,stage,plan,now,priority,archived,created,updated,star,design_gate,phase,cycle,revision,outcome,acceptance,closing,closed_at,closed_reason)
         VALUES('i','w',23,'task','事项😀','done','closed','[]','read back','高',1,101,202,1,1,'closed',7,9,'completed','human','{\"fixture\":true}',303,'fixture reason');
         INSERT INTO sessions(id,workspace_id,item_id,no,harness,model,cwd,status,used,size,cost,title,created,updated,device_id,source,readonly,import_key,reasoning_effort,first_tool_at)
         VALUES('s','w','i',29,'fixture','fixture-model','/fixture','idle',31,41,1.25,'会话😀',404,505,'fixture-device','fixture-source',1,'fixture-import','high',606);").unwrap();
+    let before = physical_tables(&c);
+    drop(c);
+    let store = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
+    let c = steve_store_sqlite::open::open_readonly(&path).unwrap();
+    migrate::check_versions(&c, true).unwrap();
+    schema::verify_baseline(&c).unwrap();
+    assert_eq!(physical_tables(&c), before);
+    assert_eq!(columns(&c, "items"), items);
+    assert_eq!(columns(&c, "sessions"), sessions);
     let item = store.items().get("i").unwrap().unwrap();
     assert_eq!(
         (item.id.as_str(), item.workspace_id.as_str(), item.no),
@@ -140,5 +128,42 @@ fn historical_order_converts_without_rebuild_and_item_session_repositories_read_
             .unwrap(),
         606
     );
-    assert_eq!(convert::convert(&mut c).unwrap(), Outcome::AlreadyCurrent);
+    let created = store
+        .items()
+        .create(
+            "w",
+            &steve_store::NewItem {
+                title: "after conversion".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.items().get(&created.id).unwrap().unwrap().title,
+        "after conversion"
+    );
+    let opened = store
+        .sessions()
+        .create(&steve_store::NewSession {
+            workspace_id: "w".into(),
+            item_id: Some(created.id),
+            harness: "fixture".into(),
+            cwd: "/fixture".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .sessions()
+            .get(&opened.id)
+            .unwrap()
+            .unwrap()
+            .workspace_id,
+        "w"
+    );
+    assert!(matches!(
+        store.storage_state().unwrap(),
+        steve_store::StorageState::Current { .. }
+    ));
 }

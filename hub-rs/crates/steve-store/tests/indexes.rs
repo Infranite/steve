@@ -539,24 +539,21 @@ fn indexes_that_need_statistics_serve_their_query_once_analyzed() {
         .unwrap();
 }
 
-/// Indexes of 035 whose query is gone (the migration itself is frozen); a later migration drops them.
-const UNQUERIED: &[&str] = &[
-    // the boot repair of Codex turns recorded without tokens
-    "usage_turn",
-];
-
+/// Every query case names an index present in the current baseline.
 #[test]
-fn every_index_of_035_has_a_query() {
-    let names: Vec<&str> = steve_store::db::MIGRATIONS[34]
-        .lines()
-        .filter_map(|l| l.strip_prefix("CREATE INDEX IF NOT EXISTS "))
-        .map(|l| l.split_whitespace().next().unwrap())
-        .collect();
-    assert!(!names.is_empty());
-    for n in names {
-        assert!(
-            CASES.iter().chain(ANALYZED).any(|(i, _, _)| *i == n) || UNQUERIED.contains(&n),
-            "{n} has no query in CASES"
-        );
-    }
+fn every_query_case_has_a_current_index() {
+    let t = fresh();
+    t.store
+        .reader(|c| {
+            for (name, _, _) in CASES.iter().chain(ANALYZED) {
+                let present: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
+                    [name],
+                    |r| r.get(0),
+                )?;
+                assert!(present, "{name} is missing from the current baseline");
+            }
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
 }

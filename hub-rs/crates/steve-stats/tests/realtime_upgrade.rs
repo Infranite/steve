@@ -1,13 +1,17 @@
 use rusqlite::{Connection, params};
 use steve_stats::realtime::{self, Quality, Scope};
-use steve_store::{NoPublisher, Store, db};
+use steve_store::{NoPublisher, Store};
 const AT: i64 = 1_800_000_000_000;
 
 fn current_db() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("steve.sqlite3");
-    let c = Connection::open(&path).unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open(&path).unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut c,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('default','test',1);")
         .unwrap();
     (d, path, c)

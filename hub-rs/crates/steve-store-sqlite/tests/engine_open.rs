@@ -1,3 +1,5 @@
+#[path = "common/legacy_input.rs"]
+mod legacy_input;
 use rusqlite::Connection;
 use steve_store_sqlite::{
     digest::Source,
@@ -202,7 +204,7 @@ fn runtime_converts_113_under_its_lifetime_lock_and_admin_refuses_legacy() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(CORE_FILE);
     let c = Connection::open(&path).unwrap();
-    steve_store_sqlite::legacy::final_structure(&c).unwrap();
+    legacy_input::at(&c, 113);
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','o','o','owner',0)").unwrap();
     drop(c);
     let before = std::fs::read(&path).unwrap();
@@ -273,7 +275,7 @@ fn observed_runtime_open_reports_one_conversion_and_migration_stream_under_lock(
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CORE_FILE);
         let c = Connection::open(&path).unwrap();
-        steve_store_sqlite::legacy::final_structure(&c).unwrap();
+        legacy_input::at(&c, 114);
         if has_owner {
             c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','o','o','owner',0)").unwrap();
         }

@@ -1,19 +1,20 @@
 use rusqlite::Connection;
 use steve_store_sqlite::digest::{self, MismatchKind, Source};
-fn fixture(explicit: bool) -> Connection {
+fn fixture() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch("CREATE TABLE connections(id TEXT PRIMARY KEY);
         CREATE TABLE chan_messages(id TEXT PRIMARY KEY,workspace_id TEXT,space_id TEXT,status TEXT,created INTEGER);
         CREATE TABLE mail_messages(id TEXT PRIMARY KEY,workspace_id TEXT,thread_id TEXT,status TEXT,date INTEGER);
         CREATE TABLE digest_receipts(workspace_id TEXT,conv TEXT,message_id TEXT,PRIMARY KEY(workspace_id,conv,message_id));
         CREATE TABLE digest_cursors(workspace_id TEXT,conv TEXT,since INTEGER);").unwrap();
-    c.execute_batch(include_str!("../legacy/migrations/112.sql"))
+    let baseline = Connection::open_in_memory().unwrap();
+    baseline
+        .execute_batch(steve_store_sqlite::schema::COMMS)
         .unwrap();
-    c.execute_batch(include_str!("../legacy/migrations/113.sql"))
-        .unwrap();
-    if explicit {
-        c.execute_batch(include_str!("../legacy/migrations/114.sql"))
-            .unwrap();
+    let objects = baseline.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name IN ('digest_pending','digest_pending_convs') AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END,name").unwrap()
+        .query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    for sql in objects {
+        c.execute_batch(&sql).unwrap();
     }
     c
 }
@@ -40,170 +41,8 @@ fn audit(c: &Connection) {
     }
 }
 #[test]
-fn explicit_membership_and_projection_match_all_nine_triggers() {
-    let old = fixture(false);
-    let new = fixture(true);
-    for n in 0..14 {
-        for (c, explicit) in [(&old, false), (&new, true)] {
-            let tx = c.unchecked_transaction().unwrap();
-            let old_a = Source::ChanMessage.scope(&tx, "a").unwrap();
-            let old_b = Source::ChanMessage.scope(&tx, "b").unwrap();
-            let old_mail = Source::MailMessage.scope(&tx, "a").unwrap();
-            match n {
-                0 => {
-                    tx.execute(
-                        "INSERT INTO chan_messages VALUES('a','w','one','received',10)",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "a", None).unwrap();
-                    }
-                }
-                1 => {
-                    tx.execute(
-                        "INSERT INTO chan_messages VALUES('b','w','one','sent',20)",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "b", None).unwrap();
-                    }
-                }
-                2 => {
-                    tx.execute(
-                        "INSERT INTO mail_messages VALUES('a','w','t','queued',5)",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::MailMessage, "a", None).unwrap();
-                    }
-                }
-                3 => {
-                    tx.execute("UPDATE mail_messages SET status='sent' WHERE id='a'", [])
-                        .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::MailMessage, "a", old_mail.as_ref())
-                            .unwrap();
-                    }
-                }
-                4 => {
-                    tx.execute(
-                        "UPDATE chan_messages SET status='received' WHERE id='a'",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "a", old_a.as_ref())
-                            .unwrap();
-                    }
-                }
-                5 => {
-                    let scope = Source::ChanMessage.scope(&tx, "a").unwrap();
-                    tx.execute("UPDATE chan_messages SET workspace_id='other',space_id='two',created=-1 WHERE id='a'",[]).unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "a", scope.as_ref())
-                            .unwrap();
-                    }
-                }
-                6 => {
-                    tx.execute(
-                        "INSERT INTO digest_receipts VALUES('other','space:two','a')",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::dequeue_on_receipt(&tx, "other", "space:two", ["a"]).unwrap();
-                    }
-                }
-                7 => {
-                    tx.execute("UPDATE chan_messages SET status='sent' WHERE id='a'", [])
-                        .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "a", old_a.as_ref())
-                            .unwrap();
-                    }
-                }
-                8 => {
-                    tx.execute(
-                        "UPDATE chan_messages SET status='recalled' WHERE id='b'",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::ChanMessage, "b", old_b.as_ref())
-                            .unwrap();
-                    }
-                }
-                9 => {
-                    tx.execute(
-                        "UPDATE mail_messages SET thread_id='t2',date=30 WHERE id='a'",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::MailMessage, "a", old_mail.as_ref())
-                            .unwrap();
-                    }
-                }
-                10 => {
-                    tx.execute(
-                        "INSERT INTO mail_messages VALUES('b','w','t2','received',50)",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::sync_message(&tx, Source::MailMessage, "b", None).unwrap();
-                    }
-                }
-                11 => {
-                    tx.execute("DELETE FROM mail_messages WHERE id='a'", [])
-                        .unwrap();
-                    if explicit {
-                        digest::remove_message(&tx, [(old_mail.unwrap(), "a".into())]).unwrap();
-                    }
-                }
-                12 => {
-                    tx.execute("DELETE FROM chan_messages WHERE id='a'", [])
-                        .unwrap();
-                    if explicit {
-                        digest::remove_message(&tx, [(old_a.unwrap(), "a".into())]).unwrap();
-                    }
-                }
-                13 => {
-                    tx.execute(
-                        "INSERT INTO digest_receipts VALUES('w','mail_thread:t2','b')",
-                        [],
-                    )
-                    .unwrap();
-                    if explicit {
-                        digest::dequeue_on_receipt(&tx, "w", "mail_thread:t2", ["b"]).unwrap();
-                    }
-                }
-                _ => unreachable!(),
-            }
-            tx.commit().unwrap();
-        }
-        // Explicit synchronization intentionally retains existing FIFO positions; compare the
-        // membership set and projection, not 112's delete/reinsert position churn.
-        let comparable = |c: &Connection| {
-            let (pending, convs) = state(c);
-            (
-                pending
-                    .into_iter()
-                    .map(|(_, w, c, m, at)| (w, c, m, at))
-                    .collect::<std::collections::BTreeSet<_>>(),
-                convs,
-            )
-        };
-        assert_eq!(comparable(&old), comparable(&new), "step {n}");
-        audit(&new);
-    }
-}
-#[test]
 fn duplicate_intake_receipt_and_conversation_sync_do_not_reuse_fifo_or_acknowledgements() {
-    let c = fixture(true);
+    let c = fixture();
     let tx = c.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO chan_messages VALUES('a','w','s','received',10)",
@@ -235,7 +74,7 @@ fn duplicate_intake_receipt_and_conversation_sync_do_not_reuse_fifo_or_acknowled
 }
 #[test]
 fn caller_transaction_rolls_back_source_queue_and_projection_and_autocommit_is_rejected() {
-    let c = fixture(true);
+    let c = fixture();
     assert!(digest::sync_message(&c, Source::ChanMessage, "a", None).is_err());
     {
         let tx = c.unchecked_transaction().unwrap();
@@ -252,7 +91,7 @@ fn caller_transaction_rolls_back_source_queue_and_projection_and_autocommit_is_r
 }
 #[test]
 fn verifier_detects_missing_stale_and_wrong_projection_without_repairing() {
-    let c = fixture(true);
+    let c = fixture();
     let tx = c.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO chan_messages VALUES('a','w','s','received',1)",
@@ -294,7 +133,7 @@ fn verifier_detects_missing_stale_and_wrong_projection_without_repairing() {
 }
 #[test]
 fn lookback_recounts_projection() {
-    let c = fixture(true);
+    let c = fixture();
     let tx = c.unchecked_transaction().unwrap();
     tx.execute(
         "INSERT INTO chan_messages VALUES('a','w','s','received',1),('b','w','s','received',2)",
@@ -333,7 +172,7 @@ fn projection_updates_preserve_additive_columns_while_the_row_exists() {
         }
     }
 
-    let c = fixture(true);
+    let c = fixture();
     c.execute_batch("ALTER TABLE digest_pending_convs ADD COLUMN extra TEXT")
         .unwrap();
     let tx = c.unchecked_transaction().unwrap();
@@ -418,7 +257,7 @@ fn projection_updates_preserve_additive_columns_while_the_row_exists() {
 #[test]
 fn sole_pending_message_preserves_fifo_and_extra_on_same_value_status_and_time_updates() {
     for source in [Source::ChanMessage, Source::MailMessage] {
-        let c = fixture(true);
+        let c = fixture();
         c.execute_batch("ALTER TABLE digest_pending_convs ADD COLUMN extra TEXT")
             .unwrap();
         let tx = c.unchecked_transaction().unwrap();
@@ -463,7 +302,7 @@ fn batch_deletion_aggregates_each_affected_conversation_once() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    let c = fixture(true);
+    let c = fixture();
     let tx = c.unchecked_transaction().unwrap();
     tx.execute("INSERT INTO chan_messages VALUES('a','w','one','received',1),('b','w','one','sent',2),('hold','w','one','sent',3),('c','w','two','received',4)",[]).unwrap();
     for id in ["a", "b", "hold", "c"] {

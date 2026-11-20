@@ -1,11 +1,12 @@
 //! Messages and seen_by masks never grant personal-send authority by themselves.
 use rusqlite::Connection;
-use steve_store::db;
+#[path = "common/current.rs"]
+mod current;
 
 #[test]
 fn messages_and_seen_masks_do_not_authorize_personal_sends_on_reopen() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     // Opaque legacy provider IDs are sufficient: no linked account or recipient is inferred.
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('legacy','Legacy',1);
@@ -17,7 +18,7 @@ fn messages_and_seen_masks_do_not_authorize_personal_sends_on_reopen() {
     )
     .unwrap();
     for _ in 0..2 {
-        db::migrate(&c).unwrap();
+        current::migrate(&mut c).unwrap();
         for table in ["chan_trigger_receipts"] {
             let n: i64 = c
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))

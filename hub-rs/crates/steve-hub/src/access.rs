@@ -530,7 +530,14 @@ pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
             if args.first().is_some_and(|s| s == "backup") {
                 return crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args);
             }
-            let store = Store::open_admin(cfg.db_path())?;
+            let path = cfg.db_path();
+            let dir = path.parent().context("database path has no parent")?;
+            let engine = steve_store_sqlite::open::open_admin(dir).context("请先启动或升级 Hub")?;
+            let store = Store::from_engine(
+                engine,
+                steve_store::NoPublisher,
+                steve_store::FacadeMode::Admin,
+            )?;
             if args.first().is_some_and(|a| a == "token")
                 && args.get(1).is_some_and(|a| a == "create")
             {

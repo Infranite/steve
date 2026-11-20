@@ -4,7 +4,7 @@ use super::{
     manifest::{Artifact, Files, Manifest, Usage},
     offline::{self, BackupError, CancelFlag, CopyOptions, Progress},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -153,6 +153,8 @@ pub enum PlanError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Storage(#[from] steve_types::Error),
 }
 struct Partial(PathBuf);
 impl Drop for Partial {
@@ -222,8 +224,25 @@ pub fn artifact(path: &Path) -> io::Result<Artifact> {
         quick_check: None,
     })
 }
-/// Schema metadata comes from the verified copy, hence describes its exact snapshot.
-fn schema(path: &Path) -> rusqlite::Result<Option<i64>> {
+/// Live source identity observes WAL; the verified closed copy is immutable so
+/// no sidecar files can make its owned backup directory foreign to retention.
+fn schema(path: &Path, immutable: bool) -> Result<crate::compat::CurrentStorage, PlanError> {
+    let c = if immutable {
+        immutable_snapshot(path)?
+    } else {
+        crate::open::open_readonly(path)?
+    };
+    let storage = crate::compat::CurrentStorage::inspect(&c)?;
+    if storage.layout.files.len() != 1 {
+        return Err(steve_storage_api::error(
+            steve_types::Code::Unsupported,
+            "single-file backup requires a single-file layout",
+        )
+        .into());
+    }
+    Ok(storage)
+}
+fn immutable_snapshot(path: &Path) -> Result<Connection, PlanError> {
     // This is our fully closed, verified snapshot. A normal read-only WAL connection
     // can leave -wal/-shm files that make the owned directory look foreign to retention.
     // Immutable mode reads only the snapshot; encode all path bytes so ?, #, % and Unicode
@@ -234,37 +253,13 @@ fn schema(path: &Path) -> rusqlite::Result<Option<i64>> {
         .iter()
         .map(|byte| format!("%{byte:02X}"))
         .collect();
-    let c = Connection::open_with_flags(
+    Connection::open_with_flags(
         format!("file:{encoded}?immutable=1"),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    let exists: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schema_version' AND type='table')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Ok(None);
-    }
-    let has_v: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schema_version') WHERE name='v')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !has_v {
-        return Ok(None);
-    }
-    let value: Option<rusqlite::types::Value> = c
-        .query_row("SELECT v FROM schema_version LIMIT 1", [], |r| r.get(0))
-        .optional()?;
-    // Application metadata is optional: an unfamiliar/older header does not prevent a
-    // physically verified diagnostic copy. Actual SQLite I/O errors still propagate.
-    Ok(match value {
-        Some(rusqlite::types::Value::Integer(v)) => Some(v),
-        Some(rusqlite::types::Value::Text(v)) => v.parse().ok(),
-        _ => None,
-    })
+    )
+    .map_err(PlanError::from)
 }
+
 pub fn backup(
     db_path: &Path,
     plan: &BackupPlan,
@@ -278,6 +273,8 @@ pub fn backup(
     if matches!(name, "manifest.json" | "files.tar" | "files.tar.partial") {
         return Err(io::Error::other("database filename conflicts with backup metadata").into());
     }
+    // Refuse legacy sources before creating backup output; only conversion reads them.
+    schema(db_path, false)?;
     let start = Instant::now();
     check(start, plan.deadline, cancel)?;
     private_dir(&plan.dest_root)?;
@@ -303,7 +300,7 @@ pub fn backup(
         progress,
         cancel,
     )?;
-    let schema_version = schema(&copied.path)?;
+    let storage = schema(&copied.path, true)?;
     let database = Artifact {
         name: copied
             .path
@@ -338,7 +335,7 @@ pub fn backup(
         published_order,
         source: db_path.to_owned(),
         directory: directory.clone(),
-        schema_version,
+        storage,
         database,
         files,
         completed: true,
@@ -436,7 +433,10 @@ fn read_manifest(path: &Path, id: &str, require_database: bool) -> io::Result<Op
     let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
         return Ok(None);
     };
-    if m.files.artifacts.iter().any(|a| !single_name(&a.name))
+    if crate::compat::StorageCapabilities::compiled()
+        .can_open(&m.storage.state(), false)
+        .is_err()
+        || m.files.artifacts.iter().any(|a| !single_name(&a.name))
         || m.format != 1
         || !m.completed
         || m.id != id
@@ -884,7 +884,11 @@ mod retention_tests {
             published_order: at,
             source: PathBuf::from("source.sqlite3"),
             directory,
-            schema_version: None,
+            storage: {
+                let mut c = Connection::open_in_memory().unwrap();
+                crate::migrate::initialize(&mut c, &crate::layout::Layout::single_file()).unwrap();
+                crate::compat::CurrentStorage::inspect(&c).unwrap()
+            },
             database: artifact,
             files: Files {
                 consistency: "best_effort".into(),

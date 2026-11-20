@@ -600,30 +600,30 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     let keys = steve_modules::vault::keystore::from_env(&cfg.home, |k| std::env::var(k).ok())
         .map_err(|e| anyhow::anyhow!("vault unavailable: {e}"))?;
     let progress = std::sync::Mutex::new(steve_install::migration::Reporter::new(&cfg.home, &id)?);
-    let store = steve_store::Store::open_with_migration_progress(
-        cfg.db_path(),
-        steve_store::NoPublisher,
+    let db_path = cfg.db_path();
+    let engine = steve_store_sqlite::open::open_runtime_observed(
+        db_path.parent().context("database directory missing")?,
         Arc::new(move |snapshot| {
-            // This facade still reports legacy replay only. Its commit is not
-            // completion of current storage preparation. The engine-open change
-            // supplies the full native phase/domain stream at this call site.
-            if let Err(error) = progress.lock().unwrap_or_else(|e| e.into_inner()).report(
-                steve_store_sqlite::migrate::Progress {
-                    phase: steve_store_sqlite::migrate::Phase::LegacyReplay,
-                    domain: None,
-                    vm_steps: snapshot.vm_steps,
-                    complete: false,
-                },
-            ) {
+            if let Err(error) = progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .report(snapshot)
+            {
                 tracing::warn!(%error, "could not report upgrade migration progress");
             }
         }),
     )?;
-    drop(store);
-    let db = rusqlite::Connection::open(cfg.db_path())?;
+    let store = steve_store::Store::from_engine(
+        engine,
+        steve_store::NoPublisher,
+        steve_store::FacadeMode::Admin,
+    )?;
+    // Retain the authoritative writer and storage.lock throughout the gate.
+    // Vault inspection uses only a read-only connection after preparation.
+    let db = steve_store_sqlite::open::open_readonly(&db_path)?;
     manifest
         .storage
-        .can_open(&steve_store_sqlite::open::inspect(&db)?, true)
+        .can_open(&store.storage_state()?, true)
         .context("candidate storage incompatible with manifest")?;
     let rows:Vec<(String,i64,String,String)>=db.prepare("SELECT workspace_id,version,keychain_account,fingerprint FROM vault_keys WHERE status != 'retired'")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<std::result::Result<_,_>>()?;
     let db_path = cfg.db_path();

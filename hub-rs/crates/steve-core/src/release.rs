@@ -57,6 +57,22 @@ pub struct DrainStatus {
     pub running: usize,
 }
 
+/// Same capability predicate as the storage open path and release gates.
+fn rollback_storage_refusal(
+    state: &steve_store_sqlite::compat::StorageState,
+    manifest: Option<&Value>,
+) -> Option<String> {
+    use steve_store_sqlite::compat::StorageCapabilities;
+    let capability = manifest.and_then(|m| StorageCapabilities::from_manifest(m).ok());
+    let Some(capability) = capability else {
+        return Some("The release does not declare valid storage capabilities (release.json storage); rollback is unavailable".into());
+    };
+    capability
+        .can_open(state, false)
+        .err()
+        .map(|e| e.to_string())
+}
+
 impl Core {
     /// A release is running or the Hub holds new turns for one (YOLO waits with release cards).
     pub fn release_busy(&self) -> bool {
@@ -92,11 +108,10 @@ impl Core {
         self.tx().start_rollback(item, target, action)
     }
 
-    /// Why the installed release `target` can't run on this Hub's database, if it can't. The rule of
-    /// ops/schema_gate.py, which `release.sh --rollback` applies again: the database records the oldest
-    /// schema a Hub must know (`steve_store::db::compat`), the release's `release.json` the schema its Hub
-    /// knows (`schema.target`). A release that doesn't say is refused. Asked before a rollback is offered
-    /// or started, so a refused one is neither shown as possible nor counted as undone.
+    /// Refuse rollback unless the installed candidate declares storage capabilities
+    /// that accept this database's typed state. A legacy schema scalar cannot
+    /// authorize opening layout 2. This observes the existing Store connection;
+    /// it never opens a second writer or migrates while deciding.
     pub fn rollback_refusal(&self, target: &str) -> Option<String> {
         if target.is_empty() || target.contains('/') || target.starts_with('.') {
             return Some(steve_i18n::t!("core.release.not_installed"));
@@ -107,28 +122,19 @@ impl Core {
             .join("releases")
             .join(target)
             .join("release.json");
-        let knows = std::fs::read(&manifest)
+        let candidate = std::fs::read(&manifest)
             .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .and_then(|m| m.pointer("/schema/target").and_then(Value::as_i64));
-        let db = match self.store().store().with_conn(steve_store::db::compat) {
-            Ok(c) => c,
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let state = match self
+            .store()
+            .store()
+            .with_conn(|c| Ok(steve_store_sqlite::open::inspect(c)))
+        {
+            Ok(Ok(state)) => state,
+            Ok(Err(e)) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
             Err(e) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
         };
-        match knows {
-            _ if db.min_reader == 0 => None,
-            None => Some(steve_i18n::t!(
-                "core.release.schema_unknown",
-                schema = db.schema
-            )),
-            Some(k) if k < db.min_reader => Some(steve_i18n::t!(
-                "core.release.schema_too_old",
-                knows = k,
-                schema = db.schema,
-                min = db.min_reader
-            )),
-            Some(_) => None,
-        }
+        rollback_storage_refusal(&state, candidate.as_ref())
     }
 
     /// Read `releases/last.json` and `releases/rollback.json` and report each final result once (boot, file
@@ -1528,5 +1534,72 @@ pub(crate) mod test_spawned {
             }
             false
         });
+    }
+}
+
+#[cfg(test)]
+mod storage_rollback_tests {
+    use super::*;
+    use steve_store_sqlite::{
+        compat::{SchemaRange, StorageCapabilities, StorageState},
+        layout::Layout,
+    };
+
+    fn current() -> StorageState {
+        let caps = StorageCapabilities::compiled();
+        StorageState::Current {
+            layout: Layout::single_file(),
+            domains: [
+                ("core".into(), caps.core.target),
+                ("stream".into(), caps.stream.target),
+                ("comms".into(), caps.comms.target),
+            ]
+            .into(),
+            contract_schema: caps.contract.target,
+        }
+    }
+    #[test]
+    fn current_rollback_requires_complete_candidate_storage_capabilities() {
+        let state = current();
+        let caps = StorageCapabilities::compiled();
+        let candidate = json!({"storage":caps, "schema":{"target":999999}});
+        assert!(rollback_storage_refusal(&state, Some(&candidate)).is_none());
+        for candidate in [
+            json!({"schema":{"target":999999}}),
+            json!({"storage":null}),
+            json!({"storage":{"layout":2}}),
+        ] {
+            assert!(rollback_storage_refusal(&state, Some(&candidate)).is_some());
+        }
+        assert!(rollback_storage_refusal(&state, None).is_some());
+        let mut candidate = json!({"storage":caps});
+        candidate["storage"]["extra"] = json!(1);
+        assert!(rollback_storage_refusal(&state, Some(&candidate)).is_some());
+    }
+    #[test]
+    fn rollback_checks_layout_every_domain_contract_and_legacy_conversion() {
+        let state = current();
+        let caps = StorageCapabilities::compiled();
+        for field in ["layout", "contract", "core", "stream", "comms"] {
+            let mut candidate = json!({"storage":caps});
+            candidate["storage"][field] = json!(SchemaRange {
+                min_read: 99,
+                target: 99
+            });
+            assert!(
+                rollback_storage_refusal(&state, Some(&candidate)).is_some(),
+                "{field}"
+            );
+        }
+        let legacy = StorageState::Legacy {
+            schema_version: caps.legacy.unwrap().target.into(),
+        };
+        assert!(rollback_storage_refusal(&legacy, Some(&json!({"storage":caps}))).is_none());
+        let mut without_converter = caps;
+        without_converter.legacy = None;
+        assert!(
+            rollback_storage_refusal(&legacy, Some(&json!({"storage":without_converter})))
+                .is_some()
+        );
     }
 }

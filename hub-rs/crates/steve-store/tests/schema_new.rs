@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use rusqlite::Connection;
-use steve_store::{NoPublisher, Store, db};
+use steve_store::{NoPublisher, Store};
 
 /// Representative tables that every fresh database provides.
 const NEW_TABLES: [&str; 31] = [
@@ -53,7 +53,7 @@ fn fresh_database_has_current_module_tables() {
     let t = fresh();
     t.store
         .with_conn(|c| {
-            assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+            assert_eq!(count(c, "SELECT count(*) FROM domain_schema"), 3);
             for name in NEW_TABLES {
                 assert!(has_table(c, name), "{name}");
             }

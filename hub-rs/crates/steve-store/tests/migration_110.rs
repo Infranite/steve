@@ -1,10 +1,12 @@
+#[path = "common/current.rs"]
+mod current;
 use rusqlite::{Connection, params};
-use steve_store::{bot_dispatch, db};
+use steve_store::bot_dispatch;
 
 #[test]
 fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);")
         .unwrap();
     let insert = |id: &str, state: &str, local: bool| {
@@ -36,7 +38,7 @@ fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
     )
     .unwrap();
 
-    db::migrate(&c).unwrap();
+    current::migrate(&mut c).unwrap();
     let reply: (String, bool) = c
         .query_row(
             "SELECT session_id,reply FROM deliveries WHERE id='reply'",
@@ -60,7 +62,7 @@ fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
     )
     .unwrap();
     // Reopening must not grant newly paired or newly confirmed Nodes legacy dispatch.
-    db::migrate(&c).unwrap();
+    current::migrate(&mut c).unwrap();
     for (id, was_eligible) in [
         ("existing", false),
         ("paused", false),

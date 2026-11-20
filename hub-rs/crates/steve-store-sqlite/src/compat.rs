@@ -27,6 +27,43 @@ pub enum StorageState {
         contract_schema: u32,
     },
 }
+/// Exact current identity shared by administration, snapshots and backup manifests.
+/// A legacy source cannot be represented as a successful current backup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentStorage {
+    pub layout: Layout,
+    pub domains: BTreeMap<String, u32>,
+    pub contract_schema: u32,
+}
+impl CurrentStorage {
+    /// Read metadata only. Opening/conversion and physical file verification stay with Engine.
+    pub fn inspect(conn: &Connection) -> Result<Self, Error> {
+        let state = crate::open::inspect(conn)?;
+        StorageCapabilities::compiled().can_open(&state, false)?;
+        match state {
+            StorageState::Current {
+                layout,
+                domains,
+                contract_schema,
+            } => Ok(Self {
+                layout,
+                domains,
+                contract_schema,
+            }),
+            _ => Err(incompatible(
+                "current storage required; start the upgraded Hub to initialize or convert it first",
+            )),
+        }
+    }
+    pub fn state(&self) -> StorageState {
+        StorageState::Current {
+            layout: self.layout.clone(),
+            domains: self.domains.clone(),
+            contract_schema: self.contract_schema,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaRange {
@@ -106,6 +143,23 @@ impl StorageCapabilities {
                 target: legacy_head,
             }),
         }
+    }
+    /// Parse the shared release/build-info declaration. Legacy support is either
+    /// absent or a range object; null is not a declaration.
+    pub fn from_manifest(value: &serde_json::Value) -> Result<Self, Error> {
+        let storage = value
+            .get("storage")
+            .ok_or_else(|| incompatible("target release does not declare storage capabilities"))?;
+        if storage
+            .get("legacy")
+            .is_some_and(serde_json::Value::is_null)
+        {
+            return Err(incompatible("null legacy capability"));
+        }
+        let capabilities: Self = serde_json::from_value(storage.clone())
+            .map_err(|_| incompatible("invalid target storage capabilities"))?;
+        capabilities.validate()?;
+        Ok(capabilities)
     }
     fn validate(&self) -> Result<(), Error> {
         if [

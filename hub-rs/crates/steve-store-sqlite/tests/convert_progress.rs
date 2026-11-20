@@ -73,7 +73,7 @@ fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
 #[test]
 fn failed_final_commit_never_reports_complete_and_handler_is_removed() {
     let mut c = Connection::open_in_memory().unwrap();
-    legacy::final_structure(&c).unwrap();
+    legacy_input::at(&c, 114);
     owner(&c);
     // Deny the sole atomic replay + installation commit.
     c.commit_hook(Some(|| true)).unwrap();

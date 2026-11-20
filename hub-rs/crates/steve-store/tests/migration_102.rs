@@ -1,13 +1,14 @@
 //! Every allowed notification topic maps to its current feed kind.
+#[path = "common/current.rs"]
+mod current;
 
 use rusqlite::Connection;
-use steve_store::db;
 
 /// Every topic the column allows is mapped to its feed kind by the insert trigger, by name; nothing falls back.
 #[test]
 fn every_topic_has_its_feed_kind() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('default','Fixture',1);
          INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','s1','One','owner',1);

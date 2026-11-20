@@ -17,7 +17,7 @@ fn old(conn: &Connection, version: Option<i64>) {
     if let Some(version) = version {
         legacy_input::at(conn, version);
     } else {
-        legacy::final_structure(conn).unwrap();
+        legacy_input::at(conn, 114);
     }
 }
 

@@ -1,17 +1,6 @@
-//! SQLite storage for the Steve Hub: the Rust port of hub/src/db.ts and hub/src/repo.ts.
-//!
-//! [`Store::open`] runs the db.ts migrations verbatim; the repositories (`store.items()`, `store.bots()`, …)
-//! mirror the repo.ts objects one to one and publish a [`BusEvent`] after every write.
-//!
-//! Connections: one write connection behind a `std::sync::Mutex`, plus an r2d2 pool of read-only
-//! connections (one per core, 4 to 16). SQLite allows a single writer anyway and every write here is a few statements, so a
-//! mutex costs nothing and keeps the TS guarantee that writes (and their events) happen in one order;
-//! Offline administration uses one lazy reader instead.
-//! WAL lets the pooled readers serve `/api/state` and event paging in parallel without waiting on it.
-//! A write followed by a read in the same operation runs on the write connection, so it sees its own data.
-//!
-//! The API is synchronous like better-sqlite3; calls take microseconds,
-//! async callers can run them inline or in `spawn_blocking` for the big reads.
+//! Synchronous repository facade over the storage engine's writer and read pool.
+//! Runtime opens initialize or convert under the engine's lifetime lock. Repository
+//! transactions keep their existing events and SAVEPOINT semantics on its RootGuard.
 
 steve_i18n::init!();
 
@@ -20,7 +9,6 @@ pub mod bot_dispatch;
 mod bus;
 pub mod caps;
 pub mod compact;
-pub mod db;
 pub mod diagnostics;
 mod event_payload;
 pub mod maintenance;
@@ -32,29 +20,24 @@ mod types;
 pub mod workflow_gate;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use steve_storage_api::{Domain, Lane};
+use steve_store_sqlite::{engine::Engine, store::SqliteStore};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use repo::*;
+pub use steve_store_sqlite::compat::{CurrentStorage, StorageCapabilities, StorageState};
 pub use steve_types::BusEvent;
 pub use tx::Tx;
 pub use types::*;
 
 /// The default workspace id (`WS` in repo.ts).
 pub const WS: &str = "default";
-
-/// Number of pooled read connections: one per core, at least 4 and at most 16. WAL readers do not
-/// block each other or the writer, so a request waits on the pool only when this many reads are running.
-fn readers() -> u32 {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get() as u32)
-        .clamp(4, 16)
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -70,21 +53,11 @@ pub enum StoreError {
     /// A hook registered by a module (e.g. [`Store::on_item_deleted`]) refused; the write rolls back.
     #[error("{0}")]
     Hook(String),
-    /// A migration left the database inconsistent; it was rolled back.
-    #[error("{0}")]
-    Migration(String),
-    /// The database needs a newer build: opening it is refused, nothing was written.
-    #[error(
-        "数据库（schema v{schema}）需要至少认识 schema v{min_reader} 的版本才能打开，这个版本只认识到 v{ours}；没有打开，也没有改动它"
-    )]
-    Incompatible {
-        schema: i64,
-        min_reader: i64,
-        ours: i64,
-    },
-    /// Offline administration must never initialize or upgrade a database.
-    #[error("离线管理需要本版本的数据库头部；请先启动或升级 Hub：{0}")]
-    AdminSchema(String),
+    /// Engine errors retain their typed code and retry policy.
+    #[error(transparent)]
+    Storage(#[from] steve_types::Error),
+    #[error(transparent)]
+    Commit(#[from] steve_storage_api::CommitError),
     /// The write contradicts the item's lifecycle (a terminal status outside the lifecycle, a status
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
@@ -122,6 +95,32 @@ pub fn sha(s: &str) -> String {
         .collect()
 }
 
+/// Diagnostic assembly policy for an Engine whose open mode was already enforced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FacadeMode {
+    Runtime,
+    Admin,
+}
+
+struct EnginePublisher;
+impl steve_store_sqlite::publish::Publisher<()> for EnginePublisher {
+    fn publish(&self, _: steve_types::Rev, _: Vec<()>) {}
+}
+
+fn storage_dir(path: &Path) -> Result<&Path> {
+    if path.file_name() != Some(std::ffi::OsStr::new(steve_store_sqlite::layout::CORE_FILE)) {
+        return Err(steve_storage_api::error(
+            steve_types::Code::Invalid,
+            "storage path must end in steve.sqlite3",
+        )
+        .into());
+    }
+    Ok(path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(".")))
+}
+
 /// Shared handle to the database. Cheap to clone.
 #[derive(Clone)]
 pub struct Store {
@@ -130,23 +129,14 @@ pub struct Store {
 
 struct Inner {
     maintenance: Arc<maintenance::Gate>,
-    writer: Mutex<Connection>,
+    engine: SqliteStore<()>,
     readers: r2d2::Pool<SqliteConnectionManager>,
     bus: Box<dyn Publisher>,
     path: PathBuf,
     item_deleted: std::sync::OnceLock<Box<ItemDeletedHook>>,
     /// Notified after a commit that emitted an outbox event ([`outbox`]).
     outbox_wake: Arc<tokio::sync::Notify>,
-    commit_wakes: Arc<Mutex<CommitWakes>>,
     diagnostics: std::sync::OnceLock<diagnostics::Recorder>,
-}
-
-#[derive(Default)]
-struct CommitWakes {
-    hooked: bool,
-    listeners: Vec<(Vec<&'static str>, std::sync::Weak<tokio::sync::Notify>)>,
-    changed: std::collections::BTreeSet<String>,
-    committed: std::collections::BTreeSet<String>,
 }
 
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
@@ -176,71 +166,70 @@ pub(crate) fn immediate(c: &Connection) -> rusqlite::Result<rusqlite::Transactio
 }
 
 impl Store {
-    /// Opens `path` (creating it), sets the pragmas, migrates, and starts the read pool.
-    /// The TS Hub's path is `STEVE_HOME/data/steve.sqlite3`; the caller decides.
+    /// Open the canonical database through the engine's runtime path.
     pub fn open(path: impl AsRef<Path>, bus: impl Publisher + 'static) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, None, false)
+        let dir = storage_dir(path.as_ref())?;
+        Self::from_engine(
+            steve_store_sqlite::open::open_runtime(dir)?,
+            bus,
+            FacadeMode::Runtime,
+        )
     }
 
-    /// Opens an existing database at exactly this build's schema head for offline administration.
-    /// The caller must hold the Hub instance lock. Repository writes remain available, but opening
-    /// never migrates, optimizes, initializes workspaces or starts diagnostic recording. One lazy
-    /// read connection is enough for a CLI. Transitional adapter, replaced by the storage engine.
-    pub fn open_admin(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_observed(path.as_ref(), NoPublisher, None, true)
-    }
-
-    /// Like [`Self::open`], with a callback for actual migration work (also within long statements).
-    /// The caller owns reporting; ordinary opens install no progress handler.
+    /// Observe the same locked initialization/conversion/domain-upgrade flow.
     pub fn open_with_migration_progress(
         path: impl AsRef<Path>,
         bus: impl Publisher + 'static,
-        observer: db::MigrationObserver,
+        observer: steve_store_sqlite::migrate::Observer,
     ) -> Result<Self> {
-        Self::open_observed(path.as_ref(), bus, Some(observer), false)
+        let dir = storage_dir(path.as_ref())?;
+        Self::from_engine(
+            steve_store_sqlite::open::open_runtime_observed(dir, observer)?,
+            bus,
+            FacadeMode::Runtime,
+        )
     }
 
-    fn open_observed(
-        path: &Path,
+    /// Attach repositories to an already opened Engine without opening another writer or pool.
+    /// The mode controls diagnostic business workers only; the engine has already enforced
+    /// runtime/admin compatibility, locking and connection policy.
+    pub fn from_engine(
+        engine: Engine,
         bus: impl Publisher + 'static,
-        observer: Option<db::MigrationObserver>,
-        admin: bool,
+        mode: FacadeMode,
     ) -> Result<Self> {
-        let path = path.to_path_buf();
-        let writer = if admin {
-            db::open_admin_writer(&path)?
-        } else {
-            db::open_writer(&path, observer)?
-        };
-        let manager = SqliteConnectionManager::file(&path)
-            .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .with_init(|c| db::pragmas(c));
-        // a checkout test (an empty statement per `get`) finds nothing on a local file
-        let readers = r2d2::Pool::builder()
-            .max_size(if admin { 1 } else { readers() })
-            .min_idle(if admin { Some(0) } else { None })
-            .test_on_check_out(false)
-            .build(manager)?;
-        let maintenance = Arc::new(maintenance::Gate::load(&writer)?);
-        let diagnostic_until = if admin {
-            0
-        } else {
-            diagnostics::active_until(&writer).unwrap_or(0)
+        let path = engine.path();
+        let readers = engine.readers().clone();
+        let engine = SqliteStore::new_sync(
+            vec![engine],
+            Arc::default(),
+            Arc::new(steve_store_sqlite::uow::SystemWallClock),
+            Arc::new(EnginePublisher),
+            || false,
+        )?;
+        let (maintenance, diagnostic_until) = {
+            let c = engine.engine(Domain::Core).read_conn()?;
+            let maintenance = Arc::new(maintenance::Gate::load(&c)?);
+            let until = if mode == FacadeMode::Runtime {
+                diagnostics::active_until(&c).unwrap_or(0)
+            } else {
+                0
+            };
+            (maintenance, until)
         };
         let store = Self {
             inner: Arc::new(Inner {
                 maintenance,
-                writer: Mutex::new(writer),
+                engine,
                 readers,
                 bus: Box::new(bus),
                 path,
                 item_deleted: std::sync::OnceLock::new(),
                 outbox_wake: Arc::new(tokio::sync::Notify::new()),
-                commit_wakes: Arc::default(),
                 diagnostics: std::sync::OnceLock::new(),
             }),
         };
-        if !admin
+        if mode == FacadeMode::Runtime
             && let Some(recorder) =
                 diagnostics::Recorder::start(Arc::downgrade(&store.inner), diagnostic_until)
         {
@@ -269,7 +258,7 @@ impl Store {
     /// rely on due_loop's 60-second fallback.
     /// DomainEvent carries business facts; it must not be a second wake path for a due loop.
     ///
-    /// Known update_hook blind spots include truncate-optimized unconditional DELETEs and
+    /// Known hint blind spots include truncate-optimized unconditional DELETEs and
     /// WITHOUT ROWID writes. These omissions are not permission for silent mutations of a
     /// subscribed table. REPLACE skips callbacks for its implicit deleted rows, but its
     /// replacement INSERT normally hints the same rowid table; this is a table-level hint,
@@ -280,114 +269,17 @@ impl Store {
     /// Hooks install lazily for live subscribers and detach before the next writer lease
     /// without subscribers. Subscribing inside a write scope also hints at its outer commit.
     pub fn commit_wake(&self, tables: &[&'static str]) -> Arc<tokio::sync::Notify> {
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let register = |c: &Connection| {
-            self.inner
-                .commit_wakes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .listeners
-                .push((tables.to_vec(), Arc::downgrade(&wake)));
-            self.sync_commit_hooks(c);
-        };
-        if let Some(c) = self.active_conn() {
-            register(c);
-            // Earlier statements may predate hook installation. A conservative hint is safe.
-            let mut state = self
-                .inner
-                .commit_wakes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let pending = if c.is_autocommit() {
-                &mut state.committed
-            } else {
-                &mut state.changed
-            };
-            pending.extend(tables.iter().map(|t| (*t).to_owned()));
-        } else {
-            let c = self.lock();
-            register(&c);
-        }
-        wake
-    }
-
-    // Registration and hook installation share the unique writer lease, so a new
-    // subscription cannot race an already-running transaction on another thread.
-    fn sync_commit_hooks(&self, c: &Connection) {
-        let mut state = self
-            .inner
-            .commit_wakes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        state.listeners.retain(|(_, w)| w.strong_count() > 0);
-        let needed = !state.listeners.is_empty();
-        if needed == state.hooked {
-            return;
-        }
-        if needed {
-            let wakes = self.inner.commit_wakes.clone();
-            c.update_hook(Some(move |_, _: &str, table: &str, _| {
-                let mut wakes = wakes.lock().unwrap_or_else(|e| e.into_inner());
-                if wakes
-                    .listeners
-                    .iter()
-                    .any(|(tables, _)| tables.contains(&table))
-                {
-                    wakes.changed.insert(table.to_owned());
-                }
-            }))
-            .expect("writer lease permits installing update hook");
-            let wakes = self.inner.commit_wakes.clone();
-            c.commit_hook(Some(move || {
-                let mut state = wakes.lock().unwrap_or_else(|e| e.into_inner());
-                let changed = std::mem::take(&mut state.changed);
-                state.committed.extend(changed);
-                false // A hint must never veto a business commit.
-            }))
-            .expect("writer lease permits installing commit hook");
-            let wakes = self.inner.commit_wakes.clone();
-            c.rollback_hook(Some(move || {
-                wakes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .changed
-                    .clear();
-            }))
-            .expect("writer lease permits installing rollback hook");
-        } else {
-            c.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
-                .expect("remove update hook");
-            c.commit_hook(None::<fn() -> bool>)
-                .expect("remove commit hook");
-            c.rollback_hook(None::<fn()>).expect("remove rollback hook");
-            state.changed.clear();
-            state.committed.clear();
-        }
-        state.hooked = needed;
-    }
-
-    fn notify_committed(&self) {
-        let mut wakes = self
-            .inner
-            .commit_wakes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let changed = std::mem::take(&mut wakes.committed);
-        wakes.listeners.retain(|(tables, w)| {
-            if let Some(wake) = w.upgrade() {
-                if tables.iter().any(|t| changed.contains(*t)) {
-                    wake.notify_one();
-                }
-                true
-            } else {
-                false
-            }
-        });
+        self.inner.engine.commit_wake(Domain::Core, tables)
     }
 
     /// Wakes the outbox dispatcher: notified (one permit) after each commit that emitted an event.
     pub fn outbox_wake(&self) -> Arc<tokio::sync::Notify> {
         self.inner.outbox_wake.clone()
+    }
+
+    /// Observe current storage metadata through the engine's shared reader pool.
+    pub fn storage_state(&self) -> Result<StorageState> {
+        self.read(|c| Ok(steve_store_sqlite::open::inspect(c)?))
     }
 
     pub fn path(&self) -> &Path {
@@ -404,16 +296,17 @@ impl Store {
     }
 
     #[track_caller]
-    pub(crate) fn lock(&self) -> WriteGuard<'_> {
+    pub(crate) fn lock(&self) -> Result<WriteGuard<'_>> {
         let timing = LockTiming::start("store", std::panic::Location::caller());
-        // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
-        let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self
+            .inner
+            .engine
+            .root_guard(Domain::Core, Lane::Interactive)?;
         instrumentation::store_acquired();
-        self.sync_commit_hooks(&conn);
-        WriteGuard {
+        Ok(WriteGuard {
             conn,
             timing: timing.map(LockTiming::acquired),
-        }
+        })
     }
 
     #[track_caller]
@@ -421,11 +314,8 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return f(&W { c, store: self });
         }
-        let c = self.lock();
+        let c = self.lock()?;
         let result = f(&W { c: &c, store: self });
-        if c.is_autocommit() {
-            self.notify_committed();
-        }
         result
     }
 
@@ -438,14 +328,17 @@ impl Store {
         f(&c)
     }
 
-    /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
-    /// the write connection. Cheap when nothing changed; meant for an hourly housekeeping pass.
+    /// Explicit bounded planner maintenance, scheduled through the same root authority.
     #[track_caller]
     pub fn optimize(&self) -> Result<()> {
-        if let Some(c) = self.active_conn() {
-            return Ok(db::optimize(c, false)?);
-        }
-        Ok(db::optimize(&self.lock(), false)?)
+        self.with_conn(|c| {
+            c.pragma_update(
+                None,
+                "analysis_limit",
+                steve_store_sqlite::pragmas::ANALYSIS_LIMIT,
+            )?;
+            Ok(c.execute_batch("PRAGMA optimize;")?)
+        })
     }
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.
@@ -455,11 +348,8 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return f(c);
         }
-        let c = self.lock();
+        let c = self.lock()?;
         let result = f(&c);
-        if c.is_autocommit() {
-            self.notify_committed();
-        }
         result
     }
 }
@@ -700,7 +590,7 @@ pub mod instrumentation {
 use instrumentation::LockTiming;
 
 pub(crate) struct WriteGuard<'a> {
-    conn: MutexGuard<'a, Connection>,
+    conn: steve_store_sqlite::store::RootGuard<'a, ()>,
     timing: Option<LockTiming>,
 }
 

@@ -6,8 +6,15 @@ use std::{
 };
 use steve_store_sqlite::backup::*;
 fn db(root: &Path) -> PathBuf {
-    let p = root.join("source.sqlite3");
-    rusqlite::Connection::open(&p).unwrap().execute_batch("CREATE TABLE schema_version(v INT); INSERT INTO schema_version VALUES(50); CREATE TABLE old_record(v TEXT); INSERT INTO old_record VALUES('旧库😀');").unwrap();
+    let p = root.join("steve.sqlite3");
+    let mut c = rusqlite::Connection::open(&p).unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut c,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
+    c.execute_batch("CREATE TABLE old_record(v TEXT); INSERT INTO old_record VALUES('旧库😀');")
+        .unwrap();
     p
 }
 fn plan(root: &Path, reason: Reason) -> BackupPlan {
@@ -52,7 +59,11 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
         let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
         assert!(m.completed);
         assert_eq!(m.reason, reason);
-        assert_eq!(m.schema_version, Some(50));
+        assert_eq!(
+            m.storage.layout.generation,
+            steve_store_sqlite::layout::LAYOUT_GENERATION
+        );
+        assert_eq!(m.storage.domains.len(), 3);
         assert!(m.files.complete);
         assert_eq!(m.files.consistency, "best_effort");
         assert_eq!(m.database.quick_check.as_deref(), Some("ok"));
@@ -62,6 +73,7 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
         let saved: Manifest =
             serde_json::from_slice(&fs::read(m.directory.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(saved.database.sha256, m.database.sha256);
+        assert_eq!(saved.storage, m.storage);
         assert_eq!(saved.source, source);
         for (path, mode) in [
             (m.directory.clone(), 0o700),
@@ -249,28 +261,22 @@ fn backup_publication_never_runs_retention_even_after_a_clock_correction() {
 }
 
 #[test]
-fn unfamiliar_application_schema_metadata_does_not_prevent_a_verified_copy() {
-    let root = tempfile::tempdir().unwrap();
-    let db = root.path().join("legacy.sqlite3");
-    let c = rusqlite::Connection::open(&db).unwrap();
-    c.execute_batch("CREATE TABLE schema_version(version TEXT); INSERT INTO schema_version VALUES('ancient'); CREATE TABLE evidence(v); INSERT INTO evidence VALUES('keep');").unwrap();
-    drop(c);
-    let m = backup(
-        &db,
-        &plan(root.path(), Reason::Diagnostic),
-        &|_| {},
-        &CancelFlag::default(),
-    )
-    .unwrap();
-    assert!(m.completed);
-    assert_eq!(m.schema_version, None);
-    assert_eq!(
-        rusqlite::Connection::open(m.database_path())
-            .unwrap()
-            .query_row("SELECT v FROM evidence", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "keep"
-    );
+fn legacy_and_unknown_sources_are_refused_without_writing_or_publishing() {
+    for sql in [
+        include_str!("../legacy/113_fixture.sql"),
+        "CREATE TABLE schema_version(version TEXT); INSERT INTO schema_version VALUES('ancient'); CREATE TABLE evidence(v); INSERT INTO evidence VALUES('keep');",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("steve.sqlite3");
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(sql).unwrap();
+        drop(c);
+        let before = fs::read(&path).unwrap();
+        let plan = plan(root.path(), Reason::Diagnostic);
+        assert!(backup(&path, &plan, &|_| {}, &CancelFlag::default()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!plan.dest_root.exists());
+    }
 }
 
 #[test]
@@ -328,7 +334,10 @@ fn wal_snapshot_metadata_is_immutable_and_leaves_no_sidecars_to_block_retention(
         .unwrap();
     let plan = plan(&special, Reason::Daily);
     let first = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
-    assert_eq!(first.schema_version, Some(50));
+    assert_eq!(
+        first.storage.layout.generation,
+        steve_store_sqlite::layout::LAYOUT_GENERATION
+    );
     let mut names: Vec<_> = fs::read_dir(&first.directory)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
