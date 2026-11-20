@@ -113,7 +113,12 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         planned.push_str(&format!("，补跑，错过 {n} 次"));
     }
     let last = previous
-        .map(|p| format!("。上次结果：{}", p.outcome_label))
+        .map(|p| {
+            format!(
+                "。上次结果：{}",
+                steve_i18n::stored(|| p.display_text().outcome_label)
+            )
+        })
         .unwrap_or_default();
     let what = cfg["goal"].as_str().unwrap_or(&s.spec.what);
     let propose = cfg["mode"] == "propose";

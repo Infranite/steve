@@ -90,12 +90,23 @@ impl RunRow {
             .unwrap_or(self.started)
     }
 
-    /// One entry of `GET /schedules/:id/runs`.
-    pub fn view(&self) -> RunView {
+    /// Human-facing text only. Persistence, comparisons and budgets use the raw fields.
+    /// Call under `stored` when this text becomes part of another persisted/model-facing goal.
+    pub fn display_text(&self) -> RunText {
         let startup_error = (self.status == "failed"
             && self.error.as_deref() == Some(START_REJECTED_CODE))
-        .then(|| start_failures::error_text(&self.context))
-        .flatten();
+        .then(|| start_failures::error_text(&self.context));
+        RunText {
+            outcome_label: startup_error
+                .clone()
+                .unwrap_or_else(|| self.outcome_label.clone()),
+            error: startup_error.or_else(|| self.error.clone()),
+        }
+    }
+
+    /// One entry of `GET /schedules/:id/runs`.
+    pub fn view(&self) -> RunView {
+        let text = self.display_text();
         RunView {
             id: self.id.clone(),
             at: self.at(),
@@ -103,17 +114,22 @@ impl RunRow {
             ended: self.ended,
             trigger: self.trigger_kind.clone(),
             status: self.status.clone(),
-            outcome_label: startup_error
-                .clone()
-                .unwrap_or_else(|| self.outcome_label.clone()),
+            outcome_label: text.outcome_label,
             item_id: self.work_item_id.clone(),
             cost_usd: self.cost,
-            error: startup_error.or_else(|| self.error.clone()),
+            error: text.error,
             start_failures: self.context.get("start_failures").and_then(Value::as_i64),
             first_at: self.context.get("first_at").and_then(Value::as_i64),
             startup: start_failures::summary(&self.context),
         }
     }
+}
+
+/// Reader-localized label and error shared by all run projections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunText {
+    pub outcome_label: String,
+    pub error: Option<String>,
 }
 
 /// The `Run` entry of the schedule pages.
@@ -157,7 +173,7 @@ pub struct ConnectorRun {
 
 pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<ConnectorRun>> {
     let mut st = c.prepare_cached(
-        "SELECT r.id, r.flow_id, f.name, f.deleted, r.status, r.outcome, r.outcome_label, r.error, i.id
+        "SELECT r.*, f.name AS flow_name, f.deleted AS flow_deleted, i.id AS item_id
            FROM flow_runs r JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id
            LEFT JOIN items i ON i.id = r.work_item_id AND i.workspace_id = r.workspace_id
           WHERE r.workspace_id = ? AND r.event_id = ? AND r.dry_run = 0
@@ -165,16 +181,18 @@ pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<C
     )?;
     Ok(st
         .query_map(params![ws, event], |r| {
+            let run = RunRow::from_row(r)?;
+            let text = run.display_text();
             Ok(ConnectorRun {
-                id: r.get(0)?,
-                flow_id: r.get(1)?,
-                flow_name: r.get(2)?,
-                flow_deleted: r.get(3)?,
-                status: r.get(4)?,
-                outcome: r.get(5)?,
-                label: r.get(6)?,
-                error: r.get(7)?,
-                item_id: r.get(8)?,
+                id: run.id,
+                flow_id: run.flow_id,
+                flow_name: r.get("flow_name")?,
+                flow_deleted: r.get("flow_deleted")?,
+                status: run.status,
+                outcome: run.outcome,
+                label: text.outcome_label,
+                error: text.error,
+                item_id: r.get("item_id")?,
             })
         })?
         .collect::<Result<_, _>>()?)

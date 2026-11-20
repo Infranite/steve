@@ -183,7 +183,7 @@ async fn after(cx: &FlowCx, run_id: &str) {
                 json!({ "output": run.context.get("input").cloned().unwrap_or(Value::Null) })
             } else {
                 let name = flows::name_of(tx, &run.flow_id)?;
-                json!({ "error": format!("子流程「{name}」没有完成：{}", run.error.clone().unwrap_or_else(|| run.status.clone())) })
+                json!({ "error": format!("子流程「{name}」没有完成：{}", steve_i18n::stored(|| run.display_text().error).unwrap_or_else(|| run.status.clone())) })
             };
             resume_in(tx, p, &node, res)
         });
@@ -645,7 +645,8 @@ pub async fn call_child(cx: &mut RunCx<'_>, flow_id: &str, input: Value) -> Node
         })),
         (_, r) => NodeOutcome::Fail(format!(
             "子流程「{name}」没有完成：{}",
-            r.and_then(|r| r.error).unwrap_or_default()
+            r.and_then(|r| steve_i18n::stored(|| r.display_text().error))
+                .unwrap_or_default()
         )),
     }
 }

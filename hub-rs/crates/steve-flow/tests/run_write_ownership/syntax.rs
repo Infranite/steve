@@ -202,10 +202,8 @@ fn skipped_end(code: &str, start: usize) -> usize {
             b'{' => stack.push(b'}'),
             b'(' => stack.push(b')'),
             b'[' => stack.push(b']'),
-            b'=' if stack.is_empty() && code.as_bytes().get(at + 1) == Some(&b'>') => {
-                expression = true
-            }
-            // Type fields/items can contain nested generics; in a match-arm expression only
+            b'=' if stack.is_empty() => expression = true,
+            // Type fields/items can contain nested generics; in a value expression only
             // an explicit turbofish opens generics, never a less-than comparison.
             b'<' if stack.iter().all(|d| *d == b'>')
                 && (!expression || code[..at].trim_end().ends_with("::")) =>
@@ -222,11 +220,16 @@ fn skipped_end(code: &str, start: usize) -> usize {
                     return at;
                 }
                 stack.pop();
-                if stack.is_empty() && *b == b'}' {
+                // Unexplained angle brackets must not carry a completed test block's
+                // exclusion into subsequent live statements (e.g. `if a < b {}`).
+                if stack.iter().all(|d| *d == b'>') && *b == b'}' {
                     return at + 1;
                 }
             }
-            b',' | b';' if stack.is_empty() => return at + 1,
+            // A value expression may contain shifts/comparisons that resemble unclosed
+            // generics. A semicolon cannot belong to a type's angle argument list.
+            b';' if stack.iter().all(|d| *d == b'>') => return at + 1,
+            b',' if stack.is_empty() => return at + 1,
             _ => {}
         }
     }

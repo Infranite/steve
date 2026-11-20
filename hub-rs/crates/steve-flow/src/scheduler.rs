@@ -30,6 +30,11 @@ pub fn start_rejected() -> String {
     steve_i18n::t!("flow.startup.rejected")
 }
 
+// Debug retains typed NotFound/Invalid identity without their locale-dependent Display text.
+fn rejection_detail(error: &crate::FlowError) -> String {
+    format!("{error:?}")
+}
+
 /// Keep row decoding failures distinct from a failing storage engine until the source boundary.
 #[derive(Debug, thiserror::Error)]
 enum StartError {
@@ -521,7 +526,7 @@ pub fn start_from_source(
                         revision: &revision,
                         limit,
                     },
-                    &error.to_string(),
+                    &rejection_detail(&error),
                 )
                 .map_err(source_error)?;
                 tracing::warn!(
@@ -784,5 +789,25 @@ impl steve_runtime::due::DueSource for Retries {
         now: i64,
     ) -> impl std::future::Future<Output = Result<(), steve_runtime::due::DueError>> + Send {
         process(self.cx.clone(), "flow.retries", now, claim_retries)
+    }
+}
+
+#[cfg(test)]
+mod rejection_identity_tests {
+    use super::*;
+    #[test]
+    fn r4g_fix_typed_rejection_identity_is_independent_of_locale_display() {
+        for error in [ApiError::not_found("定时任务"), ApiError::invalid("field")] {
+            let zh = steve_i18n::with(steve_i18n::ZH_CN, || error.to_string());
+            let en = steve_i18n::with(steve_i18n::EN, || error.to_string());
+            assert_ne!(zh, en);
+            let zh = steve_i18n::with(steve_i18n::ZH_CN, || {
+                steve_store::sha(&rejection_detail(&error))
+            });
+            let en = steve_i18n::with(steve_i18n::EN, || {
+                steve_store::sha(&rejection_detail(&error))
+            });
+            assert_eq!(zh, en);
+        }
     }
 }

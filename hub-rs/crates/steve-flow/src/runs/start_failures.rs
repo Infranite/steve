@@ -47,14 +47,14 @@ fn valid_error(context: &Value) -> bool {
         .get("start_error")
         .is_some_and(|value| *value == error_identity())
 }
-pub(super) fn error_text(context: &Value) -> Option<String> {
-    context.get("start_error").map(|_| {
-        if valid_error(context) {
-            crate::scheduler::start_rejected()
-        } else {
-            steve_i18n::t!("flow.startup.metadata_invalid")
-        }
-    })
+pub(super) fn error_text(context: &Value) -> String {
+    if valid_error(context) {
+        crate::scheduler::start_rejected()
+    } else {
+        // A projection has no current configuration identity. Recovery instructions belong
+        // only in the source diagnostic, which can distinguish current and historical damage.
+        steve_i18n::t!("flow.startup.metadata_damaged")
+    }
 }
 
 fn metadata(context: &Value) -> Result<Metadata, String> {

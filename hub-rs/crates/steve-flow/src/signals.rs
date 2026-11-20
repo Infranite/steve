@@ -13,7 +13,7 @@ use steve_modules::ApiError;
 use steve_store::base::Viewer;
 use steve_store::{Store, Tx};
 
-use crate::FlowResult;
+use crate::{FlowResult, runs};
 
 /// `GET /signals` returns at most this many.
 pub const MAX_LIST: i64 = 500;
@@ -355,29 +355,16 @@ fn parse_json(s: Option<String>) -> Value {
 
 /// `Run` with its steps.
 pub fn run_view(c: &Connection, id: &str) -> FlowResult<Option<Value>> {
-    let run = c
-        .query_row(
-            "SELECT id, flow_id, flow_version, status, dry_run, event_id, outcome, outcome_label, started, ended FROM flow_runs WHERE id = ?",
-            [id],
-            |r| {
-                Ok(json!({
-                    "id": r.get::<_, String>(0)?,
-                    "flow_id": r.get::<_, String>(1)?,
-                    "flow_version": r.get::<_, i64>(2)?,
-                    "status": r.get::<_, String>(3)?,
-                    "dry_run": r.get::<_, bool>(4)?,
-                    "event_id": r.get::<_, Option<String>>(5)?,
-                    "outcome": r.get::<_, Option<String>>(6)?,
-                    "outcome_label": r.get::<_, String>(7)?,
-                    "started": r.get::<_, i64>(8)?,
-                    "ended": r.get::<_, Option<i64>>(9)?,
-                }))
-            },
-        )
-        .optional()?;
-    let Some(mut run) = run else {
+    let Some(row) = runs::get(c, id)? else {
         return Ok(None);
     };
+    let text = row.display_text();
+    let mut run = json!({
+        "id": row.id, "flow_id": row.flow_id, "flow_version": row.flow_version,
+        "status": row.status, "dry_run": row.dry_run, "event_id": row.event_id,
+        "outcome": row.outcome, "outcome_label": text.outcome_label,
+        "started": row.started, "ended": row.ended,
+    });
     let mut st = c.prepare_cached(
         "SELECT seq, node_id, status, branch, input, output, ms, error FROM flow_run_steps WHERE run_id = ? ORDER BY seq",
     )?;

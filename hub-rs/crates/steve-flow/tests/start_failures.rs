@@ -692,3 +692,180 @@ fn r4g_diagnostics_distinguish_recovered_and_unattributed_history() {
     assert!(!diagnostic.message.contains("修改调度或 Bot 即可恢复"));
     assert_eq!(diagnostic.run_id, unattributed);
 }
+
+async fn readable_startup_fixture(mode: &str) -> (FlowEnv, String, String) {
+    use serde_json::json;
+    use steve_modules::testkit::{ME, call, caller};
+    let e = FlowEnv::new();
+    e.env.clock.set(2_000_000_000_000);
+    let (status, s) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "POST",
+        "/schedules",
+        Some(
+            &json!({"name":"readers","cron":"0 9 * * *","what":"report","bot":"steve","mode":mode}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "{s}");
+    let flow = s["id"].as_str().unwrap().to_owned();
+    let revision = e
+        .env
+        .store()
+        .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &flow))
+        .unwrap()
+        .unwrap();
+    let id = e
+        .env
+        .store()
+        .transaction(|tx| {
+            runs::record_start_failure(
+                tx,
+                &runs::FailedStart {
+                    ws: WS,
+                    flow_id: &flow,
+                    flow_version: 1,
+                    source: "digest.bot",
+                    error: "internal failure",
+                    now: 1_999_999_940_000,
+                    revision: &revision,
+                    limit: 3,
+                },
+            )
+        })
+        .unwrap();
+    (e, flow, id)
+}
+
+#[tokio::test]
+async fn r4g_fix_flow_history_projects_the_readers_label_and_error() {
+    use steve_modules::testkit::{ME, call, caller};
+    let (e, flow, _) = readable_startup_fixture("report").await;
+    for locale in [steve_i18n::ZH_CN, steve_i18n::EN] {
+        let expected = steve_i18n::with(locale, steve_flow::scheduler::start_rejected);
+        let (status, body) = steve_i18n::scope(
+            locale,
+            call(
+                &e.router(),
+                Some(&caller(WS, ME)),
+                "GET",
+                &format!("/flows/{flow}/runs"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body[0]["error"], expected);
+        assert_eq!(body[0]["outcome_label"], expected);
+    }
+}
+
+#[tokio::test]
+async fn r4g_fix_run_detail_projects_the_readers_label_and_error() {
+    use steve_modules::testkit::{ME, call, caller};
+    let (e, _, id) = readable_startup_fixture("report").await;
+    for locale in [steve_i18n::ZH_CN, steve_i18n::EN] {
+        let expected = steve_i18n::with(locale, steve_flow::scheduler::start_rejected);
+        let (status, body) = steve_i18n::scope(
+            locale,
+            call(
+                &e.router(),
+                Some(&caller(WS, ME)),
+                "GET",
+                &format!("/runs/{id}"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["error"], expected);
+        assert_eq!(body["outcome_label"], expected);
+    }
+}
+
+#[tokio::test]
+async fn r4g_fix_next_item_goal_quotes_the_previous_error_in_stored_language() {
+    let (e, flow, _) = readable_startup_fixture("item_auto").await;
+    let (run, go) = steve_flow::scheduler::start_manual(&e.flow, WS, &flow).unwrap();
+    assert!(go);
+    steve_i18n::scope(steve_i18n::EN, steve_flow::scheduler::drive(&e.flow, &run))
+        .await
+        .unwrap();
+    let created = e.core.created();
+    assert_eq!(created.len(), 1);
+    assert!(
+        created[0].goal.contains("。上次结果：此调度无法启动"),
+        "{}",
+        created[0].goal
+    );
+    assert!(!created[0].goal.contains(runs::START_REJECTED_CODE));
+}
+
+#[test]
+fn r4g_fix_damaged_error_projection_never_gives_a_stale_recovery_instruction() {
+    let e = FlowEnv::new();
+    let id = bounded(&e, "bad", 1, 1000);
+    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.start_error.code','unknown') WHERE id=?",[&id])?;Ok(())}).unwrap();
+    for saved in [false, true] {
+        if saved {
+            bounded(&e, "new configuration", 2, 61_000);
+        }
+        let row = e
+            .env
+            .store()
+            .reader(|c| runs::get(c, &id))
+            .unwrap()
+            .unwrap();
+        for (locale, forbidden) in [(steve_i18n::ZH_CN, "修改"), (steve_i18n::EN, "Edit")] {
+            let error = steve_i18n::with(locale, || row.view().error.unwrap());
+            assert!(!error.contains(forbidden), "saved={saved}: {error}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn r4g_fix_signal_run_projection_uses_the_same_readable_label() {
+    let (e, _, id) = readable_startup_fixture("report").await;
+    for locale in [steve_i18n::ZH_CN, steve_i18n::EN] {
+        let expected = steve_i18n::with(locale, steve_flow::scheduler::start_rejected);
+        let value = steve_i18n::with(locale, || {
+            e.env
+                .store()
+                .reader(|c| steve_flow::signals::run_view(c, &id))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(value["outcome_label"], expected);
+    }
+}
+
+#[tokio::test]
+async fn r4g_fix_connector_projection_never_returns_the_persistence_code() {
+    let (e, flow, id) = readable_startup_fixture("report").await;
+    // The connector projection selects event-linked rows; seed its reference without creating
+    // a parallel run representation or changing the canonical startup record.
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE flow_runs SET event_id='evt_reader_fixture' WHERE id=?",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for locale in [steve_i18n::ZH_CN, steve_i18n::EN] {
+        let expected = steve_i18n::with(locale, steve_flow::scheduler::start_rejected);
+        let rows = steve_i18n::with(locale, || {
+            e.env
+                .store()
+                .reader(|c| runs::connector_runs(c, WS, "evt_reader_fixture"))
+        })
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].flow_id, flow);
+        assert_eq!(rows[0].label, expected);
+        assert_eq!(rows[0].error.as_deref(), Some(expected.as_str()));
+    }
+}

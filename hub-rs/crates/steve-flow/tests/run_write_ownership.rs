@@ -503,3 +503,20 @@ fn r4g_external_cfg_test_modules_are_not_scanned_as_production() {
     walk(&root, &root, &mut writers, &mut found);
     assert_eq!(writers, vec!["crates/other/src/fixture/nested.rs"]);
 }
+
+#[test]
+fn r4g_fix_expression_operators_cannot_hide_later_production_writes() {
+    for source in [
+        r#"#[cfg(test)] const F:u32=1 << 3; fn live(){execute("DELETE FROM flow_runs");}"#,
+        r#"fn f(a:u8,b:u8){#[cfg(test)] let ok=a < b; execute("DELETE FROM flow_runs");}"#,
+        r#"#[cfg(test)] const F:bool=A < B; fn live(){execute("DELETE FROM flow_runs");}"#,
+        r#"fn f(a:u8,b:u8){#[cfg(test)] if a < b {} execute("DELETE FROM flow_runs");}"#,
+    ] {
+        let text = production(source);
+        assert_eq!(
+            groups(&text).iter().filter(|s| writes(s)).count(),
+            1,
+            "{text}"
+        );
+    }
+}
