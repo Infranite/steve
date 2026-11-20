@@ -59,10 +59,10 @@ pub struct DrainStatus {
 
 /// Same capability predicate as the storage open path and release gates.
 fn rollback_storage_refusal(
-    state: &steve_store_sqlite::compat::StorageState,
+    state: &steve_store::StorageState,
     manifest: Option<&Value>,
 ) -> Option<String> {
-    use steve_store_sqlite::compat::StorageCapabilities;
+    use steve_store::StorageCapabilities;
     let capability = manifest.and_then(|m| StorageCapabilities::from_manifest(m).ok());
     let Some(capability) = capability else {
         return Some("The release does not declare valid storage capabilities (release.json storage); rollback is unavailable".into());
@@ -125,13 +125,8 @@ impl Core {
         let candidate = std::fs::read(&manifest)
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        let state = match self
-            .store()
-            .store()
-            .with_conn(|c| Ok(steve_store_sqlite::open::inspect(c)))
-        {
-            Ok(Ok(state)) => state,
-            Ok(Err(e)) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
+        let state = match self.store().store().storage_state() {
+            Ok(state) => state,
             Err(e) => return Some(steve_i18n::t!("core.release.schema_unreadable", error = e)),
         };
         rollback_storage_refusal(&state, candidate.as_ref())
@@ -1540,10 +1535,7 @@ pub(crate) mod test_spawned {
 #[cfg(test)]
 mod storage_rollback_tests {
     use super::*;
-    use steve_store_sqlite::{
-        compat::{SchemaRange, StorageCapabilities, StorageState},
-        layout::Layout,
-    };
+    use steve_store::{StorageCapabilities, StorageLayout as Layout, StorageState};
 
     fn current() -> StorageState {
         let caps = StorageCapabilities::compiled();
@@ -1582,10 +1574,7 @@ mod storage_rollback_tests {
         let caps = StorageCapabilities::compiled();
         for field in ["layout", "contract", "core", "stream", "comms"] {
             let mut candidate = json!({"storage":caps});
-            candidate["storage"][field] = json!(SchemaRange {
-                min_read: 99,
-                target: 99
-            });
+            candidate["storage"][field] = json!({"min_read":99, "target":99});
             assert!(
                 rollback_storage_refusal(&state, Some(&candidate)).is_some(),
                 "{field}"

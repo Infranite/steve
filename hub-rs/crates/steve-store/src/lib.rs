@@ -31,8 +31,13 @@ use steve_store_sqlite::{engine::Engine, store::SqliteStore};
 
 pub use bus::{FnPublisher, NoPublisher, Publisher};
 pub use repo::*;
-pub use steve_store_sqlite::compat::{CurrentStorage, StorageCapabilities, StorageState};
 pub use steve_types::BusEvent;
+// Share the storage contract without a second dependency edge in callers.
+pub use steve_store_sqlite::{
+    compat::{CurrentStorage, StorageCapabilities, StorageState},
+    layout::Layout as StorageLayout,
+    open::inspect as inspect_storage,
+};
 pub use tx::Tx;
 pub use types::*;
 

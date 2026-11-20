@@ -5553,7 +5553,6 @@ dependencies = [
  "steve-runtime",
  "steve-stats",
  "steve-store",
- "steve-store-sqlite",
  "steve-toolchains",
  "steve-transcript",
  "steve-types",
