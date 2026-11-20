@@ -745,6 +745,7 @@ impl BriefIntake {
                     flow_version: version,
                     trigger_kind: if missed { "catch_up" } else { "time" },
                     status: "done",
+                    error: None,
                     outcome_label: &label,
                     cursor: None,
                     context: &json!({ "at": planned, "trigger": "time", "day": day, "pushed": pushed, "event": ev.id }),

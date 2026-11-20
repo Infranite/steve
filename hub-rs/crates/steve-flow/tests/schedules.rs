@@ -1772,6 +1772,7 @@ async fn the_flow_routes_keep_a_brief_its_owners_and_never_run_it() {
                     flow_version: 1,
                     trigger_kind: "time",
                     status: "running",
+                    error: None,
                     outcome_label: "已发到私聊：今天到期 2 个待办",
                     cursor: None,
                     context: &json!({}),

@@ -456,6 +456,7 @@ pub(crate) fn store_in(
                             flow_version: version,
                             trigger_kind: &kind,
                             status: "running",
+                            error: None,
                             outcome_label: "",
                             cursor: Some(&node_id),
                             context: &json!({ "event": event, "steps": {} }),

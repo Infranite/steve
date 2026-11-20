@@ -850,6 +850,7 @@ pub fn open_run(
             flow_version: f.version,
             trigger_kind,
             status: "running",
+            error: None,
             outcome_label: "",
             cursor: Some(&trigger),
             context: &context,

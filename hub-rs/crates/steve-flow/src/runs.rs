@@ -8,6 +8,9 @@ use steve_store::{Tx, uid};
 
 use crate::FlowResult;
 
+mod start_failures;
+pub use start_failures::{FailedStart, record_start_failure};
+
 /// Runs kept per schedule regardless of age, and the age below which every run is kept.
 pub const KEEP_RUNS: i64 = 200;
 pub const KEEP_MS: i64 = 90 * 24 * 3_600_000;
@@ -162,9 +165,11 @@ pub struct NewRun<'a> {
     pub flow_id: &'a str,
     pub flow_version: i64,
     pub trigger_kind: &'a str,
-    /// `running` or `skipped`.
+    /// Initial run status (including a terminal startup failure).
     pub status: &'a str,
     pub outcome_label: &'a str,
+    /// A terminal startup rejection is inserted with its error, never patched afterwards.
+    pub error: Option<&'a str>,
     /// Next node to run (`None` for skipped rows).
     pub cursor: Option<&'a str>,
     pub context: &'a Value,
@@ -175,7 +180,7 @@ pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
     let id = uid("run");
     let ended = (n.status != "running").then_some(n.now);
     tx.execute(
-        "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, outcome_label, cursor, context, started, ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO flow_runs (id, workspace_id, flow_id, flow_version, trigger_kind, status, outcome_label, error, cursor, context, started, ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             n.ws,
@@ -184,6 +189,7 @@ pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
             n.trigger_kind,
             n.status,
             n.outcome_label,
+            n.error,
             n.cursor,
             n.context.to_string(),
             n.now,

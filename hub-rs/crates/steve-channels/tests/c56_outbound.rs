@@ -1663,6 +1663,7 @@ fn insert_run(h: &H, context: Value) -> steve_flow::runs::RunRow {
                     flow_version: 1,
                     trigger_kind: "event",
                     status: "running",
+                    error: None,
                     outcome_label: "",
                     cursor: Some("a"),
                     context: &context,

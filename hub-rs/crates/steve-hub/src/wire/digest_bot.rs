@@ -112,65 +112,6 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
     )))
 }
 
-/// Keep one history entry per uninterrupted sequence of Bot startup rejections. Other runs
-/// (including manual/cron runs), a different error or a version change begin a new sequence.
-fn record_start_failure(
-    tx: &steve_store::Tx,
-    schedule: &schedules::Schedule,
-    now: i64,
-    reason: &str,
-) -> ApiResult<()> {
-    let (ws, id) = (&schedule.workspace_id, &schedule.id);
-    let previous = runs::page(tx, ws, id, None, 1)?.pop().filter(|r| {
-        r.status == "failed"
-            && r.error.as_deref() == Some(reason)
-            && r.flow_version == schedule.version
-            && r.context["source"] == "digest.bot"
-            && r.work_item_id.is_none()
-            && r.cursor.is_none()
-            && !r.dry_run
-    });
-    // The first R4c marker already represents one failure even without an explicit count.
-    // This is separate from attempts, which belongs to the flow engine's action retries.
-    let failures = previous.as_ref().map_or(1, |r| {
-        r.context["start_failures"]
-            .as_i64()
-            .unwrap_or(1)
-            .max(1)
-            .saturating_add(1)
-    });
-    let first_at = previous
-        .as_ref()
-        .map_or(now, |r| r.context["first_at"].as_i64().unwrap_or(r.started));
-    let context = json!({"at":now,"first_at":first_at,"trigger":"manual","source":"digest.bot","start_failures":failures});
-    let reused = previous.is_some();
-    let run = match previous {
-        Some(r) => r.id,
-        None => runs::insert(
-            tx,
-            &runs::NewRun {
-                ws,
-                flow_id: id,
-                flow_version: schedule.version,
-                trigger_kind: "manual",
-                status: "failed",
-                outcome_label: reason,
-                cursor: None,
-                context: &context,
-                now,
-            },
-        )?,
-    };
-    tx.execute(
-        "UPDATE flow_runs SET error = ?1, outcome_label = ?1, context = ?2, started = ?3, ended = ?3 WHERE id = ?4",
-        params![reason, context.to_string(), now, run],
-    )?;
-    if reused {
-        runs::publish(tx, ws, id, &run);
-    }
-    Ok(())
-}
-
 impl Runner {
     fn failed_start(
         &self,
@@ -191,7 +132,18 @@ impl Runner {
                 let Some(schedule) = schedules::get(tx, ws, id)? else {
                     return Ok(());
                 };
-                record_start_failure(tx, &schedule, now, &reason)
+                runs::record_start_failure(
+                    tx,
+                    &runs::FailedStart {
+                        ws,
+                        flow_id: &schedule.id,
+                        flow_version: schedule.version,
+                        source: "digest.bot",
+                        error: &reason,
+                        now,
+                    },
+                )
+                .map(|_| ())
             })
             .map_err(|e| steve_store::StoreError::Hook(e.to_string()))?;
         tracing::warn!(
@@ -569,6 +521,7 @@ mod tests {
                                 flow_version: first.flow_version,
                                 trigger_kind: "manual",
                                 status: barrier,
+                                error: None,
                                 outcome_label: "other run",
                                 cursor: None,
                                 context: &json!({"at":now + 60_000}),
