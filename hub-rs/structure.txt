@@ -184,10 +184,6 @@ steve-modules	crates/steve-modules/src/accounts/connections/integration.rs	too_m
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive_complexity	26
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	101
 steve-modules	crates/steve-modules/src/accounts/enrich.rs	too_many_lines	105
-steve-modules	crates/steve-modules/src/accounts/identify.rs	too_many_lines	124
-steve-modules	crates/steve-modules/src/contacts/changes.rs	too_many_lines	114
-steve-modules	crates/steve-modules/src/contacts/merge.rs	too_many_lines	131,117
-steve-modules	crates/steve-modules/src/contacts/stewards.rs	too_many_lines	118
 steve-modules	crates/steve-modules/src/error.rs	cognitive_complexity	68
 steve-modules	crates/steve-modules/src/vault/inject.rs	too_many_lines	126
 steve-node	crates/steve-node/src/actor.rs	cognitive_complexity	44,40,35

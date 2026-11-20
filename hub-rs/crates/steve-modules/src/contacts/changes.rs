@@ -649,80 +649,14 @@ impl DraftTarget for ContactTarget {
                 Raw::Set { key, value } => {
                     set_party_field(&mut d, &mut fields, &p, &key, &value);
                 }
-                Raw::JobClose { org, to } => {
-                    let hit: Vec<&(Party, Value)> =
-                        current.iter().filter(|(o, _)| named(o, &org)).collect();
-                    let [(o, j)] = hit.as_slice() else {
-                        let f = if hit.is_empty() {
-                            Found::Missing
-                        } else {
-                            Found::Many(hit.len())
-                        };
-                        d.changes.push(unknown(&org, &f));
-                        continue;
-                    };
-                    let to = to
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| MONTH.is_match(t))
-                        .unwrap_or_else(this_month);
-                    d.ops
-                        .push(json!({ "op": "job.close", "contact": p.id, "org": o.id, "to": to }));
-                    d.line(
-                        steve_i18n::t!("modules.contacts_draft.label.job"),
-                        job_text(&o.name, j["title"].as_str()),
-                        steve_i18n::t!("modules.contacts_draft.job_left", to = to),
-                    );
+                Raw::JobClose { org, to } => plan_job_close(&mut d, &p, &current, org, to),
+                Raw::JobOpen { org, title, dept } => JobPlan {
+                    c,
+                    viewer,
+                    party: &p,
+                    current: &current,
                 }
-                Raw::JobOpen { org, title, dept } => {
-                    let title = title
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty());
-                    let dept = dept.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-                    if !title.as_deref().is_none_or(|t| len_ok(t, 1, 80))
-                        || !dept.as_deref().is_none_or(|t| len_ok(t, 1, 80))
-                    {
-                        continue;
-                    }
-                    let (org_id, org_name, created) = match find_org(c, viewer, &org)? {
-                        Found::One(o) => (o.id.clone(), o.name.clone(), false),
-                        Found::Missing if len_ok(org.trim(), 1, 80) => {
-                            let v = d.var("org");
-                            d.ops.push(json!({ "op": "org.create", "name": org.trim(), "kind": "partner", "as": v }));
-                            (format!("${v}"), org.trim().to_string(), true)
-                        }
-                        f => {
-                            d.changes.push(unknown(&org, &f));
-                            continue;
-                        }
-                    };
-                    let was = current.iter().find(|(o, _)| o.id == org_id);
-                    if let Some((_, j)) = was
-                        && title
-                            .as_ref()
-                            .is_none_or(|t| j["title"].as_str() == Some(t.as_str()))
-                        && dept
-                            .as_ref()
-                            .is_none_or(|t| j["dept"].as_str() == Some(t.as_str()))
-                    {
-                        continue;
-                    }
-                    let mut op = json!({ "op": "job.open", "contact": p.id, "org": org_id });
-                    if let Some(t) = &title {
-                        op["title"] = json!(t);
-                    }
-                    if let Some(t) = &dept {
-                        op["dept"] = json!(t);
-                    }
-                    d.ops.push(op);
-                    let from = was
-                        .map(|(o, j)| job_text(&o.name, j["title"].as_str()))
-                        .unwrap_or_else(|| "—".into());
-                    let mut to = job_text(&org_name, title.as_deref());
-                    if created {
-                        to = steve_i18n::t!("modules.contacts_draft.job_new_org", job = to);
-                    }
-                    d.line(steve_i18n::t!("modules.contacts_draft.label.job"), from, to);
-                }
+                .open(&mut d, org, title, dept)?,
                 Raw::AttrSet {
                     key,
                     label,
@@ -780,6 +714,107 @@ impl DraftTarget for ContactTarget {
             });
         }
         Ok(out)
+    }
+}
+
+fn plan_job_close(
+    d: &mut Draft,
+    p: &Party,
+    current: &[(Party, Value)],
+    org: String,
+    to: Option<String>,
+) {
+    let hit: Vec<&(Party, Value)> = current.iter().filter(|(o, _)| named(o, &org)).collect();
+    let [(o, j)] = hit.as_slice() else {
+        let f = if hit.is_empty() {
+            Found::Missing
+        } else {
+            Found::Many(hit.len())
+        };
+        d.changes.push(unknown(&org, &f));
+        return;
+    };
+    let to = to
+        .map(|t| t.trim().to_string())
+        .filter(|t| MONTH.is_match(t))
+        .unwrap_or_else(this_month);
+    d.ops
+        .push(json!({ "op": "job.close", "contact": p.id, "org": o.id, "to": to }));
+    d.line(
+        steve_i18n::t!("modules.contacts_draft.label.job"),
+        job_text(&o.name, j["title"].as_str()),
+        steve_i18n::t!("modules.contacts_draft.job_left", to = to),
+    );
+}
+
+struct JobPlan<'a> {
+    c: &'a Connection,
+    viewer: &'a Viewer,
+    party: &'a Party,
+    current: &'a [(Party, Value)],
+}
+
+impl JobPlan<'_> {
+    fn open(
+        &self,
+        d: &mut Draft,
+        org: String,
+        title: Option<String>,
+        dept: Option<String>,
+    ) -> ApiResult<()> {
+        let (c, viewer, p, current) = (self.c, self.viewer, self.party, self.current);
+
+        let title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        let dept = dept.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        if !title.as_deref().is_none_or(|t| len_ok(t, 1, 80))
+            || !dept.as_deref().is_none_or(|t| len_ok(t, 1, 80))
+        {
+            return Ok(());
+        }
+        let (org_id, org_name, created) = match find_org(c, viewer, &org)? {
+            Found::One(o) => (o.id.clone(), o.name.clone(), false),
+            Found::Missing if len_ok(org.trim(), 1, 80) => {
+                let v = d.var("org");
+                d.ops.push(
+                    json!({ "op": "org.create", "name": org.trim(), "kind": "partner", "as": v }),
+                );
+                (format!("${v}"), org.trim().to_string(), true)
+            }
+            f => {
+                d.changes.push(unknown(&org, &f));
+                return Ok(());
+            }
+        };
+        let was = current.iter().find(|(o, _)| o.id == org_id);
+        if let Some((_, j)) = was
+            && title
+                .as_ref()
+                .is_none_or(|t| j["title"].as_str() == Some(t.as_str()))
+            && dept
+                .as_ref()
+                .is_none_or(|t| j["dept"].as_str() == Some(t.as_str()))
+        {
+            return Ok(());
+        }
+        let mut op = json!({ "op": "job.open", "contact": p.id, "org": org_id });
+        if let Some(t) = &title {
+            op["title"] = json!(t);
+        }
+        if let Some(t) = &dept {
+            op["dept"] = json!(t);
+        }
+        d.ops.push(op);
+        let from = was
+            .map(|(o, j)| job_text(&o.name, j["title"].as_str()))
+            .unwrap_or_else(|| "—".into());
+        let mut to = job_text(&org_name, title.as_deref());
+        if created {
+            to = steve_i18n::t!("modules.contacts_draft.job_new_org", job = to);
+        }
+        d.line(steve_i18n::t!("modules.contacts_draft.label.job"), from, to);
+        Ok(())
     }
 }
 
