@@ -21,13 +21,14 @@ const PATTERNS = NAMES.flatMap((n) => [`"${n}"`, `'${n}'`, `\`${n}\``])
 const files = (d) => readdirSync(d).flatMap((n) => { const p = join(d, n); return statSync(p).isDirectory() ? files(p) : /\.(ts|tsx)$/.test(n) ? [p] : [] })
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1")
 
-test("NAMES covers every built-in adapter id and binary in steve-acp", () => {
-  const src = readFileSync(join(root, "../hub-rs/crates/steve-acp/src/adapters.rs"), "utf8")
-  const block = src.slice(src.indexOf("const BUILTINS: &[Builtin] = &["))
-  const builtins = block.slice(0, block.indexOf("\n];") + 3)
-  const ids = [...builtins.matchAll(/\bid:\s*"([^"]+)"/g)].map((m) => m[1])
-  const cliBins = [...builtins.matchAll(/\bcli_bin:\s*"([^"]+)"/g)].map((m) => m[1])
-  const detectBins = [...builtins.matchAll(/\bdetect_bins:\s*&\[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]))
+test("NAMES covers every built-in adapter id and binary in steve-harness-spec", () => {
+  // The built-in catalog moved from steve-acp's Rust table to the declaration crate's TOML.
+  const toml = readFileSync(join(root, "../hub-rs/crates/steve-harness-spec/src/builtins.toml"), "utf8")
+  // each adapter's own keys come before its first sub-table ([adapters.properties], components, ...)
+  const builtins = toml.split(/^\[\[adapters\]\]$/m).slice(1).map((b) => b.split(/^\[/m)[0]).join("\n")
+  const ids = [...builtins.matchAll(/^id = "([^"]+)"/gm)].map((m) => m[1])
+  const cliBins = [...builtins.matchAll(/^cli_bin = "([^"]+)"/gm)].map((m) => m[1])
+  const detectBins = [...builtins.matchAll(/^detect_bins = \[([^\]]*)\]/gm)].flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]))
   assert.ok(ids.length >= 17, `expected >= 17 built-in adapters, found ${ids.length}`)
   for (const name of [...ids, ...cliBins, ...detectBins]) {
     assert.ok(NAMES.includes(name), `missing "${name}" in web/test/harness-parity.test.mjs NAMES`)
