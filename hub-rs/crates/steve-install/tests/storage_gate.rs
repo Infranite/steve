@@ -24,6 +24,7 @@ fn manifest(data: &Value, case: &Value) -> Value {
 fn same_storage_matrix_as_python_and_packaged_manifests() {
     let data = matrix();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut failures = Vec::new();
     for case in data["cases"].as_array().unwrap() {
         let temp = tempfile::tempdir().unwrap();
         let db = temp.path().join("odd ?#% 数据.sqlite3");
@@ -44,19 +45,21 @@ fn same_storage_matrix_as_python_and_packaged_manifests() {
         .unwrap();
         let before = fs::read(&db).ok();
         let native = steve_install::release::check_schema(&db, temp.path());
-        assert_eq!(
-            native.is_ok(),
-            case["allowed"].as_bool().unwrap(),
-            "{}: {native:?}",
-            case["name"]
-        );
-        if let Some(state) = case.get("state") {
-            assert_eq!(
-                &steve_install::release::schema_state(&db).unwrap(),
-                state,
-                "{}",
+        let allowed = case["allowed"].as_bool().unwrap();
+        if native.is_ok() != allowed {
+            failures.push(format!(
+                "{}: native={native:?}, allowed={allowed}",
                 case["name"]
-            );
+            ));
+        }
+        if let Some(expected) = case.get("state") {
+            match steve_install::release::schema_state(&db) {
+                Ok(actual) if &actual == expected => {}
+                actual => failures.push(format!(
+                    "{}: state={actual:?}, expected={expected}",
+                    case["name"]
+                )),
+            }
         }
         let python = Command::new("python3")
             .arg(root.join("ops/schema_gate.py"))
@@ -65,20 +68,18 @@ fn same_storage_matrix_as_python_and_packaged_manifests() {
             .arg(temp.path())
             .output()
             .unwrap();
-        assert_eq!(
-            python.status.success(),
-            native.is_ok(),
-            "{}: {}",
-            case["name"],
-            String::from_utf8_lossy(&python.stdout)
-        );
-        assert_eq!(
-            fs::read(&db).ok(),
-            before,
-            "source changed: {}",
-            case["name"]
-        );
+        if python.status.success() != native.is_ok() {
+            failures.push(format!(
+                "{}: Python/native mismatch: {}",
+                case["name"],
+                String::from_utf8_lossy(&python.stdout)
+            ));
+        }
+        if fs::read(&db).ok() != before {
+            failures.push(format!("source changed: {}", case["name"]));
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -94,4 +95,46 @@ fn compiled_converter_accepts_both_supported_legacy_inputs() {
             (113..=114).contains(&schema_version)
         );
     }
+}
+
+#[test]
+fn read_only_inspection_sees_live_wal_without_checkpointing_or_changing_journal_mode() {
+    let data = matrix();
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("live.sqlite3");
+    let writer = Connection::open(&db).unwrap();
+    writer
+        .execute_batch(data["current_sql"].as_str().unwrap())
+        .unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute("UPDATE domain_schema SET version=2 WHERE domain='core'", [])
+        .unwrap();
+    let mut manifest = data["manifest"].clone();
+    manifest["storage"]["core"]["target"] = 2.into();
+    fs::write(
+        temp.path().join("release.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    // Keep the writer open: this is a live WAL database, not an immutable snapshot.
+    let wal = temp.path().join("live.sqlite3-wal");
+    let before_db = fs::read(&db).unwrap();
+    let before_wal = fs::read(&wal).unwrap();
+    assert!(!before_wal.is_empty());
+    assert_eq!(
+        steve_install::release::schema_state(&db).unwrap()["core"],
+        2
+    );
+    steve_install::release::check_schema(&db, temp.path()).unwrap();
+    assert_eq!(
+        writer
+            .pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    assert_eq!(fs::read(&db).unwrap(), before_db);
+    assert_eq!(fs::read(&wal).unwrap(), before_wal);
+    // SQLite's shared-memory sidecar is deliberately not asserted byte-for-byte:
+    // read-only WAL access may maintain -shm while leaving database/WAL contents alone.
 }
