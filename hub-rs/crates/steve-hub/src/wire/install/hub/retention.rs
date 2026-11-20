@@ -8,7 +8,6 @@ use steve_runtime::{
 use steve_store::retention::{ALL, DEFAULT_BUDGET, Kind, SliceReport};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
-const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, _cx) [db, mut jobs] => [db, jobs] {
@@ -17,61 +16,39 @@ install! { install(reg, _cx) [db, mut jobs] => [db, jobs] {
 
 struct State {
     due: i64,
-    optimize_due: i64,
     after: [Option<i64>; ALL.len()],
     done: [bool; ALL.len()],
 }
-struct Source<F, O> {
+struct Source<F> {
     execute: F,
-    optimize: O,
     state: Mutex<State>,
 }
-impl<F, O> Source<F, O> {
-    fn new(first_due: i64, execute: F, optimize: O) -> Self {
+impl<F> Source<F> {
+    fn new(first_due: i64, execute: F) -> Self {
         Self {
             execute,
-            optimize,
             state: Mutex::new(State {
                 due: first_due,
-                optimize_due: first_due.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64),
                 after: [None; ALL.len()],
                 done: [false; ALL.len()],
             }),
         }
     }
 }
-impl<F, O, Fut, Opt> DueSource for Source<F, O>
+impl<F, Fut> DueSource for Source<F>
 where
     F: Fn(Kind, i64, Option<i64>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = steve_store::Result<SliceReport<i64>>> + Send,
-    O: Fn() -> Opt + Send + Sync + 'static,
-    Opt: Future<Output = steve_store::Result<()>> + Send,
 {
     fn name(&self) -> &'static str {
         "storage.retention"
     }
     async fn next_due(&self) -> Result<Option<i64>, DueError> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(Some(state.due.min(state.optimize_due)))
+        Ok(Some(state.due))
     }
     async fn run_due(&self, now: i64) -> Result<(), DueError> {
-        let optimize_due = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .optimize_due;
         let mut error = None;
-        if optimize_due <= now {
-            match (self.optimize)().await {
-                Ok(()) => {
-                    self.state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .optimize_due = now.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64)
-                }
-                Err(e) => error = Some(DueError(e.to_string())),
-            }
-        }
         let due = self.state.lock().unwrap_or_else(|e| e.into_inner()).due;
         if due <= now {
             for (index, kind) in ALL.into_iter().enumerate() {
@@ -110,9 +87,9 @@ where
         error.map_or(Ok(()), Err)
     }
 }
+// Planner optimization belongs to the Engine executor; this source only retains rows.
 async fn run(db: steve_store::Store) {
     let clock = Arc::new(SystemClock);
-    let optimizer = db.clone();
     let source = Arc::new(Source::new(
         clock.now(),
         move |kind, now, after| {
@@ -123,14 +100,6 @@ async fn run(db: steve_store::Store) {
                 })
                 .await
                 .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
-            }
-        },
-        move || {
-            let db = optimizer.clone();
-            async move {
-                tokio::task::spawn_blocking(move || db.optimize())
-                    .await
-                    .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
             }
         },
     ));
@@ -180,7 +149,7 @@ mod tests {
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
         assert!(cfg.no_resume);
         let db = steve_store::Store::open(
-            home.path().join("retention.sqlite3"),
+            home.path().join("steve.sqlite3"),
             steve_store::NoPublisher,
         )
         .unwrap();
@@ -209,12 +178,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_continues_cursors_and_optimizes_hourly_on_virtual_time() {
+    async fn retention_continues_cursors_on_virtual_time() {
         let clock = Arc::new(FakeClock::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
-        let optimized = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
-        let count_opt = optimized.clone();
         let source = Arc::new(Source::new(
             100,
             move |kind: Kind, _: i64, after: Option<i64>| {
@@ -234,10 +201,6 @@ mod tests {
                         },
                     })
                 }
-            },
-            move || {
-                count_opt.fetch_add(1, Ordering::SeqCst);
-                async { Ok(()) }
             },
         ));
         assert_eq!(source.name(), "storage.retention");
@@ -264,23 +227,18 @@ mod tests {
             sweep,
             "four-slice quota continues in a second round"
         );
-        assert_eq!(optimized.load(Ordering::SeqCst), 0);
         assert_eq!(
             source.next_due().await.unwrap(),
             Some(100 + INTERVAL.as_millis() as i64)
         );
-        let hour = 100 + OPTIMIZE_INTERVAL.as_millis() as i64;
+        let hour = 100 + Duration::from_secs(60 * 60).as_millis() as i64;
         clock.advance_to(hour);
         settle(&clock, hour).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2 * sweep);
-        assert_eq!(optimized.load(Ordering::SeqCst), 1);
         clock.advance_to(hour + INTERVAL.as_millis() as i64);
         settle(&clock, hour + INTERVAL.as_millis() as i64).await;
-        assert_eq!(
-            optimized.load(Ordering::SeqCst),
-            1,
-            "ordinary retention sweep does not run optimize again"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3 * sweep);
+        assert_eq!(source.next_due().await.unwrap(), Some(hour + 2 * INTERVAL.as_millis() as i64));
         task.abort();
         let _ = task.await;
     }

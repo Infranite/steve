@@ -21,6 +21,7 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 steve-store = { path = "../steve-store" }
+steve-store-sqlite = { path = "../steve-store-sqlite" }
 steve-modules = { path = "../steve-modules" }
 # Work's published facts (`work.item.done`), emitted in the transaction that finishes an item.
 steve-work-api = { path = "../steve-work-api" }

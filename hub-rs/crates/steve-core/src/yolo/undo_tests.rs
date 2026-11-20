@@ -200,34 +200,35 @@ fn rollback_is_offered_only_for_the_newest_release() {
             .unwrap()
             .unwrap()
     };
-    // `prev` (v1) is installed and says it knows the database's schema
+    // `prev` (v1) is installed and declares capabilities for the typed storage state.
     let v1 = t.kit.core.config().home.join("releases/v1");
     std::fs::create_dir_all(&v1).unwrap();
-    let knows = |schema: i64| {
+    let knows = |storage: &steve_store_sqlite::compat::StorageCapabilities| {
         std::fs::write(
             v1.join("release.json"),
-            json!({"version": "v1", "schema": {"target": schema}}).to_string(),
+            json!({"version": "v1", "storage": storage}).to_string(),
         )
         .unwrap()
     };
-    knows(steve_store::db::SCHEMA_VERSION);
+    let compatible = steve_store_sqlite::compat::StorageCapabilities::compiled();
+    knows(&compatible);
     let (i1, s1, _) = t.item();
     let first = release(&i1, &s1);
     assert_eq!(t.engine.undo_kind(&first).as_deref(), Some("rollback"));
     // one that can't open the database (the new release migrated it) is not offered, nor started
-    knows(steve_store::db::SCHEMA_VERSION - 1);
+    let mut incompatible = compatible.clone();
+    incompatible.layout = steve_store_sqlite::compat::SchemaRange {
+        min_read: 1,
+        target: 1,
+    };
+    incompatible.legacy = None;
+    knows(&incompatible);
     assert_eq!(
         t.engine.undo_kind(&first),
         None,
         "v1 can't read the database"
     );
-    assert!(
-        t.kit
-            .core
-            .rollback_refusal("v1")
-            .unwrap()
-            .contains("需要至少")
-    );
+    assert!(t.kit.core.rollback_refusal("v1").is_some());
     assert_eq!(
         t.engine
             .undo(WS, ME, &first.id, None)
@@ -241,12 +242,11 @@ fn rollback_is_offered_only_for_the_newest_release() {
             .core
             .rollback_refusal("v1")
             .unwrap()
-            .contains("说不清"),
+            .contains("storage"),
         "a release that doesn't say"
     );
     assert!(t.kit.core.rollback_refusal("../x").is_some());
-    knows(steve_store::db::SCHEMA_VERSION);
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    knows(&compatible);
     let (i2, s2, _) = t.item();
     let second = release(&i2, &s2);
     assert_eq!(t.engine.undo_kind(&first), None, "a later release went out");
