@@ -414,6 +414,7 @@ impl NodeRuntime {
             |r| r.get(0),
         )?;
         let op = format!("op_cfg_{session}_{n}");
+        self.store.sessions().expect_mcp(session, &op)?;
         let (req, digest) = command(
             &op,
             ConfigureSession {
@@ -619,6 +620,7 @@ impl NodeRuntime {
             [op],
             |r| r.get(0),
         )?;
+        self.store.sessions().mcp_open_refused(&session, op)?;
         if matches!(e.code, ErrorCode::Conflict | ErrorCode::Stale)
             && let Some(mut d) = desired_in(tx, &session)?
             && d.refreshes < MAX_REFRESHES

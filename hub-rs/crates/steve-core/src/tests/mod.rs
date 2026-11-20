@@ -13,6 +13,7 @@ mod inbox;
 mod judge;
 mod kinds;
 mod lifecycle;
+mod mcp_recovery;
 mod models;
 mod module_undo;
 mod modules;

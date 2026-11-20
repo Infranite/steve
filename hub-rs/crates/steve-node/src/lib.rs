@@ -605,13 +605,38 @@ struct CurrentOf(std::sync::Weak<Inner>);
 
 impl tools::Current for CurrentOf {
     fn execution(&self, session: &SessionId) -> Option<ExecutionRef> {
-        let inner = self.0.upgrade()?;
+        self.lookup(session).ok().flatten()
+    }
+    fn lookup(&self, session: &SessionId) -> ApiResult<Option<ExecutionRef>> {
+        let inner = self
+            .0
+            .upgrade()
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "Node runtime unavailable"))?;
         inner
             .j
             .read(|t| t.session(session))
-            .ok()
-            .flatten()
-            .and_then(|r| r.view.active)
+            .map(|s| s.and_then(|r| r.view.active))
+    }
+    fn missing_attempt(&self, session: &SessionId) {
+        let Some(inner) = self.0.upgrade() else {
+            return;
+        };
+        let result=inner.j.tx(|t| {
+            // A lost projection may still have one unfinished, journaled turn. Its identity is
+            // diagnostic evidence only: it never authorizes the refused call. Idle/unknown or
+            // cancelled work supplies no identity that could be mistaken for a later turn.
+            let runs=t.open_ops_of(session)?.into_iter().filter_map(|(_,op)| {
+                (op.method=="start_turn" && !op.cancel && !matches!(&op.receipt.state,Observed::Unknown {..})).then_some(op.execution).flatten()
+            }).filter(|exec|matches!(exec,ExecutionRef::Turn {session:s,..} if s==session)).collect::<Vec<_>>();
+            let subject=if runs.len()==1 {Subject::Execution(runs[0].clone())} else {Subject::Session {session:session.clone()}};
+            emit_all(&inner,t,vec![(subject,EventBody::Diagnostic {
+                severity:Severity::Warning,code:"mcp.no_active_attempt".into(),
+                safe_text:"Steve MCP received a tool call without a current Node execution attempt; no tool ran.".into(),details:None,
+            })])
+        });
+        if result.is_ok() {
+            inner.wake.notify_one();
+        }
     }
 }
 

@@ -52,13 +52,33 @@ if (process.env.FAKE_ACP_STUBBORN && !probing) {
   writeFileSync(process.env.FAKE_ACP_STUBBORN, String(c.pid))
 }
 
-let buf = "", sid = "", cancel = null, nextId = 1000, mode = "default"
+let buf = "", sid = "", cancel = null, nextId = 1000, mode = "default", mcpServers = []
 const failures = new Map(), waiting = new Map()
 const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n")
 const update = (u) => send({ method: "session/update", params: { sessionId: sid, update: u } })
 const say = (text) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } })
 const ask = (method, params) => new Promise((res) => { const id = ++nextId; waiting.set(id, res); send({ id, method, params }) })
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(() => r(false), ms); cancel = () => { clearTimeout(t); r(true) } })
+// Behave like an adapter that discovers its tools on its first prompt. Lifecycle/statistics
+// fixtures must not accidentally simulate missing MCP. Discovery has no tool side effect;
+// missing-tool fault injection lives in the Hub's separate mcp-recovery fixture.
+async function discoverMcp() {
+  for (const server of mcpServers.filter(s => s.name === "steve" && s.type === "http")) {
+    const url = new URL(server.url)
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) continue
+    try {
+      for (const method of ["initialize", "tools/list"]) {
+        const response = await fetch(url, { method: "POST", headers: {
+          ...Object.fromEntries((server.headers || []).map(h => [h.name, h.value])),
+          "content-type": "application/json", accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2025-06-18"
+        }, body: JSON.stringify({ jsonrpc: "2.0", id: method, method, ...(method === "initialize" ? { params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-acp", version: "1" } } } : {}) }), signal: AbortSignal.timeout(5000) })
+        const result = await response.json()
+        if (!response.ok || result.error) throw Error("MCP discovery failed")
+      }
+    } catch { log({ mcp_discovery_failed: true }) }
+  }
+}
 const options = [{ optionId: "allow", name: "Always Allow", kind: "allow_always" }, { optionId: "once", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]
 
 let toolN = 0, streamFailures = 0, capacityFailures = 0, capacitySeconds = 0
@@ -161,9 +181,14 @@ process.stdin.on("data", (d) => {
     log(m)
     if (m.id != null && !m.method) { const w = waiting.get(m.id); waiting.delete(m.id); w?.(m.error ? { error: m.error } : m.result); continue }
     if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, ...(process.env.FAKE_ACP_IMAGE ? { promptCapabilities: { image: true } } : {}) } } })
-    else if (m.method === "session/new") { sid = "fake-" + Math.random().toString(36).slice(2); const opened = () => setTimeout(() => send({ id: m.id, result: { sessionId: sid, ...session() } }), Number(process.env.FAKE_ACP_OPEN_DELAY || 0)); if (process.env.FAKE_ACP_OPEN_PERMISSION) ask("session/request_permission", {toolCall: {toolCallId:"opening", kind:"execute"}, options:[]}).then(opened); else opened() }
-    else if (m.method === "session/load") { sid = m.params.sessionId; say("replayed history"); send({ id: m.id, result: session() }) }
-    else if (m.method === "session/prompt") turn(m.params.prompt.map((p) => p.text).join("\n")).then((result) => send({ id: m.id, result }), (e) => send({ id: m.id, error: { code: -32000, message: e.message } }))
+    else if (m.method === "session/new") { mcpServers = m.params.mcpServers || []; sid = "fake-" + Math.random().toString(36).slice(2); const opened = () => setTimeout(() => send({ id: m.id, result: { sessionId: sid, ...session() } }), Number(process.env.FAKE_ACP_OPEN_DELAY || 0)); if (process.env.FAKE_ACP_OPEN_PERMISSION) ask("session/request_permission", {toolCall: {toolCallId:"opening", kind:"execute"}, options:[]}).then(opened); else opened() }
+    else if (m.method === "session/load") { mcpServers = m.params.mcpServers || []; sid = m.params.sessionId; say("replayed history"); send({ id: m.id, result: session() }) }
+    else if (m.method === "session/prompt") {
+      let cancelled = false
+      cancel = () => { cancelled = true }
+      discoverMcp().then(() => cancelled ? { stopReason: "cancelled" } : turn(m.params.prompt.map((p) => p.text).join("\n")))
+        .then((result) => send({ id: m.id, result }), (e) => send({ id: m.id, error: { code: -32000, message: e.message } }))
+    }
     else if (m.method === "session/cancel") cancel?.()
     else if (m.method === "session/set_mode") { mode = m.params.modeId; send({ id: m.id, result: {} }) }
     else if (m.method === "session/set_model" && process.env.FAKE_ACP_NO_SET_MODEL) send({ id: m.id, error: { code: -32601, message: "\"Method not found\": session/set_model", data: { method: "session/set_model" } } })

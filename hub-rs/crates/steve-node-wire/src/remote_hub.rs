@@ -111,6 +111,9 @@ fn tool_op(id: &CallId) -> ApiResult<OperationId> {
 
 #[async_trait]
 impl HubTools for RemoteTools {
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        self.0.go(TOOL_SESSION_CATALOG, &session, None).await
+    }
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         self.0.go(TOOL_CATALOG, &execution, None).await
     }

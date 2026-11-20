@@ -155,6 +155,9 @@ impl Tx<'_> {
         sid: &str,
         stop: Stop,
     ) -> Result<Option<String>> {
+        if self.recover_missing_mcp(sid, false)? {
+            return Ok(None);
+        }
         let i = self.item(item_id)?;
         /* it stopped on purpose — a question, or an answer to what you asked it from the conversation —
          * so it is yours, not continued. A report, a plan or something to confirm left in plain text is

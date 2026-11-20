@@ -205,6 +205,7 @@ impl NodeRuntime {
                 self.clock.now_ms(),
             )?;
             let open_op = format!("op_open_{}", b.session);
+            self.store.sessions().expect_mcp(&b.session, &open_op)?;
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
             open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
@@ -317,6 +318,7 @@ impl NodeRuntime {
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
         let op = uid(&format!("op_open_{session}"));
+        self.store.sessions().expect_mcp(session, &op)?;
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(
             tx,

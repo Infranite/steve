@@ -103,6 +103,9 @@ impl Tx<'_> {
                 if self.workflow_child(&i)? || self.probing(&i.id, now()) {
                     continue;
                 }
+                if self.mcp_overdue(&s.id, at)? && self.recover_missing_mcp(&s.id, false)? {
+                    continue;
+                }
                 /* the item's work, not the session alone: a coordinator idle while its graph runs,
                  * queues, waits for you or is paused has not stopped */
                 let work = self.work(&i)?;

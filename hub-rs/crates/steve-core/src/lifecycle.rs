@@ -55,7 +55,10 @@ pub fn supersede(db: &Store, item: &str, kinds: &[&str], why: &str) -> Result<us
         db,
         item,
         |d| {
-            d.subject_type != steve_store::SESSION_START_FAILURE && kinds.contains(&d.kind.as_str())
+            !matches!(
+                d.subject_type.as_str(),
+                steve_store::SESSION_START_FAILURE | steve_store::SESSION_MCP_FAILURE
+            ) && kinds.contains(&d.kind.as_str())
         },
         why,
     )
@@ -115,8 +118,10 @@ pub fn tidy(db: &Store, item: &str) -> Result<usize> {
     let stale: Vec<_> = open
         .iter()
         .filter(|d| {
-            d.subject_type != steve_store::SESSION_START_FAILURE
-                && (d.kind == "ask" || d.kind == "fail")
+            !matches!(
+                d.subject_type.as_str(),
+                steve_store::SESSION_START_FAILURE | steve_store::SESSION_MCP_FAILURE
+            ) && (d.kind == "ask" || d.kind == "fail")
                 && d.created < later
         })
         .collect();

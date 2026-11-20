@@ -4,8 +4,8 @@
 //! call counts for the attempt that session runs at that moment (none running: refused); or for one
 //! job attempt, valid until that job ends. Listing the tools is not a call: a harness lists them
 //! when it connects, which can be before its session's first turn (Claude Code keeps what it got
-//! then), so a session's list waits for its attempt a while, or answers from the catalog this Node
-//! last had from the Hub.
+//! then). Session discovery is therefore authorized by the session binding, independently of any
+//! attempt. Only older Hubs fall back to waiting for an attempt or that holder's cached catalog.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,6 +39,11 @@ use steve_node_api::*;
 /// Who is running what: the Node answers which attempt a session runs now.
 pub trait Current: Send + Sync + 'static {
     fn execution(&self, session: &SessionId) -> Option<ExecutionRef>;
+    fn lookup(&self, session: &SessionId) -> ApiResult<Option<ExecutionRef>> {
+        Ok(self.execution(session))
+    }
+    /// A call could not be attributed; report facts, never manufacture an execution identity.
+    fn missing_attempt(&self, _session: &SessionId) {}
 }
 
 /// Whom a token was given to.
@@ -172,8 +177,7 @@ fn boot_id() -> String {
     hex::encode(&sha2::Sha256::digest(seed.as_bytes())[..16])
 }
 
-/// How long a session's tool list waits for the session's first attempt when the Node has no
-/// catalog yet: the Hub starts the turn right after the open, so this is a race of a second or so.
+/// Legacy Hub fallback only: how long discovery waits for an attempt when no catalog is cached.
 const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone)]
@@ -293,11 +297,26 @@ impl Handler {
         Ok(c)
     }
 
-    /// What a holder lists: the catalog for its running attempt; for a session running none, the
-    /// last catalog this session had, else (none yet) the catalog once its attempt starts, waiting
-    /// up to [`LIST_WAIT`]. A job's token lists only while the job lives.
+    /// A session lists by its authenticated binding, including before the first attempt. Legacy
+    /// Hubs use the old attempt/cache path; a job always lists only while its execution lives.
     async fn listing(&self, holder: &Holder) -> Result<Catalog, McpError> {
         let hub = self.hub()?;
+        if let Holder::Session(session) = holder {
+            match hub.session_catalog(session.clone()).await {
+                Ok(catalog) => {
+                    self.ep
+                        .catalog
+                        .lock()
+                        .unwrap()
+                        .insert(holder.clone(), catalog.clone());
+                    return Ok(catalog);
+                }
+                // Legacy Hub: preserve its attempt-based contract. A current Hub's denial is
+                // authoritative; neither a cached catalog nor another attempt can bypass it.
+                Err(e) if e.code == ErrorCode::Unsupported => {}
+                Err(e) => return Err(McpError::internal_error(e.safe_detail, None)),
+            }
+        }
         let session = match (self.execution(holder), holder) {
             (Ok(exec), _) => return self.catalog(&*hub, exec, holder).await,
             (Err(e), Holder::Job(_)) => return Err(e),
@@ -311,7 +330,9 @@ impl Handler {
         let end = tokio::time::Instant::now() + LIST_WAIT;
         while tokio::time::Instant::now() < end {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Some(exec) = self.ep.current.execution(&session.0) {
+            if let Some(exec) = self.ep.current.lookup(&session.0).map_err(|_| {
+                McpError::internal_error("Node execution journal unavailable; no tool ran", None)
+            })? {
                 return self.catalog(&*hub, exec, holder).await;
             }
         }
@@ -322,9 +343,19 @@ impl Handler {
     /// against the token, which goes when the job ends).
     fn execution(&self, holder: &Holder) -> Result<ExecutionRef, McpError> {
         match holder {
-            Holder::Session(session) => self.ep.current.execution(session).ok_or_else(|| {
-                McpError::invalid_request("no attempt of this session is running", None)
-            }),
+            Holder::Session(session) => self
+                .ep
+                .current
+                .lookup(session)
+                .map_err(|_| {
+                    McpError::internal_error(
+                        "Node execution journal unavailable; no tool ran",
+                        None,
+                    )
+                })?
+                .ok_or_else(|| {
+                    McpError::invalid_request("no attempt of this session is running", None)
+                }),
             Holder::Job(exec) => {
                 let live = self.ep.tokens.lock().unwrap().values().any(|h| h == holder);
                 live.then(|| exec.clone())
@@ -408,13 +439,43 @@ impl ServerHandler for Handler {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let holder = Self::authed(&ctx)?;
-        let exec = self.execution(&holder)?;
+        let exec = match self.execution(&holder) {
+            Ok(exec) => exec,
+            Err(e)
+                if matches!(&holder, Holder::Session(_))
+                    && e.code == rmcp::model::ErrorCode::INVALID_REQUEST =>
+            {
+                if let Holder::Session(session) = &holder {
+                    self.ep.current.missing_attempt(session);
+                }
+                // A tool error leaves the advertised MCP server/catalog intact. No side effect
+                // runs without an attempt, even when the harness process itself is still alive.
+                return Ok(CallToolResponse::Complete(CallToolResult::error(text(
+                    "Steve tools are connected, but this session has no active execution attempt. No tool was run. Steve will reconcile an active turn; if the session is idle, send a new message to start a turn.",
+                ))));
+            }
+            Err(e) => {
+                return Ok(CallToolResponse::Complete(CallToolResult::error(text(
+                    e.message,
+                ))));
+            }
+        };
         let hub = self.hub()?;
         let id = self
             .ep
             .next_call()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let catalog = self.catalog(&*hub, exec.clone(), &holder).await?;
+        let catalog = match self.listing(&holder).await {
+            Ok(catalog) => catalog,
+            Err(e) => {
+                return Ok(CallToolResponse::Complete(CallToolResult::error(text(
+                    format!(
+                        "Steve could not refresh this session's authorized tool catalog; no tool ran: {}",
+                        e.message
+                    ),
+                ))));
+            }
+        };
         let call = ToolCall {
             id,
             execution: exec,

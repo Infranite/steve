@@ -2362,6 +2362,16 @@ impl Tx<'_> {
             self.st.pending.remove(&session.id);
             return Ok(());
         }
+        if self
+            .db()
+            .store()
+            .sessions()
+            .stop(&session.id)?
+            .is_some_and(|s| s.stop_reason.as_deref() == Some(steve_store::SESSION_MCP_FAILURE))
+        {
+            let _ = self.rt().release(&session.id);
+            return Ok(());
+        }
         if t.stop_reason == steve_store::SESSION_START_FAILURE
             || self
                 .db()
@@ -2618,6 +2628,9 @@ impl Tx<'_> {
             return self
                 .db()
                 .item_patch(item_id, patch![now: "你中断了这一回合"]);
+        }
+        if self.recover_missing_mcp(&session.id, false)? {
+            return Ok(());
         }
         let why = match error {
             Some(e) => {
@@ -3179,6 +3192,18 @@ impl Tx<'_> {
         let reget = |t: &Tx| t.db().decision(id).map(|d| d.expect("decision exists"));
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
+            ("fail", steve_store::SESSION_MCP_FAILURE) => {
+                if actor == YOLO_ACTOR || choice != "retry" {
+                    return Err(msg("Steve 工具恢复需要你检查连接后手动重试。"));
+                }
+                let session = s
+                    .as_ref()
+                    .ok_or_else(|| msg("旧会话已结束，请重新指派。"))?;
+                if !self.recover_missing_mcp(&session.id, true)? {
+                    return Err(msg("当前事项状态不允许重开，请使用当前会话或重新指派。"));
+                }
+                return reget(self);
+            }
             ("fail", steve_store::SESSION_START_FAILURE) => {
                 if actor == YOLO_ACTOR || choice != "retry" {
                     return Err(msg("会话启动失败需要你修正配置后手动重试。"));
@@ -4032,7 +4057,10 @@ impl Tx<'_> {
             .decision(id)?
             .filter(|d| d.status == "open")
             .ok_or_else(|| msg(steve_i18n::t!("core.decision.handled")))?;
-        if d.subject_type == steve_store::SESSION_START_FAILURE {
+        if matches!(
+            d.subject_type.as_str(),
+            steve_store::SESSION_START_FAILURE | steve_store::SESSION_MCP_FAILURE
+        ) {
             return Err(msg(
                 "请修正配置后重试，或重新指派、结束事项；启动失败卡需要保留。",
             ));
@@ -4762,7 +4790,7 @@ impl Tx<'_> {
     }
 
     /* ── fork: carry the conversation up to a message into a new item or a new session of the same item ── */
-    fn transcript_up_to(&self, sid: &str, seq: i64) -> Result<String> {
+    pub(crate) fn transcript_up_to(&self, sid: &str, seq: i64) -> Result<String> {
         let mut out: Vec<String> = vec![];
         let mut agent = String::new();
         for e in self.db().events_up_to(sid, seq)? {

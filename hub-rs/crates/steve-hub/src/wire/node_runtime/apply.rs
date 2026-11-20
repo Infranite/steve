@@ -117,6 +117,15 @@ impl NodeRuntime {
                     }
                     ask.extend(self.facts_in(tx, &ev)?);
                     self.realtime_in(tx, &ev)?;
+                    if matches!(&ev.body,EventBody::Diagnostic {code,..} if code=="mcp.no_active_attempt")
+                        && let Subject::Execution(ExecutionRef::Turn {session,turn,attempt})= &ev.subject
+                    {
+                        // An idle adapter probing a tool is not a running task failure. Only
+                        // contradictory live ledger facts trigger replacement; unknown/cancelled
+                        // executions retain reconciliation and the user's Stop as their owner.
+                        let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_sessions r JOIN runtime_attempts a ON a.attempt_id=r.active_attempt WHERE r.session_id=?1 AND r.node_id=?2 AND a.attempt_id=?3 AND a.turn_id=?4 AND a.state='running' AND a.cancel_requested=0)",[session.as_str(),node.as_str(),attempt.as_str(),turn.as_str()],|r|r.get(0))?;
+                        if active { self.store.sessions().mcp_attempt_missing(session.as_str())?; }
+                    }
                     let out = self.apply_in(tx, &ev)?;
                     // only the stream's flow (text, tools, plans) runs on; anything else (an
                     // attempt's end, a card, a receipt) is the last of its run

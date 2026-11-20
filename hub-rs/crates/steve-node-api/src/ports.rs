@@ -226,6 +226,15 @@ pub trait EventSink: Send + Sync {
 
 #[async_trait]
 pub trait HubTools: Send + Sync {
+    /// Discover a live session's tools before its first turn or between turns. This grants no
+    /// execution authority: `call` still requires the current uncancelled attempt. Optional for
+    /// older peers, which can continue to supply attempt-scoped discovery.
+    async fn session_catalog(&self, _session: SessionId) -> ApiResult<Catalog> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "session tool discovery unsupported",
+        ))
+    }
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog>;
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult>;
     async fn call_status(&self, key: ToolKey) -> ApiResult<ToolResult>;

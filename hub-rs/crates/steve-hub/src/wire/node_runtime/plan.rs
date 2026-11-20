@@ -703,8 +703,12 @@ fn queue_in(
 
 pub(super) fn startup_blocked_in(tx: &Tx, session: &str) -> Result<bool, StoreError> {
     Ok(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_stops WHERE session_id=? AND stop_reason=?)",
-        [session, steve_store::SESSION_START_FAILURE],
+        "SELECT EXISTS(SELECT 1 FROM session_stops WHERE session_id=? AND stop_reason IN (?,?))",
+        [
+            session,
+            steve_store::SESSION_START_FAILURE,
+            steve_store::SESSION_MCP_FAILURE,
+        ],
         |r| r.get(0),
     )?)
 }
