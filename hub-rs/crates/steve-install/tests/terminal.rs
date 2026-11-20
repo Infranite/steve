@@ -166,7 +166,7 @@ fn installer(root: &Path) -> PathBuf {
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
     let manifest = json!({
         "format_version":1, "version":"1.2.3", "commit":"a".repeat(40),
-        "hub_version":"1.2.3", "web_version":"1.2.3", "schema":{"target":54}
+        "hub_version":"1.2.3", "web_version":"1.2.3", "storage":steve_store_sqlite::compat::StorageCapabilities::compiled(), "schema":{"min_read":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target,"target":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target,"max_read":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target}
     });
     for path in [
         package.join("release.json"),
@@ -180,7 +180,7 @@ fn installer(root: &Path) -> PathBuf {
     )
     .unwrap();
     let info = json!({
-        "version":"1.2.3", "commit":"a".repeat(40), "schema":54,
+        "version":"1.2.3", "commit":"a".repeat(40), "schema":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target, "storage":steve_store_sqlite::compat::StorageCapabilities::compiled(),
         "target":steve_install::build_info()["target"]
     });
     for role in ["hub", "node"] {
@@ -900,7 +900,7 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
     let cli = installer(&root);
     manager(&bin, &root.join("manager-calls"), false);
     let info = json!({
-        "version":"1.2.3", "commit":"a".repeat(40), "schema":54,
+        "version":"1.2.3", "commit":"a".repeat(40), "schema":steve_store_sqlite::compat::StorageCapabilities::compiled().legacy.unwrap().target, "storage":steve_store_sqlite::compat::StorageCapabilities::compiled(),
         "target":steve_install::build_info()["target"]
     });
     let seen = steve_install::common::shell_quote(root.join("seen").to_str().unwrap()).unwrap();

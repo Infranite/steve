@@ -20,12 +20,15 @@ parser.add_argument("--version", required=True)
 parser.add_argument("--commit", required=True)
 parser.add_argument("--target")
 args = parser.parse_args()
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import schema_gate
 binary = args.binary.resolve(strict=True)
 identity = json.loads(subprocess.check_output([str(binary), "--build-info"], timeout=15))
 assert identity["version"] == args.version and identity["commit"] == args.commit, identity
 if args.target:
     assert identity["target"] == args.target, identity
-assert type(identity["schema"]) is int and identity["schema"] > 0, identity
+schema_gate.release_identity(identity)
 
 with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     root = Path(temp)
@@ -89,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
         target.mkdir()
         (target / "release.json").write_text(json.dumps(dict(format_version=1, version=args.version,
             commit=commit, hub_version=args.version, web_version=args.version, api_protocol=1,
-            schema=dict(min_read=identity["schema"], max_read=identity["schema"], target=identity["schema"]), assets=[])))
+            **schema_gate.release_identity(identity), assets=[])))
         operations = home / "updates/operations"
         operations.mkdir(parents=True, exist_ok=True)
         receipt = operations / f"{ident}.json"

@@ -556,7 +556,7 @@ fn manifest(root: &Path) -> Result<Value> {
         || !commit
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !value["schema"].is_object()
+        || crate::release::storage_capabilities(&value).is_err()
     {
         bail!("{}", t!("install.setup.bundle.identity_invalid"));
     }
@@ -653,7 +653,7 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
         if info["version"] != disk["version"]
             || info["commit"] != disk["commit"]
             || info["target"] != env!("STEVE_BUILD_TARGET")
-            || (role == "hub" && info["schema"] != disk["schema"]["target"])
+            || (role == "hub" && crate::release::check_build_storage(&disk, &info).is_err())
         {
             bail!(
                 "{}",
