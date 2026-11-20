@@ -820,6 +820,18 @@ CREATE TABLE queued (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES se
 
 CREATE TABLE revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, version INTEGER NOT NULL, patch TEXT NOT NULL, author TEXT NOT NULL, created INTEGER NOT NULL);
 
+CREATE TABLE route_log (
+  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  reply_id TEXT,
+  model TEXT, model_kind TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  confidence REAL, signals TEXT NOT NULL DEFAULT '[]', guard TEXT,
+  fallback INTEGER NOT NULL DEFAULT 0, item_id TEXT, ms INTEGER NOT NULL,
+  override TEXT,
+  override_at INTEGER, outcome TEXT,
+  created INTEGER NOT NULL);
+
 CREATE TABLE runtime_attempts (
  attempt_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL REFERENCES runtime_turns(turn_id),
  ordinal INTEGER NOT NULL CHECK(ordinal>=0), node_id TEXT NOT NULL,
@@ -1327,6 +1339,10 @@ CREATE INDEX outbox_leases_dead ON outbox_leases(dead) WHERE dead = 1;
 CREATE INDEX queued_session ON queued(session_id, created);
 
 CREATE INDEX revisions_object ON revisions(object_type, object_id, version);
+
+CREATE UNIQUE INDEX route_log_msg ON route_log(message_id);
+
+CREATE INDEX route_log_ws ON route_log(workspace_id, created);
 
 CREATE INDEX runtime_job_attempts_open ON runtime_job_attempts(node_id) WHERE state <> 'finished';
 

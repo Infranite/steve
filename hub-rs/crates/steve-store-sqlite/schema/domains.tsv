@@ -192,7 +192,7 @@ realtime_output_blocks	stream
 realtime_output_samples	stream
 reply_basis	comms
 revisions	core
-route_log	comms
+route_log	core
 runtime_attempts	core
 runtime_job_attempts	core
 runtime_jobs	core

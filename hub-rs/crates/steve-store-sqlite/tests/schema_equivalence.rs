@@ -149,6 +149,76 @@ fn three_baselines_and_contract_equal_legacy() {
 }
 
 #[test]
+fn route_log_belongs_to_core_in_both_layouts() {
+    assert_eq!(domains()["route_log"], "core");
+    for split in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        for domain in DOMAINS {
+            let file = if split { domain } else { "single" };
+            let c = Connection::open(directory.path().join(format!("{file}.sqlite3"))).unwrap();
+            c.execute_batch(
+                &std::fs::read_to_string(root().join(domain).join("0001_baseline.sql")).unwrap(),
+            )
+            .unwrap();
+        }
+        for domain in DOMAINS {
+            let file = if split { domain } else { "single" };
+            let c = Connection::open(directory.path().join(format!("{file}.sqlite3"))).unwrap();
+            let owned = strings(
+                &c,
+                "SELECT name FROM sqlite_schema WHERE tbl_name='route_log' AND sql IS NOT NULL ORDER BY name",
+            );
+            assert!(
+                rows(
+                    &c,
+                    "SELECT t.name FROM sqlite_schema t JOIN pragma_foreign_key_list(t.name) f
+                     WHERE t.type='table' AND f.\"table\"='route_log'",
+                )
+                .is_empty()
+            );
+            if split && domain != "core" {
+                assert!(owned.is_empty(), "route_log leaked into {domain}");
+                continue;
+            }
+            assert_eq!(owned, ["route_log", "route_log_msg", "route_log_ws"]);
+            assert_eq!(
+                strings(&c, "SELECT name FROM pragma_index_info('route_log_msg')"),
+                ["message_id"]
+            );
+            assert_eq!(
+                strings(&c, "SELECT name FROM pragma_index_info('route_log_ws')"),
+                ["workspace_id", "created"]
+            );
+            assert!(rows(&c, "PRAGMA foreign_key_list(route_log)").is_empty());
+            c.pragma_update(None, "foreign_keys", true).unwrap();
+            c.execute("DELETE FROM route_log", []).unwrap();
+            c.execute_batch(
+                "INSERT INTO route_log(id,workspace_id,message_id,reply_id,model_kind,kind,ms,created)
+                 VALUES('route','workspace','message','reply','test','fixed',0,1)",
+            )
+            .unwrap();
+            assert_eq!(
+                strings(
+                    &c,
+                    "SELECT reply_id FROM route_log WHERE message_id='message'"
+                ),
+                ["reply"]
+            );
+            let error = c
+                .execute_batch(
+                    "INSERT INTO route_log(id,workspace_id,message_id,model_kind,kind,ms,created)
+                 VALUES('duplicate','workspace','message','test','fixed',0,2)",
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+    }
+}
+
+#[test]
 fn legacy_flow_matches_old_store_open() {
     // Temporary dev dependency; this is its sole use. Remove when the old store runner is retired.
     let directory =

@@ -774,18 +774,6 @@ CREATE TABLE reply_basis (
   verdict TEXT NOT NULL,                       -- pass|rewritten|drafted
   answer_model TEXT, check_model TEXT, created INTEGER NOT NULL);
 
-CREATE TABLE route_log (
-  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
-  message_id TEXT NOT NULL,
-  reply_id TEXT,
-  model TEXT, model_kind TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  confidence REAL, signals TEXT NOT NULL DEFAULT '[]', guard TEXT,
-  fallback INTEGER NOT NULL DEFAULT 0, item_id TEXT, ms INTEGER NOT NULL,
-  override TEXT,
-  override_at INTEGER, outcome TEXT,
-  created INTEGER NOT NULL);
-
 -- debt:comms/fk/source_settings.(triage_bot) -> bots.(id)
 CREATE TABLE source_settings (
   connection_id TEXT PRIMARY KEY REFERENCES connections(id), workspace_id TEXT NOT NULL,
@@ -1037,10 +1025,6 @@ CREATE INDEX personal_notifications_delivery ON personal_notifications(delivery_
 CREATE INDEX personal_notifications_due ON personal_notifications(state,next_attempt_at,created);
 
 CREATE INDEX reply_basis_msg ON reply_basis(message_id, created);
-
-CREATE UNIQUE INDEX route_log_msg ON route_log(message_id);
-
-CREATE INDEX route_log_ws ON route_log(workspace_id, created);
 
 CREATE INDEX space_identities_conn ON space_identities(connection_id, space_id);
 

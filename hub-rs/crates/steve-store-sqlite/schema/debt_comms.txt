@@ -28,7 +28,7 @@ trigger	comms/trigger/todo_alarms_update	todos -> time_alarm_dirty
 write	comms/write/T0033	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
 write	comms/write/T0034	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
 write	comms/write/T0035	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
-write	comms/write/T0048	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
+write	comms/write/T0048	channels 清理仍跨 comms/core；route_log 属 core/thread，message_id 为软引用，拆分前由 core/thread 工作单元或 fact 消费承接其删除。按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
 write	comms/write/T0056	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
 write	comms/write/T0057	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
 write	comms/write/T0058	按每域命名业务工作单元提交权威变更与本域 fact；消费者效果/receipt 同域，使用 producer+fact_id 去重。配置 bundle 需持久进度/补偿或异步 pending；不能改成裸 SQL 两次提交。
