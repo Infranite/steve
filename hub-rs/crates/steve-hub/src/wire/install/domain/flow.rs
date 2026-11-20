@@ -91,7 +91,8 @@ install! { clocks(reg, cx) [flow, mut jobs] => [flow, jobs] {
 
 install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {
     jobs.push(Job::new("flow.ingest", steve_flow::Poller::new(flow.clone()).run()));
-    jobs.push(Job::new("flow.retention", steve_flow::retention::run(flow.clone())));
+    let retention = flow.clone();
+    jobs.push(Job::task("flow.retention", move || steve_flow::retention::run(retention)));
 }}
 
 install! { root(reg, _cx) [flow, gh, mut root_routes] => [flow, gh, root_routes] {

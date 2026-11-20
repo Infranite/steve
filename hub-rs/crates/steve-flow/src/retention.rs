@@ -3,6 +3,7 @@
 //! step inputs/outputs of the runs that handled it (nodes, branches and timings stay); the event row
 //! itself — summary and triage result — goes after a year.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -149,12 +150,40 @@ fn purge_batch(tx: &Tx, ws: &str, cut: i64, now: i64) -> FlowResult<(usize, usiz
     Ok((runs, events))
 }
 
+fn report_pass(pass: FlowResult<Swept>) {
+    match pass {
+        Ok(s) if s.payloads + s.events_deleted > 0 => tracing::info!(?s, "flow.retention"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("flow.retention: {e}"),
+    }
+}
+
+fn retention_job<F, Fut>(clock: Arc<dyn steve_runtime::Clock>, mut pass: F) -> steve_runtime::Task
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = FlowResult<Swept>> + Send,
+{
+    steve_runtime::every_after(
+        "flow.retention",
+        clock,
+        EVERY,
+        steve_runtime::FirstRun::Immediate,
+        move || {
+            let work = pass();
+            async move {
+                report_pass(work.await);
+            }
+        },
+    )
+}
+
 /// The hourly job; each pass runs on the blocking pool.
-pub async fn run(cx: Arc<FlowCx>) {
-    loop {
-        let now = cx.now();
-        let pass = {
-            let cx = cx.clone();
+pub fn run(cx: Arc<FlowCx>) -> steve_runtime::Task {
+    let clock = cx.modules.clock.clone();
+    retention_job(clock, move || {
+        let cx = cx.clone();
+        async move {
+            let now = cx.now();
             cx.clone()
                 .blocking(move |_| {
                     // Schedule-run retention formerly lived in the scheduler's polling loop.
@@ -162,12 +191,119 @@ pub async fn run(cx: Arc<FlowCx>) {
                     sweep(&cx, now)
                 })
                 .await
-        };
-        match pass {
-            Ok(s) if s.payloads + s.events_deleted > 0 => tracing::info!(?s, "flow.retention"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("flow.retention: {e}"),
         }
-        tokio::time::sleep(EVERY).await;
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_runtime::testkit::eventually_sync;
+    use steve_runtime::{Clock, FakeClock};
+    use tokio::sync::Notify;
+
+    struct ObservedClock {
+        time: Arc<FakeClock>,
+        active: Arc<AtomicUsize>,
+    }
+    struct ActiveSleep(Arc<AtomicUsize>);
+    impl Drop for ActiveSleep {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl Clock for ObservedClock {
+        fn now(&self) -> i64 {
+            self.time.now()
+        }
+        fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let sleeping = self.time.sleep(duration);
+            let active = self.active.clone();
+            Box::pin(async move {
+                active.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveSleep(active);
+                sleeping.await;
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_cadence_table() {
+        for (fails, work_ms) in [(false, 0), (false, 60_000), (true, 0), (true, 60_000)] {
+            let time = Arc::new(FakeClock::new(0));
+            let active = Arc::new(AtomicUsize::new(0));
+            let clock = Arc::new(ObservedClock {
+                time: time.clone(),
+                active: active.clone(),
+            });
+            let calls = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new(Notify::new());
+            let job = tokio::spawn(retention_job(clock, {
+                let calls = calls.clone();
+                let release = release.clone();
+                move || {
+                    let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    let release = release.clone();
+                    async move {
+                        if first {
+                            release.notified().await;
+                            if fails {
+                                return Err(steve_modules::ApiError::Internal(
+                                    "scripted retention failure".into(),
+                                ));
+                            }
+                        }
+                        Ok(Swept::default())
+                    }
+                }
+            }));
+            eventually_sync("immediate retention pass", || {
+                calls.load(Ordering::SeqCst) == 1
+            })
+            .await;
+            assert_eq!(
+                active.load(Ordering::SeqCst),
+                0,
+                "period is not started alongside work"
+            );
+            time.advance(work_ms);
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "passes never overlap");
+            release.notify_one();
+            eventually_sync("retention fixed delay starts after work", || {
+                time.observed(work_ms)
+            })
+            .await;
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+            let period = EVERY.as_millis() as i64;
+            time.advance(period - 1);
+            eventually_sync("retention before deadline", || {
+                time.observed(work_ms + period - 1) || calls.load(Ordering::SeqCst) > 1
+            })
+            .await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "fails={fails}, work={work_ms}"
+            );
+            time.advance(1);
+            eventually_sync("retention next pass", || {
+                calls.load(Ordering::SeqCst) == 2 && time.observed(work_ms + period)
+            })
+            .await;
+            job.abort();
+            assert!(job.await.unwrap_err().is_cancelled());
+            eventually_sync("retention wait cancellation", || {
+                active.load(Ordering::SeqCst) == 0
+            })
+            .await;
+            time.advance(period * 2);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "cancelled job never dispatches again"
+            );
+        }
     }
 }

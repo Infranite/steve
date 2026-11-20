@@ -26,7 +26,6 @@ steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner:
 steve-core/src/yolo/engine.rs	ttl-cache	yolo::engine::Inner::errors	1
 steve-digest/src/job.rs	timer-loop	job::run	1
 steve-flow/src/ingest.rs	timer-loop	ingest::Poller::run	1
-steve-flow/src/retention.rs	timer-loop	retention::run	1
 steve-github/src/api.rs	timer-loop	api::GhClient::request	1
 steve-github/src/effects.rs	timer-loop	effects::GitHub::run_effects_job	1
 steve-github/src/poll.rs	timer-loop	poll::GitHub::run_jobs	1
