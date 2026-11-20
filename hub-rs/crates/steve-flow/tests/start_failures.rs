@@ -161,22 +161,27 @@ fn changing_errors_or_ordinary_history_cannot_reset_the_persisted_budget() {
     let before = history(&e);
     assert_eq!(bounded(&e, "C", 1, 4000), dead);
     assert_eq!(history(&e), before);
-    let reopened =
-        steve_store::Store::open(e.env.store().path(), steve_store::NoPublisher).unwrap();
-    assert_eq!(
-        reopened
-            .reader(|c| runs::startup_state(
-                c,
+    // Read the committed budget through an independent connection while this fixture stays live.
+    {
+        let reader = rusqlite::Connection::open_with_flags(
+            e.env.store().path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            runs::startup_state(
+                &reader,
                 WS,
                 "flow_start",
                 "fixture.start",
                 &serde_json::json!({"epoch":1})
-            ))
+            )
             .unwrap()
             .unwrap()
             .state,
-        runs::StartupStatus::Dead
-    );
+            runs::StartupStatus::Dead
+        );
+    }
     assert!(state(&e, 2).is_none());
     bounded(&e, "A", 2, 5000);
     assert_eq!(state(&e, 2).unwrap().attempts, 1);

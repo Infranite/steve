@@ -250,8 +250,19 @@ fn current_dead_budget_survives_old_marker_cleanup_and_reopening() {
     let before = e.env.store().reader(read).unwrap().unwrap();
     assert_eq!(before.state, runs::StartupStatus::Dead);
     assert_eq!(clean(&e), 1);
+    // Keep the directory, but release every old owner before acquiring a new writer.
+    let FlowEnv { env, core, flow } = e;
+    let steve_modules::testkit::TestEnv {
+        dir,
+        modules,
+        gateway,
+        clock,
+        events,
+    } = env;
+    drop((flow, core, modules, gateway, clock, events));
     let reopened =
-        steve_store::Store::open(e.env.store().path(), steve_store::NoPublisher).unwrap();
+        steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
+            .unwrap();
     assert_eq!(reopened.reader(read).unwrap().unwrap(), before);
 }
 

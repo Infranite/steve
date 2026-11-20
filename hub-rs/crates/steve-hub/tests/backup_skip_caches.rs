@@ -12,6 +12,16 @@ fn write(home: &Path, name: &str, value: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, value).unwrap();
 }
+fn current_database(path: &Path, evidence: &str) {
+    let mut c = rusqlite::Connection::open(path).unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut c,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
+    c.execute_batch(evidence).unwrap();
+}
+
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
 impl io::Write for LogWriter {
     fn write(&mut self, value: &[u8]) -> io::Result<usize> {
@@ -44,10 +54,7 @@ fn daily_backup_preserves_cache_named_or_marked_directories_outside_workspaces()
         write(home.path(), &format!("{part}/marked/payload"), part);
     }
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v);")
-        .unwrap();
+    current_database(&db, "CREATE TABLE evidence(v);");
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
     let mut archive = tar::Archive::new(fs::File::open(made.files.unwrap()).unwrap());
     let files: BTreeMap<_, _> = archive
@@ -111,10 +118,10 @@ fn daily_backup_skips_shared_caches_at_any_depth_and_logs_paths_and_bytes() {
     )
     .unwrap();
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');")
-        .unwrap();
+    current_database(
+        &db,
+        "CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');",
+    );
     let logs = Arc::new(Mutex::new(Vec::new()));
     let output = logs.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -210,10 +217,7 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
     write(signing.path(), "keychain-pass", "secret");
     symlink(signing.path(), home.path().join("signing")).unwrap();
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v);")
-        .unwrap();
+    current_database(&db, "CREATE TABLE evidence(v);");
     fs::set_permissions(&cache, fs::Permissions::from_mode(0o000)).unwrap();
     assert!(fs::read_dir(&cache).is_err(), "fixture must be unreadable");
     let made = daily_backup::make(home.path(), &db, "20261120");

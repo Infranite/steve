@@ -447,10 +447,6 @@ fn integration_fixtures_cannot_bypass_teardown_audits() {
     let allowed = BTreeMap::from([
         ("crates/steve-channels/tests/typed_events.rs".into(), (0, 1)), // custom publisher, explicit Audit guard
         (
-            "crates/steve-channels/examples/support/recovery_yolo.rs".into(),
-            (0, 1),
-        ), // reopens an audited c56/im_conversations fixture file
-        (
             "crates/steve-channels/tests/support/digest_env.rs".into(),
             (1, 0),
         ), // audited wrapper's underlying environment
@@ -474,7 +470,7 @@ fn integration_fixtures_cannot_bypass_teardown_audits() {
     let outbound =
         std::fs::read_to_string(root.join("crates/steve-channels/tests/c56_outbound.rs")).unwrap();
     assert!(
-        recovery.contains(r#"home.join("steve.sqlite3")"#)
+        recovery.contains("Db::new(modules.store.clone())")
             && outbound.contains("use digest_env::TestEnv;")
     );
     assert!(
