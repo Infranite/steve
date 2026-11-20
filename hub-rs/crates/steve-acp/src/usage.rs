@@ -169,6 +169,11 @@ impl Reader {
     }
 }
 
+struct FinalReadings {
+    incomplete: bool,
+    fallback: Vec<Reading>,
+}
+
 /// Bound the async caller even on a slow filesystem. Only one blocking read can be in flight
 /// per sampler. An OS read cannot be aborted; its worker owns only source state, no Node/home
 /// lock or event sender. Dropping the sampler schedules no more I/O.
@@ -331,6 +336,16 @@ impl Sampler {
                 .await;
             }
         }
+        let FinalReadings {
+            incomplete,
+            fallback,
+        } = self.final_readings();
+        self.merge_final_readings(&mut native, fallback);
+        self.complete_final_reports(&mut native, incomplete);
+        native
+    }
+
+    fn final_readings(&self) -> FinalReadings {
         let incomplete = self.stalled
             || self
                 .reader
@@ -343,6 +358,13 @@ impl Sampler {
         } else {
             self.snapshot.clone()
         };
+        FinalReadings {
+            incomplete,
+            fallback,
+        }
+    }
+
+    fn merge_final_readings(&self, native: &mut Vec<Fact>, fallback: Vec<Reading>) {
         let root_models: Vec<_> = fallback
             .iter()
             .filter(|r| r.scope == UsageScope::Main)
@@ -350,7 +372,7 @@ impl Sampler {
             .collect();
         // The native Main is anonymous. Attribute it only when the persisted main chain gives
         // exactly one model. With several models its aggregate is replaced by source groups.
-        for fact in &mut native {
+        for fact in native.iter_mut() {
             if let Fact::Event(EventBody::Usage { report }) = fact
                 && report.meter_epoch == self.meter
                 && report.measurement == Measurement::Final
@@ -408,6 +430,9 @@ impl Sampler {
                 }));
             }
         }
+    }
+
+    fn complete_final_reports(&self, native: &mut Vec<Fact>, incomplete: bool) {
         let has_own = native.iter().any(|f| matches!(f, Fact::Event(EventBody::Usage { report }) if report.meter_epoch == self.meter && report.measurement == Measurement::Final && report.tokens != Tokens::default()));
         if !has_own {
             // Keep explicit native zero; do not create another main beside a native final.
@@ -425,7 +450,7 @@ impl Sampler {
                 }));
             }
         }
-        for fact in &mut native {
+        for fact in native.iter_mut() {
             if let Fact::Event(EventBody::Usage { report }) = fact
                 && report.meter_epoch == self.meter
             {
@@ -454,7 +479,6 @@ impl Sampler {
                 details: None,
             }));
         }
-        native
     }
 }
 
