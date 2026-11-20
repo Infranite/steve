@@ -1483,3 +1483,214 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
 
 #[path = "facts/cases.rs"]
 mod facts_cases;
+
+fn sg6_window(kind: &str, people: &[(&str, bool, bool)], at: Option<i64>) -> facts::Built {
+    facts::Built {
+        facts: json!({"conv":{"kind":kind},"messages":[]}),
+        lines: at
+            .into_iter()
+            .map(|at| facts::Line {
+                pos: 1,
+                id: "window".into(),
+                at,
+                chain: None,
+                text: String::new(),
+                body: String::new(),
+                tokens: 0,
+            })
+            .collect(),
+        refs: vec![],
+        parties: people
+            .iter()
+            .map(|(id, bot, mine)| facts::Party {
+                id: (*id).into(),
+                name: (*id).into(),
+                bot: *bot,
+                mine: *mine,
+                messages: 1,
+                mentioned: 0,
+                last_at: NOW,
+            })
+            .collect(),
+        chains: Default::default(),
+        items: vec![],
+        mentions_me: false,
+        my_messages: 0,
+    }
+}
+
+#[test]
+fn sg6_candidate_people_and_time_boundary_table() {
+    for (name, kind, people, offset, state, ws, want) in [
+        (
+            "one in group",
+            "group",
+            vec![("alice", false, false)],
+            0,
+            "open",
+            WS,
+            false,
+        ),
+        (
+            "one in dm",
+            "dm",
+            vec![("alice", false, false)],
+            0,
+            "open",
+            WS,
+            true,
+        ),
+        (
+            "two in group",
+            "group",
+            vec![("alice", false, false), ("bob", false, false)],
+            0,
+            "open",
+            WS,
+            true,
+        ),
+        (
+            "bot excluded",
+            "group",
+            vec![("alice", false, false), ("bob", true, false)],
+            0,
+            "open",
+            WS,
+            false,
+        ),
+        (
+            "self excluded",
+            "group",
+            vec![("alice", false, false), ("bob", false, true)],
+            0,
+            "open",
+            WS,
+            false,
+        ),
+        (
+            "old boundary included",
+            "dm",
+            vec![("alice", false, false)],
+            -candidates::NEAR_MS,
+            "open",
+            WS,
+            true,
+        ),
+        (
+            "new boundary included",
+            "dm",
+            vec![("alice", false, false)],
+            candidates::NEAR_MS,
+            "open",
+            WS,
+            true,
+        ),
+        (
+            "too old",
+            "dm",
+            vec![("alice", false, false)],
+            -candidates::NEAR_MS - 1,
+            "open",
+            WS,
+            false,
+        ),
+        (
+            "too new",
+            "dm",
+            vec![("alice", false, false)],
+            candidates::NEAR_MS + 1,
+            "open",
+            WS,
+            false,
+        ),
+        (
+            "done excluded",
+            "dm",
+            vec![("alice", false, false)],
+            0,
+            "done",
+            WS,
+            false,
+        ),
+        (
+            "workspace isolated",
+            "dm",
+            vec![("alice", false, false)],
+            0,
+            "open",
+            WS2,
+            false,
+        ),
+        ("no people", "dm", vec![], 0, "open", WS, false),
+    ] {
+        let e = env();
+        let id = e
+            .store()
+            .transaction(|tx| matter::create(tx, ws, "No repeated search terms", ME, NOW))
+            .unwrap();
+        e.store().with_conn(|c|{
+            c.execute("UPDATE matters SET state=?,last_at=? WHERE id=?",params![state,NOW+offset,id])?;
+            for person in ["alice","bob"] {c.execute("INSERT INTO matter_parties(matter_id,party_id,messages,last_at) VALUES(?,?,1,?)",params![id,person,NOW])?;}
+            Ok(())
+        }).unwrap();
+        let built = sg6_window(kind, &people, Some(NOW));
+        let found = e
+            .store()
+            .reader(|c| candidates::find(c, WS, &cv("s1"), &built, NOW))
+            .unwrap();
+        assert_eq!(
+            found.iter().any(|candidate| candidate.id == id),
+            want,
+            "{name}: {found:?}"
+        );
+        if want {
+            let candidate = found.iter().find(|candidate| candidate.id == id).unwrap();
+            assert_eq!(candidate.reasons, ["same_people"], "{name}");
+            assert_eq!(candidate.score, 1.0, "{name}");
+        }
+    }
+}
+
+#[test]
+fn sg6_candidate_reasons_accumulate_scores_once_per_signal_and_cap_ties_by_id() {
+    let e = env();
+    let id = e
+        .store()
+        .transaction(|tx| matter::create(tx, WS, "No search text", ME, NOW))
+        .unwrap();
+    segments(&e, &id, "sg6-segment", "s1", json!(["t:a", "t:b"]));
+    msg(&e, "s1", "cm1", NOW - 100, None, None, "");
+    e.store().with_conn(|c|{
+        c.execute("INSERT INTO links(workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,created) VALUES(?,'matter',?,'about','item','ST-1','fixture',1)",params![WS,id])?;
+        Ok(())
+    }).unwrap();
+    let mut built = sg6_window("group", &[], Some(NOW));
+    built.chains.insert("t:a".into(), vec![1]);
+    built.chains.insert("t:b".into(), vec![1]);
+    built.facts["messages"] = json!([{"reply_to":"cm1"},{"reply_to":"cm1"}]);
+    built.items = (1..=8).map(|i| format!("ST-{i}")).collect();
+    let found = e
+        .store()
+        .reader(|c| candidates::find(c, WS, &cv("s1"), &built, NOW))
+        .unwrap();
+    let candidate = found.iter().find(|candidate| candidate.id == id).unwrap();
+    assert_eq!(candidate.reasons, ["same_thread", "referenced"]);
+    assert_eq!(
+        candidate.score, 10.0,
+        "two chains3+3, deduplicated reply2, item link2"
+    );
+    let items: Vec<_> = found
+        .iter()
+        .filter(|candidate| candidate.kind == "item")
+        .collect();
+    assert_eq!(items.len(), candidates::MAX_EACH);
+    assert_eq!(
+        items.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+        ["ST-1", "ST-2", "ST-3", "ST-4", "ST-5", "ST-6"]
+    );
+    assert!(
+        items
+            .iter()
+            .all(|x| x.score == 3.0 && x.reasons == ["referenced"])
+    );
+}

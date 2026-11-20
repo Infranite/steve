@@ -848,3 +848,206 @@ async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
     .await;
     assert_eq!(s, 200, "{b}");
 }
+
+#[test]
+fn sg6_tool_deadline_and_null_patch_table() {
+    for (name, due, patch, want) in [
+        ("absent", Value::Null, json!({}), Value::Null),
+        ("date", json!("2027-02-05"), json!({}), json!("2027-02-05")),
+        (
+            "moment",
+            json!("2027-02-05T17:00:00+08:00"),
+            json!({}),
+            json!("moment"),
+        ),
+        (
+            "clear",
+            json!("2027-02-05"),
+            json!({"due":null}),
+            Value::Null,
+        ),
+        (
+            "date to moment",
+            json!("2027-02-05"),
+            json!({"due":"2027-02-06T09:00:00Z"}),
+            json!("moment2"),
+        ),
+        (
+            "moment to date",
+            json!("2027-02-05T17:00:00+08:00"),
+            json!({"due":"2027-02-06"}),
+            json!("2027-02-06"),
+        ),
+    ] {
+        let e = env();
+        let mut args = json!({"text":"deadline","remind_at":"2027-02-04T09:00:00Z","snooze_until":"2027-02-04T10:00:00Z"});
+        if !due.is_null() {
+            args["due"] = due;
+        }
+        let added = tool(&e, ME, todo_tools::ADD, args).unwrap();
+        let id = added["todo"]["id"].as_str().unwrap();
+        let mut args = patch;
+        args["todo"] = json!(id);
+        args["remind_at"] = Value::Null;
+        args["snooze_until"] = Value::Null;
+        let updated = tool(&e, ME, todo_tools::UPDATE, args).unwrap();
+        let actual = &updated["todo"]["due"];
+        if want == "moment" || want == "moment2" {
+            let expected = if want == "moment" {
+                "2027-02-05T17:00:00+08:00"
+            } else {
+                "2027-02-06T09:00:00Z"
+            };
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(actual.as_str().unwrap())
+                    .unwrap()
+                    .timestamp_millis(),
+                chrono::DateTime::parse_from_rfc3339(expected)
+                    .unwrap()
+                    .timestamp_millis(),
+                "{name}"
+            );
+        } else {
+            assert_eq!(actual, &want, "{name}");
+        }
+        assert!(
+            updated["todo"]["remind_at"].is_null() && updated["todo"]["snooze_until"].is_null(),
+            "{name}"
+        );
+        assert_eq!(
+            e.store()
+                .reader(|c| changes::list(c, WS, Some("ST-1"), None, 50))
+                .unwrap()
+                .len(),
+            2
+        );
+        changes::undo(&e.modules, WS, ME, updated["change"].as_str().unwrap()).unwrap();
+        let restored = tool(&e, ME, todo_tools::LIST, json!({})).unwrap();
+        assert_eq!(restored["todos"][0]["due"], added["todo"]["due"], "{name}");
+    }
+}
+
+#[test]
+fn sg6_tool_errors_preserve_rows_and_changes() {
+    let e = env();
+    let id = add(&e, ME, "unchanged", |_| {});
+    for (name, args, part) in [
+        (
+            todo_tools::ADD,
+            json!({"text":"x","extra":1}),
+            "unknown field",
+        ),
+        (
+            todo_tools::ADD,
+            json!({"text":"x","remind_at":"2027-02-04"}),
+            "needs a time",
+        ),
+        (
+            todo_tools::ADD,
+            json!({"text":"x","due":"tomorrow"}),
+            "RFC 3339",
+        ),
+        (
+            todo_tools::UPDATE,
+            json!({"todo":id,"due":"tomorrow"}),
+            "RFC 3339",
+        ),
+        (
+            todo_tools::UPDATE,
+            json!({"todo":id,"remind_at":"2027-02-04"}),
+            "needs a time",
+        ),
+        (
+            todo_tools::COMPLETE,
+            json!({"todo":id,"state":"invalid"}),
+            "done, dropped or open",
+        ),
+        (
+            "steve_todo_unknown",
+            json!({}),
+            "Tool steve_todo_unknown not found",
+        ),
+    ] {
+        let before = e.store().reader(|c| todo::get(c, WS, &id)).unwrap();
+        let error = tool(&e, ME, name, args).unwrap_err();
+        assert!(error.contains(part), "{name}: {error}");
+        assert_eq!(e.store().reader(|c| todo::get(c, WS, &id)).unwrap(), before);
+        assert!(
+            e.store()
+                .reader(|c| changes::list(c, WS, None, None, 50))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn sg6_undo_failure_classification_and_atomicity_table() {
+    use steve_modules::ApiError;
+    for (op, after, kind) in [
+        ("summary", json!({"conv":"broken","version":1}), "invalid"),
+        ("summary", json!({"conv":"space:s1","version":9}), "rule"),
+        (
+            "segment",
+            json!({"segment":"missing","matter":"missing"}),
+            "rule",
+        ),
+        ("todo", json!({"todo":"missing"}), "not_found"),
+        (
+            "todo_state",
+            json!({"todo":"missing","state":"done"}),
+            "not_found",
+        ),
+        (
+            "todo_edit",
+            json!({"todo":"missing","fields":{}}),
+            "not_found",
+        ),
+        (
+            "todo_link",
+            json!({"todo":"missing","item":"ST-1","linked":true}),
+            "rule",
+        ),
+        ("mem_link", json!({}), "invalid"),
+        ("mem_new", json!({"mem":"missing"}), "rule"),
+        ("unknown", json!({}), "invalid"),
+    ] {
+        let e = env();
+        let id = e
+            .store()
+            .transaction(|tx| {
+                changes::record(
+                    tx,
+                    WS,
+                    "run",
+                    "writer",
+                    op,
+                    "target",
+                    None,
+                    &json!({}),
+                    &after,
+                    NOW,
+                )
+            })
+            .unwrap();
+        let before = e
+            .store()
+            .reader(|c| changes::list(c, WS, None, None, 50))
+            .unwrap();
+        let error = changes::undo(&e.modules, WS, ME, &id).unwrap_err();
+        let actual = match error {
+            ApiError::Invalid(_) => "invalid",
+            ApiError::NotFound(_) => "not_found",
+            ApiError::Rule(_) => "rule",
+            e => panic!("{op}: {e:?}"),
+        };
+        assert_eq!(actual, kind, "{op}");
+        assert_eq!(
+            e.store()
+                .reader(|c| changes::list(c, WS, None, None, 50))
+                .unwrap(),
+            before,
+            "{op}: failed undo must not mark undone"
+        );
+    }
+}
