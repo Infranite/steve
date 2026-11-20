@@ -13,10 +13,10 @@ fn db(root: &Path) -> PathBuf {
 fn plan(root: &Path, reason: Reason) -> BackupPlan {
     BackupPlan::new(root.join("backups"), reason)
 }
-fn failed_files(_: &Path, _: &Path) -> io::Result<Option<PathBuf>> {
+fn failed_files(_: &Path, _: &Path) -> io::Result<FileArchive> {
     Err(io::Error::other("attachment disappeared"))
 }
-fn file(_: &Path, out: &Path) -> io::Result<Option<PathBuf>> {
+fn file(_: &Path, out: &Path) -> io::Result<FileArchive> {
     use std::io::Write;
     let p = out.join("files.tar");
     let mut f = fs::OpenOptions::new()
@@ -26,7 +26,13 @@ fn file(_: &Path, out: &Path) -> io::Result<Option<PathBuf>> {
         .open(&p)?;
     f.write_all(b"archive")?;
     f.sync_all()?;
-    Ok(Some(p))
+    Ok(FileArchive {
+        path: Some(p),
+        skipped_dirs: vec![SkippedDir {
+            path: "workspaces/item/node_modules".into(),
+            bytes: 12,
+        }],
+    })
 }
 #[test]
 fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
@@ -61,6 +67,15 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
         assert_eq!(actual.bytes, m.database.bytes);
         let saved: Manifest =
             serde_json::from_slice(&fs::read(m.directory.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(saved.files.skipped_dirs, m.files.skipped_dirs);
+        assert_eq!(saved.files.skipped_bytes, 12);
+        assert_eq!(
+            saved.files.skipped_dirs,
+            vec![SkippedDir {
+                path: "workspaces/item/node_modules".into(),
+                bytes: 12,
+            }]
+        );
         assert_eq!(saved.database.sha256, m.database.sha256);
         assert_eq!(saved.source, source);
         for (path, mode) in [
@@ -91,6 +106,8 @@ fn attachment_failure_is_explicit_but_does_not_discard_the_database() {
     assert!(!m.files.complete);
     assert!(m.files.error.as_ref().unwrap().contains("disappeared"));
     assert!(m.files.artifacts.is_empty());
+    assert!(m.files.skipped_dirs.is_empty());
+    assert_eq!(m.files.skipped_bytes, 0);
 }
 #[test]
 fn retention_is_scoped_to_completed_owned_directories_and_the_correct_purpose() {
@@ -350,5 +367,58 @@ fn wal_snapshot_metadata_is_immutable_and_leaves_no_sidecars_to_block_retention(
                 .get::<_, i64>(0))
             .unwrap(),
         2
+    );
+}
+
+#[test]
+fn files_without_skip_fields_deserialize_as_empty() {
+    let files: Files = serde_json::from_value(serde_json::json!({
+        "consistency": "best_effort", "complete": true, "artifacts": [], "error": null
+    }))
+    .unwrap();
+    assert!(files.skipped_dirs.is_empty());
+    assert_eq!(files.skipped_bytes, 0);
+    let saved: Files = serde_json::from_slice(&serde_json::to_vec(&files).unwrap()).unwrap();
+    assert!(saved.skipped_dirs.is_empty());
+    assert_eq!(saved.skipped_bytes, 0);
+}
+
+fn retry_files(home: &Path, out: &Path) -> io::Result<FileArchive> {
+    let marker = home.join("attempted");
+    if !marker.exists() {
+        fs::write(marker, "first attempt")?;
+        return Ok(FileArchive {
+            path: Some(out.join("missing.tar")),
+            skipped_dirs: vec![SkippedDir {
+                path: "discarded".into(),
+                bytes: 999,
+            }],
+        });
+    }
+    file(home, out)
+}
+
+#[test]
+fn retry_records_only_the_successfully_verified_archive() {
+    let root = tempfile::tempdir().unwrap();
+    let source = db(root.path());
+    let mut plan = plan(root.path(), Reason::Daily);
+    plan.with_files = Some(FileSet {
+        home: root.path().to_owned(),
+        archive: retry_files,
+    });
+    let m = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
+    assert!(root.path().join("attempted").exists());
+    assert!(m.files.complete && m.files.error.is_none());
+    let saved: Manifest =
+        serde_json::from_slice(&fs::read(m.directory.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(saved.files.artifacts.len(), 1);
+    assert_eq!(saved.files.skipped_bytes, 12);
+    assert_eq!(
+        saved.files.skipped_dirs,
+        vec![SkippedDir {
+            path: "workspaces/item/node_modules".into(),
+            bytes: 12,
+        }]
     );
 }

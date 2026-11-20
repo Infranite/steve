@@ -1,13 +1,10 @@
 //! Host archive adapter and management backup entry. Tar is kept here once so the
 //! storage contract needs no additional dependency or process-based archiver.
 use anyhow::{Result, bail};
-use std::{
-    fs,
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    path::{Path, PathBuf},
+use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
+use steve_store_sqlite::backup::{
+    self, CancelFlag, FileArchive, FileSet, Manifest, Reason, SkippedDir,
 };
-use steve_store_sqlite::backup::{self, CancelFlag, FileSet, Manifest, Reason};
 const PARTS: [&str; 6] = [
     "data/files",
     "signing",
@@ -67,14 +64,14 @@ pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String>
         reason(args)?,
     )?)?)
 }
-pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf>> {
+pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<FileArchive> {
     let parts: Vec<&str> = PARTS
         .into_iter()
         .filter(|p| home.join(p).exists())
         .collect();
     if parts.is_empty() {
         report_skipped(&[]);
-        return Ok(None);
+        return Ok(FileArchive::default());
     }
     let dest = out.join("files.tar");
     let partial = out.join("files.tar.partial");
@@ -114,14 +111,12 @@ pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf
     }
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
     report_skipped(&skipped);
-    Ok(Some(dest))
+    Ok(FileArchive {
+        path: Some(dest),
+        skipped_dirs: skipped,
+    })
 }
 
-#[derive(Debug)]
-struct SkippedDir {
-    path: PathBuf,
-    bytes: u64,
-}
 fn report_skipped(skipped: &[SkippedDir]) {
     let mut bytes = 0u64;
     for entry in skipped {
@@ -183,7 +178,7 @@ fn append(
     Ok(())
 }
 
-/// Logging only: disappearing or unreadable cache entries contribute zero and never fail a backup.
+/// Best-effort accounting: disappearing or unreadable cache entries contribute zero and never fail a backup.
 /// Links are not followed while measuring a skipped directory.
 fn logical_bytes(path: &Path) -> u64 {
     let Ok(metadata) = fs::symlink_metadata(path) else {
@@ -215,7 +210,7 @@ mod tests {
         fs::write(outside.path().join("secret"), "outside").unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("signing/link")).unwrap();
         std::os::unix::fs::symlink(outside.path(), home.path().join("secrets")).unwrap();
-        let path = archive(home.path(), out.path()).unwrap().unwrap();
+        let path = archive(home.path(), out.path()).unwrap().path.unwrap();
         let mut reader = tar::Archive::new(fs::File::open(path).unwrap());
         let entries: Vec<_> = reader
             .entries()
