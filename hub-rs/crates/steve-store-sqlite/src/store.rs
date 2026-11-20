@@ -128,11 +128,19 @@ impl<E: Send + 'static> BatchRunner<Arc<Engine>> for EngineRunner<E> {
     }
 }
 struct Writer<E: Send + 'static> {
-    observer: crate::exec::watch::Observer,
     engine: Arc<Engine>,
     executor: Executor<Arc<Engine>, EngineRunner<E>>,
     runner: Arc<SqliteBatchRunner<E>>,
 }
+/// SQLite DomainStore. Hints cover ordinary rowid tables written through this Store
+/// and its clones. Independent connections/processes and remote backends need the
+/// consumer's 60-second polling fallback.
+///
+/// WITHOUT ROWID domain tables are prohibited by the schema guard. update_hook
+/// misses truncate-optimized DELETE: the production source guard forbids clearing
+/// watched tables without a predicate, including constant-true WHERE expressions.
+/// REPLACE still hints through its INSERT. FTS shadow events do not imply a hint
+/// under the virtual table's logical name; subscribe to ordinary domain tables.
 pub struct SqliteStore<E: Send + 'static = ()> {
     registry: Arc<Registry>,
     writers: BTreeMap<Domain, Arc<Writer<E>>>,
@@ -141,9 +149,21 @@ pub struct SqliteStore<E: Send + 'static = ()> {
     clock: Arc<dyn WallClock>,
     runtime: Option<tokio::runtime::Handle>,
 }
+impl<E: Send + 'static> Clone for SqliteStore<E> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            writers: self.writers.clone(),
+            reads: self.reads.clone(),
+            hello: self.hello.clone(),
+            clock: self.clock.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
 impl<E: Send + 'static> SqliteStore<E> {
     /// Engines must all come from the same validated layout. Writer connections are
-    /// reused; each file also has one idle read-only commit observer, outside its read pool.
+    /// reused. Commit hints cover this Store and its clones, not independent connections.
     /// Construct within the owning Tokio runtime; it must outlive the store and its reads.
     pub fn new(
         engines: Vec<Engine>,
@@ -216,7 +236,6 @@ impl<E: Send + 'static> SqliteStore<E> {
                 )
             })?;
             let writer = Arc::new(Writer {
-                observer: crate::exec::watch::Observer::new(&engine)?,
                 engine,
                 executor,
                 runner,
@@ -325,7 +344,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         }
     }
     /// Backend-only table-key bridge for the legacy Store::commit_wake facade.
-    /// It shares the entity watch registry, preupdate hook and publication boundary.
+    /// It shares the entity watch registry, update hook and publication boundary.
     /// Subscribing inside a writer scope conservatively hints at its outer commit;
     /// pure rollbacks remain quiet. Domain code uses DomainStore::watch instead.
     pub fn commit_wake(&self, domain: Domain, tables: &[&str]) -> Arc<tokio::sync::Notify> {
@@ -406,9 +425,11 @@ impl<E: Send + 'static> SqliteStore<E> {
         })?
     }
     /// Legacy bridge seam: allocate before the callback opens a transaction. The callback owns
-    /// COMMIT/rollback and pending events; mark successful outer commits with
-    /// RootRevision::mark_committed (also covers empty commits). File-changing commits
-    /// are additionally observed for raw callbacks. Nested operations reuse the revision.
+    /// COMMIT/rollback and pending events. SQL hooks record candidates; notifications
+    /// leave only after the callback returns and successful statements are confirmed.
+    /// Nested operations reuse the revision. Independent writers are outside this registry.
+    /// Callbacks must preserve the writer's hooks/trace registration. Subscribe from
+    /// the writer callback, outside SQL functions or SQLite hook execution.
     pub fn with_root<T>(
         &self,
         domain: Domain,
@@ -422,7 +443,6 @@ impl<E: Send + 'static> SqliteStore<E> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
         let rev = w.runner.reserve_root(&c)?;
-        let observer = w.observer.begin().map_err(CommitError::Fatal)?;
         let capture = crate::exec::watch::Capture::begin(&c, &w.runner.watches)
             .map_err(crate::domains::sql_error)?;
         let outcome =
@@ -433,9 +453,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         } else {
             Ok(())
         };
-        let committed = rev.was_committed() || observer.committed();
-        drop(observer);
-        capture.finish(committed);
+        capture.finish();
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);

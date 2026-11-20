@@ -6,15 +6,23 @@ use std::{
     task::{Context, Waker},
 };
 use steve_storage_api::*;
-use steve_store_sqlite::domains::Registry;
+use steve_store_sqlite::{domains::Registry, store::SqliteStore};
 use support::*;
 fn ready(watch: &CommitWatch) -> bool {
     let mut cx = Context::from_waker(Waker::noop());
-    let mut future = std::pin::pin!(watch.changed());
-    future.as_mut().poll(&mut cx).is_ready()
+    std::pin::pin!(watch.changed())
+        .as_mut()
+        .poll(&mut cx)
+        .is_ready()
 }
-#[test]
-fn root_hook_covers_without_rowid_delete_triggers_savepoints_and_rollbacks() {
+fn ready_notify(wake: &Arc<tokio::sync::Notify>) -> bool {
+    let mut cx = Context::from_waker(Waker::noop());
+    std::pin::pin!(wake.notified())
+        .as_mut()
+        .poll(&mut cx)
+        .is_ready()
+}
+fn each_layout(test: impl Fn(SqliteStore<String>)) {
     for split in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         prepare_layout(dir.path(), split);
@@ -24,78 +32,291 @@ fn root_hook_covers_without_rowid_delete_triggers_savepoints_and_rollbacks() {
             Arc::new(Time::default()),
         );
         store.install_registered().unwrap();
-        // Replace the physical fixture while preserving its public entity contract.
-        store.with_root(Domain::Core,Lane::Admin, |c,_,_| {
-            c.execute_batch("DROP TABLE verify_core; CREATE TABLE verify_core(id TEXT PRIMARY KEY,value INTEGER,label TEXT,at INTEGER,data TEXT,bytes BLOB,real REAL,flag INTEGER,rev INTEGER NOT NULL) WITHOUT ROWID; CREATE TABLE source(value INTEGER); CREATE TRIGGER source_write AFTER INSERT ON source BEGIN INSERT INTO verify_core(id,value,rev) VALUES('trigger',NEW.value,1); END;").unwrap();
+        test(store);
+    }
+}
+fn raw(store: &SqliteStore<String>, sql: &str) {
+    store
+        .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+            c.execute_batch(sql).unwrap();
             Ok(())
-        }).unwrap();
-        let watch = store.watch(&["verify_core".into()]);
-        // A real pending future is installed before the commit as well as after it.
-        assert!(!ready(&watch));
-        store
+        })
+        .unwrap();
+}
+fn rejected() -> steve_storage_api::CommitError {
+    steve_storage_api::CommitError::Fatal(error(
+        steve_types::Code::Invalid,
+        "intentional callback failure",
+    ))
+}
+#[test]
+fn commit_hint_1_root_commit_wakes_after_return() {
+    each_layout(|store| {
+        let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+        let clone = store.clone();
+        clone
             .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-                c.execute_batch("BEGIN; INSERT INTO source VALUES(7); COMMIT")
+                c.execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('root',1,1)")
                     .unwrap();
+                assert!(!ready_notify(&wake));
+                c.execute_batch("COMMIT").unwrap();
+                assert!(
+                    !ready_notify(&wake),
+                    "commit hook cannot publish inside the callback"
+                );
                 Ok(())
             })
             .unwrap();
-        assert!(ready(&watch));
-        store
-            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-                c.execute_batch("BEGIN; DELETE FROM verify_core; COMMIT")
-                    .unwrap();
-                Ok(())
-            })
-            .unwrap();
-        assert!(
-            ready(&watch),
-            "unqualified DELETE on WITHOUT ROWID must wake"
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+        let entity = store.watch(&["verify_core".into()]);
+        block_on(clone.commit(unit("clone-uow", vec![insert("uow", 2)]))).unwrap();
+        assert!(ready(&entity));
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+    });
+}
+#[test]
+fn commit_hint_2_autocommit_success_survives_later_failure() {
+    each_layout(|store| {
+        raw(&store, "CREATE TABLE discarded(id INTEGER PRIMARY KEY)");
+        let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+        let discarded = store.commit_wake(Domain::Core, &["discarded"]);
+        for (id, tail) in [
+            (
+                "bare",
+                "INSERT INTO verify_core(id,value,rev) VALUES('bare',2,2)",
+            ),
+            (
+                "rollback",
+                "BEGIN; INSERT INTO discarded VALUES(1); INSERT OR ROLLBACK INTO verify_core(id,value,rev) VALUES('rollback',2,2)",
+            ),
+        ] {
+            let result: Result<(), _> =
+                store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                    c.execute("INSERT INTO verify_core(id,value,rev) VALUES(?1,1,1)", [id])
+                        .unwrap();
+                    assert!(!ready_notify(&wake));
+                    assert!(c.execute_batch(tail).is_err());
+                    Err(rejected())
+                });
+            assert!(result.is_err());
+            assert!(ready_notify(&wake));
+            assert!(!ready_notify(&wake));
+            assert!(
+                !ready_notify(&discarded),
+                "the later failed transaction must stay quiet"
+            );
+        }
+    });
+}
+#[test]
+fn commit_hint_3_root_rollback_does_not_wake() {
+    each_layout(|store| {
+        let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+        raw(
+            &store,
+            "BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('explicit',1,1); ROLLBACK",
         );
+        assert!(!ready_notify(&wake));
+        let result: Result<(), _> = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+            c.execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('leaked',1,1)")
+                .unwrap();
+            Err(rejected())
+        });
+        assert!(result.is_err());
+        assert!(!ready_notify(&wake));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Result<(), _> = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                c.execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('panic',1,1)")
+                    .unwrap();
+                panic!("root panic before commit")
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(!ready_notify(&wake));
+        block_on(store.commit(unit("after-panic", vec![insert("live", 1)]))).unwrap();
+        assert!(ready_notify(&wake));
+    });
+}
+#[test]
+fn commit_hint_4_savepoint_rollback_keeps_outer_and_each_table_once() {
+    each_layout(|store| {
+        raw(
+            &store,
+            "CREATE TABLE hint_a(id INTEGER); CREATE TABLE hint_b(id INTEGER)",
+        );
+        let a = store.commit_wake(Domain::Core, &["hint_a"]);
+        let b = store.commit_wake(Domain::Core, &["hint_b"]);
+        raw(
+            &store,
+            "BEGIN; INSERT INTO hint_a VALUES(1); SAVEPOINT inner; INSERT INTO hint_b VALUES(2); ROLLBACK TO inner; RELEASE inner; INSERT INTO hint_a VALUES(3); COMMIT",
+        );
+        assert!(ready_notify(&a));
+        assert!(!ready_notify(&a));
+        assert!(
+            ready_notify(&b),
+            "savepoint rollback may conservatively over-report its table"
+        );
+        assert!(!ready_notify(&b));
         store
             .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                assert_eq!(
+                    c.query_row("SELECT count(*) FROM hint_b", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+#[test]
+fn commit_hint_5_subscribe_after_write_in_transaction_still_covers() {
+    each_layout(|store| {
+        let watch = store
+            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                // There is no existing subscriber: hooks must be installed lazily here.
                 c.execute_batch(
-                    "BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('rollback',1,1); ROLLBACK",
+                    "BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('before',1,1)",
                 )
                 .unwrap();
+                let watch = store.watch(&["verify_core".into()]);
+                assert!(!ready(&watch));
+                c.execute_batch("COMMIT").unwrap();
+                assert!(!ready(&watch));
+                Ok(watch)
+            })
+            .unwrap();
+        assert!(ready(&watch));
+        assert!(!ready(&watch));
+        drop(watch);
+        let wake = store
+            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                c.execute_batch(
+                    "BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('discard',1,1)",
+                )
+                .unwrap();
+                let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+                c.execute_batch("ROLLBACK").unwrap();
+                Ok(wake)
+            })
+            .unwrap();
+        assert!(!ready_notify(&wake));
+    });
+}
+#[test]
+fn commit_hint_6_commit_failure_does_not_wake() {
+    each_layout(|store| {
+        raw(
+            &store,
+            "PRAGMA foreign_keys=ON; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)",
+        );
+        let wake = store.commit_wake(Domain::Core, &["child"]);
+        let result = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+            c.execute_batch("BEGIN; INSERT INTO child VALUES(1,99)")
+                .unwrap();
+            let error = c.execute_batch("COMMIT").unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+            assert!(!ready_notify(&wake));
+            Ok(()) // with_root must roll back the still-open failed transaction.
+        });
+        assert!(result.is_err());
+        assert!(!ready_notify(&wake));
+        raw(
+            &store,
+            "INSERT INTO parent VALUES(99); INSERT INTO child VALUES(2,99)",
+        );
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+    });
+}
+#[test]
+fn commit_hint_7_unconditional_delete_known_blind_spot() {
+    // Known blind spot, see G2-R2. Production guard prohibits this on watched tables.
+    each_layout(|store| {
+        raw(
+            &store,
+            "CREATE TABLE truncate_probe(id INTEGER PRIMARY KEY); INSERT INTO truncate_probe VALUES(1),(2)",
+        );
+        let wake = store.commit_wake(Domain::Core, &["truncate_probe"]);
+        raw(&store, "BEGIN; DELETE FROM truncate_probe; COMMIT");
+        assert!(
+            !ready_notify(&wake),
+            "bundled update_hook misses truncate optimization"
+        );
+        store
+            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                assert_eq!(
+                    c.query_row("SELECT count(*) FROM truncate_probe", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
                 Ok(())
             })
             .unwrap();
-        assert!(!ready(&watch), "an explicit rollback must not wake");
-        store.with_root(Domain::Core,Lane::Interactive, |c,_,_| {
-            c.execute_batch("BEGIN; SAVEPOINT inner; INSERT INTO verify_core(id,value,rev) VALUES('savepoint',1,1); ROLLBACK TO inner; RELEASE inner; INSERT INTO source VALUES(8); COMMIT").unwrap(); Ok(())
-        }).unwrap();
-        assert!(ready(&watch));
-        store.with_root(Domain::Core,Lane::Interactive, |c,_,_| {
-            c.execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('before-savepoint',1,1); SAVEPOINT inner; INSERT INTO verify_core(id,value,rev) VALUES('discarded',1,1); ROLLBACK TO inner; RELEASE inner; COMMIT").unwrap(); Ok(())
-        }).unwrap();
-        assert!(
-            ready(&watch),
-            "savepoint rollback must not erase earlier committed table changes"
+    });
+}
+#[test]
+fn commit_hint_8_replace_implicit_delete_still_wakes() {
+    each_layout(|store| {
+        raw(
+            &store,
+            "CREATE TABLE replace_probe(id INTEGER PRIMARY KEY, value TEXT); INSERT INTO replace_probe VALUES(1,'old')",
         );
-        let result: Result<(), _> = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-            c.execute_batch("BEGIN; DELETE FROM verify_core;").unwrap();
-            Err(steve_storage_api::CommitError::Fatal(error(
-                steve_types::Code::Invalid,
-                "abandon root",
-            )))
-        });
-        assert!(result.is_err());
-        assert!(!ready(&watch));
-        // A durable commit still wakes if the legacy callback returns an error later.
-        let result: Result<(), _> = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-            c.execute_batch("BEGIN; DELETE FROM verify_core; COMMIT;")
-                .unwrap();
-            Err(steve_storage_api::CommitError::Fatal(error(
-                steve_types::Code::Invalid,
-                "after commit",
-            )))
-        });
-        assert!(result.is_err());
-        assert!(ready(&watch));
-        drop(watch);
-        // No subscriber: Capture never installs a hook (asserted directly by its unit test).
-        block_on(store.commit(unit("no-subscriber", vec![insert("unit", 2)]))).unwrap();
-    }
+        let wake = store.commit_wake(Domain::Core, &["replace_probe"]);
+        raw(
+            &store,
+            "INSERT OR REPLACE INTO replace_probe VALUES(1,'new')",
+        );
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+        store
+            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+                assert_eq!(
+                    c.query_row("SELECT value FROM replace_probe WHERE id=1", [], |r| r
+                        .get::<_, String>(
+                        0
+                    ))
+                    .unwrap(),
+                    "new"
+                );
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+#[test]
+fn bundled_foreign_key_cascades_and_trigger_writes_hint_each_table() {
+    each_layout(|store| {
+        raw(
+            &store,
+            "PRAGMA foreign_keys=ON; CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY,parent INTEGER REFERENCES parent(id) ON DELETE CASCADE); CREATE TABLE triggered(id INTEGER); CREATE TRIGGER log_delete AFTER DELETE ON child BEGIN INSERT INTO triggered VALUES(old.id); END; INSERT INTO parent VALUES(1); INSERT INTO child VALUES(2,1)",
+        );
+        let child = store.commit_wake(Domain::Core, &["child"]);
+        let trigger = store.commit_wake(Domain::Core, &["triggered"]);
+        raw(&store, "DELETE FROM parent WHERE id=1");
+        assert!(ready_notify(&child));
+        assert!(ready_notify(&trigger));
+        assert!(!ready_notify(&child));
+        assert!(!ready_notify(&trigger));
+    });
+}
+#[test]
+fn independent_connections_are_outside_this_store_hint_registry() {
+    each_layout(|store| {
+        let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+        let c = rusqlite::Connection::open(store.engine(Domain::Core).path()).unwrap();
+        c.execute_batch("INSERT INTO verify_core(id,value,rev) VALUES('external',1,1)")
+            .unwrap();
+        assert!(!ready_notify(&wake));
+        block_on(store.commit(unit("own", vec![insert("local", 1)]))).unwrap();
+        assert!(ready_notify(&wake));
+    });
 }
 #[test]
 fn entity_names_resolve_to_physical_tables_across_files() {
@@ -131,143 +352,16 @@ fn entity_names_resolve_to_physical_tables_across_files() {
         assert!(ready(&watch));
         store
             .with_root(Domain::Comms, Lane::Interactive, |c, _, _| {
-                c.execute_batch("BEGIN; DELETE FROM verify_comms; COMMIT")
+                c.execute_batch("BEGIN; DELETE FROM verify_comms WHERE id IS NOT NULL; COMMIT")
                     .unwrap();
                 Ok(())
             })
             .unwrap();
         assert!(
             ready(&watch),
-            "rowid truncate deletion and peer-file legacy commits must wake"
+            "qualified deletion and peer-file legacy commits must wake"
         );
     }
-}
-
-#[test]
-fn subscription_inside_root_covers_earlier_sql_and_waits_for_commit() {
-    for split in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        prepare_layout(dir.path(), split);
-        let store = open_store(
-            dir.path(),
-            Arc::new(Registry::verification().unwrap()),
-            Arc::new(Time::default()),
-        );
-        store.install_registered().unwrap();
-        let watch = store
-            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-                c.execute_batch(
-                    "BEGIN; INSERT INTO verify_core(id,value,at,rev) VALUES('before',1,0,1)",
-                )
-                .unwrap();
-                let watch = store.watch(&["verify_core".into()]);
-                assert!(!ready(&watch));
-                c.execute_batch("COMMIT").unwrap();
-                assert!(!ready(&watch));
-                Ok(watch)
-            })
-            .unwrap();
-        assert!(ready(&watch));
-        assert!(!ready(&watch));
-        drop(watch);
-        let watch = store
-            .with_root(Domain::Comms, Lane::Interactive, |c, _, _| {
-                c.execute_batch(
-                    "BEGIN; INSERT INTO verify_comms(id,value,at,rev) VALUES('discard',1,0,1)",
-                )
-                .unwrap();
-                let watch = store.commit_wake(Domain::Comms, &["verify_comms"]);
-                assert!(!ready_notify(&watch));
-                c.execute_batch("ROLLBACK").unwrap();
-                Ok(watch)
-            })
-            .unwrap();
-        assert!(!ready_notify(&watch));
-        drop(watch);
-        // No watched row changed: a subscription inside the scope is deliberately
-        // conservative, and shares publication with the table-key legacy facade.
-        let watch = store
-            .with_root(Domain::Core, Lane::Interactive, |c, _, _| {
-                c.execute_batch("BEGIN; UPDATE verify_core SET value=2 WHERE id='before'")
-                    .unwrap();
-                let watch = store.commit_wake(Domain::Core, &["verify_log"]);
-                c.execute_batch("COMMIT").unwrap();
-                Ok(watch)
-            })
-            .unwrap();
-        assert!(ready_notify(&watch));
-        drop(watch);
-        let watch = store
-            .with_root(Domain::Core, Lane::Interactive, |c, _, root| {
-                c.execute_batch("BEGIN").unwrap();
-                let watch = store.commit_wake(Domain::Core, &["verify_log"]);
-                assert!(!ready_notify(&watch));
-                c.execute_batch("COMMIT").unwrap();
-                root.mark_committed();
-                assert!(!ready_notify(&watch));
-                Ok(watch)
-            })
-            .unwrap();
-        assert!(
-            ready_notify(&watch),
-            "explicit publication also covers empty commits"
-        );
-    }
-}
-
-#[test]
-fn preupdate_commit_hints_cover_truncate_replace_and_without_rowid() {
-    let dir = tempfile::tempdir().unwrap();
-    prepare_layout(dir.path(), false);
-    let store = open_store(
-        dir.path(),
-        Arc::new(Registry::verification().unwrap()),
-        Arc::new(Time::default()),
-    );
-    store.install_registered().unwrap();
-    store.with_root(Domain::Core,Lane::Admin, |c,_,_| {
-        c.execute_batch("CREATE TABLE rowid_probe(id INTEGER PRIMARY KEY); INSERT INTO rowid_probe VALUES(1); CREATE TABLE without_rowid_probe(id TEXT PRIMARY KEY) WITHOUT ROWID;").unwrap();Ok(())
-    }).unwrap();
-    for (table, sql, label) in [
-        (
-            "rowid_probe",
-            "BEGIN; DELETE FROM rowid_probe; COMMIT",
-            "truncate-optimized DELETE",
-        ),
-        (
-            "rowid_probe",
-            "BEGIN; INSERT INTO rowid_probe VALUES(1); COMMIT",
-            "seed REPLACE",
-        ),
-        (
-            "rowid_probe",
-            "BEGIN; INSERT OR REPLACE INTO rowid_probe VALUES(1); COMMIT",
-            "REPLACE",
-        ),
-        (
-            "without_rowid_probe",
-            "BEGIN; INSERT INTO without_rowid_probe VALUES('key'); COMMIT",
-            "WITHOUT ROWID",
-        ),
-    ] {
-        let watch = store.commit_wake(Domain::Core, &[table]);
-        store
-            .with_root(Domain::Core, Lane::Interactive, |c, _, root| {
-                c.execute_batch(sql).unwrap();
-                root.mark_committed();
-                Ok(())
-            })
-            .unwrap();
-        assert!(ready_notify(&watch), "preupdate must hint: {label}");
-    }
-}
-
-fn ready_notify(wake: &Arc<tokio::sync::Notify>) -> bool {
-    let mut cx = Context::from_waker(Waker::noop());
-    std::pin::pin!(wake.notified())
-        .as_mut()
-        .poll(&mut cx)
-        .is_ready()
 }
 
 #[test]
@@ -294,4 +388,19 @@ fn entity_and_legacy_table_subscriptions_share_commit_publication() {
     assert!(block_on(store.commit(failed)).is_err());
     assert!(!ready(&entity));
     assert!(!ready_notify(&legacy));
+}
+
+#[test]
+fn first_subscription_after_autocommit_is_conservative_and_survives_later_rollback() {
+    each_layout(|store| {
+        let wake = store.with_root(Domain::Core, Lane::Interactive, |c, _, _| {
+            c.execute_batch("INSERT INTO verify_core(id,value,rev) VALUES('earlier',1,1)").unwrap();
+            let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+            assert!(!ready_notify(&wake));
+            c.execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('discarded',1,1); ROLLBACK").unwrap();
+            Ok(wake)
+        }).unwrap();
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+    });
 }

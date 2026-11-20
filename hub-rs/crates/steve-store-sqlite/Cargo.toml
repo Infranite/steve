@@ -15,7 +15,7 @@ steve-storage-api = { path = "../steve-storage-api" }
 metrics = "=0.24.6"
 r2d2 = "=0.8.10"
 r2d2_sqlite = "=0.35.0"
-rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "hooks", "preupdate_hook"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "hooks", "trace"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.11.1"

@@ -359,7 +359,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             tx.commit()
                 .map_err(crate::domains::sql_error)
                 .map_err(Error::from)?;
-            capture.finish(true);
+            capture.finish();
             Ok(report)
         })
     }
@@ -411,7 +411,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             tx.commit()
                 .map_err(crate::domains::sql_error)
                 .map_err(Error::from)?;
-            capture.finish(true);
+            capture.finish();
             Ok(report)
         })?;
         let more = report.more();

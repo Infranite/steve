@@ -76,8 +76,9 @@ pub trait DomainStore: Send + Sync {
     fn hello(&self) -> &Hello;
     /// UNSTABLE: freeze after the first contract-based DueSource is exercised.
     /// A data-free hint for re-querying due work, never a business decision or event.
-    /// Local in-process commits do not lose wakeups; hints may coalesce or over-fire.
-    /// Other processes and remote backends may remain silent. Correctness requires
+    /// Commits through the same Store and its clones do not lose wakeups; hints may
+    /// coalesce or over-fire. Independent connections, other Store instances, other
+    /// processes and remote backends may remain silent. Correctness requires
     /// the consumer's 60-second polling fallback. Root rollbacks never wake watchers.
     fn watch(&self, _entities: &[EntityName]) -> CommitWatch {
         CommitWatch::new()

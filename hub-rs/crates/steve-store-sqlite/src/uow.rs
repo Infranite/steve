@@ -12,7 +12,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 use steve_storage_api::{
@@ -81,19 +81,10 @@ struct Receipt {
     result: Committed,
 }
 /// Opaque authority allocated before the outer legacy transaction. A rollback never returns it.
-pub struct RootRevision(Rev, usize, AtomicBool);
+pub struct RootRevision(Rev, usize);
 impl RootRevision {
     pub fn rev(&self) -> Rev {
         self.0
-    }
-    /// The legacy transaction owner calls this after a successful outer COMMIT,
-    /// including empty commits. It records publication intent, never commits SQL.
-    /// Raw callbacks that do not mark are still observed when the file changes.
-    pub fn mark_committed(&self) {
-        self.2.store(true, Ordering::Relaxed);
-    }
-    pub(crate) fn was_committed(&self) -> bool {
-        self.2.load(Ordering::Relaxed)
     }
 }
 pub struct Applied<E> {
@@ -127,7 +118,6 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         Ok(RootRevision(
             self.revisions.issue(c, 1)?[0],
             Arc::as_ptr(&self.revisions) as usize,
-            AtomicBool::new(false),
         ))
     }
     pub fn apply_in(
@@ -530,11 +520,14 @@ impl<E: Send + 'static> BatchRunner<Connection> for SqliteBatchRunner<E> {
                 .map(|(j, rev)| self.isolated(&tx, &j.unit, rev))
                 .collect::<Vec<_>>();
             tx.commit().map_err(sql_error)?;
-            capture.finish(
-                results
-                    .iter()
-                    .any(|r| r.as_ref().is_ok_and(|done| !done.replayed)),
-            );
+            // If every UOW rolled back its savepoint (or replayed), no watched
+            // mutation committed. Keep those conservative savepoint hints private.
+            if results
+                .iter()
+                .any(|r| r.as_ref().is_ok_and(|done| !done.replayed))
+            {
+                capture.finish();
+            }
             Ok(results)
         };
         let results = match catch_unwind(AssertUnwindSafe(run)) {

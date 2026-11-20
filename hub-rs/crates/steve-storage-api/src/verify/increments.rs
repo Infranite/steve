@@ -223,7 +223,7 @@ pub(super) fn commit_watch(h: &dyn Harness, store: Arc<dyn DomainStore>) {
         vec![insert(CORE.name, "watched", 1)],
     );
     commit(store.as_ref(), unit.clone());
-    assert!(ready(&watch));
+    assert!(ready(&watch), "commit_hint_1: successful commit must wake");
     assert!(!ready(&watch));
     commit(store.as_ref(), unit);
     assert!(!ready(&watch));
@@ -237,7 +237,10 @@ pub(super) fn commit_watch(h: &dyn Harness, store: Arc<dyn DomainStore>) {
         ],
     );
     assert!(block_on(store.commit(failed)).is_err());
-    assert!(!ready(&watch));
+    assert!(
+        !ready(&watch),
+        "commit_hint_3: rolled-back UOW must not wake"
+    );
     commit(
         store.as_ref(),
         uow(h, Domain::Core, "coalesced-1", vec![update("watched", 2)]),
