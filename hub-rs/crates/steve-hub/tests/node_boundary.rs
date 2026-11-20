@@ -400,6 +400,87 @@ fn sources() -> Vec<(String, Vec<Source>)> {
         .collect()
 }
 
+/// Runtime sandbox assembly belongs to the Node. Hub-host capabilities use Sandbox or
+/// confinement instead; moving implementation into a library must not widen that boundary.
+const RUN_SANDBOX_INTERNALS: &[&str] = &[
+    "wrap_in_mode",
+    "wrap_readonly",
+    "bwrap_readonly_standalone",
+    "Places",
+    "LoginStore",
+];
+
+fn hub_run_sandbox_internals(sources: &[Source]) -> Vec<Site> {
+    let mut found = Vec::new();
+    for source in sources {
+        for name in RUN_SANDBOX_INTERNALS {
+            for at in scan::find_in(&source.code, name) {
+                if source
+                    .code
+                    .as_bytes()
+                    .get(at + name.len())
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    continue;
+                }
+                found.push(Site {
+                    file: source.rel.clone(),
+                    line: source.code[..at].bytes().filter(|b| *b == b'\n').count() + 1,
+                });
+            }
+        }
+    }
+    found.extend(scan::find_imports(sources, |flat| {
+        RUN_SANDBOX_INTERNALS
+            .iter()
+            .any(|name| scan::imports(flat, &format!("steve_confine::{name}"), true))
+    }));
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn the_hub_uses_host_capabilities_not_run_sandbox_internals() {
+    let sources = scan::crate_sources(crates_dir(), "steve-hub");
+    let found = hub_run_sandbox_internals(&sources);
+    assert!(
+        found.is_empty(),
+        "Hub must use Sandbox/confinement: {found:?}"
+    );
+}
+
+#[test]
+fn run_sandbox_internals_cannot_hide_in_imports_or_method_calls() {
+    let check = |raw| {
+        hub_run_sandbox_internals(&[Source {
+            rel: "steve-hub/src/example.rs".into(),
+            code: scan::production(raw).unwrap(),
+        }])
+    };
+    for raw in [
+        "fn f() { c.wrap_in_mode(args); }",
+        "fn f() { c.wrap_readonly(args); }",
+        "fn f() { steve_confine::bwrap_readonly_standalone(args); }",
+        "use steve_confine::{Places as Writable, LoginStore};",
+        "use steve_confine::*;",
+        "use steve_confine as c;",
+    ] {
+        assert!(!check(raw).is_empty(), "missed {raw}");
+    }
+    assert!(
+        check(
+            r#"
+        use steve_confine::{Sandbox, confinement};
+        // LoginStore and wrap_readonly are documentation, not capabilities.
+        fn f() { let s = "Places"; let other = PlacesElsewhere; }
+        #[cfg(test)] fn t() { c.wrap_in_mode(args); }
+    "#
+        )
+        .is_empty()
+    );
+}
+
 /// The sites of `rule` in one crate's sources.
 fn sites(rule: Rule, krate: &str, sources: &[Source]) -> Vec<Site> {
     if rule == Rule::Harness && LIBRARIES.contains(&krate) {

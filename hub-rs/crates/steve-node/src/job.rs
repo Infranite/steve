@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use steve_acp::StateDirRuntime;
 use steve_acp::oneshot::{Image, OneShotError};
+use steve_confine as steve_research_sandbox;
 use steve_node_api::*;
 use tokio::sync::Notify;
 
@@ -321,10 +322,10 @@ async fn acp_think(
     // declared, otherwise apply the host's read-only wrapper when the platform provides it.
     let sandbox = if !properties.self_read_only
         && properties.nested_sandbox
-        && steve_research::sandbox::available()
+        && steve_research_sandbox::available()
     {
         if cfg!(target_os = "macos") {
-            let Some(profile) = steve_research::sandbox::profile(&writable) else {
+            let Some(profile) = steve_research_sandbox::readonly_profile(&writable) else {
                 return failed(OneShotError::Failed(
                     "invalid read-only sandbox paths".into(),
                 ));

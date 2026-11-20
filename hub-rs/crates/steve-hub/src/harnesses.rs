@@ -10,6 +10,57 @@ use std::time::Duration;
 use steve_core::harnesses::{Harness, HarnessModel, HarnessSource};
 use steve_node_api::{AdapterStatus, HarnessCapability};
 
+/// The pure resolver reports ignored declarations; the Hub owns its operator diagnostics.
+pub(crate) fn adapter_spec(
+    id: &str,
+    declared: Option<&steve_harness_spec::Declaration>,
+) -> steve_harness_spec::AdapterSpec {
+    if let Some(declared) = declared {
+        for key in declared.ignored_mode_keys() {
+            tracing::warn!(
+                adapter = id,
+                "harness adapter: unknown mode {key} in its declared modes"
+            );
+        }
+    }
+    steve_harness_spec::spec(id, declared)
+}
+
+#[cfg(test)]
+#[test]
+fn ignored_declared_modes_still_warn_in_the_hub() {
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || Capture(writer.clone()))
+        .finish();
+    let declared = serde_json::from_value(serde_json::json!({
+        "properties": {"modes": {"plan": "inspect", "plna": "misspelled"}}
+    }))
+    .unwrap();
+    let spec =
+        tracing::subscriber::with_default(subscriber, || adapter_spec("own", Some(&declared)));
+    assert_eq!(spec.properties.modes.plan, "inspect");
+    let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("unknown mode plna"), "{log}");
+    assert!(log.contains("WARN"), "{log}");
+}
+
 /// How often the list asks the Nodes again (each Node answers from its own cache).
 const REFRESH: Duration = Duration::from_secs(60);
 /// Remote probe timeout per Node so an unreachable device never stalls the poll.

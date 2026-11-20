@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 
 /// How the runtime resolves a trusted built-in command. No path is read here.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DefaultCommand {
     Claude,
     Codex,

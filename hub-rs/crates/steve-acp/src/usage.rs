@@ -12,10 +12,11 @@ use steve_node_api::{
     Digest, Epoch, EventBody, Measurement, Severity, Tokens, UsageReport, UsageScope,
 };
 
+use crate::AcpConfig;
 use crate::normalize::Fact;
 use crate::rollout::Reader as Rollout;
 use crate::transcript::Reader as Transcript;
-use crate::{AcpConfig, UsageFallback};
+use steve_harness_spec::UsageFallback;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const SETTLE_WAIT: Duration = Duration::from_secs(3);

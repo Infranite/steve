@@ -22,7 +22,7 @@ pub const PROTECTED: [&str; 14] = [
 ];
 
 /// `steve_home` with symlinks resolved when it exists (the harnesses match real paths).
-fn real(steve_home: &Path) -> PathBuf {
+pub fn canonical_path(steve_home: &Path) -> PathBuf {
     std::fs::canonicalize(steve_home).unwrap_or_else(|_| steve_home.to_path_buf())
 }
 
@@ -85,7 +85,7 @@ fn sbpl_filter(root: &str, entry: &str) -> Option<Vec<String>> {
 /// `root` as given and, when it differs, with symlinks resolved (the sandbox sees real paths).
 fn roots_of(root: &Path) -> Vec<String> {
     let mut out = vec![root.to_string_lossy().trim_end_matches('/').to_string()];
-    let r = real(root)
+    let r = canonical_path(root)
         .to_string_lossy()
         .trim_end_matches('/')
         .to_string();
@@ -160,7 +160,7 @@ pub struct BwrapPlan {
 }
 
 pub fn bwrap_plan(steve_home: &Path, node_home: &Path) -> BwrapPlan {
-    let (sh, nh) = (real(steve_home), real(node_home));
+    let (sh, nh) = (canonical_path(steve_home), canonical_path(node_home));
     let mut p = BwrapPlan::default();
     if sh.is_dir() {
         p.masked.push(sh.clone());

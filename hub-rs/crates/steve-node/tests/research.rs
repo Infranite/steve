@@ -1034,10 +1034,7 @@ async fn a_preferred_sandbox_is_used_where_this_machine_has_one() {
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
     let c = t.end_of(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::Succeeded, "{c:?}");
-    assert_eq!(
-        c.job.unwrap().sandboxed,
-        steve_research::sandbox::available()
-    );
+    assert_eq!(c.job.unwrap().sandboxed, steve_confine::available());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

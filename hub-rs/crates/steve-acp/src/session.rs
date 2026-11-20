@@ -74,6 +74,7 @@ pub struct OpenConfig<'a> {
     pub system_prompt: Option<SystemPrompt<'a>>,
 }
 
+// Transitional declaration facade, G4-W39A-ACP-REEXPORT: remove in W3.9c.
 pub use steve_harness_spec::ModeChoice;
 
 fn available_modes(r: &Value) -> Option<Vec<String>> {

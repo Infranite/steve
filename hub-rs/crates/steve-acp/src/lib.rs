@@ -31,10 +31,6 @@ pub mod usage;
 mod util;
 pub use state_dir::StateDirRuntime;
 
-pub use adapters::{
-    AdapterEntry, AdapterProperties, AdapterSpec, Declaration, Login, ModeMap, StateDir,
-    UsageFallback,
-};
 pub use capacity::{
     capacity_error_tail, capacity_recovery_at, capacity_summary, is_capacity_error,
 };
@@ -46,3 +42,6 @@ pub use errors::{is_dead_agent, is_stream_interruption, is_transient, stream_int
 pub use oneshot::{Image, OneShotError, TOOL_REFUSED};
 pub use rollout::find as codex_rollout;
 pub use rpc::RpcError;
+
+// Transitional declaration facade, G4-W39A-ACP-REEXPORT: remove in W3.9c.
+pub use steve_harness_spec::{AdapterEntry, AdapterProperties, Declaration, Login, StateDir};

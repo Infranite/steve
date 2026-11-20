@@ -4971,7 +4971,7 @@ async fn a_harness_cannot_read_the_control_plane() {
     std::fs::create_dir_all(steve.join("signing")).unwrap();
     std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
     let n = t.node();
-    if !steve_vault::harness::seatbelt_works() {
+    if !steve_confine::seatbelt_works() {
         eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
         return;
     }
@@ -5084,7 +5084,7 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
         "nothing of the owner's"
     );
     // in the sandbox, a session reads its own directory and nobody else's
-    if steve_vault::harness::seatbelt_works() && n.confinement().is_ok() {
+    if steve_confine::seatbelt_works() && n.confinement().is_ok() {
         std::fs::write(other.join("mine.txt"), "m").unwrap();
         let text = format!(
             "@cat {}/mine.txt @cat {}/settings.json",

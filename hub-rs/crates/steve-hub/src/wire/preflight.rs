@@ -1,7 +1,7 @@
 //! The preflight that says, before anything is created, whether a principal's Bot can run at all.
 //!
 //! A harness on a Node signs in by itself there (its own login command and settings); every
-//! principal's session on that Node uses that sign-in ([`steve_acp::Login`]), and Steve never
+//! principal's session on that Node uses that sign-in ([`steve_harness_spec::Login`]), and Steve never
 //! configures a model provider or handles a provider key. So what can stop a Bot is only its
 //! harness: not installed, not ready, or not signed in on any Node that could take it. Each Node's
 //! probe opens a scratch session of every harness it has; one that is not signed in cannot open it

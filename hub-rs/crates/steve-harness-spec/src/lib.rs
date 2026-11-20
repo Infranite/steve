@@ -523,6 +523,22 @@ pub struct Declaration {
     pub install_hint: Option<String>,
 }
 
+impl Declaration {
+    /// Mode keys ignored by resolution, for diagnostics owned by the runtime or its caller.
+    pub fn ignored_mode_keys(&self) -> impl Iterator<Item = &str> {
+        self.properties
+            .modes
+            .keys()
+            .map(String::as_str)
+            .filter(|key| {
+                !matches!(
+                    *key,
+                    "plan" | "ask" | "accept_edits" | "auto" | "full_access"
+                )
+            })
+    }
+}
+
 /// One manifest entry: a command (as `harness.json` always had it) or a declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]

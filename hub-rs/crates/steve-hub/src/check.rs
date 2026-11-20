@@ -337,7 +337,7 @@ mod tests {
             r.warnings.is_empty(),
             "no local Node, no runs of its own: {r:?}"
         );
-        if steve_vault::harness::seatbelt_works() {
+        if steve_confine::seatbelt_works() {
             let r = run(&[]);
             assert!(
                 r.warnings.iter().all(|w| !w.starts_with("STEVE_CONFINE:")),

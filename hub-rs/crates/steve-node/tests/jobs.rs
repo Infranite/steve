@@ -523,7 +523,7 @@ async fn a_custom_adapter_with_nothing_declared_runs_in_the_nodes_sandbox() {
             }]
         )
     );
-    if steve_research::sandbox::available() {
+    if steve_confine::available() {
         assert_eq!(t.spawns(), 0, "its log is outside what it may write");
     }
 }

@@ -30,11 +30,11 @@ impl Scope {
 }
 
 pub(crate) fn protected(hub: &Path, node: &Path) -> Vec<PathBuf> {
-    steve_vault::harness::PROTECTED
+    steve_confine::PROTECTED
         .iter()
         .map(|p| hub.join(p.trim_end_matches(['/', '*'])))
         .chain(
-            steve_vault::harness::NODE_PROTECTED
+            steve_confine::NODE_PROTECTED
                 .iter()
                 .map(|p| node.join(p.trim_end_matches(['/', '*']))),
         )

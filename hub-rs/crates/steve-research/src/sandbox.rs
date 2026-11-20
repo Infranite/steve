@@ -1,11 +1,7 @@
 //! Shared read-only OS sandbox policy; Research keeps its tool/scope checks separately.
-pub use steve_confine::{
-    SANDBOX_EXEC, SandboxMode, available, decide, readonly_profile as profile,
-};
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use steve_confine::{SANDBOX_EXEC, available, readonly_profile as profile};
 
     #[test]
     fn profile_shape() {

@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 mod control;
 mod probe;
 mod profile;
-pub use control::{BwrapPlan, NODE_FILES, NODE_PROTECTED, PROTECTED, RUN_DIRS, SEALED, bwrap_plan};
+pub use control::{
+    BwrapPlan, NODE_FILES, NODE_PROTECTED, PROTECTED, RUN_DIRS, SEALED, bwrap_plan, canonical_path,
+};
 pub use probe::{available, bwrap_path, bwrap_works, seatbelt_works};
 #[cfg(test)]
 use profile::*;
@@ -1362,4 +1364,91 @@ fn pre_extraction_research_and_control_profiles_are_byte_identical() {
             .as_bytes(),
         include_bytes!("../tests/fixtures/control.sbpl")
     );
+}
+
+// This fixture uses the Linux backend even on macOS; no bwrap process is executed.
+#[cfg(test)]
+fn level_one_bwrap_fixture() -> serde_json::Value {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let home = root.join("steve");
+    let node = home.join("data/node");
+    let user = root.join("user");
+    let work = root.join("work");
+    for path in [
+        home.join("signing"),
+        home.join("worktrees"),
+        home.join("scratch"),
+        node.join("secrets/one"),
+        node.join("state/one"),
+        user.join(".cache"),
+        user.join(".npm"),
+        user.join(".claude"),
+        user.join(".ssh"),
+        work.clone(),
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(node.join("node.sqlite3"), "").unwrap();
+    std::fs::write(user.join(".claude.json"), "").unwrap();
+    let c = Confine {
+        sandbox: Backend::Bwrap {
+            bwrap: "/usr/bin/bwrap".into(),
+            steve_home: home,
+            node_home: node.clone(),
+        },
+        files: true,
+        env: None,
+    };
+    let (program, args) = c.wrap_in_mode(
+        "/bin/tool".into(),
+        vec!["hello".into()],
+        &[node.join("secrets/one")],
+        &[node.join("state/one")],
+        Some(&work),
+        false,
+        true,
+        Some(&user),
+        None,
+    );
+    let normalize =
+        |p: &std::ffi::OsStr| p.to_string_lossy().replace(root.to_str().unwrap(), "$ROOT");
+    serde_json::to_value((
+        normalize(program.as_os_str()),
+        args.iter().map(|a| normalize(a)).collect::<Vec<_>>(),
+    ))
+    .unwrap()
+}
+
+#[cfg(test)]
+#[test]
+fn pre_extraction_level_one_bwrap_is_byte_identical() {
+    // Captured from Confine { files: true } at c8af7504, never from this renderer.
+    let actual = level_one_bwrap_fixture();
+    let (program, args): (String, Vec<String>) =
+        serde_json::from_str(include_str!("../tests/fixtures/bwrap-level-one.json")).unwrap();
+    let tmp = std::env::var_os("TMPDIR");
+    let mut expected = Vec::new();
+    let mut at = 0;
+    while at < args.len() {
+        // Legacy Places probes these four system directories and optional TMPDIR. Their
+        // presence is an input: macOS captures must also run on Linux without inventing mounts.
+        if args[at] == "--bind" && at + 2 < args.len() && args[at + 1] == args[at + 2] {
+            let path = &args[at + 1];
+            if ["/tmp", "/private/tmp", "/var/tmp", "/private/var/folders"].contains(&path.as_str())
+                && !Path::new(path).is_dir()
+                || path == "$TMPDIR" && tmp.is_none()
+            {
+                at += 3;
+                continue;
+            }
+        }
+        expected.push(if args[at] == "$TMPDIR" {
+            tmp.as_ref().unwrap().to_string_lossy().into_owned()
+        } else {
+            args[at].clone()
+        });
+        at += 1;
+    }
+    assert_eq!(actual, serde_json::to_value((program, expected)).unwrap());
 }

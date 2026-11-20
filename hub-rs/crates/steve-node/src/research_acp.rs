@@ -48,7 +48,7 @@ pub(super) fn sandbox_mode(
             Ok(r::SandboxMode::Off)
         }
         SandboxRequirement::Required { guarantees } if only_fs(guarantees) => {
-            if r::sandbox::available() {
+            if steve_confine::available() {
                 Ok(r::SandboxMode::Required)
             } else {
                 unsupported("no read-only system sandbox on this node")
@@ -299,7 +299,7 @@ async fn prepare(
     readable.push(dir.clone());
     readable.extend(files.dir);
     let scope = r::Scope::new(&cwd, &readable, &cfg.home);
-    let sandboxed = r::sandbox::decide(cfg.sandbox)
+    let sandboxed = steve_confine::decide(cfg.sandbox)
         .ok_or_else(|| std::io::Error::other("research requires an unavailable system sandbox"))?;
     let sandbox = if sandboxed {
         // The run's directory and the harness's own state. Project and attachment paths never
@@ -308,7 +308,7 @@ async fn prepare(
             .chain(adapter_state.iter().map(|p| r::guard::resolve(p)))
             .collect();
         if cfg!(target_os = "macos") {
-            let sb = r::sandbox::profile(&writable)
+            let sb = steve_confine::readonly_profile(&writable)
                 .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
             // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
             let sb = format!("{sb}{}", confine.unwrap_or_default());

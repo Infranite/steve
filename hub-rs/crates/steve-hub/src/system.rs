@@ -409,7 +409,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
         .iter()
         .map(|(id, path)| {
             let declared = cfg.declared_adapters.get(id);
-            let spec = steve_harness_spec::spec(id, declared);
+            let spec = crate::harnesses::adapter_spec(id, declared);
             let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
             let adapter = reported.and_then(|h| h.adapter.as_ref());
             let session = adapter.and_then(|a| a.session.as_ref()).filter(|_| {

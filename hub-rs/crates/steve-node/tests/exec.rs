@@ -715,7 +715,7 @@ async fn a_command_cannot_reach_the_control_plane() {
     std::fs::write(steve.join("signing/identity.json"), "k").unwrap();
     std::fs::write(steve.join("steve.env"), "STEVE_X=1").unwrap();
     let n = t.node();
-    if !steve_vault::harness::seatbelt_works() {
+    if !steve_confine::seatbelt_works() {
         eprintln!("skipped: no seatbelt here (inside a sandbox already?)");
         return;
     }

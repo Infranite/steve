@@ -1,10 +1,7 @@
 //! Harness secret filtering and harness-native permission rules. OS sandbox policy and
 //! probing are owned by steve-confine, shared with Node and Research.
-use std::path::{Path, PathBuf};
-pub use steve_confine::{
-    BwrapPlan, NODE_FILES, NODE_PROTECTED, PROTECTED, RUN_DIRS, SEALED, bwrap_path, bwrap_plan,
-    bwrap_works, seatbelt_rules, seatbelt_works,
-};
+use std::path::Path;
+use steve_confine::PROTECTED;
 
 /// Environment variables the Hub has and no harness inherits: the upgrade control channel, and what
 /// points at the vault's key store or a secret file.
@@ -35,18 +32,13 @@ pub fn hub_private_vars() -> Vec<std::ffi::OsString> {
         .collect()
 }
 
-/// `steve_home` with symlinks resolved when it exists (the harnesses match real paths).
-fn real(steve_home: &Path) -> PathBuf {
-    std::fs::canonicalize(steve_home).unwrap_or_else(|_| steve_home.to_path_buf())
-}
-
 /// Claude Code permission rules (`permissions.deny`) for [`PROTECTED`] under `steve_home`. Deny rules
 /// hold in every permission mode, `bypassPermissions` included, but only for Claude Code's own file
 /// tools (Read, Edit, Write, Grep, Glob …): a program a Bash command runs (`python3 -c`, `sqlite3`,
 /// `tar`) is not bound by them. Keeping those out needs an OS sandbox (`sandbox-exec`), not rules.
 pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
     let mut roots = vec![steve_home.to_path_buf()];
-    let r = real(steve_home);
+    let r = steve_confine::canonical_path(steve_home);
     if r != roots[0] {
         roots.push(r);
     }
@@ -76,6 +68,7 @@ pub fn claude_settings(steve_home: &Path) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steve_confine::{bwrap_plan, seatbelt_rules, seatbelt_works};
 
     #[test]
     fn hub_private_env_names() {

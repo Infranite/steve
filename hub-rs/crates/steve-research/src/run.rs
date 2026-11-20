@@ -4,10 +4,10 @@
 
 use crate::answer::{self, Citation, Offer};
 use crate::guard::Violation;
-use crate::sandbox::{self, SandboxMode};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
+use steve_confine::SandboxMode;
 
 /// A run whose harness says nothing (no text, no tool call, no event at all) for this long is stuck and is
 /// ended. This is not a limit on how long a conversation may take: a run that keeps working never ends by
@@ -103,7 +103,7 @@ impl ResearchConfig {
 
     /// The line to log at startup when the platform has no system sandbox.
     pub fn startup_note(&self) -> Option<&'static str> {
-        (self.sandbox != SandboxMode::Off && !sandbox::available()).then_some(
+        (self.sandbox != SandboxMode::Off && !steve_confine::available()).then_some(
             "research: system sandbox not available; read-only relies on the adapter's mode and the guard",
         )
     }

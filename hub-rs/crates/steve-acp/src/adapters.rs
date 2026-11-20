@@ -14,19 +14,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_node_api::PermissionMode;
 
+#[cfg(test)]
+use steve_harness_spec::{AdapterEntry, builtin_packages};
+
 use crate::rpc::{Conn, Spawn};
 use crate::util::truthy;
 
-// Transitional declaration facade, G4-W39A-ACP-REEXPORT: W3.9c removes these old paths.
 pub use crate::state_dir::StateDirRuntime;
-pub use steve_harness_spec::{
-    AdapterEntry, AdapterProperties, AdapterSpec, Component, DEFAULT_ADAPTER,
-    DEFAULT_MANAGED_ADAPTERS, DEFAULT_MODEL_VAR, Declaration, LaunchExtra, Login, ModeMap,
-    PROPERTY_KEYS, PermissionPolicy, PropertiesPatch, SessionMeta, StateDir, UsageFallback,
-    builtin_bins, builtin_ids, builtin_packages, components, implicit_selection, is_npm_managed,
-    split_entries,
+
+use steve_harness_spec::{
+    AdapterProperties, AdapterSpec, Component, Declaration, DefaultCommand, LaunchExtra, ModeMap,
+    SessionMeta, UsageFallback, builtin, builtins,
 };
-use steve_harness_spec::{DefaultCommand, builtin, builtins};
+
+// Transitional declaration facade, G4-W39A-ACP-REEXPORT: W3.9c removes these old paths.
+pub use steve_harness_spec::{
+    DEFAULT_ADAPTER, PermissionPolicy, PropertiesPatch, StateDir, builtin_bins, builtin_ids,
+    components, split_entries,
+};
 
 fn npm_entry(pkg: &str, entry: &str, root: &Path) -> PathBuf {
     root.join(pkg).join(entry)
@@ -110,13 +115,8 @@ pub fn builtin_commands(
 /// Runtime diagnostics stay here; the declaration crate does not log or perform IO.
 pub fn spec(id: &str, declared: Option<&Declaration>) -> AdapterSpec {
     if let Some(d) = declared {
-        for key in d.properties.modes.keys() {
-            if !matches!(
-                key.as_str(),
-                "plan" | "ask" | "accept_edits" | "auto" | "full_access"
-            ) {
-                tracing::warn!("harness adapter: unknown mode {key} in its declared modes");
-            }
+        for key in d.ignored_mode_keys() {
+            tracing::warn!("harness adapter: unknown mode {key} in its declared modes");
         }
     }
     steve_harness_spec::spec(id, declared)
@@ -1166,4 +1166,59 @@ mod tests {
         let p = probe(&c, "unbuilt", dir.path(), Duration::from_millis(300)).await;
         assert_eq!(p.status, ProbeStatus::AdapterMissing, "{p:?}");
     }
+}
+
+#[cfg(test)]
+fn default_commands_fixture() -> serde_json::Value {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let modules = root.join("node_modules");
+    let commands = || {
+        builtin_commands(&modules)
+            .map(|(id, var, command)| {
+                serde_json::json!([
+                    id,
+                    var,
+                    command
+                        .to_string_lossy()
+                        .replace(root.to_str().unwrap(), "$ROOT")
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
+    let empty = commands();
+    for (package, bin, manifest) in [
+        (
+            "@xai-official/grok",
+            "grok.mjs",
+            serde_json::json!({"bin":"./grok.mjs"}),
+        ),
+        (
+            "@kilocode/cli",
+            "kilo.mjs",
+            serde_json::json!({"bin":{"kilo":"./kilo.mjs","other":"./unused.mjs"}}),
+        ),
+        (
+            "droid",
+            "droid.mjs",
+            serde_json::json!({"bin":{"single-alias":"./droid.mjs"}}),
+        ),
+    ] {
+        let dir = modules.join(package);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+        std::fs::write(dir.join(bin), "").unwrap();
+    }
+    std::fs::create_dir_all(modules.join(".bin")).unwrap();
+    std::fs::write(modules.join(".bin/codebuddy"), "").unwrap();
+    serde_json::json!({"empty": empty, "installed_bins": commands()})
+}
+
+#[cfg(test)]
+#[test]
+fn default_commands_match_the_pre_extraction_resolvers() {
+    // c8af7504 invokes each old default_*_adapter function through builtin_commands.
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/default-commands.json")).unwrap();
+    assert_eq!(default_commands_fixture(), expected);
 }

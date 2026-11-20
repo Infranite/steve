@@ -28,7 +28,7 @@ pub fn root(home: &Path) -> PathBuf {
 
 /// The command of npm-managed built-in `id` in `home`'s adapters, whether it is installed or not.
 pub fn command(home: &Path, id: &str) -> Option<PathBuf> {
-    if !crate::adapters::is_npm_managed(id) {
+    if !steve_harness_spec::is_npm_managed(id) {
         return None;
     }
     crate::adapters::builtin_commands(&root(home))
@@ -38,7 +38,7 @@ pub fn command(home: &Path, id: &str) -> Option<PathBuf> {
 
 /// The npm package of built-in `id`.
 pub fn package(id: &str) -> Option<&'static str> {
-    crate::adapters::builtin_packages()
+    steve_harness_spec::builtin_packages()
         .find(|(b, _)| *b == id)
         .map(|(_, p)| p)
 }
@@ -116,7 +116,7 @@ fn select(home: &Path, ids: &[&str]) -> Result<(), String> {
 }
 
 /// Whether Steve keeps npm-managed built-in `id` in `home`: it is installed there, was chosen, or
-/// nothing was ever chosen and `id` is in [`crate::adapters::DEFAULT_MANAGED_ADAPTERS`]. An adapter
+/// nothing was ever chosen and `id` is in [`steve_harness_spec::DEFAULT_MANAGED_ADAPTERS`]. An adapter
 /// its user left out (or one not distributed on npm) is neither installed by the daily check nor
 /// reported as missing.
 pub fn wanted(home: &Path, id: &str) -> bool {
@@ -126,18 +126,18 @@ pub fn wanted(home: &Path, id: &str) -> bool {
     installed(home, pkg).is_some()
         || match selection(home) {
             Some(chosen) => chosen.iter().any(|c| c == id),
-            None => crate::adapters::DEFAULT_MANAGED_ADAPTERS.contains(&id),
+            None => steve_harness_spec::DEFAULT_MANAGED_ADAPTERS.contains(&id),
         }
 }
 
 /// Records an explicit successful installation without changing the other choices.
 pub fn add_selection(home: &Path, id: &str) -> Result<(), String> {
     let before = selection(home);
-    let ids: Vec<&str> = crate::adapters::builtin_ids()
+    let ids: Vec<&str> = steve_harness_spec::builtin_ids()
         .filter(|b| {
             *b == id
                 || before.as_ref().map_or_else(
-                    || crate::adapters::implicit_selection(b),
+                    || steve_harness_spec::implicit_selection(b),
                     |v| v.iter().any(|c| c == b),
                 )
         })
@@ -147,7 +147,7 @@ pub fn add_selection(home: &Path, id: &str) -> Result<(), String> {
 
 /// Every trusted component of one built-in adapter, including its separate harness executable.
 pub fn packages(id: &str) -> Vec<&'static str> {
-    crate::adapters::components(id)
+    steve_harness_spec::components(id)
         .iter()
         .map(|c| c.package)
         .collect()
@@ -361,7 +361,7 @@ impl Status {
 /// Each built-in adapter in `home`, with the latest release when `npm` is given and the adapter is
 /// wanted in `home` (installed or selected).
 pub fn status(home: &Path, npm: Option<&Path>) -> Vec<Status> {
-    crate::adapters::builtin_packages()
+    steve_harness_spec::builtin_packages()
         .map(|(id, package)| {
             let inst = installed(home, package);
             let query = npm.filter(|_| inst.is_some() || wanted(home, id));
@@ -502,7 +502,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
         }
         Some("list") => {
             let path_env = std::env::var_os("PATH");
-            let adapters: Vec<serde_json::Value> = crate::adapters::builtin_packages()
+            let adapters: Vec<serde_json::Value> = steve_harness_spec::builtin_packages()
                 .map(|(id, package)| {
                     serde_json::json!({
                         "id": id,
@@ -514,8 +514,8 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                     })
                 })
                 .collect();
-            let path_only: Vec<&str> = crate::adapters::builtin_ids()
-                .filter(|id| !crate::adapters::is_npm_managed(id))
+            let path_only: Vec<&str> = steve_harness_spec::builtin_ids()
+                .filter(|id| !steve_harness_spec::is_npm_managed(id))
                 .collect();
             let detected_path_only: Vec<&str> = path_only
                 .iter()
@@ -554,7 +554,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                         t!("acp.managed.not_npm_managed", id = unknown, hint = hint)
                     );
                 } else {
-                    let known: Vec<&str> = crate::adapters::builtin_packages()
+                    let known: Vec<&str> = steve_harness_spec::builtin_packages()
                         .map(|(id, _)| id)
                         .collect();
                     eprintln!(
@@ -576,7 +576,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 eprintln!("{e}");
                 return 1;
             }
-            let targets: Vec<&str> = crate::adapters::builtin_packages()
+            let targets: Vec<&str> = steve_harness_spec::builtin_packages()
                 .map(|(id, _)| id)
                 .filter(|id| match only || !ids.is_empty() {
                     true => ids.contains(id),
@@ -627,7 +627,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 && !installed_ids.is_empty()
                 && let Some(prev) = before.as_ref()
             {
-                let merged: Vec<&str> = crate::adapters::builtin_packages()
+                let merged: Vec<&str> = steve_harness_spec::builtin_packages()
                     .map(|(id, _)| id)
                     .filter(|id| installed_ids.contains(&id) || prev.iter().any(|b| b == id))
                     .collect();
@@ -696,7 +696,7 @@ mod tests {
             Some("0.102.0")
         );
         let s = status(home.path(), None);
-        assert_eq!(s.len(), crate::adapters::builtin_packages().count());
+        assert_eq!(s.len(), steve_harness_spec::builtin_packages().count());
         assert!(!s[0].outdated(), "nothing asked: not outdated");
         assert!(s[1].outdated(), "not installed: to install");
     }
@@ -715,7 +715,7 @@ mod tests {
     fn what_setup_chose_is_what_a_home_keeps() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        let ids: Vec<&str> = crate::adapters::builtin_packages()
+        let ids: Vec<&str> = steve_harness_spec::builtin_packages()
             .map(|(id, _)| id)
             .collect();
         let (first, second, third) = (ids[0], ids[1], ids[2]);
@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn the_home_of_an_adapter_is_the_one_it_is_installed_in() {
         let home = Path::new("/u/.steve");
-        for (id, _) in crate::adapters::builtin_packages() {
+        for (id, _) in steve_harness_spec::builtin_packages() {
             assert_eq!(home_of(&command(home, id).unwrap()).as_deref(), Some(home));
         }
         assert_eq!(command(home, "cursor"), None);
@@ -787,7 +787,7 @@ esac
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let (node, log) = fake_npm(temp.path());
-        let ids: Vec<&str> = crate::adapters::builtin_packages()
+        let ids: Vec<&str> = steve_harness_spec::builtin_packages()
             .map(|(id, _)| id)
             .collect();
         let (first, second) = (ids[0], ids[1]);
@@ -843,7 +843,7 @@ esac
         for id in &ids {
             assert_eq!(
                 installed(&all, package(id).unwrap()).is_some(),
-                crate::adapters::DEFAULT_MANAGED_ADAPTERS.contains(id),
+                steve_harness_spec::DEFAULT_MANAGED_ADAPTERS.contains(id),
                 "{id}"
             );
         }
@@ -878,7 +878,7 @@ esac
         let home = temp.path().join("home");
         let npm = temp.path().join("npm");
         let node = temp.path().join("node");
-        let ids: Vec<&str> = crate::adapters::builtin_packages()
+        let ids: Vec<&str> = steve_harness_spec::builtin_packages()
             .map(|(id, _)| id)
             .collect();
         let (first, second, third) = (ids[0], ids[1], ids[2]);
