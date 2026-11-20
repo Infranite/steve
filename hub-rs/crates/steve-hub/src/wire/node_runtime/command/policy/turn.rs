@@ -98,7 +98,7 @@ fn turn_retry(
     } else {
         facts.execution_allowed()?;
         if facts.acted {
-            return Err(Refusal::MustCheckAfterActing);
+            return Err(Refusal::Acted);
         }
     }
     if !service && retry == Retry::Never {
@@ -123,25 +123,6 @@ fn turn_retry(
     )?;
     facts.configuration_allows()?;
     Ok(at)
-}
-
-/// UNAPPROVED behavior change from design v2.2 section 2.4. W3.3s MUST NOT wire this rule.
-/// Current stream/service failures still retry after acting via TurnInterrupted.
-#[derive(Debug, Clone, Copy)]
-pub struct TurnInterruptedAfterActing {
-    pub facts: TurnFacts,
-}
-
-impl TurnInterruptedAfterActing {
-    pub fn decide(self, _retry: Retry) -> Decision {
-        if let Err(why) = self.facts.allowed() {
-            return Decision::Stop(why);
-        }
-        if !self.facts.acted {
-            return Decision::Stop(Refusal::NotActed);
-        }
-        Decision::CheckBeforeContinuing
-    }
 }
 
 #[cfg(test)]

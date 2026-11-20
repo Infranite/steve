@@ -37,7 +37,6 @@ pub enum Rule {
     },
     TurnInterrupted,
     TurnGatewayTransient,
-    TurnInterruptedAfterActing,
     ConfigStale,
 }
 
@@ -89,7 +88,6 @@ pub fn next_revision(history: History<'_>, why: RevisionWhy) -> Result<IntentKey
             (Rule::TurnCapacity { .. }, Intent::StartTurn(_)) => 3,
             (Rule::TurnInterrupted | Rule::TurnGatewayTransient, Intent::StartTurn(_)) => 2,
             (Rule::ConfigStale, Intent::Configure(_)) => 2,
-            (Rule::TurnInterruptedAfterActing, _) => return Err(Refusal::MustCheckAfterActing),
             _ => return Err(Refusal::WrongIntent),
         };
         if !history.revisions.is_empty() {
@@ -199,16 +197,6 @@ mod tests {
                 policy(Rule::ConfigStale, 2000)
             ),
             Err(Refusal::WrongIntent)
-        );
-        assert_eq!(
-            next_revision(
-                History {
-                    intent: &intent,
-                    revisions: &rows
-                },
-                policy(Rule::TurnInterruptedAfterActing, 2000)
-            ),
-            Err(Refusal::MustCheckAfterActing)
         );
         assert_eq!(
             next_revision(

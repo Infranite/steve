@@ -1,5 +1,6 @@
 //! The current coordinator waits five seconds after any reconciliation error.
-//! The design's 200ms-30s exponential alternative is UNAPPROVED; W3.3s must not wire it.
+//! The design's 200 ms-30 s exponential backoff with jitter (not stopping on `never`) is
+//! approved; W3.3s replaces this fixed wait with it when it wires reconciliation.
 use super::time::{HintSource, schedule};
 use super::{Action, Decision, HubTime, Refusal, scheduled};
 use steve_types::Retry;

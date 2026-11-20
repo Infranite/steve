@@ -206,21 +206,6 @@ fn interrupted_turns_keep_twenty_and_sixty_seconds_even_after_acting() {
             rule.decide(Retry::Now)
         );
     }
-    for retry in [Retry::Never, Retry::Later { after_ms: None }, Retry::Now] {
-        let rule = TurnInterruptedAfterActing {
-            facts: TurnFacts {
-                acted: true,
-                ..facts()
-            },
-        };
-        let decision = rule.decide(retry);
-        assert_eq!(decision, rule.decide(retry));
-        assert_eq!(decision, Decision::CheckBeforeContinuing);
-        assert_eq!(
-            TurnInterruptedAfterActing { facts: facts() }.decide(retry),
-            Decision::Stop(Refusal::NotActed)
-        );
-    }
 }
 
 #[test]

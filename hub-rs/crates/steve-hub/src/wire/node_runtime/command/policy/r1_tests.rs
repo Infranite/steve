@@ -335,7 +335,7 @@ fn gateway_never_after_acting_budget_and_restart_are_explicit() {
                 ..rule
             }
             .decide(Retry::Now),
-            Decision::Stop(Refusal::MustCheckAfterActing)
+            Decision::Stop(Refusal::Acted)
         );
     }
 }

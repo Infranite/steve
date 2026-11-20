@@ -26,8 +26,8 @@ pub enum Refusal {
     InvalidTime,
     InvalidJitter,
     WrongIntent,
-    NotActed,
-    MustCheckAfterActing,
+    /// A non-service failure after the run acted: resending is not known to be safe.
+    Acted,
     LinkClosed,
     Complete,
 }
@@ -44,7 +44,6 @@ pub enum Action {
 pub enum Decision {
     Stop(Refusal),
     Schedule { action: Action, at: Schedule },
-    CheckBeforeContinuing,
 }
 
 /// The three business gates are one fact group, independently of workflow/configuration gates.
