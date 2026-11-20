@@ -758,3 +758,134 @@ async fn the_read_views_are_bound_to_one_connection() {
         None
     );
 }
+
+/// Completions are scripted, but desired-state handling, reporting, elapsed time and retries
+/// all pass through the real supervisor. No call to Timing::finish_run is made by the test.
+#[tokio::test(start_paused = true)]
+async fn supervisor_stable_success_and_supersession_reset_the_next_failure() {
+    use tokio::sync::oneshot;
+    use tokio::time::Instant;
+
+    #[derive(Debug, Clone, Copy)]
+    enum End {
+        Success,
+        Transient,
+    }
+    #[derive(Debug)]
+    struct Started {
+        at: Instant,
+        credential: Option<String>,
+        finish: oneshot::Sender<End>,
+    }
+    struct Controlled {
+        starts: mpsc::UnboundedSender<Started>,
+    }
+    #[async_trait]
+    impl ConnectionHook for Controlled {
+        async fn run(&self, run: ConnRun) -> Result<(), AdapterError> {
+            let (finish, result) = oneshot::channel();
+            self.starts
+                .send(Started {
+                    at: Instant::now(),
+                    credential: run.state.credential.clone(),
+                    finish,
+                })
+                .expect("the test receives every run");
+            let end = tokio::select! {
+                result = result => result.unwrap_or(End::Success),
+                _ = run.stop.cancelled() => End::Success,
+            };
+            match end {
+                End::Success => Ok(()),
+                End::Transient => Err(ProviderError::Transient("scripted failure".into()).into()),
+            }
+        }
+    }
+    async fn next(starts: &mut mpsc::UnboundedReceiver<Started>) -> Started {
+        starts
+            .recv()
+            .await
+            .expect("the supervisor must start another run")
+    }
+    async fn settled_success(h: &H) {
+        // Success completion has no blocking report: yield through the hook and supervisor,
+        // without advancing time or relying on a real-time sleep.
+        for _ in 0..1000 {
+            if h.rt.running().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the successful run did not settle");
+    }
+
+    for superseded in [false, true] {
+        let timing = Timing {
+            backoff_min: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(80),
+            stop_grace: Duration::from_millis(10),
+            shutdown_grace: Duration::from_millis(10),
+        };
+        let mut h = setup(timing);
+        let (starts, mut rx) = mpsc::unbounded_channel();
+        h.rt = ConnectionRuntime::builder(h.ch.clone())
+            .hook(
+                "test_bot",
+                Some(ChannelDecl::new("test_bot")),
+                Arc::new(Controlled { starts }),
+            )
+            .timing(timing)
+            .build();
+        h.add("con_a", "test_bot", json!({}));
+        h.start();
+        let mut current = next(&mut rx).await;
+        for expected in [10, 20, 40] {
+            let failed_at = Instant::now();
+            current.finish.send(End::Transient).unwrap();
+            current = next(&mut rx).await;
+            let waited = current.at.duration_since(failed_at);
+            assert!(
+                waited >= Duration::from_millis(expected)
+                    && waited < Duration::from_millis(expected + 10),
+                "failure history must really advance the supervisor backoff: {waited:?}"
+            );
+        }
+        // A connected run normally reports recovery itself. This resets health, not the
+        // supervisor's private attempt counter, so retaining that counter remains observable.
+        h.ch.connections()
+            .record(WS, "con_a", connections::Health::Ok)
+            .await;
+        tokio::time::advance(Duration::from_millis(160)).await;
+        assert!(Instant::now().duration_since(current.at) >= timing.backoff_max);
+        if superseded {
+            // Do not send its event: the completed error must discover the replacement
+            // through superseded(), not through the event-driven restart/stop path.
+            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            current.finish.send(End::Transient).unwrap();
+        } else {
+            current.finish.send(End::Success).unwrap();
+            settled_success(&h).await;
+            h.exec("UPDATE connections SET credential_item='vi_con_a_2' WHERE id='con_a'");
+            h.event("con_a");
+        }
+        let fresh = next(&mut rx).await;
+        assert_eq!(fresh.credential.as_deref(), Some("vi_con_a_2"));
+        assert_eq!(h.one("SELECT CAST(coalesce(json_extract(health,'$.fails'),0) AS TEXT) FROM connections WHERE id='con_a'"), "0",
+            "a superseded error must not be reported as this connection's failure");
+        let failed_at = Instant::now();
+        fresh.finish.send(End::Transient).unwrap();
+        let restarted = next(&mut rx).await;
+        let waited = restarted.at.duration_since(failed_at);
+        assert!(
+            waited >= timing.backoff_min && waited < timing.backoff_min * 2,
+            "stable {} must reset the real supervisor before the next short failure, got {waited:?}",
+            if superseded {
+                "supersession"
+            } else {
+                "success"
+            }
+        );
+        h.rt.shutdown().await;
+        drop(restarted);
+    }
+}

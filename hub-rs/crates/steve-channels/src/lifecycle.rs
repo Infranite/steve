@@ -231,7 +231,7 @@ impl Default for Timing {
 
 impl Timing {
     fn finish_run(self, attempt: &mut u32, ran: Duration) {
-        if ran >= self.backoff_max {
+        if self.backoff().reset_after.is_some_and(|reset| ran >= reset) {
             *attempt = 0;
         }
     }
@@ -819,7 +819,7 @@ mod retry_sequence_tests {
         );
     }
     #[test]
-    fn r3d_lifecycle_stable_success_and_supersession_reset_the_next_failure() {
+    fn lifecycle_stable_success_and_supersession_reset_the_next_failure() {
         let timing = Timing::default();
         for (outcome, ran, next_wait) in [
             ("short success", 299, 300),

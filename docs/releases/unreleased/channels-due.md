@@ -5,7 +5,4 @@ limits, retry hints, authorization checks and rate limits retain their behavior.
 
 Approved sends now wait for the latest linked personal-notification attempt deadline
 before becoming eligible, rather than using that deadline only to order the queue.
-This usually adds about ten seconds when a notification attempt is pending. Direct
-sends also honor the latest applicable deadline when several notifications refer
-to the same message. A long successful or superseded connection run resets its
-restart backoff, so a later failure starts at the initial delay again.
+This usually adds about ten seconds when a notification attempt is pending.

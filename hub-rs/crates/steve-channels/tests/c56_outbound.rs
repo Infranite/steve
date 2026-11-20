@@ -7604,7 +7604,7 @@ async fn send_claim_commits_do_not_self_wake_into_a_busy_loop() {
 }
 
 #[tokio::test]
-async fn r3d_queue_uses_the_latest_of_multiple_notification_deadlines() {
+async fn queue_uses_the_latest_of_multiple_notification_deadlines() {
     use steve_runtime::due::{DueSource, contract::Fixture};
     for direct in [false, true] {
         for order in [[10_000, 20_000], [20_000, 10_000]] {
@@ -7638,7 +7638,7 @@ async fn r3d_queue_uses_the_latest_of_multiple_notification_deadlines() {
 }
 
 #[tokio::test]
-async fn r3d_queue_query_failure_reaches_the_due_loop() {
+async fn queue_query_failure_reaches_the_due_loop() {
     use steve_runtime::due::{DueSource, contract::Fixture};
     let f = QueueFixture::new().await;
     let now = f.h.ch.now();

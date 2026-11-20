@@ -64,7 +64,7 @@ fn detach_update_hook(store: &Store) -> bool {
 
 // 1. Root commit after the public write returns.
 #[test]
-fn trigger_writes_wake_only_after_the_commit() {
+fn commit_hint_1_root_commit_wakes_after_return() {
     let (_dir, store) = setup();
     let wake = store.commit_wake(&["wake_sink"]);
     store
@@ -80,7 +80,7 @@ fn trigger_writes_wake_only_after_the_commit() {
 
 // 2. Earlier commits survive a later autocommit statement failure or rollback.
 #[test]
-fn r3d_autocommit_failure_keeps_an_earlier_successful_commit_hint() {
+fn commit_hint_2_autocommit_success_survives_later_failure() {
     for explicit_commit in [false, true] {
         let (_dir, store) = setup();
         insert(&store, 1).unwrap();
@@ -119,7 +119,7 @@ fn r3d_autocommit_failure_keeps_an_earlier_successful_commit_hint() {
 }
 
 #[test]
-fn r3d_later_transaction_rollback_keeps_an_earlier_commit_hint() {
+fn commit_hint_2_autocommit_success_survives_later_failure_explicit_rollback() {
     let (_dir, store) = setup();
     let wake = store.commit_wake(&["wake_sink"]);
     store
@@ -143,7 +143,7 @@ fn r3d_later_transaction_rollback_keeps_an_earlier_commit_hint() {
 
 // 3. Root rollback.
 #[test]
-fn rolled_back_trigger_writes_do_not_wake() {
+fn commit_hint_3_root_rollback_does_not_wake() {
     let (_dir, store) = setup();
     let wake = store.commit_wake(&["wake_sink"]);
     let result = store.atomic(|| -> steve_store::Result<()> {
@@ -165,7 +165,7 @@ fn rolled_back_trigger_writes_do_not_wake() {
 
 // 4. Savepoints and one coalesced hint per written table.
 #[test]
-fn inner_savepoint_rollback_keeps_the_outer_commit_hint() {
+fn commit_hint_4_savepoint_rollback_keeps_outer_and_each_table_once_same_table() {
     let (_dir, store) = setup();
     let wake = store.commit_wake(&["wake_sink"]);
     store
@@ -193,48 +193,72 @@ fn inner_savepoint_rollback_keeps_the_outer_commit_hint() {
 }
 
 #[test]
-fn savepoints_notify_each_written_table_once() {
+fn commit_hint_4_savepoint_rollback_keeps_outer_and_each_table_once() {
     let (_dir, store) = setup();
-    let source = store.commit_wake(&["wake_source"]);
-    let sink = store.commit_wake(&["wake_sink"]);
+    store
+        .with_conn(|c| {
+            c.execute_batch(
+                "CREATE TABLE savepoint_a(id INTEGER PRIMARY KEY);
+            CREATE TABLE savepoint_b(id INTEGER PRIMARY KEY);
+            CREATE TABLE savepoint_ignored(id INTEGER PRIMARY KEY);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let a = store.commit_wake(&["savepoint_a"]);
+    let b = store.commit_wake(&["savepoint_b"]);
     store
         .atomic(|| -> steve_store::Result<()> {
             let rolled_back = store.atomic(|| -> steve_store::Result<()> {
-                insert(&store, 1)?;
+                store.with_conn(|c| {
+                    c.execute("INSERT INTO savepoint_ignored VALUES(1)", [])?;
+                    Ok(())
+                })?;
                 Err(StoreError::Hook("inner rollback".into()))
             });
             assert!(rolled_back.is_err());
             store.atomic(|| -> steve_store::Result<()> {
                 store.with_conn(|c| {
-                    c.execute("INSERT INTO wake_source VALUES(2)", [])?;
+                    c.execute("INSERT INTO savepoint_a VALUES(2)", [])?;
                     Ok(())
                 })
             })?;
             store.atomic(|| -> steve_store::Result<()> {
                 store.with_conn(|c| {
-                    c.execute("INSERT INTO wake_sink VALUES(3)", [])?;
+                    c.execute("INSERT INTO savepoint_b VALUES(3)", [])?;
                     Ok(())
                 })
             })?;
-            assert!(!ready(&source) && !ready(&sink));
+            assert!(!ready(&a) && !ready(&b));
             Ok(())
         })
         .unwrap();
-    assert!(ready(&source) && ready(&sink));
     assert!(
-        !ready(&source) && !ready(&sink),
-        "each table's subscriber gets one coalesced hint"
+        ready(&a),
+        "successful savepoint A must be observed independently"
     );
+    assert!(
+        ready(&b),
+        "successful savepoint B must be observed independently"
+    );
+    assert!(!ready(&a));
+    assert!(!ready(&b));
     store
         .reader(|c| {
             assert_eq!(
-                c.query_row("SELECT sum(id) FROM wake_source", [], |r| r
+                c.query_row("SELECT sum(id) FROM savepoint_a", [], |r| r
                     .get::<_, i64>(0))?,
                 2
             );
             assert_eq!(
-                c.query_row("SELECT sum(id) FROM wake_sink", [], |r| r.get::<_, i64>(0))?,
-                5
+                c.query_row("SELECT sum(id) FROM savepoint_b", [], |r| r
+                    .get::<_, i64>(0))?,
+                3
+            );
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM savepoint_ignored", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
             );
             Ok::<_, StoreError>(())
         })
@@ -243,7 +267,7 @@ fn savepoints_notify_each_written_table_once() {
 
 // 5. Subscribe inside the transaction, including before a failed commit.
 #[test]
-fn subscribing_inside_a_write_scope_covers_earlier_statements() {
+fn commit_hint_5_subscribe_after_write_in_transaction_still_covers() {
     let (_dir, store) = setup();
     let wake = store
         .transaction(|tx| -> steve_store::Result<_> {
@@ -257,7 +281,7 @@ fn subscribing_inside_a_write_scope_covers_earlier_statements() {
 }
 
 #[test]
-fn subscribing_inside_a_write_scope_failed_commit_does_not_wake() {
+fn commit_hint_5_subscribe_after_write_in_transaction_still_covers_failed_commit() {
     let (_dir, store) = setup();
     deferred_constraint(&store);
     let mut subscription = None;
@@ -280,7 +304,7 @@ fn subscribing_inside_a_write_scope_failed_commit_does_not_wake() {
 
 // 6. A failed COMMIT does not publish, including on a later empty write.
 #[test]
-fn deferred_constraint_commit_failure_does_not_wake() {
+fn commit_hint_6_commit_failure_does_not_wake() {
     let (_dir, store) = setup();
     deferred_constraint(&store);
     let wake = store.commit_wake(&["wake_child"]);
@@ -316,7 +340,7 @@ fn deferred_constraint_commit_failure_does_not_wake() {
 
 // 7. Known blind spot; see G2-R2. Not permission for a silent subscribed-table delete.
 #[test]
-fn truncate_delete_known_blind_spot_g2_r2() {
+fn commit_hint_7_unconditional_delete_known_blind_spot() {
     let (_dir, store) = setup();
     store
         .with_conn(|c| {
@@ -371,7 +395,7 @@ fn truncate_delete_known_blind_spot_g2_r2() {
 
 // 8. REPLACE still produces a table-level hint through its replacement INSERT.
 #[test]
-fn replace_implicit_delete_still_notifies_the_subscribed_table() {
+fn commit_hint_8_replace_implicit_delete_still_wakes() {
     let (_dir, store) = setup();
     store
         .with_conn(|c| {
