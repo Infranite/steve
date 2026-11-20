@@ -1144,12 +1144,15 @@ mod tests {
         }
     }
     struct ServiceFixture {
+        address: std::net::SocketAddr,
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
     impl Drop for ServiceFixture {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
+            // Wake blocking accept so an idle fixture also exits before joining.
+            let _ = TcpStream::connect(self.address);
             if let Some(thread) = self.thread.take() {
                 thread.join().unwrap();
             }
@@ -1157,32 +1160,18 @@ mod tests {
     }
     fn service_fixture(home: &Path) -> (ServiceFixture, u16) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let address = listener.local_addr().unwrap();
+        let port = address.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let home = home.to_owned();
         let thread = std::thread::spawn(move || {
             let mut maintenance = false;
             loop {
-                let mut accepted = None;
-                steve_runtime::testkit::eventually_blocking(
-                    "service fixture accepts a request or stops",
-                    || {
-                        if stopped.load(Ordering::Relaxed) {
-                            return true;
-                        }
-                        match listener.accept() {
-                            Ok(connection) => accepted = Some(connection),
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                            Err(error) => panic!("{error}"),
-                        }
-                        accepted.is_some()
-                    },
-                );
-                let Some((mut stream, _)) = accepted else {
+                let (mut stream, _) = listener.accept().unwrap();
+                if stopped.load(Ordering::Relaxed) {
                     break;
-                };
+                }
                 let line = request(&mut stream);
                 if fs::read_to_string(home.join("service-state")).is_ok_and(|v| v == "stop") {
                     continue;
@@ -1207,6 +1196,7 @@ mod tests {
         });
         (
             ServiceFixture {
+                address,
                 stop,
                 thread: Some(thread),
             },
