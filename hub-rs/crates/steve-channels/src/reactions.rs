@@ -536,3 +536,7 @@ impl Channels {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/sg19/contracts.rs"]
+mod sg19;
