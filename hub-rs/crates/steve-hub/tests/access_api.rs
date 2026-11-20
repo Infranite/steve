@@ -1379,7 +1379,7 @@ async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it(
             if client_of(&v, &laptop)["streams"] == 1 {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
