@@ -243,7 +243,12 @@ fn all_switch_records(home: &Path) -> anyhow::Result<Vec<Record>> {
             ),
             "unknown upgrade phase"
         );
-        related.push(r);
+        // Neither phase can have spawned a helper: abandon is accepted only while staged.
+        // Validate the whole record first, then exclude these pre-switch operations from
+        // handoff/conflict checks. A previous abandoned attempt must not veto a later receipt.
+        if !matches!(r.state.phase.as_str(), "staged" | "abandoned") {
+            related.push(r);
+        }
     }
     anyhow::ensure!(
         related.iter().filter(|r| !r.state.is_terminal()).count() <= 1,
@@ -282,13 +287,14 @@ fn switch_permits_upgrade(
     );
     // A terminal record does not override a changed service definition or an active operation.
     let Some(r) = active.first() else {
+        // Order only already-terminal operations; age never proves a helper gone, and even
+        // a newer old receipt cannot take precedence over the active operation above.
+        let latest = related.iter().max_by_key(|r| r.state.updated.0).unwrap();
         return Ok(current()?
-            && related.iter().all(|r| {
-                matches!(
-                    r.state.phase.as_str(),
-                    "succeeded" | "rolled_back" | "failed"
-                )
-            }));
+            && matches!(
+                latest.state.phase.as_str(),
+                "succeeded" | "rolled_back" | "failed"
+            ));
     };
     let mut r = (*r).clone();
     if r.state.phase == "switching" {
@@ -2085,6 +2091,13 @@ mod tests {
             ),
             3
         );
+        // A previous drain timeout never switched this build. It must neither veto the
+        // current handoff nor keep this actual v3 journal unopened after its receipt.
+        switching(temp.path(), "nup_abandoned");
+        let mut abandoned = load(temp.path(), "nup_abandoned").unwrap().unwrap();
+        abandoned.state.phase = "abandoned".into();
+        abandoned.previous_release = None;
+        save(temp.path(), &abandoned).unwrap();
         switching(temp.path(), "nup_sqlite");
         let record = load(temp.path(), "nup_sqlite").unwrap().unwrap();
         let config = || {
@@ -2164,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn receipts_and_terminal_failures_still_require_the_actual_service_build() {
+    fn receipts_require_the_actual_service_but_unswitched_operations_are_unrelated() {
         for phase in [
             "succeeded",
             "rolled_back",
@@ -2187,7 +2200,171 @@ mod tests {
                         &mut || Ok(current)
                     )
                     .unwrap(),
-                    current && matches!(phase, "succeeded" | "rolled_back" | "failed")
+                    matches!(phase, "staged" | "abandoned")
+                        || (current && matches!(phase, "succeeded" | "rolled_back" | "failed"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_abandoned_attempt_cannot_veto_a_later_receipt_for_the_same_build() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_first");
+        let mut abandoned = load(home.path(), "nup_first").unwrap().unwrap();
+        abandoned.state.phase = "abandoned".into();
+        abandoned.previous_release = None;
+        // Even a later update to a pre-switch record cannot change which handoff matters.
+        abandoned.state.updated = Timestamp(i64::MAX);
+        save(home.path(), &abandoned).unwrap();
+        let before = std::fs::read(record_path(home.path(), "nup_first")).unwrap();
+        switching(home.path(), "nup_second");
+        let mut receipt = load(home.path(), "nup_second").unwrap().unwrap();
+        receipt.state.phase = "succeeded".into();
+        save(home.path(), &receipt).unwrap();
+        for current in [false, true] {
+            assert_eq!(
+                switch_permits_upgrade(
+                    home.path(),
+                    &receipt.request.build,
+                    &mut |_| panic!("a receipt does not need helper absence"),
+                    &mut || Ok(current)
+                )
+                .unwrap(),
+                current
+            );
+        }
+        assert_eq!(
+            before,
+            std::fs::read(record_path(home.path(), "nup_first")).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_previous_receipt_cannot_override_the_current_switching_operation() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_previous");
+        let mut receipt = load(home.path(), "nup_previous").unwrap().unwrap();
+        receipt.state.phase = "succeeded".into();
+        receipt.state.updated = Timestamp(i64::MAX);
+        save(home.path(), &receipt).unwrap();
+        switching(home.path(), "nup_current");
+        let me = receipt.request.build;
+        let mut checked_current = false;
+        assert!(
+            !switch_permits_upgrade(
+                home.path(),
+                &me,
+                &mut |r| {
+                    assert_eq!(r.state.operation.as_str(), "nup_current");
+                    checked_current = true;
+                    Ok(false)
+                },
+                &mut || Ok(true)
+            )
+            .unwrap()
+        );
+        assert!(checked_current);
+        assert_eq!(
+            load(home.path(), "nup_current")
+                .unwrap()
+                .unwrap()
+                .state
+                .phase,
+            "linked"
+        );
+    }
+
+    #[test]
+    fn a_staged_operation_does_not_conflict_with_an_actual_switch() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_staged");
+        let mut staged = load(home.path(), "nup_staged").unwrap().unwrap();
+        staged.state.phase = "staged".into();
+        staged.previous_release = None;
+        staged.request.build = build("9.9.9");
+        staged.state.version = staged.request.build.version.clone();
+        save(home.path(), &staged).unwrap();
+        switching(home.path(), "nup_switch");
+        let current = load(home.path(), "nup_switch").unwrap().unwrap();
+        for gone in [false, true] {
+            assert_eq!(
+                switch_permits_upgrade(
+                    home.path(),
+                    &current.request.build,
+                    &mut |r| {
+                        assert_eq!(r.state.operation.as_str(), "nup_switch");
+                        Ok(gone)
+                    },
+                    &mut || Ok(true)
+                )
+                .unwrap(),
+                gone
+            );
+        }
+        // Corrupt pre-switch records are still uncertainty, never silently ignored.
+        staged.state.version = "mismatched".into();
+        save(home.path(), &staged).unwrap();
+        assert!(
+            switch_permits_upgrade(
+                home.path(),
+                &current.request.build,
+                &mut |_| Ok(true),
+                &mut || Ok(true)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_manual_update_to_the_same_build_rechecks_a_residual_switch_against_the_service() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_manual");
+        let mut residual = load(home.path(), "nup_manual").unwrap().unwrap();
+        // Both the operator's candidate and the residual request name exactly this build.
+        let me = residual.request.build.clone();
+        let current_release = home.path().join("releases/new");
+        let old_release = home.path().join("releases/old");
+        std::fs::create_dir_all(current_release.join("bin")).unwrap();
+        std::fs::create_dir_all(old_release.join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            std::env::current_exe().unwrap(),
+            current_release.join("bin/steve-node"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", old_release.join("bin/steve-node")).unwrap();
+        std::fs::create_dir_all(home.path().join("services")).unwrap();
+        for (release, current) in [(&old_release, false), (&current_release, true)] {
+            std::fs::write(
+                home.path().join("services/node.json"),
+                serde_json::to_vec(&serde_json::json!({"release":release})).unwrap(),
+            )
+            .unwrap();
+            for evidence in [None, Some(false), Some(true)] {
+                residual.state.phase = "switching".into();
+                residual.state.updated = Timestamp(i64::MIN / 2);
+                save(home.path(), &residual).unwrap();
+                let result = switch_permits_upgrade(
+                    home.path(),
+                    &me,
+                    &mut |r| {
+                        assert_eq!(r.request.build, me);
+                        assert_eq!(r.state.operation, residual.state.operation);
+                        evidence.ok_or_else(|| anyhow::anyhow!("native process query inconclusive"))
+                    },
+                    &mut || Ok(service_release(home.path()).is_some()),
+                );
+                assert_eq!(
+                    result.is_ok_and(|allowed| allowed),
+                    current && evidence == Some(true)
+                );
+                assert_eq!(
+                    load(home.path(), "nup_manual")
+                        .unwrap()
+                        .unwrap()
+                        .state
+                        .phase,
+                    "linked"
                 );
             }
         }
