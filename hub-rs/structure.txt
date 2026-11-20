@@ -27,7 +27,6 @@ steve-channels	crates/steve-channels/src/cleanup.rs	too_many_lines	107,104
 steve-channels	crates/steve-channels/src/compose.rs	too_many_lines	183,139
 steve-channels	crates/steve-channels/src/conversations.rs	cognitive_complexity	28
 steve-channels	crates/steve-channels/src/conversations.rs	too_many_lines	274,118
-steve-channels	crates/steve-channels/src/disclosure.rs	too_many_lines	142
 steve-channels	crates/steve-channels/src/drafts.rs	cognitive_complexity	43,40
 steve-channels	crates/steve-channels/src/drafts.rs	too_many_lines	184,177,113
 steve-channels	crates/steve-channels/src/ext.rs	too_many_lines	120
@@ -37,8 +36,6 @@ steve-channels	crates/steve-channels/src/im_context.rs	too_many_lines	168,106
 steve-channels	crates/steve-channels/src/inbound.rs	cognitive_complexity	73,54,28
 steve-channels	crates/steve-channels/src/inbound.rs	too_many_lines	511,263,161
 steve-channels	crates/steve-channels/src/lifecycle.rs	cognitive_complexity	40
-steve-channels	crates/steve-channels/src/membership.rs	cognitive_complexity	27
-steve-channels	crates/steve-channels/src/membership.rs	too_many_lines	164
 steve-channels	crates/steve-channels/src/names.rs	cognitive_complexity	30
 steve-channels	crates/steve-channels/src/outbound.rs	cognitive_complexity	29,29
 steve-channels	crates/steve-channels/src/outbound.rs	too_many_lines	140,124,117

@@ -921,6 +921,123 @@ fn result(
     }
 }
 
+fn check_private(
+    audience: &Audience,
+    text: &str,
+    knowledge: &[KnowledgeUse],
+    names: &Names,
+) -> CheckResult {
+    let mut spans = Vec::new();
+    let mut flagged = vec![false; knowledge.len()];
+    for (i, k) in knowledge.iter().enumerate() {
+        if k.level == Level::Never && overlaps(text, &k.text, &[]) {
+            flagged[i] = true;
+            spans.push(Span {
+                text: k.source_label.clone(),
+                reason: format!("用到了不可使用的知识（{}）", k.source_label),
+            });
+        }
+    }
+    let verdict = if spans.is_empty() {
+        Verdict::Pass
+    } else {
+        Verdict::Leak
+    };
+    result(
+        verdict,
+        entries(text, audience, knowledge, names, &flagged),
+        spans,
+        None,
+    )
+}
+
+fn run_local_checks(
+    cx: &CheckCx,
+    audience: &Audience,
+    text: &str,
+    knowledge: &[KnowledgeUse],
+    names: &Names,
+    known: &str,
+) -> (Vec<Span>, Vec<bool>) {
+    let (mut spans, mut flagged) = rule_check(text, audience, knowledge, names);
+    for (i, k) in knowledge.iter().enumerate() {
+        if k.level == Level::Never && overlaps(text, &k.text, &[]) {
+            flagged[i] = true;
+            spans.push(Span {
+                text: k.source_label.clone(),
+                reason: format!("用到了不可使用的知识（{}）", k.source_label),
+            });
+        }
+    }
+    // the writer's style samples are inputs for the tone: their content copied is a span
+    for x in copied_samples(text, &cx.style_samples, known) {
+        if !spans.iter().any(|y| y.text == x.text) {
+            spans.push(x);
+        }
+    }
+
+    (spans, flagged)
+}
+
+struct ModelCheck {
+    answered: Option<bool>,
+    spans: Vec<Span>,
+    model: Option<String>,
+    why: String,
+}
+
+impl Disclosure {
+    async fn run_model_checks(
+        &self,
+        cx: &CheckCx,
+        prompt: &str,
+        usable: &[KnowledgeUse],
+        mut spans: Vec<Span>,
+    ) -> ModelCheck {
+        // without hurry: a longer time limit and, failing, one more try on a stronger model
+        let (timeout, tries): (Duration, &[bool]) = if cx.patient {
+            (PATIENT_TIMEOUT, &[false, true])
+        } else {
+            (TIMEOUT, &[false])
+        };
+        let mut tried: Vec<String> = Vec::new();
+        let mut answered: Option<bool> = None;
+        let mut why = String::new();
+        for &smart in tries {
+            match self.run_model(cx, prompt, smart, timeout).await {
+                Ok((answer, model)) => {
+                    tried.push(model);
+                    match judge_check(&answer, usable) {
+                        Some((leak, s)) => {
+                            for x in s {
+                                if !spans.iter().any(|y| y.text == x.text) {
+                                    spans.push(x);
+                                }
+                            }
+                            answered = Some(leak);
+                            break;
+                        }
+                        None => why = "检查模型的回答读不懂".into(),
+                    }
+                }
+                Err((w, model)) => {
+                    if !model.is_empty() {
+                        tried.push(model);
+                    }
+                    why = w;
+                }
+            }
+        }
+        let model = (!tried.is_empty()).then(|| tried.join(" → "));
+        ModelCheck {
+            answered,
+            spans,
+            model,
+            why,
+        }
+    }
+}
+
 #[async_trait]
 impl OutboundCheck for Disclosure {
     async fn check(
@@ -961,28 +1078,7 @@ impl OutboundCheck for Disclosure {
         // to the owner for seconds). Never-level knowledge still counts. Decided by the user
         // on 2026-11-03.
         if private(audience) {
-            let mut spans = Vec::new();
-            let mut flagged = vec![false; knowledge.len()];
-            for (i, k) in knowledge.iter().enumerate() {
-                if k.level == Level::Never && overlaps(text, &k.text, &[]) {
-                    flagged[i] = true;
-                    spans.push(Span {
-                        text: k.source_label.clone(),
-                        reason: format!("用到了不可使用的知识（{}）", k.source_label),
-                    });
-                }
-            }
-            let verdict = if spans.is_empty() {
-                Verdict::Pass
-            } else {
-                Verdict::Leak
-            };
-            return result(
-                verdict,
-                entries(text, audience, knowledge, &names, &flagged),
-                spans,
-                None,
-            );
+            return check_private(audience, text, knowledge, &names);
         }
 
         // what the audience can already read: their message and the conversation around it
@@ -997,22 +1093,7 @@ impl OutboundCheck for Disclosure {
         // 1–2. the rule check (with every entry, never included: quoting one is a leak). A term the
         // audience said itself still counts here: naming an item unlocks nothing about it; what they
         // already know is the check model's to weigh, with the conversation in front of it
-        let (mut spans, mut flagged) = rule_check(text, audience, knowledge, &names);
-        for (i, k) in knowledge.iter().enumerate() {
-            if k.level == Level::Never && overlaps(text, &k.text, &[]) {
-                flagged[i] = true;
-                spans.push(Span {
-                    text: k.source_label.clone(),
-                    reason: format!("用到了不可使用的知识（{}）", k.source_label),
-                });
-            }
-        }
-        // the writer's style samples are inputs for the tone: their content copied is a span
-        for x in copied_samples(text, &cx.style_samples, &known) {
-            if !spans.iter().any(|y| y.text == x.text) {
-                spans.push(x);
-            }
-        }
+        let (spans, flagged) = run_local_checks(cx, audience, text, knowledge, &names, &known);
 
         // 3. the model check, except where it cannot find more than the rules did: a fixed receipt no model
         // wrote (the caller says so), or a bot's message whose knowledge was all tracked, to an audience made
@@ -1039,41 +1120,12 @@ impl OutboundCheck for Disclosure {
             seen.as_deref(),
             &cx.style_samples,
         );
-        // without hurry: a longer time limit and, failing, one more try on a stronger model
-        let (timeout, tries): (Duration, &[bool]) = if cx.patient {
-            (PATIENT_TIMEOUT, &[false, true])
-        } else {
-            (TIMEOUT, &[false])
-        };
-        let mut tried: Vec<String> = Vec::new();
-        let mut answered: Option<bool> = None;
-        let mut why = String::new();
-        for &smart in tries {
-            match self.run_model(cx, &prompt, smart, timeout).await {
-                Ok((answer, model)) => {
-                    tried.push(model);
-                    match judge_check(&answer, &usable) {
-                        Some((leak, s)) => {
-                            for x in s {
-                                if !spans.iter().any(|y| y.text == x.text) {
-                                    spans.push(x);
-                                }
-                            }
-                            answered = Some(leak);
-                            break;
-                        }
-                        None => why = "检查模型的回答读不懂".into(),
-                    }
-                }
-                Err((w, model)) => {
-                    if !model.is_empty() {
-                        tried.push(model);
-                    }
-                    why = w;
-                }
-            }
-        }
-        let model = (!tried.is_empty()).then(|| tried.join(" → "));
+        let ModelCheck {
+            answered,
+            mut spans,
+            model,
+            why,
+        } = self.run_model_checks(cx, &prompt, &usable, spans).await;
         let entries = entries(text, audience, knowledge, &names, &flagged);
         let Some(leak) = answered else {
             // no answer: not checked, unless the local checks already found something
