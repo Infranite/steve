@@ -676,31 +676,12 @@ pub fn retain_at(root: &Path, now: u64, daily_keep_days: u64) -> io::Result<Prun
         crate::retention::MAX_SLICE_ROWS as usize,
     )
 }
-/// Single interpreter: evaluate age/count/byte pressure in publication order, oldest first.
-/// Every purpose's newest copy survives every rule. Manual copies are outside the
-/// automatic byte budget and never retired. Status reports any irreducible excess.
-fn prune_impl(
-    root: &Path,
-    now: u64,
-    rules: &[Rule; 5],
-    daily_keep_days: u64,
-    max_bytes: u64,
-    limit: usize,
-) -> io::Result<Pruned> {
-    let inventory = inventory(root, false)?;
-    let all = inventory.manifests;
-    let mut remaining: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
-    let mut newest = BTreeMap::new();
-    let mut sizes = Vec::with_capacity(all.len());
-    let mut report = Pruned {
-        failures: inventory.failures,
-        ..Pruned::default()
-    };
-    let mut total = 0u64;
-    let mut changed = false;
-    // Resume retired directories before considering any newly eligible backups. They
-    // remain part of the automatic budget until their remaining files are removed.
-    for path in inventory.retiring {
+/// Resume retired directories before considering any newly eligible backups. They
+/// remain part of the automatic budget until their remaining files are removed.
+/// Returns the bytes still on disk and whether any directory was touched.
+fn resume_retiring(retiring: Vec<PathBuf>, limit: usize, report: &mut Pruned) -> (u64, bool) {
+    let (mut total, mut changed) = (0u64, false);
+    for path in retiring {
         let state = match retiring_state(&path) {
             Ok(state) => state,
             Err(error) => {
@@ -726,6 +707,73 @@ fn prune_impl(
             }
         }
     }
+    (total, changed)
+}
+/// Every purpose's newest copy survives every rule; an oversized one is only reported.
+fn warn_if_latest_oversized(kind: &str, bytes: u64, max_bytes: u64) {
+    if bytes > max_bytes {
+        tracing::warn!(
+            reason = kind,
+            bytes,
+            max_bytes,
+            "latest backup exceeds retention limit; retained"
+        );
+    }
+}
+/// A backup may be retired only while every entry in it is still ours.
+fn owned_state(m: &Manifest) -> io::Result<DirectoryState> {
+    let state = directory_state(m)?;
+    if !state.owned {
+        return Err(io::Error::other("backup contains unowned entries"));
+    }
+    Ok(state)
+}
+/// Rename one backup to `retired`, sync the root, then remove its files. The flag says
+/// whether the rename happened, so the caller's budget moves even if removal failed.
+fn retire(
+    root: &Path,
+    m: &Manifest,
+    contents: DirectoryState,
+    retired: &Path,
+) -> (bool, io::Result<()>) {
+    if fs::symlink_metadata(retired).is_ok() {
+        let exists = io::Error::new(io::ErrorKind::AlreadyExists, "retired backup path exists");
+        return (false, Err(exists));
+    }
+    if let Err(error) = rename(&m.directory, retired) {
+        return (false, Err(error));
+    }
+    let files = contents
+        .files
+        .iter()
+        .map(|p| retired.join(p.file_name().unwrap()))
+        .collect();
+    let result = File::open(root)
+        .and_then(|f| f.sync_all())
+        .and_then(|()| remove_retiring(retired, DirectoryState { files, ..contents }));
+    (true, result)
+}
+/// Single interpreter: evaluate age/count/byte pressure in publication order, oldest first.
+/// Every purpose's newest copy survives every rule. Manual copies are outside the
+/// automatic byte budget and never retired. Status reports any irreducible excess.
+fn prune_impl(
+    root: &Path,
+    now: u64,
+    rules: &[Rule; 5],
+    daily_keep_days: u64,
+    max_bytes: u64,
+    limit: usize,
+) -> io::Result<Pruned> {
+    let inventory = inventory(root, false)?;
+    let all = inventory.manifests;
+    let mut remaining: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    let mut newest = BTreeMap::new();
+    let mut sizes = Vec::with_capacity(all.len());
+    let mut report = Pruned {
+        failures: inventory.failures,
+        ..Pruned::default()
+    };
+    let (mut total, mut changed) = resume_retiring(inventory.retiring, limit, &mut report);
     for m in &all {
         let bytes = match directory_state(m) {
             Ok(state) => Some(state.bytes),
@@ -754,14 +802,7 @@ fn prune_impl(
             continue;
         };
         if newest.get(kind).copied() == Some(m.id.as_str()) {
-            if bytes > limits.bytes {
-                tracing::warn!(
-                    reason = kind,
-                    bytes,
-                    max_bytes = limits.bytes,
-                    "latest backup exceeds retention limit; retained"
-                );
-            }
+            warn_if_latest_oversized(kind, bytes, limits.bytes);
             continue;
         }
         let state = remaining.get_mut(kind).unwrap();
@@ -774,16 +815,8 @@ fn prune_impl(
             continue;
         }
         // Recheck ownership immediately before retirement; directory errors never stop others.
-        let contents = match directory_state(m) {
-            Ok(state) if state.owned => state,
-            Ok(_) => {
-                directory_failure(
-                    &m.directory,
-                    &io::Error::other("backup contains unowned entries"),
-                );
-                report.failures += 1;
-                continue;
-            }
+        let contents = match owned_state(m) {
+            Ok(state) => state,
             Err(error) => {
                 directory_failure(&m.directory, &error);
                 report.failures += 1;
@@ -795,30 +828,8 @@ fn prune_impl(
             break;
         }
         let retired = root.join(format!("{}.retiring", m.id));
-        let mut moved = false;
-        let result = (|| -> io::Result<()> {
-            if fs::symlink_metadata(&retired).is_ok() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "retired backup path exists",
-                ));
-            }
-            rename(&m.directory, &retired)?;
-            changed = true;
-            moved = true;
-            File::open(root)?.sync_all()?;
-            remove_retiring(
-                &retired,
-                DirectoryState {
-                    files: contents
-                        .files
-                        .into_iter()
-                        .map(|p| retired.join(p.file_name().unwrap()))
-                        .collect(),
-                    ..contents
-                },
-            )
-        })();
+        let (moved, result) = retire(root, m, contents, &retired);
+        changed |= moved;
         if moved {
             state.0 -= 1;
             state.1 = state.1.saturating_sub(bytes);
