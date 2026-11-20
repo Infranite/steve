@@ -18,7 +18,7 @@ pub(super) fn builtin_queries() -> BTreeMap<(Domain, String), Arc<QueryHandler>>
                 if body.domain != q.domain {
                     return Err(Error::from(invalid("mixed-domain cursor")));
                 }
-                let table = table(c, q.domain, "cursor")?;
+                let table = table(c, q.domain, crate::schema::CURSOR_TABLE)?;
                 let position: Option<String> = c
                     .query_row(
                         &format!("SELECT key FROM {table} WHERE domain=?1 AND name=?2"),

@@ -1,4 +1,4 @@
-//! Verified, schema-independent copies from one pinned SQLite read snapshot.
+//! Storage file I/O: process exclusion and verified, schema-independent snapshot copies.
 use rusqlite::{
     Connection, OpenFlags,
     backup::{Backup, StepResult},
@@ -13,6 +13,26 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+
+/// Shared physical exclusion for runtime opening and offline maintenance. Callers keep the
+/// returned handle alive for their entire storage operation; this never blocks waiting for
+/// another process. Administration passes create=false to avoid initializing a missing dir.
+/// Keeping the lock file here centralizes host storage I/O with the offline copy primitive;
+/// backup_file itself still requires the caller to hold exclusion and never reacquires it.
+pub(crate) fn storage_lock(dir: &Path, create: bool) -> Result<File, fs::TryLockError> {
+    if create {
+        fs::create_dir_all(dir).map_err(fs::TryLockError::Error)?;
+    }
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("storage.lock"))
+        .map_err(fs::TryLockError::Error)?;
+    file.try_lock()?;
+    Ok(file)
+}
 
 #[derive(Clone, Debug)]
 pub struct CopyOptions {
