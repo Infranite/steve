@@ -153,12 +153,7 @@ steve-node	crates/steve-node/src/scan.rs	too_many_lines	130
 steve-node	crates/steve-node/src/toolchain.rs	cognitive_complexity	35
 steve-node	crates/steve-node/src/workspace.rs	too_many_lines	157
 steve-node-wire	crates/steve-node-wire/src/conn.rs	too_many_lines	108
-steve-stats	crates/steve-stats/src/coverage.rs	too_many_lines	165
 steve-stats	crates/steve-stats/src/metrics.rs	too_many_lines	347,107
-steve-stats	crates/steve-stats/src/realtime.rs	too_many_lines	128
-steve-stats	crates/steve-stats/src/refresh.rs	too_many_lines	145
-steve-stats	crates/steve-stats/src/views.rs	cognitive_complexity	45,31
-steve-stats	crates/steve-stats/src/views.rs	too_many_lines	324,138
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
 steve-store	crates/steve-store/src/repo/gateway_ledger.rs	too_many_lines	169

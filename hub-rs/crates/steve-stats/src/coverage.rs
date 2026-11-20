@@ -216,37 +216,59 @@ fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
             }
         }
         if let Some(payload) = r.get::<_, Option<String>>(15)? {
-            // One attempt can explicitly report an unused model. Keep its zero coverage
-            // beside the charged model without creating another request/cube row. Retry
-            // zeros have no such marker and cannot stand in for the answering model.
-            for evidence in serde_json::from_str::<Vec<serde_json::Value>>(&payload)? {
-                let model = evidence["model"].as_str().unwrap_or_default();
-                if q.and_then(|q| q.model.as_deref())
-                    .is_some_and(|m| m != model)
-                {
-                    continue;
-                }
-                let f = &evidence["tokens"];
-                let t = Tokens {
-                    input: f["input"].as_i64(),
-                    output: f["output"].as_i64(),
-                    cache_read: f["cache_read"].as_i64(),
-                    cache_write: f["cache_write"].as_i64(),
-                    reasoning: f["reasoning"].as_i64(),
-                };
-                if [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
-                    .iter()
-                    .flatten()
-                    .any(|n| *n != 0)
-                {
-                    continue;
-                }
-                let mut key = k.clone();
-                key.4 = model.into();
-                cells.entry(key).or_default().observe(t, None, false);
-            }
+            observe_unspent_models(&mut cells, q, &k, &payload)?;
         }
     }
+    observe_unreported_turns(c, &f, turn_guard, role, &mut cells)?;
+    Ok(cells)
+}
+
+fn observe_unspent_models(
+    cells: &mut BTreeMap<Key, Coverage>,
+    q: Option<&Query>,
+    k: &Key,
+    payload: &str,
+) -> Result<()> {
+    // One attempt can explicitly report an unused model. Keep its zero coverage
+    // beside the charged model without creating another request/cube row. Retry
+    // zeros have no such marker and cannot stand in for the answering model.
+    for evidence in serde_json::from_str::<Vec<serde_json::Value>>(payload)? {
+        let model = evidence["model"].as_str().unwrap_or_default();
+        if q.and_then(|q| q.model.as_deref())
+            .is_some_and(|m| m != model)
+        {
+            continue;
+        }
+        let f = &evidence["tokens"];
+        let t = Tokens {
+            input: f["input"].as_i64(),
+            output: f["output"].as_i64(),
+            cache_read: f["cache_read"].as_i64(),
+            cache_write: f["cache_write"].as_i64(),
+            reasoning: f["reasoning"].as_i64(),
+        };
+        if [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
+            .iter()
+            .flatten()
+            .any(|n| *n != 0)
+        {
+            continue;
+        }
+        let mut key = k.clone();
+        key.4 = model.into();
+        cells.entry(key).or_default().observe(t, None, false);
+    }
+    Ok(())
+}
+
+fn observe_unreported_turns(
+    c: &Connection,
+    f: &Filter<'_>,
+    turn_guard: &str,
+    role: &str,
+    cells: &mut BTreeMap<Key, Coverage>,
+) -> Result<()> {
+    let q = f.q;
     // No synthetic zero-valued usage row is needed to represent an unreported attempt.
     let bounds = match q {
         Some(q) => {
@@ -298,7 +320,7 @@ fn load(c: &Connection, f: Filter<'_>) -> Result<BTreeMap<Key, Coverage>> {
             .or_default()
             .observe(Tokens::default(), None, r.get(6)?);
     }
-    Ok(cells)
+    Ok(())
 }
 
 pub(crate) fn hourly_cells(c: &Connection, q: &Query) -> Result<BTreeMap<Key, Coverage>> {

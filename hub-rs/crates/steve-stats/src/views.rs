@@ -95,6 +95,10 @@ pub fn fixed_label(key: &str) -> Option<String> {
     if spec.builtin {
         return Some(spec.name);
     }
+    source_label(key).or_else(|| outcome_label(key))
+}
+
+fn source_label(key: &str) -> Option<String> {
     Some(match key {
         "agent" => steve_i18n::t!("stats.label.agent"),
         "gateway" => steve_i18n::t!("stats.label.gateway"),
@@ -115,6 +119,12 @@ pub fn fixed_label(key: &str) -> Option<String> {
         "yolo" => steve_i18n::t!("stats.label.yolo"),
         "digest" => steve_i18n::t!("stats.label.digest"),
         "other" => steve_i18n::t!("stats.label.other"),
+        _ => return None,
+    })
+}
+
+fn outcome_label(key: &str) -> Option<String> {
+    Some(match key {
         "stall" => steve_i18n::t!("stats.label.stall"),
         "error" => steve_i18n::t!("stats.label.error"),
         "restart" => steve_i18n::t!("stats.label.restart"),
@@ -437,101 +447,25 @@ fn lines(
         .enumerate()
         .map(|(i, d)| (d.as_str(), i))
         .collect();
-    let bucket_of = |ts: i64| {
-        if spans.is_some() {
-            hour(ts, tz)
-        } else {
-            day(ts, tz)
-        }
-    };
+
     let names = Names::load(c, &q.workspace_id)?.with_harnesses(harnesses.clone());
     let mut acc = Acc::default();
-    let mut observed: Option<std::collections::HashSet<(String, usize)>> = None;
-    let total_label = |m: Metric| match m {
-        Metric::Tokens => steve_i18n::t!("stats.total.tokens"),
-        Metric::Cost => steve_i18n::t!("stats.total.cost"),
-        Metric::Done => steve_i18n::t!("stats.total.done"),
-        Metric::Created => steve_i18n::t!("stats.total.created"),
-        Metric::Wip => steve_i18n::t!("stats.total.wip"),
-        Metric::Lead => steve_i18n::t!("stats.total.lead"),
-        Metric::HitRate => steve_i18n::t!("stats.total.hit_rate"),
-        Metric::Turns => steve_i18n::t!("stats.total.turns"),
-        Metric::TurnMs => steve_i18n::t!("stats.total.turn_ms"),
-        Metric::WaitMs => steve_i18n::t!("stats.total.wait_ms"),
-        Metric::Decisions => steve_i18n::t!("stats.total.decisions"),
-        Metric::Active => steve_i18n::t!("stats.total.active"),
-    };
+    let mut observed: Option<Observed> = None;
+
     let mut rate = false;
     let mut order: &[&str] = &[];
+    let scope = BucketScope {
+        q,
+        group,
+        buckets,
+        spans,
+        tz,
+        index: &index,
+        n,
+    };
     match metric {
         Metric::Tokens | Metric::Cost | Metric::HitRate | Metric::Turns | Metric::TurnMs => {
-            let prices = metrics::book_of(c, &q.workspace_id)?;
-            let rows = if spans.is_some() {
-                metrics::hourly(c, q)?
-            } else {
-                metrics::daily(c, q)?
-            };
-            if matches!(metric, Metric::Tokens | Metric::Cost) {
-                observed = Some(Default::default());
-            }
-            for d in rows {
-                let Some(&i) = index.get(d.day.as_str()) else {
-                    continue;
-                };
-                let key = group_key(&d, group);
-                coverage[i].add(&d.coverage);
-                if let Some(seen) = &mut observed {
-                    if group == "token_type" {
-                        let fields = [
-                            d.coverage.input,
-                            d.coverage.output,
-                            d.coverage.cache_read,
-                            d.coverage.cache_write,
-                        ];
-                        for (field, value) in TOKEN_TYPES.iter().zip(fields) {
-                            if value.is_some()
-                                && (metric == Metric::Tokens
-                                    || prices.quote(&d.model, &d.day).is_some())
-                            {
-                                seen.insert((field.to_string(), i));
-                            }
-                        }
-                    } else if d.coverage.total.is_some()
-                        && (metric == Metric::Tokens || prices.quote(&d.model, &d.day).is_some())
-                    {
-                        seen.insert((key.to_string(), i));
-                    }
-                }
-                match metric {
-                    Metric::Tokens if group == "token_type" => {
-                        for (t, v) in TOKEN_TYPES.iter().zip(token_parts(&d)) {
-                            acc.add(t, i, n, v as f64, 0.0);
-                        }
-                    }
-                    Metric::Tokens => acc.add(key, i, n, d.total() as f64, 0.0),
-                    Metric::Cost => {
-                        let Some(p) = prices.quote(&d.model, &d.day) else {
-                            continue;
-                        };
-                        if group == "token_type" {
-                            let per = [
-                                p.price.input,
-                                p.price.output,
-                                p.price.cache_read,
-                                p.price.cache_write,
-                            ];
-                            for ((t, v), pr) in TOKEN_TYPES.iter().zip(token_parts(&d)).zip(per) {
-                                acc.add(t, i, n, v as f64 * pr / 1e6, 0.0);
-                            }
-                        } else {
-                            acc.add(key, i, n, p.price.cost(&d.tokens()), 0.0);
-                        }
-                    }
-                    Metric::HitRate => acc.add(key, i, n, d.cache_read as f64, d.hit_base as f64),
-                    Metric::TurnMs => acc.add(key, i, n, d.turn_ms as f64, 0.0),
-                    _ => acc.add(key, i, n, d.turns as f64, 0.0),
-                }
-            }
+            collect_usage_lines(c, &scope, metric, &mut acc, coverage, &mut observed)?;
             rate = metric == Metric::HitRate;
             if group == "token_type" {
                 order = &TOKEN_TYPES;
@@ -544,193 +478,438 @@ fn lines(
             }
         }
         Metric::Done | Metric::Created => {
-            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+            if collect_item_counts(c, &scope, metric, &mut acc)?.is_none() {
                 return Ok(vec![]);
-            };
-            let sql = if metric == Metric::Done {
-                "SELECT DISTINCT m.item_id, m.ts, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM item_marks m JOIN items i ON i.id = m.item_id
-                 WHERE m.workspace_id = ?1 AND m.kind = 'status' AND m.to_v = 'done' AND m.ts >= ?2 AND m.ts < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5) ORDER BY m.ts"
-            } else {
-                "SELECT i.id, i.created, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM items i
-                 WHERE i.workspace_id = ?1 AND i.kind = 'task' AND i.created >= ?2 AND i.created < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
-            };
-            let rows: Vec<(String, i64, String, String)> = c
-                .prepare_cached(sql)?
-                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            // done: an item counts once per day (per hour)
-            let mut seen = std::collections::HashSet::new();
-            for (id, ts, bot, project) in rows {
-                let dd = bucket_of(ts);
-                let Some(&i) = index.get(dd.as_str()) else {
-                    continue;
-                };
-                if !seen.insert((id, i)) {
-                    continue;
-                }
-                let key = match group {
-                    "bot" => bot.as_str(),
-                    "project" => project.as_str(),
-                    _ => "total",
-                };
-                acc.add(key, i, n, 1.0, 0.0);
             }
         }
         Metric::Active => {
-            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+            if collect_active_work(c, &scope, &mut acc)?.is_none() {
                 return Ok(vec![]);
-            };
-            let rows: Vec<(String, i64, String, String)> = c
-                .prepare_cached(
-                    "SELECT COALESCE(item_id, 'session:' || session_id), started, COALESCE(bot_id, ''), COALESCE(project_id, '')
-                     FROM agent_turns WHERE workspace_id = ?1 AND started >= ?2 AND started < ?3
-                       AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)",
-                )?
-                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut seen = std::collections::HashSet::new();
-            for (work, ts, bot, project) in rows {
-                let Some(&i) = index.get(bucket_of(ts).as_str()) else {
-                    continue;
-                };
-                if !seen.insert((work, i)) {
-                    continue;
-                }
-                let key = match group {
-                    "bot" => bot.as_str(),
-                    "project" => project.as_str(),
-                    _ => "total",
-                };
-                acc.add(key, i, n, 1.0, 0.0);
             }
         }
         Metric::WaitMs => {
-            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+            if collect_waiting_time(c, &scope, &mut acc)?.is_none() {
                 return Ok(vec![]);
+            }
+        }
+        Metric::Wip => collect_work_in_progress(c, &scope, &mut acc)?,
+        Metric::Decisions => {
+            if collect_decision_counts(c, &scope, &mut acc)?.is_none() {
+                return Ok(vec![]);
+            }
+        }
+        Metric::Lead => return lead_percentiles(c, &scope),
+    }
+    Ok(finish_series(
+        acc, observed, rate, order, &scope, &names, metric,
+    ))
+}
+
+type Observed = std::collections::HashSet<(String, usize)>;
+
+struct BucketScope<'a> {
+    q: &'a Query,
+    group: &'a str,
+    buckets: &'a [String],
+    spans: Option<&'a [(String, i64, i64)]>,
+    tz: Option<chrono_tz::Tz>,
+    index: &'a HashMap<&'a str, usize>,
+    n: usize,
+}
+
+impl BucketScope<'_> {
+    fn bucket_of(&self, ts: i64) -> String {
+        if self.spans.is_some() {
+            hour(ts, self.tz)
+        } else {
+            day(ts, self.tz)
+        }
+    }
+}
+
+fn series_total_label(m: Metric) -> String {
+    match m {
+        Metric::Tokens => steve_i18n::t!("stats.total.tokens"),
+        Metric::Cost => steve_i18n::t!("stats.total.cost"),
+        Metric::Done => steve_i18n::t!("stats.total.done"),
+        Metric::Created => steve_i18n::t!("stats.total.created"),
+        Metric::Wip => steve_i18n::t!("stats.total.wip"),
+        Metric::Lead => steve_i18n::t!("stats.total.lead"),
+        Metric::HitRate => steve_i18n::t!("stats.total.hit_rate"),
+        Metric::Turns => steve_i18n::t!("stats.total.turns"),
+        Metric::TurnMs => steve_i18n::t!("stats.total.turn_ms"),
+        Metric::WaitMs => steve_i18n::t!("stats.total.wait_ms"),
+        Metric::Decisions => steve_i18n::t!("stats.total.decisions"),
+        Metric::Active => steve_i18n::t!("stats.total.active"),
+    }
+}
+
+fn collect_usage_lines(
+    c: &Connection,
+    scope: &BucketScope<'_>,
+    metric: Metric,
+    acc: &mut Acc,
+    coverage: &mut [crate::coverage::Coverage],
+    observed: &mut Option<Observed>,
+) -> Result<()> {
+    let &BucketScope {
+        q,
+        group,
+        spans,
+        index,
+        ..
+    } = scope;
+
+    let prices = metrics::book_of(c, &q.workspace_id)?;
+    let rows = if spans.is_some() {
+        metrics::hourly(c, q)?
+    } else {
+        metrics::daily(c, q)?
+    };
+    if matches!(metric, Metric::Tokens | Metric::Cost) {
+        *observed = Some(Default::default());
+    }
+    for d in rows {
+        let Some(&i) = index.get(d.day.as_str()) else {
+            continue;
+        };
+        let key = group_key(&d, group);
+        coverage[i].add(&d.coverage);
+        if let Some(seen) = observed.as_mut() {
+            if group == "token_type" {
+                let fields = [
+                    d.coverage.input,
+                    d.coverage.output,
+                    d.coverage.cache_read,
+                    d.coverage.cache_write,
+                ];
+                for (field, value) in TOKEN_TYPES.iter().zip(fields) {
+                    if value.is_some()
+                        && (metric == Metric::Tokens || prices.quote(&d.model, &d.day).is_some())
+                    {
+                        seen.insert((field.to_string(), i));
+                    }
+                }
+            } else if d.coverage.total.is_some()
+                && (metric == Metric::Tokens || prices.quote(&d.model, &d.day).is_some())
+            {
+                seen.insert((key.to_string(), i));
+            }
+        }
+        add_usage_values(acc, &d, metric, key, i, scope, &prices);
+    }
+    Ok(())
+}
+
+fn add_usage_values(
+    acc: &mut Acc,
+    d: &Daily,
+    metric: Metric,
+    key: &str,
+    i: usize,
+    scope: &BucketScope<'_>,
+    prices: &PriceBook<'_>,
+) {
+    let group = scope.group;
+    let n = scope.n;
+    match metric {
+        Metric::Tokens if group == "token_type" => {
+            for (t, v) in TOKEN_TYPES.iter().zip(token_parts(&d)) {
+                acc.add(t, i, n, v as f64, 0.0);
+            }
+        }
+        Metric::Tokens => acc.add(key, i, n, d.total() as f64, 0.0),
+        Metric::Cost => {
+            let Some(p) = prices.quote(&d.model, &d.day) else {
+                return;
             };
-            // each bucket's [start, end): the hours' own spans, or the local days'
-            let edges: Vec<(i64, i64)> = match spans {
-                Some(h) => h.iter().map(|x| (x.1, x.2)).collect(),
-                None => buckets
-                    .iter()
-                    .map(|d| bounds(d, d, tz).unwrap_or((0, 0)))
-                    .collect(),
-            };
-            let now = steve_store::now();
-            let filtered = q.project.is_some() || q.bot.is_some();
-            let sql = if filtered {
-                "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
+            if group == "token_type" {
+                let per = [
+                    p.price.input,
+                    p.price.output,
+                    p.price.cache_read,
+                    p.price.cache_write,
+                ];
+                for ((t, v), pr) in TOKEN_TYPES.iter().zip(token_parts(&d)).zip(per) {
+                    acc.add(t, i, n, v as f64 * pr / 1e6, 0.0);
+                }
+            } else {
+                acc.add(key, i, n, p.price.cost(&d.tokens()), 0.0);
+            }
+        }
+        Metric::HitRate => acc.add(key, i, n, d.cache_read as f64, d.hit_base as f64),
+        Metric::TurnMs => acc.add(key, i, n, d.turn_ms as f64, 0.0),
+        _ => acc.add(key, i, n, d.turns as f64, 0.0),
+    }
+}
+
+fn collect_item_counts(
+    c: &Connection,
+    scope: &BucketScope<'_>,
+    metric: Metric,
+    acc: &mut Acc,
+) -> Result<Option<()>> {
+    let &BucketScope {
+        q,
+        group,
+        index,
+        n,
+        tz,
+        ..
+    } = scope;
+
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(None);
+    };
+    let sql = if metric == Metric::Done {
+        "SELECT DISTINCT m.item_id, m.ts, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM item_marks m JOIN items i ON i.id = m.item_id
+                 WHERE m.workspace_id = ?1 AND m.kind = 'status' AND m.to_v = 'done' AND m.ts >= ?2 AND m.ts < ?3
+                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5) ORDER BY m.ts"
+    } else {
+        "SELECT i.id, i.created, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '') FROM items i
+                 WHERE i.workspace_id = ?1 AND i.kind = 'task' AND i.created >= ?2 AND i.created < ?3
+                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
+    };
+    let rows: Vec<(String, i64, String, String)> = c
+        .prepare_cached(sql)?
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    // done: an item counts once per day (per hour)
+    let mut seen = std::collections::HashSet::new();
+    for (id, ts, bot, project) in rows {
+        let dd = scope.bucket_of(ts);
+        let Some(&i) = index.get(dd.as_str()) else {
+            continue;
+        };
+        if !seen.insert((id, i)) {
+            continue;
+        }
+        let key = match group {
+            "bot" => bot.as_str(),
+            "project" => project.as_str(),
+            _ => "total",
+        };
+        acc.add(key, i, n, 1.0, 0.0);
+    }
+    Ok(Some(()))
+}
+
+fn collect_active_work(
+    c: &Connection,
+    scope: &BucketScope<'_>,
+    acc: &mut Acc,
+) -> Result<Option<()>> {
+    let &BucketScope {
+        q,
+        group,
+        index,
+        n,
+        tz,
+        ..
+    } = scope;
+
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(None);
+    };
+    let rows: Vec<(String, i64, String, String)> = c
+        .prepare_cached(
+            "SELECT COALESCE(item_id, 'session:' || session_id), started, COALESCE(bot_id, ''), COALESCE(project_id, '')
+                     FROM agent_turns WHERE workspace_id = ?1 AND started >= ?2 AND started < ?3
+                       AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)",
+        )?
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut seen = std::collections::HashSet::new();
+    for (work, ts, bot, project) in rows {
+        let Some(&i) = index.get(scope.bucket_of(ts).as_str()) else {
+            continue;
+        };
+        if !seen.insert((work, i)) {
+            continue;
+        }
+        let key = match group {
+            "bot" => bot.as_str(),
+            "project" => project.as_str(),
+            _ => "total",
+        };
+        acc.add(key, i, n, 1.0, 0.0);
+    }
+    Ok(Some(()))
+}
+
+fn collect_waiting_time(
+    c: &Connection,
+    scope: &BucketScope<'_>,
+    acc: &mut Acc,
+) -> Result<Option<()>> {
+    let &BucketScope {
+        q,
+        group,
+        buckets,
+        spans,
+        n,
+        tz,
+        ..
+    } = scope;
+
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(None);
+    };
+    // each bucket's [start, end): the hours' own spans, or the local days'
+    let edges: Vec<(i64, i64)> = match spans {
+        Some(h) => h.iter().map(|x| (x.1, x.2)).collect(),
+        None => buckets
+            .iter()
+            .map(|d| bounds(d, d, tz).unwrap_or((0, 0)))
+            .collect(),
+    };
+    let now = steve_store::now();
+    let filtered = q.project.is_some() || q.bot.is_some();
+    let sql = if filtered {
+        "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
                  FROM decisions d JOIN items i ON i.id = d.item_id
                  WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2)
                    AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
-            } else {
-                "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
+    } else {
+        "SELECT d.id, d.kind, d.status, d.created, d.resolved, d.result, d.item_id, COALESCE(i.bot_id, ''), COALESCE(i.project_id, '')
                  FROM decisions d LEFT JOIN items i ON i.id = d.item_id
                  WHERE d.workspace_id = ?1 AND d.created < ?3 AND (d.resolved IS NULL OR d.resolved > ?2) AND ?4 IS NULL AND ?5 IS NULL"
-            };
-            type Card = (items::DecisionRow, Option<String>, String, String);
-            let rows: Vec<Card> = c
-                .prepare_cached(sql)?
-                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-                    Ok((items::decision_row(r)?, r.get(6)?, r.get(7)?, r.get(8)?))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            // per piece of work: its line and the spans a person was waited on
-            let mut work: BTreeMap<String, (String, Vec<(i64, i64)>)> = BTreeMap::new();
-            for (card, item, bot, project) in rows.into_iter().filter(|r| r.0.human()) {
-                let key = match group {
-                    "bot" => bot,
-                    "project" => project,
-                    _ => "total".into(),
-                };
-                let w = work
-                    .entry(item.unwrap_or_else(|| format!("decision:{}", card.id)))
-                    .or_insert_with(|| (key, vec![]));
-                w.1.push((card.created, card.resolved.unwrap_or(now).min(now)));
+    };
+    type Card = (items::DecisionRow, Option<String>, String, String);
+    let rows: Vec<Card> = c
+        .prepare_cached(sql)?
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+            Ok((items::decision_row(r)?, r.get(6)?, r.get(7)?, r.get(8)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    // per piece of work: its line and the spans a person was waited on
+    let mut work: BTreeMap<String, (String, Vec<(i64, i64)>)> = BTreeMap::new();
+    for (card, item, bot, project) in rows.into_iter().filter(|r| r.0.human()) {
+        let key = match group {
+            "bot" => bot,
+            "project" => project,
+            _ => "total".into(),
+        };
+        let w = work
+            .entry(item.unwrap_or_else(|| format!("decision:{}", card.id)))
+            .or_insert_with(|| (key, vec![]));
+        w.1.push((card.created, card.resolved.unwrap_or(now).min(now)));
+    }
+    for (key, spans) in work.into_values() {
+        for (i, (start, end)) in edges.iter().enumerate() {
+            let ms = items::union_ms(spans.iter().copied(), *start, *end);
+            if ms > 0 {
+                acc.add(&key, i, n, ms as f64, 0.0);
             }
-            for (key, spans) in work.into_values() {
-                for (i, (start, end)) in edges.iter().enumerate() {
-                    let ms = items::union_ms(spans.iter().copied(), *start, *end);
-                    if ms > 0 {
-                        acc.add(&key, i, n, ms as f64, 0.0);
-                    }
-                }
-            }
-        }
-        Metric::Wip => {
-            let wip = match spans {
-                Some(h) => metrics::wip_at(c, q, h.iter().map(|x| (x.0.clone(), x.2)).collect())?,
-                None => metrics::wip_by_day(c, q)?,
-            };
-            for (d, v) in wip {
-                if let Some(&i) = index.get(d.as_str()) {
-                    acc.add("total", i, n, v as f64, 0.0);
-                }
-            }
-        }
-        Metric::Decisions => {
-            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
-                return Ok(vec![]);
-            };
-            let filtered = q.project.is_some() || q.bot.is_some();
-            let sql = if filtered {
-                "SELECT d.created FROM decisions d JOIN items i ON i.id = d.item_id WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3
-                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
-            } else {
-                "SELECT d.created FROM decisions d WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3 AND ?4 IS NULL AND ?5 IS NULL"
-            };
-            let ts: Vec<i64> = c
-                .prepare_cached(sql)?
-                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
-                    r.get(0)
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            for t in ts {
-                if let Some(&i) = index.get(bucket_of(t).as_str()) {
-                    acc.add("total", i, n, 1.0, 0.0);
-                }
-            }
-        }
-        Metric::Lead => {
-            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
-                return Ok(vec![]);
-            };
-            let rows: Vec<(i64, i64)> = c
-                .prepare_cached(
-                    "SELECT s.done_at, s.lead_ms FROM item_stats s JOIN items i ON i.id = s.item_id
-                     WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND s.lead_ms IS NOT NULL
-                       AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)",
-                )?
-                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut per: Vec<Vec<i64>> = vec![vec![]; n];
-            for (at, lead) in rows {
-                if let Some(&i) = index.get(bucket_of(at).as_str()) {
-                    per[i].push(lead);
-                }
-            }
-            let line = |key: &str, label: &str, q: f64| Line {
-                key: key.into(),
-                label: label.into(),
-                values: per
-                    .iter()
-                    .map(|v| percentile(v, q).map(|x| x as f64))
-                    .collect(),
-            };
-            return Ok(vec![
-                line("p50", &steve_i18n::t!("stats.label.median"), 0.5),
-                line("p85", "p85", 0.85),
-            ]);
         }
     }
+    Ok(Some(()))
+}
+
+fn collect_work_in_progress(c: &Connection, scope: &BucketScope<'_>, acc: &mut Acc) -> Result<()> {
+    let &BucketScope {
+        q, spans, index, n, ..
+    } = scope;
+
+    let wip = match spans {
+        Some(h) => metrics::wip_at(c, q, h.iter().map(|x| (x.0.clone(), x.2)).collect())?,
+        None => metrics::wip_by_day(c, q)?,
+    };
+    for (d, v) in wip {
+        if let Some(&i) = index.get(d.as_str()) {
+            acc.add("total", i, n, v as f64, 0.0);
+        }
+    }
+    Ok(())
+}
+
+fn collect_decision_counts(
+    c: &Connection,
+    scope: &BucketScope<'_>,
+    acc: &mut Acc,
+) -> Result<Option<()>> {
+    let &BucketScope {
+        q, index, n, tz, ..
+    } = scope;
+
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(None);
+    };
+    let filtered = q.project.is_some() || q.bot.is_some();
+    let sql = if filtered {
+        "SELECT d.created FROM decisions d JOIN items i ON i.id = d.item_id WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3
+                   AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)"
+    } else {
+        "SELECT d.created FROM decisions d WHERE d.workspace_id = ?1 AND d.created >= ?2 AND d.created < ?3 AND ?4 IS NULL AND ?5 IS NULL"
+    };
+    let ts: Vec<i64> = c
+        .prepare_cached(sql)?
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+            r.get(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for t in ts {
+        if let Some(&i) = index.get(scope.bucket_of(t).as_str()) {
+            acc.add("total", i, n, 1.0, 0.0);
+        }
+    }
+    Ok(Some(()))
+}
+
+fn lead_percentiles(c: &Connection, scope: &BucketScope<'_>) -> Result<Vec<Line>> {
+    let &BucketScope {
+        q, index, n, tz, ..
+    } = scope;
+
+    let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+        return Ok(vec![]);
+    };
+    let rows: Vec<(i64, i64)> = c
+        .prepare_cached(
+            "SELECT s.done_at, s.lead_ms FROM item_stats s JOIN items i ON i.id = s.item_id
+                     WHERE s.workspace_id = ?1 AND s.done_at >= ?2 AND s.done_at < ?3 AND s.lead_ms IS NOT NULL
+                       AND (?4 IS NULL OR i.project_id = ?4) AND (?5 IS NULL OR i.bot_id = ?5)",
+        )?
+        .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut per: Vec<Vec<i64>> = vec![vec![]; n];
+    for (at, lead) in rows {
+        if let Some(&i) = index.get(scope.bucket_of(at).as_str()) {
+            per[i].push(lead);
+        }
+    }
+    let line = |key: &str, label: &str, q: f64| Line {
+        key: key.into(),
+        label: label.into(),
+        values: per
+            .iter()
+            .map(|v| percentile(v, q).map(|x| x as f64))
+            .collect(),
+    };
+    Ok(vec![
+        line("p50", &steve_i18n::t!("stats.label.median"), 0.5),
+        line("p85", "p85", 0.85),
+    ])
+}
+
+fn finish_series(
+    acc: Acc,
+    observed: Option<Observed>,
+    rate: bool,
+    order: &[&str],
+    scope: &BucketScope<'_>,
+    names: &Names,
+    metric: Metric,
+) -> Vec<Line> {
+    let group = scope.group;
+    let n = scope.n;
+
     let dim = if group == "none" { "total" } else { group };
-    let mut series = acc.lines(rate, &names, dim, order);
+    let mut series = acc.lines(rate, names, dim, order);
     if group == "none" {
         if series.is_empty() {
             series.push(Line {
@@ -740,7 +919,7 @@ fn lines(
             });
         }
         for l in &mut series {
-            l.label = total_label(metric);
+            l.label = series_total_label(metric);
         }
     }
     if let Some(seen) = observed {
@@ -758,7 +937,7 @@ fn lines(
             }
         }
     }
-    Ok(series)
+    series
 }
 
 /* ── items ── */
@@ -1228,6 +1407,18 @@ pub fn item_detail(
     if brief {
         return Ok(Some((ws, d)));
     }
+    populate_item_details(c, item_id, &mut d, per_model, per_turn, rate)?;
+    Ok(Some((ws, d)))
+}
+
+fn populate_item_details(
+    c: &Connection,
+    item_id: &str,
+    d: &mut ItemDetail,
+    per_model: BTreeMap<String, (Usage, i64)>,
+    mut per_turn: HashMap<String, (Usage, i64)>,
+    rate: impl Fn(&mut Usage, i64),
+) -> Result<()> {
     let turns: Vec<TurnOut> = c
         .prepare_cached(
             "SELECT id, session_id, started, ended, stop_reason, attempt, transient, tools, tool_errors FROM agent_turns
@@ -1314,7 +1505,7 @@ pub fn item_detail(
     d.marks = Some(marks);
     d.decisions = Some(decisions);
     d.by_model = Some(by_model);
-    Ok(Some((ws, d)))
+    Ok(())
 }
 
 /// `GET /stats/sessions/:id`: a session's turns and tokens (the session page's top bar).

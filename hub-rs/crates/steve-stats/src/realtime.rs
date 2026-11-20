@@ -160,37 +160,7 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
-    for (id, a, node) in &mut attempts {
-        if !a.tracked {
-            continue; // no compatible collection record in this workspace, including a moved session
-        }
-        a.pending_at = tx.query_row(PENDING_SQL, params![node.as_str(), id.as_str()], |r| {
-            r.get(0)
-        })?;
-        a.gap_at = tx.query_row(GAP_SQL, [id.as_str()], |r| r.get(0))?;
-        // One preceding activity is enough for the first point's freshness check. No need to
-        // reread a long attempt's entire journal every second.
-        let mut st = tx.prepare_cached(WINDOW_SQL)?;
-        a.samples = st
-            .query_map(params![id.as_str(), lo, at], |r| {
-                Ok(Sample {
-                    at: r.get(0)?,
-                    units: r.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut preceding = tx.prepare_cached(PRECEDING_SQL)?;
-        a.samples.extend(
-            preceding
-                .query_map(params![id.as_str(), lo], |r| {
-                    Ok(Sample {
-                        at: r.get(0)?,
-                        units: 0,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        );
-    }
+    load_attempt_samples(&tx, &mut attempts, lo, at)?;
     // Old non-Node sessions have no compatible collection path. Their persisted ended lifecycle
     // bounds the unknown interval, but does not erase its historical windows or prove coverage.
     let mut st = tx.prepare_cached(
@@ -248,6 +218,46 @@ pub fn read(c: &Connection, scope: Scope<'_>, now: i64) -> Result<Realtime, Stor
         measured_tps: None,
         observed_output_sessions: current.observed_output_sessions,
     })
+}
+
+fn load_attempt_samples(
+    tx: &Connection,
+    attempts: &mut [(String, Attempt, String)],
+    lo: i64,
+    at: i64,
+) -> Result<(), StoreError> {
+    for (id, a, node) in attempts {
+        if !a.tracked {
+            continue; // no compatible collection record in this workspace, including a moved session
+        }
+        a.pending_at = tx.query_row(PENDING_SQL, params![node.as_str(), id.as_str()], |r| {
+            r.get(0)
+        })?;
+        a.gap_at = tx.query_row(GAP_SQL, [id.as_str()], |r| r.get(0))?;
+        // One preceding activity is enough for the first point's freshness check. No need to
+        // reread a long attempt's entire journal every second.
+        let mut st = tx.prepare_cached(WINDOW_SQL)?;
+        a.samples = st
+            .query_map(params![id.as_str(), lo, at], |r| {
+                Ok(Sample {
+                    at: r.get(0)?,
+                    units: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut preceding = tx.prepare_cached(PRECEDING_SQL)?;
+        a.samples.extend(
+            preceding
+                .query_map(params![id.as_str(), lo], |r| {
+                    Ok(Sample {
+                        at: r.get(0)?,
+                        units: 0,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(())
 }
 
 struct Aggregate {
