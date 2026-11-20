@@ -296,19 +296,23 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
 
 #[tokio::test]
 async fn discarded_failure_details_never_reclassify_or_retry_old_completion_hints() {
-    for stop in [
+    for (stop, acted) in [
         "error",
         STOP,
         steve_core::runtime::MODEL_SERVICE_UNAVAILABLE,
         steve_node_api::NODE_RESTARTED,
-    ] {
-        let h = clocked_hub();
+    ]
+    .into_iter()
+    .flat_map(|stop| [false, true].map(|acted| (stop, acted)))
+    {
+        let mut h = clocked_hub();
         h.bind();
         let exec = h.running("retained failure after journal upgrade").await;
         let mut completion = build::done();
         completion.outcome = Outcome::Failed;
         completion.stop_reason = stop.into();
         completion.transient = true;
+        completion.acted = acted;
         completion.error = Some(NodeReason::error_detail_discarded(
             "error details from before the upgrade were discarded",
         ));
@@ -326,6 +330,14 @@ async fn discarded_failure_details_never_reclassify_or_retry_old_completion_hint
             serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
             expected
         );
+        // A lost ACK can replay both the receipt and the attempt end. A restart must also
+        // retain this terminal fact without turning its old hints into permission to run.
+        let replay = h.seen.seen.lock().unwrap().clone();
+        h.restart_hub().await;
+        Sink(Arc::downgrade(&h.rt))
+            .commit(EventBatch { events: replay })
+            .await
+            .unwrap();
         h.advance_to(h.clock().now() + 20 * 60_000).await;
         assert_eq!(
             h.count("start_turn"),
@@ -334,5 +346,15 @@ async fn discarded_failure_details_never_reclassify_or_retry_old_completion_hint
         );
         assert_eq!(h.attempts().len(), 1);
         assert_eq!(h.q::<i64>("SELECT retry_ordinal FROM runtime_turns"), 0);
+        assert_eq!(h.ends().len(), 1, "replay must not notify the domain again");
+        assert_eq!(
+            h.q::<i64>("SELECT COUNT(*) FROM events WHERE kind='turn_end'"),
+            1
+        );
+        assert_eq!(
+            h.q::<String>("SELECT completion FROM runtime_attempts"),
+            stored,
+            "recovery and replay must preserve the completion bytes"
+        );
     }
 }

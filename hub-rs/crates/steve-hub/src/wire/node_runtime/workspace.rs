@@ -137,7 +137,7 @@ fn tidy_since_in(
     workspace: &str,
     rowid: i64,
 ) -> Result<Option<bool>, StoreError> {
-    // G4-W31B-RETRY-SHAPE: remove the legacy string fallback with migration 116.
+    // G4-W31B-RETRY-SHAPE: remove the legacy string fallback with the coordinated error migration.
     let (done, open): (bool, bool) = tx.query_row(
         "SELECT
            EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND state='finished' AND json_extract(receipt,'$.success')=1),
