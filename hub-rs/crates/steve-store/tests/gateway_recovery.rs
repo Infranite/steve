@@ -318,10 +318,10 @@ fn concurrent_workers_and_producer_cannot_move_new_work_ahead_of_healthy_prefix(
         end(&s, &format!("call-{i:04}"), i % 2 == 0);
     }
     outage(&s, Some("call-0384"));
-    // Independent Store write locks/connections exercise SQLite's IMMEDIATE serialization too.
-    let a = open(&path);
-    let b = open(&path);
-    let producer = open(&path);
+    // Concurrent callers share the engine's one authoritative writer and root grants.
+    let a = s.clone();
+    let b = s.clone();
+    let producer = s.clone();
     let gate = std::sync::Arc::new(std::sync::Barrier::new(3));
     std::thread::scope(|scope| {
         for worker in [a, b] {

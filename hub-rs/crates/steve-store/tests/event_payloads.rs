@@ -51,8 +51,9 @@ fn lossless_dedup_reopen_and_session_isolation() {
         vec![&data, &data]
     );
     assert_eq!(s.events().up_to(&id, first).unwrap()[0].data, data);
-    let reopened = Store::open(s.path(), NoPublisher).unwrap();
-    assert_eq!(reopened.events().up_to(&id, last).unwrap()[1].data, data);
+    let t = common::reopen(t);
+    let s = &t.store;
+    assert_eq!(s.events().up_to(&id, last).unwrap()[1].data, data);
     let other = session(s);
     s.events()
         .add(&other, "tool_call_update", data.clone())

@@ -516,13 +516,13 @@ fn persisted_dispatch_and_session_bindings_recover_without_duplicate_child() {
     let (t, parent, specs) = setup();
     plan(&t, &parent, &specs);
     let first = t.store.workflows().claim(&parent, "a").unwrap();
-    let reopened = Store::open(t.store.path(), NoPublisher).unwrap();
-    assert_eq!(reopened.workflows().claim(&parent, "a").unwrap(), first);
+    let t = common::reopen(t);
+    assert_eq!(t.store.workflows().claim(&parent, "a").unwrap(), first);
     let running = start(&t, &parent, "a");
-    let reopened = Store::open(t.store.path(), NoPublisher).unwrap();
-    assert_eq!(reopened.workflows().claim(&parent, "a").unwrap(), running);
-    assert_eq!(reopened.workflows().active().unwrap().len(), 1);
-    assert_eq!(reopened.items().all(WS).unwrap().len(), 2);
+    let t = common::reopen(t);
+    assert_eq!(t.store.workflows().claim(&parent, "a").unwrap(), running);
+    assert_eq!(t.store.workflows().active().unwrap().len(), 1);
+    assert_eq!(t.store.items().all(WS).unwrap().len(), 2);
 }
 
 #[test]
@@ -1070,11 +1070,13 @@ fn a_turn_end_is_recorded_once_and_a_pause_mark_is_kept() {
     s.turn_paused(sid, "a1").unwrap();
     assert!(s.turn_ended(sid, "a0", "end_turn").unwrap());
     assert!(!s.turn_ended(sid, "a0", "end_turn").unwrap(), "told again");
-    let again = Store::open(t.store.path(), NoPublisher).unwrap();
+    let t = common::reopen(t);
+    let again = &t.store;
     assert_eq!(again.sessions().turns_paused(sid).unwrap(), ["a1"]);
     assert!(!again.sessions().turn_ended(sid, "a0", "cancelled").unwrap());
     assert!(again.sessions().turn_ended(sid, "a1", "cancelled").unwrap());
     again.sessions().turn_unpaused(sid, None).unwrap();
+    let s = again.sessions();
     assert!(s.turns_paused(sid).unwrap().is_empty());
     // only the newest turns are kept
     for n in 0..100 {
