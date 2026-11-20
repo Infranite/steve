@@ -185,7 +185,6 @@ steve-knowledge	crates/steve-knowledge/src/drafts.rs	too_many_lines	109
 steve-knowledge	crates/steve-knowledge/src/index.rs	too_many_lines	105
 steve-knowledge	crates/steve-knowledge/src/scan.rs	cognitive_complexity	28
 steve-knowledge	crates/steve-knowledge/src/scan.rs	too_many_lines	101
-steve-knowledge	crates/steve-knowledge/src/steward.rs	too_many_lines	160
 steve-mail	crates/steve-mail/src/adapters/imap.rs	cognitive_complexity	27
 steve-mail	crates/steve-mail/src/compose.rs	too_many_lines	156,145
 steve-mail	crates/steve-mail/src/mcp.rs	too_many_lines	118
@@ -196,7 +195,6 @@ steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	101
 steve-modules	crates/steve-modules/src/accounts/enrich.rs	too_many_lines	105
 steve-modules	crates/steve-modules/src/accounts/identify.rs	too_many_lines	124
-steve-modules	crates/steve-modules/src/caps/a2a.rs	too_many_lines	134
 steve-modules	crates/steve-modules/src/contacts/changes.rs	too_many_lines	114
 steve-modules	crates/steve-modules/src/contacts/merge.rs	too_many_lines	131,117
 steve-modules	crates/steve-modules/src/contacts/stewards.rs	too_many_lines	118

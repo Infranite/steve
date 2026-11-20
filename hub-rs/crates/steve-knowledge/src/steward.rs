@@ -258,6 +258,338 @@ fn set_status(tx: &Tx, id: &str, status: &str) -> ApiResult<()> {
     Ok(())
 }
 
+struct TidyRequest {
+    op: String,
+    ids: Vec<String>,
+    reason: String,
+    run: String,
+    ws: String,
+    writer: String,
+}
+
+struct Tidying<'a, 'tx> {
+    tx: &'a Tx<'tx>,
+    cx: &'a McpCx,
+    viewer: &'a Viewer,
+    request: &'a TidyRequest,
+    list: &'a [Mem],
+    args: &'a Value,
+}
+
+fn merge_text(list: &[Mem], args: &Value) -> ApiResult<String> {
+    if list.len() < 2 {
+        return Err(ApiError::rule("merge: at least two ids."));
+    }
+    if let Some(x) = list.iter().find(|x| x.status != "confirmed") {
+        return Err(ApiError::rule(format!(
+            "merge: {} is {}, only confirmed memories merge.",
+            x.id, x.status
+        )));
+    }
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() || text.chars().count() > 2000 {
+        return Err(ApiError::rule(
+            "merge: text is the merged wording (1 to 2000 characters).",
+        ));
+    }
+    Ok(text)
+}
+
+impl Tidying<'_, '_> {
+    fn merge(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let cx = self.cx;
+        let args = self.args;
+        let list = self.list;
+        let ids = &self.request.ids;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        let text = merge_text(list, args)?;
+        let mut about: Vec<ObjRef> = Vec::new();
+        for a in list.iter().flat_map(|x| x.about.iter()) {
+            if !about.contains(a) {
+                about.push(a.clone());
+            }
+        }
+        let origin = Origin {
+            ws: ws.clone(),
+            kind: OriginKind::Tool,
+            id: run.clone(),
+            label: match &cx.item_id {
+                Some(i) => format!("{i} 的会话"),
+                None => "Agent 会话".into(),
+            },
+            user: cx.user.clone(),
+            writer: writer.clone(),
+            default_level: Level::Conclusion,
+            item_id: cx.item_id.clone(),
+            session_id: cx.session_id.clone(),
+        };
+        let level = list
+            .iter()
+            .map(|x| x.level)
+            .max_by_key(|l| level_rank(*l))
+            .unwrap_or(Level::Conclusion);
+        let new = candidates::propose(
+            tx,
+            &origin,
+            &NewCandidate {
+                kind: list[0].kind.clone(),
+                text: text.clone(),
+                about,
+                level,
+                evidence: list
+                    .iter()
+                    .map(|x| x.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                supersedes: Some(list[0].id.clone()),
+                why: reason.clone(),
+                scope: String::new(),
+                owner_said: false,
+            },
+        )?;
+        for x in list {
+            tx.prepare_cached(
+                "INSERT OR IGNORE INTO mem_supersedes (mem_id, old_id) VALUES (?, ?)",
+            )?
+            .execute(params![new.id, x.id])?;
+        }
+        let id = record(
+            tx,
+            ws,
+            run,
+            writer,
+            "merge",
+            &new.id,
+            ids,
+            &json!({}),
+            &json!({"text": text}),
+            reason,
+            "applied",
+        )?;
+        Ok(format!(
+            "Merged into candidate {} (change {id}); the user confirms it, and then it replaces {}.",
+            new.id,
+            ids.join(", ")
+        ))
+    }
+
+    fn resolve(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let viewer = self.viewer;
+        let args = self.args;
+        let list = self.list;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        let keep = args.get("keep").and_then(Value::as_str).unwrap_or_default();
+        let k = own(tx, viewer, keep)
+            .map_err(|_| ApiError::rule("resolve: keep is the id of the memory that holds."))?;
+        let retire: Vec<&Mem> = list.iter().filter(|x| x.id != k.id).collect();
+        if retire.is_empty() {
+            return Err(ApiError::rule(
+                "resolve: ids are the memories that no longer hold.",
+            ));
+        }
+        let before: serde_json::Map<String, Value> = retire
+            .iter()
+            .map(|x| (x.id.clone(), json!(x.status)))
+            .collect();
+        for x in &retire {
+            set_status(tx, &x.id, "stale")?;
+        }
+        let targets: Vec<String> = retire.iter().map(|x| x.id.clone()).collect();
+        let id = record(
+            tx,
+            ws,
+            run,
+            writer,
+            "resolve",
+            &k.id,
+            &targets,
+            &Value::Object(before),
+            &json!({}),
+            reason,
+            "applied",
+        )?;
+        Ok(format!(
+            "Kept {}; {} no longer used (change {id}, the user can undo it).",
+            k.id,
+            targets.join(", ")
+        ))
+    }
+
+    fn flag(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let list = self.list;
+        let ids = &self.request.ids;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        if list.len() < 2 {
+            return Err(ApiError::rule(
+                "flag: the ids of at least two memories that contradict each other.",
+            ));
+        }
+        let id = record(
+            tx,
+            ws,
+            run,
+            writer,
+            "flag",
+            &ids[0],
+            &ids[1..],
+            &json!({}),
+            &json!({}),
+            reason,
+            "open",
+        )?;
+        Ok(format!(
+            "Flagged for the user (change {id}); nothing was changed."
+        ))
+    }
+
+    fn stale(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let list = self.list;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        let mut done = Vec::new();
+        for x in list {
+            if x.status == "stale" {
+                continue;
+            }
+            set_status(tx, &x.id, "stale")?;
+            done.push(record(
+                tx,
+                ws,
+                run,
+                writer,
+                "stale",
+                &x.id,
+                &[],
+                &Value::Object(std::iter::once((x.id.clone(), json!(x.status))).collect()),
+                &json!({"status": "stale"}),
+                reason,
+                "applied",
+            )?);
+        }
+        Ok(format!(
+            "{} marked stale (changes {}).",
+            done.len(),
+            done.join(", ")
+        ))
+    }
+
+    fn about(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let viewer = self.viewer;
+        let args = self.args;
+        let list = self.list;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        let x = &list[0];
+        let name = args
+            .get("about")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let names = Names::load(tx, viewer, None)?;
+        let r = names.resolve(name).ok_or_else(|| ApiError::rule(format!("No person, organization, project or bot is called \"{name}\". Pass the exact name or id.")))?;
+        if x.about.contains(&r) {
+            return Ok(format!("{} is already about {name}.", x.id));
+        }
+        tx.prepare_cached("INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, ?, ?)")?
+            .execute(params![x.id, ws, r.kind, r.id])?;
+        touch(tx, ws, &x.id)?;
+        let id = record(
+            tx,
+            ws,
+            run,
+            writer,
+            "about",
+            &x.id,
+            &[],
+            &json!({}),
+            &json!({"about": r}),
+            reason,
+            "applied",
+        )?;
+        Ok(format!("{} is now about {name} (change {id}).", x.id))
+    }
+
+    fn source(&self) -> ApiResult<String> {
+        let tx = self.tx;
+        let args = self.args;
+        let list = self.list;
+        let ws = &self.request.ws;
+        let run = &self.request.run;
+        let writer = &self.request.writer;
+        let reason = &self.request.reason;
+        // source
+        let x = &list[0];
+        if x.source_type == "me" || x.source_id.as_deref().is_some_and(|s| !s.is_empty()) {
+            return Err(ApiError::rule(format!(
+                "{} already says where it came from.",
+                x.id
+            )));
+        }
+        let item = args
+            .get("item")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let found: Option<String> = tx
+            .prepare_cached("SELECT title FROM items WHERE id = ? AND workspace_id = ?")?
+            .query_row(params![item, ws], |r| r.get(0))
+            .optional()?;
+        if item.is_empty() || found.is_none() {
+            return Err(ApiError::rule(
+                "source: item is the id of the item it came from (ST-12).",
+            ));
+        }
+        let label = format!("{item} 交付时");
+        tx.execute(
+            "UPDATE mems SET source_type = 'item', source_id = ?, source_label = ?, updated = ? WHERE id = ?",
+            params![item, label, steve_store::now(), x.id],
+        )?;
+        touch(tx, ws, &x.id)?;
+        let before = json!({"type": x.source_type, "id": x.source_id, "label": x.source_label});
+        let id = record(
+            tx,
+            ws,
+            run,
+            writer,
+            "source",
+            &x.id,
+            &[],
+            &before,
+            &json!({"type": "item", "id": item, "label": label}),
+            reason,
+            "applied",
+        )?;
+        Ok(format!(
+            "{} now says it came from {item} (change {id}).",
+            x.id
+        ))
+    }
+}
+
 fn tidy(m: &Modules, cx: &McpCx, viewer: &Viewer, args: &Value) -> ApiResult<String> {
     let op = args
         .get("op")
@@ -288,135 +620,35 @@ fn tidy(m: &Modules, cx: &McpCx, viewer: &Viewer, args: &Value) -> ApiResult<Str
     let run = run_of(cx);
     let ws = cx.ws.clone();
     let writer = cx.bot_id.clone();
+    let request = TidyRequest {
+        op,
+        ids,
+        reason,
+        run,
+        ws,
+        writer,
+    };
     let out = m.store.transaction(|tx| -> ApiResult<String> {
-        let list: Vec<Mem> = ids.iter().map(|i| own(tx, viewer, i)).collect::<ApiResult<_>>()?;
-        match op.as_str() {
-            "merge" => {
-                if list.len() < 2 {
-                    return Err(ApiError::rule("merge: at least two ids."));
-                }
-                if let Some(x) = list.iter().find(|x| x.status != "confirmed") {
-                    return Err(ApiError::rule(format!("merge: {} is {}, only confirmed memories merge.", x.id, x.status)));
-                }
-                let text = args.get("text").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-                if text.is_empty() || text.chars().count() > 2000 {
-                    return Err(ApiError::rule("merge: text is the merged wording (1 to 2000 characters)."));
-                }
-                let mut about: Vec<ObjRef> = Vec::new();
-                for a in list.iter().flat_map(|x| x.about.iter()) {
-                    if !about.contains(a) {
-                        about.push(a.clone());
-                    }
-                }
-                let origin = Origin {
-                    ws: ws.clone(),
-                    kind: OriginKind::Tool,
-                    id: run.clone(),
-                    label: match &cx.item_id {
-                        Some(i) => format!("{i} 的会话"),
-                        None => "Agent 会话".into(),
-                    },
-                    user: cx.user.clone(),
-                    writer: writer.clone(),
-                    default_level: Level::Conclusion,
-                    item_id: cx.item_id.clone(),
-                    session_id: cx.session_id.clone(),
-                };
-                let level = list.iter().map(|x| x.level).max_by_key(|l| level_rank(*l)).unwrap_or(Level::Conclusion);
-                let new = candidates::propose(
-                    tx,
-                    &origin,
-                    &NewCandidate {
-                        kind: list[0].kind.clone(),
-                        text: text.clone(),
-                        about,
-                        level,
-                        evidence: list.iter().map(|x| x.text.as_str()).collect::<Vec<_>>().join(" / "),
-                        supersedes: Some(list[0].id.clone()),
-                        why: reason.clone(),
-                        scope: String::new(),
-                        owner_said: false,
-                    },
-                )?;
-                for x in &list {
-                    tx.prepare_cached("INSERT OR IGNORE INTO mem_supersedes (mem_id, old_id) VALUES (?, ?)")?
-                        .execute(params![new.id, x.id])?;
-                }
-                let id = record(tx, &ws, &run, &writer, "merge", &new.id, &ids, &json!({}), &json!({"text": text}), &reason, "applied")?;
-                Ok(format!("Merged into candidate {} (change {id}); the user confirms it, and then it replaces {}.", new.id, ids.join(", ")))
-            }
-            "resolve" => {
-                let keep = args.get("keep").and_then(Value::as_str).unwrap_or_default();
-                let k = own(tx, viewer, keep)
-                    .map_err(|_| ApiError::rule("resolve: keep is the id of the memory that holds."))?;
-                let retire: Vec<&Mem> = list.iter().filter(|x| x.id != k.id).collect();
-                if retire.is_empty() {
-                    return Err(ApiError::rule("resolve: ids are the memories that no longer hold."));
-                }
-                let before: serde_json::Map<String, Value> = retire.iter().map(|x| (x.id.clone(), json!(x.status))).collect();
-                for x in &retire {
-                    set_status(tx, &x.id, "stale")?;
-                }
-                let targets: Vec<String> = retire.iter().map(|x| x.id.clone()).collect();
-                let id = record(tx, &ws, &run, &writer, "resolve", &k.id, &targets, &Value::Object(before), &json!({}), &reason, "applied")?;
-                Ok(format!("Kept {}; {} no longer used (change {id}, the user can undo it).", k.id, targets.join(", ")))
-            }
-            "flag" => {
-                if list.len() < 2 {
-                    return Err(ApiError::rule("flag: the ids of at least two memories that contradict each other."));
-                }
-                let id = record(tx, &ws, &run, &writer, "flag", &ids[0], &ids[1..], &json!({}), &json!({}), &reason, "open")?;
-                Ok(format!("Flagged for the user (change {id}); nothing was changed."))
-            }
-            "stale" => {
-                let mut done = Vec::new();
-                for x in &list {
-                    if x.status == "stale" {
-                        continue;
-                    }
-                    set_status(tx, &x.id, "stale")?;
-                    done.push(record(tx, &ws, &run, &writer, "stale", &x.id, &[], &Value::Object(std::iter::once((x.id.clone(), json!(x.status))).collect()), &json!({"status": "stale"}), &reason, "applied")?);
-                }
-                Ok(format!("{} marked stale (changes {}).", done.len(), done.join(", ")))
-            }
-            "about" => {
-                let x = &list[0];
-                let name = args.get("about").and_then(Value::as_str).unwrap_or_default().trim();
-                let names = Names::load(tx, viewer, None)?;
-                let r = names.resolve(name).ok_or_else(|| ApiError::rule(format!("No person, organization, project or bot is called \"{name}\". Pass the exact name or id.")))?;
-                if x.about.contains(&r) {
-                    return Ok(format!("{} is already about {name}.", x.id));
-                }
-                tx.prepare_cached("INSERT OR IGNORE INTO mem_about (mem_id, workspace_id, object_type, object_id) VALUES (?, ?, ?, ?)")?
-                    .execute(params![x.id, ws, r.kind, r.id])?;
-                touch(tx, &ws, &x.id)?;
-                let id = record(tx, &ws, &run, &writer, "about", &x.id, &[], &json!({}), &json!({"about": r}), &reason, "applied")?;
-                Ok(format!("{} is now about {name} (change {id}).", x.id))
-            }
-            _ => {
-                // source
-                let x = &list[0];
-                if x.source_type == "me" || x.source_id.as_deref().is_some_and(|s| !s.is_empty()) {
-                    return Err(ApiError::rule(format!("{} already says where it came from.", x.id)));
-                }
-                let item = args.get("item").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-                let found: Option<String> = tx
-                    .prepare_cached("SELECT title FROM items WHERE id = ? AND workspace_id = ?")?
-                    .query_row(params![item, ws], |r| r.get(0))
-                    .optional()?;
-                if item.is_empty() || found.is_none() {
-                    return Err(ApiError::rule("source: item is the id of the item it came from (ST-12)."));
-                }
-                let label = format!("{item} 交付时");
-                tx.execute(
-                    "UPDATE mems SET source_type = 'item', source_id = ?, source_label = ?, updated = ? WHERE id = ?",
-                    params![item, label, steve_store::now(), x.id],
-                )?;
-                touch(tx, &ws, &x.id)?;
-                let before = json!({"type": x.source_type, "id": x.source_id, "label": x.source_label});
-                let id = record(tx, &ws, &run, &writer, "source", &x.id, &[], &before, &json!({"type": "item", "id": item, "label": label}), &reason, "applied")?;
-                Ok(format!("{} now says it came from {item} (change {id}).", x.id))
-            }
+        let list: Vec<Mem> = request
+            .ids
+            .iter()
+            .map(|i| own(tx, viewer, i))
+            .collect::<ApiResult<_>>()?;
+        let tidy = Tidying {
+            tx,
+            cx,
+            viewer,
+            request: &request,
+            list: &list,
+            args,
+        };
+        match request.op.as_str() {
+            "merge" => tidy.merge(),
+            "resolve" => tidy.resolve(),
+            "flag" => tidy.flag(),
+            "stale" => tidy.stale(),
+            "about" => tidy.about(),
+            _ => tidy.source(),
         }
     })?;
     Ok(out)
