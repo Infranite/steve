@@ -199,11 +199,9 @@ fn case_4(path: WritePath) {
         );
         assert!(ready_notify(&a));
         assert!(!ready_notify(&a));
-        assert!(
-            ready_notify(&b),
-            "savepoint rollback may conservatively over-report its table"
-        );
-        assert!(!ready_notify(&b));
+        // The rolled-back savepoint's table may receive an extra hint. Its
+        // presence or absence is deliberately not part of this contract.
+        let _ = ready_notify(&b);
         with_writer(path, &store, Domain::Core, Lane::Interactive, |c| {
             assert_eq!(
                 c.query_row("SELECT count(*) FROM hint_b", [], |r| r.get::<_, i64>(0))
@@ -296,6 +294,12 @@ fn case_7(path: WritePath) {
             Ok(())
         })
         .unwrap();
+        // Reuse the same subscription: a predicate DELETE must still hint.
+        raw_on(path, &store, "INSERT INTO truncate_probe VALUES(3)");
+        assert!(ready_notify(&wake));
+        raw_on(path, &store, "DELETE FROM truncate_probe WHERE id=3");
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
     });
 }
 fn case_8(path: WritePath) {
@@ -692,5 +696,70 @@ fn returned_guard_keeps_multiple_commits_before_later_rollback() {
                 .unwrap(),
             0
         );
+    });
+}
+
+#[test]
+fn cross_file_subscription_inside_core_root_is_retained() {
+    let dir = tempfile::tempdir().unwrap();
+    prepare_layout(dir.path(), true);
+    let store = open_sync_store(
+        dir.path(),
+        Arc::new(Registry::verification().unwrap()),
+        Arc::new(Time::default()),
+    );
+    store.install_registered().unwrap();
+    let core = store.root_guard(Domain::Core, Lane::Interactive).unwrap();
+    let tables = store.commit_wake(Domain::Comms, &["verify_comms"]);
+    let entities = store.watch(&["verify_core".into(), "verify_comms".into()]);
+    core.execute_batch("INSERT INTO verify_core(id,value,rev) VALUES('core',1,1)")
+        .unwrap();
+    assert!(!ready(&entities));
+    drop(core);
+    assert!(ready(&entities));
+    assert!(!ready_notify(&tables));
+    let comms = store.root_guard(Domain::Comms, Lane::Interactive).unwrap();
+    comms
+        .execute_batch("INSERT INTO verify_comms(id,value,rev) VALUES('comms',1,1)")
+        .unwrap();
+    assert!(!ready_notify(&tables));
+    drop(comms);
+    assert!(ready_notify(&tables));
+    assert!(ready(&entities));
+    assert!(!ready(&entities));
+}
+
+#[test]
+fn subscription_returns_while_another_thread_holds_root() {
+    each_layout_on(WritePath::Guard, |store| {
+        let root = store.root_guard(Domain::Core, Lane::Interactive).unwrap();
+        let clone = store.clone();
+        let (send, received) = std::sync::mpsc::channel();
+        let subscriber = std::thread::spawn(move || {
+            // Synchronous watch must also return on an async executor thread.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let watch = clone.watch(&["verify_core".into(), "verify_comms".into()]);
+                let tables = clone.commit_wake(Domain::Core, &["verify_core"]);
+                send.send((watch, tables)).unwrap();
+            });
+        });
+        // Timeout is only a deadlock watchdog, not a timing/scheduling assertion.
+        // Release root before joining even on failure, so a regression cannot hang.
+        let subscribed = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(root);
+        subscriber.join().unwrap();
+        let (watch, tables) = subscribed.expect("subscription waited for a writer grant");
+        assert!(!ready(&watch));
+        assert!(!ready_notify(&tables));
+        raw_on(
+            WritePath::Guard,
+            &store,
+            "INSERT INTO verify_core(id,value,rev) VALUES('subscribed',1,1)",
+        );
+        assert!(ready(&watch));
+        assert!(ready_notify(&tables));
     });
 }

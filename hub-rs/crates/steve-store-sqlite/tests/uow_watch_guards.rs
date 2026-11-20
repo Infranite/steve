@@ -1,5 +1,12 @@
 //! G2-R2 guards. Rust literal/cfg/module scanning follows sql_column_lists.rs.
-//! Deliberately no baseline exceptions: watched production tables cannot be cleared wholesale.
+//! No baseline DELETE exceptions within the Store database: watched tables cannot
+//! be cleared wholesale. This scans literal SQL only, not SQL assembled through
+//! concatenation/format! at runtime; those call sites require separate review.
+//! Excluded boundaries: schema_compat is frozen legacy replay, not runtime SQL;
+//! steve-node/src/journal.rs writes an independent Node journal database;
+//! steve-hub/src/wire/node_tools.rs writes the independent host-tools ledger.
+//! Those independent databases do not share Store table identities. Test-only
+//! items/modules are excluded by the same cfg/module scan as sql_column_lists.rs.
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},

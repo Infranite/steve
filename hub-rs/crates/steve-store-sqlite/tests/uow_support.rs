@@ -174,7 +174,7 @@ pub fn open_sync_store(
         registry,
         time.clone(),
         Arc::new(|_, _: Vec<String>| {}),
-        || false,
+        || tokio::runtime::Handle::try_current().is_ok(),
     )
     .unwrap()
 }

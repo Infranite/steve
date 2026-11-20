@@ -345,10 +345,12 @@ impl<E: Send + 'static> SqliteStore<E> {
         }
         let writer = &self.writers[&domain];
         let tables: Vec<_> = tables.iter().map(|s| (*s).to_owned()).collect();
-        if let Ok(_grant) = writer.executor.grant(Lane::Interactive) {
-            writer.runner.watches.subscribe_hint(&tables, hint);
-            crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
-        }
+        // Registration never acquires a writer grant or connection: it is safe
+        // while another thread holds a root, or this thread holds another file.
+        writer.runner.watches.subscribe_hint(&tables, hint);
+        // Only this thread's capture for this registry can conservatively mark
+        // an in-scope subscription; other files/threads are ordinary registrations.
+        crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
     }
     /// Backend-only table-key bridge for the legacy Store::commit_wake facade.
     /// It shares the entity watch registry, update hook and publication boundary.
