@@ -11,6 +11,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
+use steve_runtime::testkit::eventually_blocking;
 use steve_runtime::testkit::process::{Child, Command};
 
 struct Pty {
@@ -98,35 +99,38 @@ impl Pty {
     fn wait_prompt(&mut self, child: &mut Child, prompt: &str) {
         // The wizard verifies and privately copies the real CLI before its first prompt.
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
+        eventually_blocking(format!("CLI prompt {prompt}"), || {
             self.drain();
             if let Some(offset) = self.output[self.prompt_cursor..]
                 .windows(prompt.len())
                 .position(|bytes| bytes == prompt.as_bytes())
             {
                 self.prompt_cursor += offset + prompt.len();
-                return;
+                return true;
             }
             assert!(
                 child.try_wait().unwrap().is_none() && Instant::now() < deadline,
                 "CLI did not reach {prompt}: {}",
                 String::from_utf8_lossy(&self.output)
             );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
     }
 
     fn wait_exit(&mut self, child: &mut Child) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        let mut exited = None;
+        eventually_blocking("cancelled CLI exits", || {
             self.drain();
             if let Some(status) = child.try_wait().unwrap() {
                 self.drain();
-                return status;
+                exited = Some(status);
+                return true;
             }
             assert!(Instant::now() < deadline, "cancelled CLI did not exit");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
+        exited.unwrap()
     }
 }
 

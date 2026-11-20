@@ -109,9 +109,7 @@ steve-hub/tests/updates_api.rs	1
 steve-hub/tests/wired/mod.rs	4
 steve-hub/tests/workspaces_api.rs	1
 steve-hub/tests/yolo_e2e.rs	4
-steve-install/src/release.rs	3
-steve-install/src/signing.rs	1
-steve-install/tests/terminal.rs	2
+steve-install/src/release.rs	1
 steve-knowledge/src/extract_text.rs	1
 steve-knowledge/tests/folder.rs	1
 steve-knowledge/tests/folder_node.rs	4

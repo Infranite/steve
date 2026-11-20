@@ -1113,6 +1113,9 @@ mod tests {
                 .unwrap();
             if mode == "advancing" {
                 for n in 1..=17 {
+                    // This native child must advance beyond the parent's real health window.
+                    // Keep this pacing: a child-local fake clock cannot drive the parent's
+                    // std::time budget or preserve the test's elapsed-time assertion.
                     std::thread::sleep(Duration::from_millis(400));
                     progress.report(54, 54, n * 100_000, false).unwrap();
                 }
@@ -1120,7 +1123,8 @@ mod tests {
             } else {
                 // The parent must stop this candidate and roll back, whether migration stalled or
                 // finished but startup never became healthy. Only the test's own child is stopped.
-                std::thread::sleep(Duration::from_secs(10));
+                let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+                receiver.recv().unwrap();
             }
         }
         let port: u16 = std::env::var("STEVE_PORT").unwrap().parse().unwrap();
@@ -1160,35 +1164,44 @@ mod tests {
         let home = home.to_owned();
         let thread = std::thread::spawn(move || {
             let mut maintenance = false;
-            while !stopped.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let line = request(&mut stream);
-                        if fs::read_to_string(home.join("service-state")).is_ok_and(|v| v == "stop")
-                        {
-                            continue;
+            loop {
+                let mut accepted = None;
+                steve_runtime::testkit::eventually_blocking(
+                    "service fixture accepts a request or stops",
+                    || {
+                        if stopped.load(Ordering::Relaxed) {
+                            return true;
                         }
-                        if line.contains("/internal/upgrade/drain") {
-                            if line.starts_with("POST ") {
-                                maintenance = true;
-                            }
-                            if line.starts_with("DELETE ") {
-                                maintenance = false;
-                            }
-                            response(stream, 200, json!({"ready":true,"maintenance":maintenance}));
-                        } else {
-                            let manifest = json_file(&home.join("current/release.json")).unwrap();
-                            response(
-                                stream,
-                                200,
-                                json!({"version":manifest["version"],"web_version":manifest["version"],"build_commit":manifest["commit"],"drain":maintenance,"recovery":{"state":"ready"}}),
-                            );
+                        match listener.accept() {
+                            Ok(connection) => accepted = Some(connection),
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => panic!("{error}"),
                         }
+                        accepted.is_some()
+                    },
+                );
+                let Some((mut stream, _)) = accepted else {
+                    break;
+                };
+                let line = request(&mut stream);
+                if fs::read_to_string(home.join("service-state")).is_ok_and(|v| v == "stop") {
+                    continue;
+                }
+                if line.contains("/internal/upgrade/drain") {
+                    if line.starts_with("POST ") {
+                        maintenance = true;
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5))
+                    if line.starts_with("DELETE ") {
+                        maintenance = false;
                     }
-                    Err(error) => panic!("{error}"),
+                    response(stream, 200, json!({"ready":true,"maintenance":maintenance}));
+                } else {
+                    let manifest = json_file(&home.join("current/release.json")).unwrap();
+                    response(
+                        stream,
+                        200,
+                        json!({"version":manifest["version"],"web_version":manifest["version"],"build_commit":manifest["commit"],"drain":maintenance,"recovery":{"state":"ready"}}),
+                    );
                 }
             }
         });
