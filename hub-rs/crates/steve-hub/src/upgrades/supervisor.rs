@@ -604,11 +604,16 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
         cfg.db_path(),
         steve_store::NoPublisher,
         Arc::new(move |snapshot| {
+            // This facade still reports legacy replay only. Its commit is not
+            // completion of current storage preparation. The engine-open change
+            // supplies the full native phase/domain stream at this call site.
             if let Err(error) = progress.lock().unwrap_or_else(|e| e.into_inner()).report(
-                snapshot.migration,
-                snapshot.target,
-                snapshot.vm_steps,
-                snapshot.complete,
+                steve_store_sqlite::migrate::Progress {
+                    phase: steve_store_sqlite::migrate::Phase::LegacyReplay,
+                    domain: None,
+                    vm_steps: snapshot.vm_steps,
+                    complete: false,
+                },
             ) {
                 tracing::warn!(%error, "could not report upgrade migration progress");
             }
@@ -616,13 +621,10 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
     )?;
     drop(store);
     let db = rusqlite::Connection::open(cfg.db_path())?;
-    let schema: u32 = db.query_row("SELECT v FROM schema_version", [], |r| r.get(0))?;
-    if schema != manifest.schema.target
-        || schema < manifest.schema.min_read
-        || schema > manifest.schema.max_read
-    {
-        bail!("candidate database schema incompatible with manifest")
-    }
+    manifest
+        .storage
+        .can_open(&steve_store_sqlite::open::inspect(&db)?, true)
+        .context("candidate storage incompatible with manifest")?;
     let rows:Vec<(String,i64,String,String)>=db.prepare("SELECT workspace_id,version,keychain_account,fingerprint FROM vault_keys WHERE status != 'retired'")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<std::result::Result<_,_>>()?;
     let db_path = cfg.db_path();
     tokio::time::timeout(Duration::from_secs(15),tokio::task::spawn_blocking(move||->Result<()>{
@@ -687,11 +689,7 @@ mod tests {
             hub_version: version.into(),
             web_version: version.into(),
             api_protocol: 1,
-            schema: Schema {
-                min_read: 1,
-                max_read: 1,
-                target: 1,
-            },
+            storage: steve_store_sqlite::compat::StorageCapabilities::compiled(),
             assets: vec![],
         }
     }
