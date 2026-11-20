@@ -14,15 +14,17 @@ fn group_alive(pgid: u32) -> bool {
     unsafe { libc::kill(-g, 0) == 0 }
 }
 
-fn until(secs: u64, f: impl Fn() -> bool) -> bool {
+fn until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < end {
-        if f() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    f()
+    let mut ready = false;
+    steve_runtime::testkit::eventually_blocking(
+        "release condition or its original deadline",
+        || {
+            ready = f();
+            ready || Instant::now() >= end
+        },
+    );
+    ready
 }
 
 #[test]
@@ -97,13 +99,13 @@ fn a_fake_release_script_stops_when_its_home_is_gone() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(child.try_wait().unwrap().is_none(), "still waiting for go");
     std::fs::remove_dir_all(&home).unwrap();
-    let end = Instant::now() + Duration::from_secs(3);
     let mut status = child.try_wait().unwrap();
-    while status.is_none() && Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(20));
-        status = child.try_wait().unwrap();
-    }
-    if status.is_none() {
+    if !until(3, || {
+        if status.is_none() {
+            status = child.try_wait().unwrap();
+        }
+        status.is_some()
+    }) {
         let _ = child.kill();
         panic!("the script did not exit once its home was deleted");
     }

@@ -301,7 +301,6 @@ fn an_approval_after_the_no_takes_it_back() {
             None,
         )
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
     let yes = k.decision(
         &x.id,
         Some(&x.session),
@@ -315,6 +314,19 @@ fn an_approval_after_the_no_takes_it_back() {
             json!({"approved": true, "text": ""}),
             "resolved",
             None,
+        )
+        .unwrap();
+    // The approving answer is strictly newer than the real preceding refusal.
+    let no_at = k.db().decision(&no).unwrap().unwrap().resolved.unwrap();
+    let yes_row = k.db().decision(&yes).unwrap().unwrap();
+    let yes_at = yes_row
+        .created
+        .max(yes_row.resolved.unwrap())
+        .max(no_at + 1);
+    k.db()
+        .exec(
+            "UPDATE decisions SET created = ?, resolved = ? WHERE id = ?",
+            &[&yes_at, &yes_at, &yes],
         )
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
@@ -331,8 +343,23 @@ fn a_question_after_the_acceptance_is_answered_before_the_close_is_judged_again(
     let k = Kit::new();
     let x = k.delivered(true);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    let accepted_at = crate::cycle::closing_of(&k.db().item(&x.id).unwrap().unwrap())
+        .unwrap()
+        .at;
     let q = k.decision(&x.id, Some(&x.session), "ask", "question", &[]);
+    let question_at = k
+        .db()
+        .decision(&q)
+        .unwrap()
+        .unwrap()
+        .created
+        .max(accepted_at + 1);
+    k.db()
+        .exec(
+            "UPDATE decisions SET created = ? WHERE id = ?",
+            &[&question_at, &q],
+        )
+        .unwrap();
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let i = k.db().item(&x.id).unwrap().unwrap();
     let c = crate::cycle::closing_of(&i).unwrap();

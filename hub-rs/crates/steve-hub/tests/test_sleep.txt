@@ -20,13 +20,10 @@ steve-channels/tests/lifecycle.rs	1
 steve-channels/tests/owner_decisions.rs	2
 steve-core/src/testkit.rs	3
 steve-core/src/tests/dependencies.rs	1
-steve-core/src/tests/lifecycle.rs	2
 steve-core/src/tests/modules.rs	2
 steve-core/src/tests/node_git.rs	4
-steve-core/src/tests/release_cleanup.rs	4
+steve-core/src/tests/release_cleanup.rs	2
 steve-core/src/tests/routing.rs	3
-steve-core/src/tests/supersede.rs	1
-steve-core/src/tests/sweep.rs	1
 steve-core/src/tests/thread.rs	4
 steve-core/src/thread/research.rs	1
 steve-core/src/util.rs	1
@@ -90,10 +87,8 @@ steve-knowledge/tests/k5.rs	1
 steve-mail/src/fake/imap/mod.rs	1
 steve-mail/src/fake/smtp.rs	1
 steve-mail/tests/e1_imap.rs	1
-steve-mail/tests/e3_send.rs	2
-steve-mail/tests/e4_triage.rs	2
 steve-mail/tests/e6_reading.rs	1
-steve-mail/tests/imap.rs	2
+steve-mail/tests/imap.rs	1
 steve-modules/src/vault/inject.rs	1
 steve-modules/src/vault/keystore/secret_service.rs	1
 steve-modules/tests/connections.rs	1
