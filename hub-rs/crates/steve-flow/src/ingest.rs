@@ -11,7 +11,7 @@
 //! 7. waiting `wait(event)` nodes that match are handed to the executor;
 //! 8. SSE `signal` (coalesced per workspace, [`crate::signals::SignalDebounce`]).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_modules::ApiError;
 use steve_modules::accounts::{Hints, identify};
+use steve_runtime::due::{DueError, DueSource, RowDeadlines, due_loop};
+use steve_runtime::policy::{Backoff, Jitter, Limiter, RateLimit};
 use steve_store::{Tx, uid};
 
 use crate::adapter::{
@@ -670,116 +672,250 @@ pub async fn push(
 
 /// Longest wait after failures (back off to 30 minutes).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
-/// How often the poller looks for due connections.
+/// The pause after a completed background round, also the source-query retry interval.
 pub const POLL_TICK: Duration = Duration::from_secs(15);
 /// Connections polled at the same time.
 pub const POLL_PARALLEL: usize = 4;
 /// A poll (provider call and its ingests) that takes longer counts as failed.
 pub const POLL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// The `flow.poll` job: every [`IngestMode::Poll`] connection with the `events` capability, at its
-/// adapter's interval; failures double the wait up to [`MAX_BACKOFF`].
+fn retry_wait(every: Duration, failures: u32) -> Duration {
+    Backoff {
+        base: every,
+        // Preserve the old saturated u32 multiplier even for sub-millisecond intervals.
+        max: MAX_BACKOFF.min(every.saturating_mul(u32::MAX)),
+        factor: 2,
+        jitter: Jitter::None,
+        attempts: None,
+        reset_after: None,
+    }
+    .sample_delay(failures.saturating_add(1))
+}
+
+fn cadence_rate() -> RateLimit {
+    RateLimit::Window {
+        len: POLL_TICK,
+        max: 1,
+        sliding: true,
+    }
+}
+
+fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+async fn poll_bounded(
+    cx: &Arc<FlowCx>,
+    ws: &str,
+    id: &str,
+    timeout: Duration,
+) -> Result<usize, AdapterError> {
+    tokio::time::timeout(timeout, poll_connection(cx, ws, id))
+        .await
+        .unwrap_or_else(|_| Err(AdapterError::Malformed("拉取超时".into())))
+}
+
+/// Each live Poll connection owns a row deadline; a round retains the former completion gap.
 pub struct Poller {
     cx: Arc<FlowCx>,
-    /// connection → (next due, consecutive failures)
-    due: HashMap<String, (i64, u32)>,
+    due: RowDeadlines,
+    failures: Mutex<HashMap<String, u32>>,
+    serial: tokio::sync::Mutex<()>,
+    cadence: Limiter<()>,
+    changes: Option<tokio::sync::mpsc::Receiver<steve_types::Notification>>,
+}
+
+struct PollRow {
+    id: String,
+    ws: String,
+    every: Duration,
+    at: Option<i64>,
 }
 
 impl Poller {
     pub fn new(cx: Arc<FlowCx>) -> Self {
         Self {
             cx,
-            due: HashMap::new(),
+            due: RowDeadlines::default(),
+            failures: Mutex::default(),
+            serial: tokio::sync::Mutex::new(()),
+            cadence: Limiter::new(cadence_rate()),
+            changes: None,
         }
     }
 
-    /// One round: polls the connections that are due. Returns how many were polled.
+    /// Already committed connection/source changes request a replan, never erase a row's fence.
+    pub fn with_changes(
+        mut self,
+        changes: tokio::sync::mpsc::Receiver<steve_types::Notification>,
+    ) -> Self {
+        self.changes = Some(changes);
+        self
+    }
+
+    fn failure_counts(&self) -> std::sync::MutexGuard<'_, HashMap<String, u32>> {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn rows(&self) -> Result<Vec<PollRow>, DueError> {
+        let cx = self.cx.clone();
+        let conns = cx.blocking(|store| store.reader(|c| -> FlowResult<Vec<(String,String,String,String)>> {
+            let mut st = c.prepare_cached("SELECT id, workspace_id, adapter, caps FROM connections WHERE status IN ('ok', 'error') ORDER BY created, id")?;
+            Ok(st.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?)
+        })).await.map_err(|e| DueError(e.to_string()))?;
+        {
+            let live: HashSet<_> = conns.iter().map(|c| c.0.as_str()).collect();
+            self.due.retain_live(live.iter().copied());
+            self.failure_counts()
+                .retain(|id, _| live.contains(id.as_str()));
+        }
+        let mut rows = Vec::new();
+        for (id, ws, adapter, caps) in conns {
+            let Some(adapter) = self.cx.events.get(&adapter) else {
+                continue;
+            };
+            let IngestMode::Poll { every } = adapter.mode() else {
+                continue;
+            };
+            if !json_list(&caps).iter().any(|cap| cap == "events") {
+                continue;
+            }
+            let at = self.due.not_before(&id);
+            rows.push(PollRow { id, ws, every, at });
+        }
+        Ok(rows)
+    }
+
+    /// One manual round retains the existing tick API, without the background round throttle.
     pub async fn tick(&mut self) -> usize {
-        let conns = match self.cx.store().reader(|c| -> FlowResult<Vec<(String, String, String, String)>> {
-            let mut st = c.prepare_cached(
-                "SELECT id, workspace_id, adapter, caps FROM connections WHERE status IN ('ok', 'error') ORDER BY created, id",
-            )?;
-            let rows = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        }) {
-            Ok(c) => c,
+        match self.round_at(None, false).await {
+            Ok(n) => n,
             Err(e) => {
                 tracing::warn!("flow.poll: {e}");
-                return 0;
+                0
             }
-        };
-        let now = self.cx.now();
-        // a connection that is gone is no longer tracked
-        self.due.retain(|id, _| conns.iter().any(|c| &c.0 == id));
-        let mut todo = Vec::new();
-        for (id, ws, adapter, caps) in conns {
-            let Some(a) = self.cx.events.get(&adapter) else {
-                continue;
-            };
-            let IngestMode::Poll { every } = a.mode() else {
-                continue;
-            };
-            if !json_list(&caps).iter().any(|c| c == "events") {
-                continue;
-            }
-            let (next, fails) = self.due.get(&id).copied().unwrap_or((0, 0));
-            if next > now {
-                continue;
-            }
-            todo.push((id, ws, every, fails));
         }
-        let polled = todo.len();
-        // a few at a time, so one slow upstream does not hold up the others; a connection is in
-        // the list once, so its own polls stay one after another
-        let mut todo = todo.into_iter();
+    }
+
+    async fn round_at(&self, at: Option<i64>, paced: bool) -> Result<usize, DueError> {
+        let _serial = self.serial.lock().await;
+        if paced && self.cadence.peek(&()).is_err() {
+            return Ok(0);
+        }
+        let mut rows = self.rows().await?;
+        let now = at.unwrap_or_else(|| self.cx.now());
+        // A fresh row is due immediately; using None avoids assigning a later query timestamp.
+        rows.retain(|row| row.at.unwrap_or(0) <= now);
+        rows.sort_by(|a, b| (a.at.unwrap_or(now), &a.id).cmp(&(b.at.unwrap_or(now), &b.id)));
+        let polled = rows.len();
+        let mut todo = rows.into_iter();
         let mut running = tokio::task::JoinSet::new();
         loop {
             while running.len() < POLL_PARALLEL {
-                let Some((id, ws, every, fails)) = todo.next() else {
-                    break;
-                };
+                let Some(row) = todo.next() else { break };
+                let fails = self.failure_counts().get(&row.id).copied().unwrap_or(0);
                 let cx = self.cx.clone();
                 running.spawn(async move {
-                    let r = tokio::time::timeout(POLL_TIMEOUT, poll_connection(&cx, &ws, &id))
-                        .await
-                        .unwrap_or_else(|_| Err(AdapterError::Malformed("拉取超时".into())));
-                    (id, every, fails, r)
+                    let result = poll_bounded(&cx, &row.ws, &row.id, POLL_TIMEOUT).await;
+                    (row.id, row.every, fails, result)
                 });
             }
             let Some(done) = running.join_next().await else {
                 break;
             };
-            let (id, every, fails, r) = match done {
-                Ok(x) => x,
-                // a panicked poll leaves its connection due; it is tried again next round
+            let (id, every, fails, result) = match done {
+                Ok(done) => done,
                 Err(e) => {
                     tracing::error!("flow.poll task: {e}");
                     continue;
                 }
             };
-            match r {
+            match result {
                 Ok(_) => {
-                    self.due.insert(id, (now + every.as_millis() as i64, 0));
+                    self.due
+                        .defer(id.clone(), now.saturating_add(millis(every)));
+                    self.failure_counts().remove(&id);
                 }
                 Err(e) => {
                     tracing::warn!(conn = id, "flow.poll failed: {e}");
-                    let back = every.saturating_mul(2u32.saturating_pow(fails + 1));
-                    let wait = back.min(MAX_BACKOFF);
-                    self.due
-                        .insert(id, (now + wait.as_millis() as i64, fails + 1));
+                    self.due.defer(
+                        id.clone(),
+                        now.saturating_add(millis(retry_wait(every, fails))),
+                    );
+                    self.failure_counts().insert(id, fails.saturating_add(1));
                 }
             }
         }
-        polled
+        // This is a source-wide completion gap, not another per-connection deadline table.
+        if paced && polled > 0 {
+            self.cadence.hit(&());
+        }
+        Ok(polled)
     }
 
-    /// Runs forever.
-    pub async fn run(mut self) {
-        loop {
-            self.tick().await;
-            tokio::time::sleep(POLL_TICK).await;
-        }
+    pub async fn run(self) {
+        let clock = self.cx.modules.clock.clone();
+        self.run_on_clock(clock).await;
+    }
+
+    async fn run_on_clock(mut self, clock: Arc<dyn steve_runtime::Clock>) {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let changed = wake.clone();
+        let changes = self.changes.take();
+        let observe = async move {
+            if let Some(mut changes) = changes {
+                while changes.recv().await.is_some() {
+                    changed.notify_one();
+                }
+            }
+            std::future::pending::<()>().await;
+        };
+        tokio::join!(
+            due_loop(
+                Arc::new(self),
+                clock,
+                wake,
+                Backoff {
+                    base: POLL_TICK,
+                    max: POLL_TICK,
+                    factor: 1,
+                    jitter: Jitter::None,
+                    attempts: None,
+                    reset_after: None,
+                }
+            ),
+            observe
+        );
     }
 }
+
+impl DueSource for Poller {
+    fn name(&self) -> &'static str {
+        "flow.ingest"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let rows = self.rows().await?;
+        let now = self.cx.now();
+        let Some(at) = rows.iter().map(|row| row.at.unwrap_or(now.max(0))).min() else {
+            return Ok(None);
+        };
+        let at = match self.cadence.peek(&()) {
+            Ok(()) => at,
+            Err(steve_runtime::policy::Wait(wait)) => {
+                // Round up: a sub-millisecond remaining quota must not become an already-due time.
+                let ms = i64::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(i64::MAX);
+                at.max(now.saturating_add(ms))
+            }
+        };
+        Ok(Some(at))
+    }
+
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        self.round_at(Some(now), true).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/ingest_due/mod.rs"]
+mod poll_tests;
