@@ -196,7 +196,7 @@ fn future_legacy_version_and_reader_request_a_newer_program_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CORE_FILE);
         let c = Connection::open(&path).unwrap();
-        steve_store_sqlite::legacy::final_structure(&c).unwrap();
+        legacy_input::at(&c, 114);
         c.execute_batch(sql).unwrap();
         drop(c);
         let before = std::fs::read(&path).unwrap();

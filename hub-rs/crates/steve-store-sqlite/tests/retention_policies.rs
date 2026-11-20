@@ -1,14 +1,15 @@
 use rusqlite::{Connection, params};
-use steve_store_sqlite::{
-    legacy,
-    retention::{
-        self as r, Budget,
-        policies::{BACKGROUND_TOTAL_BYTES, DAY, Diagnostics, ITEM_BYTES, Kind, Turns},
-    },
+use steve_store_sqlite::retention::{
+    self as r, Budget,
+    policies::{BACKGROUND_TOTAL_BYTES, DAY, Diagnostics, ITEM_BYTES, Kind, Turns},
 };
 fn database() -> Connection {
-    let c = Connection::open_in_memory().unwrap();
-    legacy::migrate_to_head(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut c,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
     c.pragma_update(None, "foreign_keys", false).unwrap();
     c
 }

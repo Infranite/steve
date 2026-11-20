@@ -438,7 +438,7 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     let manifest = json!({
         "format_version": 1, "version": VERSION, "commit": "a".repeat(40),
         "hub_version": VERSION, "web_version": VERSION, "api_protocol": 1,
-        "schema": {"min_read": steve_store::db::SCHEMA_VERSION, "max_read": steve_store::db::SCHEMA_VERSION, "target": steve_store::db::SCHEMA_VERSION},
+        "storage": steve_store_sqlite::compat::StorageCapabilities::compiled(),
         "assets": [],
     });
     atomic(&target.join("release.json"), &manifest);

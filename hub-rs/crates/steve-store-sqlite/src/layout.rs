@@ -17,7 +17,8 @@ pub const META_DOMAIN: &str = "core";
 pub const DOMAINS: [Domain; 3] = [Domain::Core, Domain::Stream, Domain::Comms];
 
 /// Placement and identities stored in the core file; filenames are single relative components.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Layout {
     pub generation: u32,
     pub min_reader: u32,

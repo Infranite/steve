@@ -243,7 +243,10 @@ async fn no_resume_hub_listens_with_private_permissions_and_removes_socket_on_sh
         serde_json::from_str::<serde_json::Value>(response.split_once("\r\n\r\n").unwrap().1).unwrap()
     }).await.unwrap();
     assert_eq!(body["path"], hub.cfg.db_path().to_string_lossy().as_ref());
-    assert!(body["schema_version"].as_i64().unwrap() > 0);
+    assert_eq!(
+        body["storage"]["layout"]["generation"],
+        steve_store_sqlite::layout::LAYOUT_GENERATION
+    );
     assert!(body["file_size"].as_u64().unwrap() > 0);
     hub.stop().await;
     assert!(!path.exists());
@@ -342,13 +345,15 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     );
     drop(lock);
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    let c = rusqlite::Connection::open(cfg.db_path()).unwrap();
-    steve_store::db::migrate(&c).unwrap();
+    let mut c = rusqlite::Connection::open(cfg.db_path()).unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut c,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
     c.execute_batch(&format!(
-        "DELETE FROM schema_version; INSERT INTO schema_version(rowid,v) VALUES(17,{});
-        DELETE FROM schema_compat; INSERT INTO schema_compat(rowid,min_reader) VALUES(29,{});",
-        steve_store::db::SCHEMA_VERSION,
-        steve_store::db::SCHEMA_VERSION - 1
+        "DELETE FROM schema_compat; INSERT INTO schema_compat(rowid,min_reader) VALUES(29,{});",
+        steve_store_sqlite::compat::LEGACY_READER_FENCE
     ))
     .unwrap();
     drop(c);
@@ -388,7 +393,12 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
     let id = token["id"].as_str().unwrap();
     let revoked = access::command(&cfg, &["token".into(), "revoke".into(), id.into()]);
     assert_eq!(revoked.code, 0, "{}", revoked.stderr);
-    let store = Store::open_admin(cfg.db_path()).unwrap();
+    let store = Store::from_engine(
+        steve_store_sqlite::open::open_admin(&cfg.data_dir).unwrap(),
+        steve_store::NoPublisher,
+        steve_store::FacadeMode::Admin,
+    )
+    .unwrap();
     assert!(store.access().token(id).unwrap().unwrap().revoked.is_some());
     let actions: Vec<String> = store
         .with_conn(|c| {
@@ -401,16 +411,34 @@ fn an_offline_cli_lists_without_writing_metadata_and_keeps_token_writes_audited(
         .unwrap();
     assert_eq!(actions, ["token.create", "token.revoke"]);
     assert_eq!(admin_header(&cfg.db_path()), before_header);
+    let expected = access::command_on(&store, &args).unwrap();
+    drop(store);
     let listed = access::command(&cfg, &args);
     assert_eq!(listed.code, 0);
-    assert_eq!(listed.stdout, access::command_on(&store, &args).unwrap());
+    assert_eq!(listed.stdout, expected);
 }
 
 fn admin_header(path: &std::path::Path) -> Vec<(i64, i64)> {
     let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap();
-    c.prepare("SELECT rowid,v FROM schema_version UNION ALL SELECT rowid,min_reader FROM schema_compat ORDER BY 1")
-        .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    let legacy: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schema_version')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let sql = if legacy {
+        "SELECT rowid,v FROM schema_version UNION ALL SELECT rowid,min_reader FROM schema_compat ORDER BY 1"
+    } else {
+        "SELECT rowid,min_reader FROM schema_compat ORDER BY 1"
+    };
+    c.prepare(sql)
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
 }
 
 #[test]
@@ -674,11 +702,10 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
     for chosen in ["pre-upgrade", "pre-destructive"] {
         let args = vec!["backup".into(), "--reason".into(), chosen.into()];
         let result = access::command(&cfg, &args);
-        assert_eq!(result.code, 0, "{}", result.stderr);
-        let manifest: steve_store_sqlite::backup::Manifest =
-            serde_json::from_str(&result.stdout).unwrap();
-        assert_eq!(manifest.schema_version, Some(50));
-        assert_eq!(manifest.reason.kind(), chosen);
+        assert_eq!(
+            result.code, 2,
+            "legacy backup must require conversion first"
+        );
         assert_eq!(std::fs::read(cfg.db_path()).unwrap(), before);
         assert_eq!(
             std::fs::metadata(cfg.db_path())
@@ -696,7 +723,7 @@ fn offline_backup_takes_instance_lock_and_never_opens_the_legacy_store() {
         steve_store_sqlite::backup::list(&cfg.home.join("backups"))
             .unwrap()
             .len(),
-        2
+        0
     );
 }
 

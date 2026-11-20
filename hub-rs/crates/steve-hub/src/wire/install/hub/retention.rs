@@ -8,7 +8,6 @@ use steve_runtime::{
 use steve_store::retention::{ALL, DEFAULT_BUDGET, Kind, SliceReport};
 
 const INTERVAL: Duration = Duration::from_secs(5 * 60);
-const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
@@ -17,26 +16,22 @@ install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
 
 struct State {
     due: i64,
-    optimize_due: i64,
     after: [Option<i64>; ALL.len()],
     done: [bool; ALL.len()],
     resources_done: bool,
 }
-struct Source<F, O, R> {
+struct Source<F, R> {
     execute: F,
-    optimize: O,
     resources: R,
     state: Mutex<State>,
 }
-impl<F, O, R> Source<F, O, R> {
-    fn new(first_due: i64, execute: F, optimize: O, resources: R) -> Self {
+impl<F, R> Source<F, R> {
+    fn new(first_due: i64, execute: F, resources: R) -> Self {
         Self {
             execute,
-            optimize,
             resources,
             state: Mutex::new(State {
                 due: first_due,
-                optimize_due: first_due.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64),
                 after: [None; ALL.len()],
                 done: [false; ALL.len()],
                 resources_done: false,
@@ -44,12 +39,10 @@ impl<F, O, R> Source<F, O, R> {
         }
     }
 }
-impl<F, O, R, Fut, Opt, Res> DueSource for Source<F, O, R>
+impl<F, R, Fut, Res> DueSource for Source<F, R>
 where
     F: Fn(Kind, i64, Option<i64>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = steve_store::Result<SliceReport<i64>>> + Send,
-    O: Fn() -> Opt + Send + Sync + 'static,
-    Opt: Future<Output = steve_store::Result<()>> + Send,
     R: Fn(i64) -> Res + Send + Sync + 'static,
     Res: Future<Output = steve_store::Result<bool>> + Send,
 {
@@ -58,26 +51,10 @@ where
     }
     async fn next_due(&self) -> Result<Option<i64>, DueError> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(Some(state.due.min(state.optimize_due)))
+        Ok(Some(state.due))
     }
     async fn run_due(&self, now: i64) -> Result<(), DueError> {
-        let optimize_due = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .optimize_due;
         let mut error = None;
-        if optimize_due <= now {
-            match (self.optimize)().await {
-                Ok(()) => {
-                    self.state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .optimize_due = now.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64)
-                }
-                Err(e) => error = Some(DueError(e.to_string())),
-            }
-        }
         let due = self.state.lock().unwrap_or_else(|e| e.into_inner()).due;
         if due <= now {
             for (index, kind) in ALL.into_iter().enumerate() {
@@ -148,7 +125,6 @@ fn source(
     no_resume: bool,
     first_due: i64,
 ) -> impl DueSource {
-    let optimizer = db.clone();
     let backup_store = db.clone();
     Source::new(
         first_due,
@@ -160,14 +136,6 @@ fn source(
                 })
                 .await
                 .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
-            }
-        },
-        move || {
-            let db = optimizer.clone();
-            async move {
-                tokio::task::spawn_blocking(move || db.optimize())
-                    .await
-                    .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
             }
         },
         move |now: i64| {
@@ -240,17 +208,17 @@ mod tests {
         });
         let cfg = Arc::new(Config::from_vars(|key| vars(key)).unwrap());
         assert!(cfg.no_resume);
-        let db = steve_store::Store::open(
-            home.path().join("steve.sqlite3"),
-            steve_store::NoPublisher,
-        )
-        .unwrap();
+        let db =
+            steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
         let mut registry = HubRegistry {
             db: Some(db),
             jobs: Some(vec![]),
             ..Default::default()
         };
-        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(Default::default())));
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
         let asm = crate::extension::Assembly::empty();
         install(
             &mut registry,
@@ -359,7 +327,6 @@ mod tests {
                     })
                 }
             },
-            || async { Ok(()) },
             |_: i64| async {
                 Err(steve_store::StoreError::Conflict(
                     "filesystem unavailable".into(),
@@ -381,14 +348,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_continues_cursors_and_optimizes_hourly_on_virtual_time() {
+    async fn retention_continues_cursors_and_resources_on_virtual_time() {
         let clock = Arc::new(FakeClock::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
-        let optimized = Arc::new(AtomicUsize::new(0));
         let resources = Arc::new(AtomicUsize::new(0));
         let resource_calls = resources.clone();
         let observed = calls.clone();
-        let count_opt = optimized.clone();
         let source = Arc::new(Source::new(
             100,
             move |kind: Kind, _: i64, after: Option<i64>| {
@@ -408,10 +373,6 @@ mod tests {
                         },
                     })
                 }
-            },
-            move || {
-                count_opt.fetch_add(1, Ordering::SeqCst);
-                async { Ok(()) }
             },
             move |_: i64| {
                 let n = resource_calls.fetch_add(1, Ordering::SeqCst);
@@ -442,7 +403,6 @@ mod tests {
             sweep,
             "four-slice quota continues in a second round"
         );
-        assert_eq!(optimized.load(Ordering::SeqCst), 0);
         assert_eq!(
             resources.load(Ordering::SeqCst),
             2,
@@ -452,19 +412,13 @@ mod tests {
             source.next_due().await.unwrap(),
             Some(100 + INTERVAL.as_millis() as i64)
         );
-        let hour = 100 + OPTIMIZE_INTERVAL.as_millis() as i64;
+        let hour = 100 + Duration::from_secs(60 * 60).as_millis() as i64;
         clock.advance_to(hour);
         settle(&clock, hour).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2 * sweep);
-        assert_eq!(optimized.load(Ordering::SeqCst), 1);
         assert_eq!(resources.load(Ordering::SeqCst), 3);
         clock.advance_to(hour + INTERVAL.as_millis() as i64);
         settle(&clock, hour + INTERVAL.as_millis() as i64).await;
-        assert_eq!(
-            optimized.load(Ordering::SeqCst),
-            1,
-            "ordinary retention sweep does not run optimize again"
-        );
         task.abort();
         let _ = task.await;
     }

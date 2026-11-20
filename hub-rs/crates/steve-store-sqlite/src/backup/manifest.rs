@@ -29,7 +29,7 @@ pub struct Manifest {
     pub published_order: u64,
     pub source: PathBuf,
     pub directory: PathBuf,
-    pub schema_version: Option<i64>,
+    pub storage: crate::compat::CurrentStorage,
     pub database: Artifact,
     pub files: Files,
     /// A verified database and durable manifest were published. Files may be incomplete.

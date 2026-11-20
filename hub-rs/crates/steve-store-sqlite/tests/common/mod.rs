@@ -72,9 +72,11 @@ pub fn objects(c: &Connection) -> Vec<Object> {
         .filter(|o| !shadows.contains(&o.table) && !LEGACY_TABLES.contains(&o.table.as_str())).collect()
 }
 
+mod legacy_input;
+
 pub fn legacy() -> Connection {
     let c = Connection::open_in_memory().unwrap();
-    steve_store_sqlite::legacy::final_structure(&c).unwrap();
+    legacy_input::at(&c, 114);
     c
 }
 

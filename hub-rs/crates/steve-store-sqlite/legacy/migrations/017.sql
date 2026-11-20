@@ -1,2 +1,0 @@
--- Reasoning effort is added conditionally by db.rs because the TS Hub can add these
--- same nullable columns without advancing the shared Rust schema version.

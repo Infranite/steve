@@ -10,7 +10,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::*;
 use steve_store::*;
 
 fn prod_copy() -> Option<(tempfile::TempDir, PathBuf)> {
@@ -70,7 +69,6 @@ const TABLES: &[&str] = &[
     "item_tags",
     "settings",
     "devices",
-    "schema_version",
 ];
 
 #[test]
@@ -83,26 +81,15 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
         .iter()
         .map(|t| cli(&path, &format!("SELECT count(*) FROM {t}")))
         .collect();
-    let schema_before = schema_of(&path);
-    let v_before: i64 = cli(&path, "SELECT v FROM schema_version").parse().unwrap();
-    assert!(
-        (2..=db::SCHEMA_VERSION).contains(&v_before),
-        "prod copy at v{v_before}"
-    );
-
+    let source = steve_store_sqlite::open::open_readonly(&path).unwrap();
+    steve_store_sqlite::compat::CurrentStorage::inspect(&source).unwrap();
+    drop(source);
     let s = Store::open(&path, NoPublisher).unwrap();
-    if v_before == db::SCHEMA_VERSION {
-        assert_eq!(
-            schema_of(&path),
-            schema_before,
-            "opening at the current version must not change the schema"
-        );
-    }
-    assert_eq!(
-        schema_of(&path),
-        schema_of(fresh().store.path()),
-        "migrated prod schema equals a fresh schema"
-    );
+    s.reader(|c| {
+        steve_store_sqlite::schema::verify_baseline(c)?;
+        Ok::<_, StoreError>(())
+    })
+    .unwrap();
     s.with_conn(|c| {
         assert_eq!(
             c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?,
@@ -125,8 +112,8 @@ fn opens_prod_copy_unchanged_and_reads_everything() {
     .unwrap();
     drop(s);
     assert_eq!(
-        cli(&path, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION.to_string()
+        cli(&path, "SELECT min_reader FROM schema_compat"),
+        steve_store_sqlite::compat::LEGACY_READER_FENCE.to_string()
     );
     let s = Store::open(&path, NoPublisher).unwrap();
 

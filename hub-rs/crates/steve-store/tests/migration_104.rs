@@ -1,7 +1,8 @@
 //! Current work-fact tables and the newest-turn index.
+#[path = "common/current.rs"]
+mod current;
 
 use rusqlite::Connection;
-use steve_store::db;
 
 fn one<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
@@ -9,8 +10,8 @@ fn one<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
 
 #[test]
 fn facts_start_empty_and_newest_turn_reads_use_the_session_index() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     // Only turns matter here; their sessions are not set up.
     c.execute_batch(
         "PRAGMA foreign_keys=OFF;

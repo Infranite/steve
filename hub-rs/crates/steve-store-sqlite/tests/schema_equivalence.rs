@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/legacy_input.rs"]
+mod legacy_input;
 
 use common::*;
 use rusqlite::{Connection, types::Value};
@@ -189,76 +191,6 @@ fn route_log_belongs_to_core_in_both_layouts() {
 }
 
 #[test]
-fn legacy_flow_matches_old_store_open() {
-    // Temporary dev dependency; this is its sole use. Remove when the old store runner is retired.
-    let directory =
-        std::env::temp_dir().join(format!("steve-schema-equivalence-{}", std::process::id()));
-    std::fs::create_dir(&directory).unwrap();
-    let path = directory.join("steve.sqlite3");
-    let store = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
-    let c = Connection::open(&path).unwrap();
-    equivalent(&legacy(), &c, false);
-    drop(c);
-    drop(store);
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-fn archived_at(version: i64) -> Connection {
-    let c = Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL); CREATE TABLE schema_compat (min_reader INTEGER NOT NULL);").unwrap();
-    for n in 1..=version {
-        let sql = std::fs::read_to_string(
-            root()
-                .parent()
-                .unwrap()
-                .join(format!("legacy/migrations/{n:03}.sql")),
-        )
-        .unwrap();
-        c.execute_batch(&sql).unwrap();
-    }
-    c.execute("INSERT INTO schema_version VALUES(?)", [version])
-        .unwrap();
-    c.execute("INSERT INTO schema_compat VALUES(?)", [version])
-        .unwrap();
-    c
-}
-
-#[test]
-fn legacy_migration_replays_without_a_support_window() {
-    let fresh = Connection::open_in_memory().unwrap();
-    steve_store_sqlite::legacy::migrate_to_head(&fresh).unwrap();
-    equivalent(&legacy(), &fresh, false);
-    let head: i64 = fresh
-        .query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    for version in [1, 27, 107, 108, 109, 110, 111, 112, 113, head] {
-        let c = archived_at(version);
-        c.pragma_update(None, "foreign_keys", true).unwrap();
-        steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
-        equivalent(&legacy(), &c, false);
-        steve_store_sqlite::legacy::migrate_to_head(&c).unwrap();
-        assert_eq!(
-            rows(&c, "PRAGMA foreign_keys"),
-            vec![vec![Value::Integer(1)]]
-        );
-    }
-    for (version, reader) in [(-1, -1), (head + 1, head + 1), (head, head + 1)] {
-        let c = legacy();
-        c.execute("UPDATE schema_version SET v=?", [version])
-            .unwrap();
-        c.execute("UPDATE schema_compat SET min_reader=?", [reader])
-            .unwrap();
-        let before = structure(&c, false);
-        assert!(steve_store_sqlite::legacy::migrate_to_head(&c).is_err());
-        assert_eq!(before, structure(&c, false));
-        assert_eq!(
-            seed_rows(&c, "schema_version"),
-            vec![format!("[Integer({version})]")]
-        );
-    }
-}
-
-#[test]
 fn contract_keys_and_retention_index() {
     let c = baseline();
     c.execute_batch("INSERT INTO meta VALUES('core','schema','1'); INSERT INTO meta VALUES('comms','schema','1');
@@ -289,10 +221,10 @@ fn contract_keys_and_retention_index() {
 
 #[test]
 fn failed_pending_migration_keeps_version_and_restores_foreign_keys() {
-    let head: i64 = legacy()
-        .query_row("SELECT v FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    let c = archived_at(head - 1);
+    let head = steve_store_sqlite::compat::LEGACY_MAX;
+    let mut c = rusqlite::Connection::open_in_memory().unwrap();
+    legacy_input::at(&c, head - 1);
+    c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('owner','w','fixture','fixture','owner',0);").unwrap();
     c.pragma_update(None, "foreign_keys", false).unwrap();
     c.execute_batch(
         "INSERT INTO diagnostic_captures(item_id,workspace_id,actor,started_at,expires_at)
@@ -301,7 +233,7 @@ fn failed_pending_migration_keeps_version_and_restores_foreign_keys() {
     .unwrap();
     c.pragma_update(None, "foreign_keys", true).unwrap();
     let before = structure(&c, false);
-    let error = steve_store_sqlite::legacy::migrate_to_head(&c).unwrap_err();
+    let error = steve_store_sqlite::convert::convert(&mut c).unwrap_err();
     assert!(error.to_string().contains("foreign keys broken"));
     assert!(c.is_autocommit());
     assert_eq!(

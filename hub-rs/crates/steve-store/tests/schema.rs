@@ -1,64 +1,11 @@
-//! Migrations and the schema_version they leave.
+//! Current schema, connection policy and repository decoding.
 
 mod common;
 
 use common::*;
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use steve_store::{NoPublisher, Store, db};
-
-/// Counts WARN events (enough to see the newer-schema warning without a subscriber crate).
-struct Warns(Arc<AtomicUsize>);
-
-impl tracing::Subscriber for Warns {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, e: &tracing::Event<'_>) {
-        if *e.metadata().level() == tracing::Level::WARN {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-#[test]
-fn compiled_migrations_match_the_release_lock() {
-    // The compatibility test checks disk files against LOCK, including helper
-    // files such as 027_items.sql. This checks what the release actually compiles.
-    let locked: Vec<_> = include_str!("../migrations/LOCK")
-        .lines()
-        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-        .map(|line| line.split_once(' ').expect("`<file> <sha256>`"))
-        .filter(|(file, _)| {
-            file.len() == "000.sql".len()
-                && file.ends_with(".sql")
-                && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
-        })
-        .collect();
-    assert_eq!(
-        db::MIGRATIONS.len(),
-        locked.len(),
-        "compiled migration count"
-    );
-    for (index, ((file, expected), sql)) in locked.iter().zip(db::MIGRATIONS).enumerate() {
-        assert_eq!(*file, format!("{:03}.sql", index + 1), "migration order");
-        let actual: String = Sha256::digest(sql.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        assert_eq!(actual, *expected, "compiled migration differs from {file}");
-    }
-}
+use steve_store::{NoPublisher, Store};
 
 #[test]
 fn pragmas_and_version() {
@@ -80,8 +27,11 @@ fn pragmas_and_version() {
                 c.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?,
                 1
             );
-            assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
-            assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+            assert_eq!(
+                count(c, "SELECT min_reader FROM schema_compat"),
+                steve_store_sqlite::compat::LEGACY_READER_FENCE
+            );
+            assert_eq!(count(c, "SELECT count(*) FROM domain_schema"), 3);
             Ok(())
         })
         .unwrap();
@@ -122,50 +72,14 @@ fn reopen_changes_nothing() {
     let s = Store::open(&path, NoPublisher).unwrap();
     assert_eq!(schema_of(&path), before);
     s.with_conn(|c| {
-        assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
-        assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+        assert_eq!(
+            count(c, "SELECT min_reader FROM schema_compat"),
+            steve_store_sqlite::compat::LEGACY_READER_FENCE
+        );
         assert_eq!(count(c, "SELECT count(*) FROM items"), 1);
         Ok(())
     })
     .unwrap();
-}
-
-#[test]
-fn newer_schema_is_opened_unchanged() {
-    let t = fresh();
-    let path = t.store.path().to_path_buf();
-    t.store
-        .with_conn(|c| {
-            // what a newer build would have left behind
-            c.execute(
-                "UPDATE schema_version SET v = ?",
-                [db::SCHEMA_VERSION + 1],
-            )?;
-            c.execute_batch("CREATE TABLE future (id TEXT PRIMARY KEY); ALTER TABLE queued ADD COLUMN later TEXT;")?;
-            Ok(())
-        })
-        .unwrap();
-    drop(t.store);
-    let before = schema_of(&path);
-    let warns = Arc::new(AtomicUsize::new(0));
-    let s = tracing::subscriber::with_default(Warns(warns.clone()), || {
-        Store::open(&path, NoPublisher).unwrap()
-    });
-    assert_eq!(warns.load(Ordering::SeqCst), 1, "one warning");
-    assert_eq!(schema_of(&path), before, "no migration ran");
-    s.with_conn(|c| {
-        assert_eq!(
-            count(c, "SELECT v FROM schema_version"),
-            db::SCHEMA_VERSION + 1,
-            "version is never written down"
-        );
-        assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
-        Ok(())
-    })
-    .unwrap();
-    // the repositories still work on the newer schema
-    s.ensure_workspace().unwrap();
-    assert!(s.workspaces().get("default").unwrap().is_some());
 }
 
 #[test]

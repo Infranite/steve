@@ -1,188 +1,32 @@
-//! The reader gate (`schema_compat`): a database records the oldest schema a build must know to open it,
-//! every open checks it before writing anything, and the stamp never goes down. Plus the lock on released
-//! migration files: once a migration may have reached a database it can't change.
-
+//! Current data, constraints and schema survive reopen without historical replay.
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
-use steve_store::{StoreError, db};
-
+#[path = "common/current.rs"]
+mod current;
 fn fresh() -> Connection {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     c
 }
-
 fn one(c: &Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
 }
-
-#[test]
-fn a_migrated_database_records_the_schema_it_needs() {
-    let c = fresh();
-    assert_eq!(
-        db::compat(&c).unwrap(),
-        db::Compat {
-            schema: db::SCHEMA_VERSION,
-            min_reader: db::SCHEMA_VERSION,
-        }
-    );
-    assert_eq!(one(&c, "SELECT count(*) FROM schema_compat"), 1);
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        one(&c, "SELECT count(*) FROM schema_compat"),
-        1,
-        "one row, every open"
-    );
-}
-
-#[test]
-fn a_database_that_needs_a_newer_build_is_refused_untouched() {
-    let c = fresh();
-    let ahead = db::SCHEMA_VERSION + 1;
-    c.execute_batch(&format!(
-        "UPDATE schema_version SET v = {ahead}; UPDATE schema_compat SET min_reader = {ahead};"
-    ))
-    .unwrap();
-    let before: i64 = one(&c, "SELECT total_changes()");
-    match db::migrate(&c) {
-        Err(StoreError::Incompatible {
-            schema,
-            min_reader,
-            ours,
-        }) => {
-            assert_eq!(
-                (schema, min_reader, ours),
-                (ahead, ahead, db::SCHEMA_VERSION)
-            );
-        }
-        r => panic!("opened a database that needs v{ahead}: {r:?}"),
-    }
-    assert_eq!(one(&c, "SELECT total_changes()"), before, "nothing written");
-    assert_eq!(one(&c, "SELECT v FROM schema_version"), ahead);
-}
-
-#[test]
-fn a_newer_database_no_build_stamped_is_refused() {
-    // 0.2.13 and older don't stamp: what such a build migrated needs a build that knows its schema
-    let c = fresh();
-    let ahead = db::SCHEMA_VERSION + 1;
-    c.execute_batch(&format!(
-        "DROP TABLE schema_compat; UPDATE schema_version SET v = {ahead};"
-    ))
-    .unwrap();
-    assert!(matches!(
-        db::migrate(&c),
-        Err(StoreError::Incompatible { .. })
-    ));
-    assert_eq!(
-        one(
-            &c,
-            "SELECT count(*) FROM sqlite_master WHERE name = 'schema_compat'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn an_older_unstamped_database_is_migrated_and_stamped() {
-    let c = fresh();
-    c.execute_batch("DROP TABLE schema_compat").unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        one(&c, "SELECT min_reader FROM schema_compat"),
-        db::SCHEMA_VERSION
-    );
-}
-
-#[test]
-fn a_newer_database_that_asks_only_for_this_schema_is_opened_unchanged() {
-    let c = fresh();
-    let ahead = db::SCHEMA_VERSION + 1;
-    c.execute_batch(&format!("UPDATE schema_version SET v = {ahead}"))
-        .unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        one(&c, "SELECT v FROM schema_version"),
-        ahead,
-        "not written down"
-    );
-    assert_eq!(
-        one(&c, "SELECT min_reader FROM schema_compat"),
-        db::SCHEMA_VERSION
-    );
-}
-
-#[test]
-fn the_stamp_never_goes_down() {
-    let c = fresh();
-    // a stamp an earlier, stricter build left (still one this build can read)
-    c.execute_batch(&format!(
-        "UPDATE schema_compat SET min_reader = {}",
-        db::SCHEMA_VERSION
-    ))
-    .unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        one(&c, "SELECT min_reader FROM schema_compat"),
-        db::SCHEMA_VERSION
-    );
-}
-
-/// `migrations/LOCK`: the sha256 of every migration file. A released migration is frozen (changes go into a
-/// new one), so a changed hash fails; a new migration adds its line.
-#[test]
-fn released_migrations_are_frozen() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let lock = std::fs::read_to_string(dir.join("LOCK")).unwrap();
-    let locked: Vec<(&str, &str)> = lock
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .map(|l| l.split_once(' ').expect("`<file> <sha256>`"))
-        .collect();
-    let mut files: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| n.ends_with(".sql"))
-        .collect();
-    files.sort();
-    // one NNN.sql per migration; parts of one (027_items.sql) are locked too
-    let numbered = files
-        .iter()
-        .filter(|f| f.len() == "000.sql".len() && f[..3].bytes().all(|b| b.is_ascii_digit()))
-        .count();
-    assert_eq!(
-        numbered as i64,
-        db::SCHEMA_VERSION,
-        "one NNN.sql per migration"
-    );
-    assert_eq!(
-        locked.iter().map(|(f, _)| *f).collect::<Vec<_>>(),
-        files,
-        "LOCK lists every migration file, in order"
-    );
-    for (f, want) in locked {
-        let got: String = Sha256::digest(std::fs::read(dir.join(f)).unwrap())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(
-            got, want,
-            "{f} changed after release: put the change in a new migration"
-        );
-    }
-}
-
 #[test]
 fn delivery_tables_and_existing_device_revision_survive_reopen() {
-    let c = fresh();
+    let mut c = fresh();
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('default','Existing workspace',1);
          INSERT INTO devices(id,name,roles,max_sessions,revision,seen,created)
              VALUES('delivery-upgrade-device','Existing device','[]',64,17,1,1);",
     )
     .unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(one(&c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+    current::migrate(&mut c).unwrap();
+    assert_eq!(
+        steve_store_sqlite::compat::CurrentStorage::inspect(&c)
+            .unwrap()
+            .domains
+            .len(),
+        3
+    );
     assert_eq!(
         one(
             &c,
@@ -214,7 +58,7 @@ fn delivery_tables_and_existing_device_revision_survive_reopen() {
         assert!(exists, "{table} created by the delivery migration");
     }
     // Reopening the same version must not rebuild or overwrite the existing device.
-    db::migrate(&c).unwrap();
+    current::migrate(&mut c).unwrap();
     assert_eq!(
         one(
             &c,
@@ -226,7 +70,7 @@ fn delivery_tables_and_existing_device_revision_survive_reopen() {
 
 #[test]
 fn connector_references_have_foreign_keys_and_indexes() {
-    let c = fresh();
+    let mut c = fresh();
     assert_eq!(
         one(
             &c,
@@ -248,14 +92,20 @@ fn connector_references_have_foreign_keys_and_indexes() {
         ),
         2
     );
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
+    current::migrate(&mut c).unwrap();
+    assert_eq!(
+        steve_store_sqlite::compat::CurrentStorage::inspect(&c)
+            .unwrap()
+            .domains
+            .len(),
+        3
+    );
     assert_eq!(one(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
 }
 
 #[test]
 fn notification_foreign_keys_triggers_and_schema_survive_reopen() {
-    let c = fresh();
+    let mut c = fresh();
     assert_eq!(
         one(
             &c,
@@ -284,7 +134,7 @@ fn notification_foreign_keys_triggers_and_schema_survive_reopen() {
             |r| r.get(0),
         )
         .unwrap();
-    db::migrate(&c).unwrap();
+    current::migrate(&mut c).unwrap();
     let reopened: String = c
         .query_row(
             "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",
@@ -293,6 +143,36 @@ fn notification_foreign_keys_triggers_and_schema_survive_reopen() {
         )
         .unwrap();
     assert_eq!(schema, reopened);
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
+    assert_eq!(
+        steve_store_sqlite::compat::CurrentStorage::inspect(&c)
+            .unwrap()
+            .domains
+            .len(),
+        3
+    );
     assert_eq!(one(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[test]
+fn facade_refuses_noncanonical_names_before_creating_files() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("other.sqlite3");
+    assert!(steve_store::Store::open(&path, steve_store::NoPublisher).is_err());
+    assert!(!path.exists());
+    assert!(!d.path().join("steve.sqlite3").exists());
+}
+
+#[test]
+fn facade_refuses_legacy_without_an_instance_owner_and_preserves_bytes() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("steve.sqlite3");
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(include_str!(
+        "../../steve-store-sqlite/legacy/113_fixture.sql"
+    ))
+    .unwrap();
+    drop(c);
+    let before = std::fs::read(&path).unwrap();
+    assert!(steve_store::Store::open(&path, steve_store::NoPublisher).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }

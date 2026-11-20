@@ -1,11 +1,12 @@
 //! A Node environment entry stores either a value or a vault reference.
 use rusqlite::Connection;
-use steve_store::db;
+#[path = "common/current.rs"]
+mod current;
 
 #[test]
 fn node_environment_values_and_vault_references_are_mutually_exclusive() {
-    let c = Connection::open_in_memory().unwrap();
-    db::migrate(&c).unwrap();
+    let mut c = Connection::open_in_memory().unwrap();
+    current::migrate(&mut c).unwrap();
     c.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
     c.pragma_update(None, "foreign_keys", "OFF").unwrap();
     // one user's variable on one Node is a value or a vault reference, never both

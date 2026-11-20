@@ -16,7 +16,11 @@ fn realtime_queries_seek_bounded_windows_in_hour_four_hour_and_concurrent_histor
     let mut window_costs = vec![];
     for (hours, concurrent) in [(1, 1), (4, 1), (4, 3)] {
         let mut c = Connection::open_in_memory().unwrap();
-        steve_store::db::migrate(&c).unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut c,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
         let n = hours * 3_600 * 20; // actual Node coalescing cadence, 50ms
         let start = AT - n * 50;
         let tx = c.transaction().unwrap();
