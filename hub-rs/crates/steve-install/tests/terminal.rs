@@ -1447,3 +1447,110 @@ fn actual_reconfigure_preserves_installation_and_supports_noop_and_eof() {
         "only the committed modification runs candidate validation"
     );
 }
+
+#[test]
+fn sg9_pairing_phase_failure_and_resume_are_not_reordered() {
+    for scenario in ["refused", "wrong-readback", "paired", "resume-refused"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let account = root.join("account");
+        let bin = root.join("bin");
+        fs::create_dir_all(&account).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let cli = installer(&root);
+        manager(&bin, &root.join("manager-calls"), false);
+        let info = json!({"version":"1.2.3","commit":"a".repeat(40),"schema":54,"target":steve_install::build_info()["target"]});
+        let calls =
+            steve_install::common::shell_quote(root.join("node-calls").to_str().unwrap()).unwrap();
+        let response = if scenario == "wrong-readback" {
+            "https://other.example"
+        } else {
+            "https://hub.example"
+        };
+        let paired = if scenario == "refused" {
+            "exit 93"
+        } else {
+            "/bin/mkdir -p \"$STEVE_HOME/node\"; printf '%s' '{\"hub_url\":\"RESPONSE\",\"pin\":null}' > \"$STEVE_HOME/node/node.json\""
+        };
+        executable(
+            &root.join("installer/bin/steve-node"),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n--build-info) printf '%s\\n' '{info}' ;;\npair) printf 'pair|%s|%s\\n' \"$*\" \"$STEVE_PAIR_CODE\" >> {calls}; {} ;;\nstatus) printf 'status\\n' >> {calls}; exit {} ;;\n*) exit 95 ;;\nesac\n",
+                paired.replace("RESPONSE", response),
+                if scenario == "resume-refused" { 94 } else { 0 }
+            ),
+        );
+        let home = account.join("isolated-node");
+        let invoke = || {
+            Command::new(&cli)
+                .args([
+                    "setup",
+                    "node",
+                    "--hub",
+                    "https://hub.example",
+                    "--label",
+                    "test.sg9.node",
+                    "--home",
+                ])
+                .arg(&home)
+                .env_clear()
+                .env("HOME", &account)
+                .env("PATH", &bin)
+                .env("STEVE_LANG", "en")
+                .env("STEVE_SETUP_PROGRESS", "1")
+                .env("STEVE_PAIR_CODE", "fixture-code")
+                .env("TMPDIR", &root)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let output = invoke();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let phases: Vec<_> = stdout
+            .lines()
+            .filter_map(|s| s.strip_prefix("steve-setup-progress "))
+            .collect();
+        let failed = matches!(scenario, "refused" | "wrong-readback");
+        assert_eq!(
+            phases,
+            if failed {
+                vec!["install", "pair"]
+            } else {
+                vec!["install", "pair", "adapters", "start"]
+            },
+            "{scenario}: {output:?}"
+        );
+        if failed {
+            assert!(!output.status.success());
+            assert!(!root.join("manager-calls").exists());
+        }
+        let log = fs::read_to_string(root.join("node-calls")).unwrap();
+        assert_eq!(log, "pair|pair https://hub.example|fixture-code\n");
+        let record = fs::read_to_string(home.join("setup.json")).unwrap();
+        assert!(!record.contains("fixture-code"));
+        let saved: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(saved["pair_started"], true);
+        assert_eq!(saved["hub_url"], "https://hub.example");
+        if !failed {
+            let second = invoke();
+            let phases: Vec<_> = String::from_utf8_lossy(&second.stdout)
+                .lines()
+                .filter_map(|s| s.strip_prefix("steve-setup-progress ").map(str::to_owned))
+                .collect();
+            assert_eq!(
+                phases,
+                if scenario == "resume-refused" {
+                    vec!["install"]
+                } else {
+                    vec!["install", "adapters", "start"]
+                },
+                "{scenario}: {second:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("node-calls")).unwrap(),
+                format!("{log}status\n"),
+                "resume cannot pair twice"
+            );
+        }
+    }
+}
