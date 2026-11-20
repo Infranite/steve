@@ -3988,12 +3988,7 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
     .unwrap();
     let m = r.out_message_id.unwrap();
     h.env.clock.advance(3_600_000 + 1);
-    exec(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET status = 'pending', sent = NULL, created = 0 WHERE id = '{m}'"
-        ),
-    );
+    sg4_message_state(&h, &m, "pending", None, Some(0));
     h.outbox.send_due(&h.ch).await;
     h.outbox.send_due(&h.ch).await;
     let sends = h.fake.sent.lock().unwrap().len();
@@ -7675,4 +7670,159 @@ async fn queue_query_failure_reaches_the_due_loop() {
             Ok(())
         })
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sg4_preflight_priorities_precede_validation_checks_and_sending() {
+    for (skip, reuse, blank, bad_target, expected) in [
+        (true, true, true, true, "skip"),
+        (false, true, true, true, "reuse"),
+        (false, false, true, true, "invalid"),
+        (false, false, false, true, "missing"),
+        (false, false, true, false, "invalid"),
+    ] {
+        let h = setup().await;
+        checks_pass(&h);
+        let plan = recorded(&h, &h.oncall, "C_OPS", "sg4-source", "ulilei", "question").await;
+        set_rules(
+            &h,
+            &h.oncall,
+            json!([{"when":{"kind":"all"},"act":"reply"}]),
+        );
+        let mut first = out(&plan, "safe reply", rule(&plan), None);
+        first.operation_id = Some("sg4-operation".into());
+        let original = h.outbox.deliver(&h.ch, &first).await.unwrap();
+        assert!(matches!(original, Delivered::Sent { .. }));
+        let before = h.env.gateway.prompts.lock().unwrap().len();
+        let mut next = first;
+        next.auth = Auth::Decision {
+            id: "must-not-be-read".into(),
+        };
+        if !reuse {
+            next.operation_id = None;
+        }
+        if skip {
+            next.generation = Some(Generation {
+                outcome: steve_channels::deliver::Outcome::Skip,
+                ..Default::default()
+            });
+        }
+        if blank {
+            next.text = "  ".into();
+        }
+        if bad_target {
+            next.target.space_id = "missing-space".into();
+        }
+        let result = h.outbox.deliver_checked(&h.ch, &next).await;
+        match expected {
+            "skip" => assert!(matches!(result, Ok((Delivered::Skipped, None)))),
+            "reuse" => assert!(matches!(result,Ok((ref d,None)) if *d==original)),
+            "invalid" => assert!(matches!(result, Err(ApiError::Invalid(_)))),
+            "missing" => assert!(matches!(result, Err(ApiError::NotFound(_)))),
+            _ => unreachable!(),
+        }
+        assert_eq!(h.env.gateway.prompts.lock().unwrap().len(), before);
+        assert_eq!(h.fake.send_calls.lock().unwrap().len(), 1);
+        let messages = h
+            .env
+            .store()
+            .reader(|c| steve_channels::messages::page(c, &plan.space_id, ME, None, 50))
+            .unwrap();
+        assert_eq!(messages.iter().filter(|m| m.direction == "out").count(), 1);
+    }
+}
+
+// One existing audited fixture writer, shared by the old late-send scenario and the new tables.
+fn sg4_message_state(h: &H, id: &str, status: &str, sent: Option<i64>, created: Option<i64>) {
+    digest_env::write(h.env.store(), |c| {
+        c.execute(
+            "UPDATE chan_messages SET status=?2,sent=?3,created=coalesce(?4,created) WHERE id=?1",
+            rusqlite::params![id, status, sent, created],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+async fn sg4_pending(h: &H, state: &str, age: Option<i64>) -> (Plan, String) {
+    checks_pass(h);
+    let plan = recorded(h, &h.oncall, "C_OPS", "sg4-source", "ulilei", "question").await;
+    set_rules(h, &h.oncall, json!([{"when":{"kind":"all"},"act":"reply"}]));
+    let mut request = out(&plan, "safe reply", rule(&plan), None);
+    request.approve = true;
+    let Delivered::Drafted { message_id, .. } = h.outbox.deliver(&h.ch, &request).await.unwrap()
+    else {
+        panic!("fixture draft");
+    };
+    let stamp = age.map(|age| h.ch.now() - age);
+    sg4_message_state(h, &message_id, state, stamp, None);
+    (plan, message_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sg4_claim_status_and_strict_staleness_gate_every_attempt() {
+    use steve_channels::outbound::CLAIM_STALE_MS;
+    for (state, age, attempt) in [
+        ("pending", None, true),
+        ("pending", Some(0), false),
+        ("pending", Some(CLAIM_STALE_MS), false),
+        ("pending", Some(CLAIM_STALE_MS + 1), true),
+        ("unknown", None, false),
+        ("draft", None, false),
+        ("sent", None, false),
+    ] {
+        let h = setup().await;
+        let (plan, id) = sg4_pending(&h, state, age).await;
+        let result = h.outbox.send(&h.ch, &id, &rule(&plan)).await.unwrap();
+        assert_eq!(
+            matches!(result, SendOutcome::Sent { .. }),
+            attempt,
+            "{state} {age:?}: {result:?}"
+        );
+        if !attempt {
+            assert_eq!(result, SendOutcome::Skipped);
+        }
+        assert_eq!(
+            h.fake.send_calls.lock().unwrap().len(),
+            usize::from(attempt)
+        );
+        assert_eq!(status(&h, &id), if attempt { "sent" } else { state });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sg4_provider_result_preserves_first_attempt_and_uncertainty_classification() {
+    use steve_channels::outbound::CLAIM_STALE_MS;
+    for stale in [false, true] {
+        for provider in ["success", "refusal", "lost-answer"] {
+            let h = setup().await;
+            let (plan, id) = sg4_pending(&h, "pending", stale.then_some(CLAIM_STALE_MS + 1)).await;
+            if provider == "refusal" {
+                *h.fake.fail_send.lock().unwrap() = Some("fixture refusal".into());
+            }
+            if provider == "lost-answer" {
+                *h.fake.lose_answer.lock().unwrap() = true;
+            }
+            let result = h.outbox.send(&h.ch, &id, &rule(&plan)).await.unwrap();
+            let expected = match (provider, stale) {
+                ("success", _) => "sent",
+                ("refusal", false) => "failed",
+                _ => "unknown",
+            };
+            assert_eq!(
+                status(&h, &id),
+                expected,
+                "{provider} stale={stale}: {result:?}"
+            );
+            assert!(match expected {
+                "sent" => matches!(result, SendOutcome::Sent { .. }),
+                "failed" => matches!(result, SendOutcome::Failed { .. }),
+                _ => matches!(result, SendOutcome::Unknown { .. }),
+            });
+            let calls = h.fake.send_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].1.uuid.as_deref(), Some(id.as_str()));
+            assert_eq!(calls[0].1.space_ext_id.as_deref(), Some("C_OPS"));
+        }
+    }
 }
