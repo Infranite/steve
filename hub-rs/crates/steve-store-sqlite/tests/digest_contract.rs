@@ -109,12 +109,7 @@ fn digest_contract_real_comms_enqueue_receipt_move_and_rollback() {
             assert_eq!(projection, (2, 10, 20));
         });
         transaction(&store, |c, runner, root| {
-            c.execute(
-                "INSERT INTO digest_receipts(workspace_id,conv,message_id,seq,created)
-                VALUES('ws','space:old','a',1,0)",
-                [],
-            )
-            .map_err(sql_error)?;
+            digest_fixture::receipt(c, "ws", "space:old", "a").map_err(sql_error)?;
             operation(
                 c,
                 runner,
@@ -125,7 +120,7 @@ fn digest_contract_real_comms_enqueue_receipt_move_and_rollback() {
         })
         .unwrap();
         inspect(&store, |c| {
-            assert_eq!(count(c, "digest_receipts"), 1);
+            assert_eq!(count(c, digest::RECEIPTS_TABLE), 1);
             assert_eq!(
                 count(c, "digest_pending"),
                 1,
@@ -204,7 +199,7 @@ fn digest_contract_real_comms_enqueue_receipt_move_and_rollback() {
         assert!(failed.is_err());
         inspect(&store, |c| {
             assert_eq!(
-                count(c, "chan_messages"),
+                count(c, NativeSource::ChanMessage.shape().table),
                 2,
                 "failed source insertion rolls back"
             );

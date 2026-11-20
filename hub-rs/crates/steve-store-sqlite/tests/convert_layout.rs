@@ -5,6 +5,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 use steve_store_sqlite::{
     convert::{self, Outcome},
+    digest::Source,
     layout::Layout,
     legacy, migrate, schema,
 };
@@ -21,7 +22,7 @@ fn old(conn: &Connection, version: Option<i64>) {
 }
 
 fn data(conn: &Connection) {
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0);
         INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES
         ('owner','w','owner','owner','owner',0),
@@ -30,11 +31,12 @@ fn data(conn: &Connection) {
         INSERT INTO workspace_members VALUES('w','member','owner',0);
         INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
         VALUES('space','w','fixture','group','fixture','fixture',0,0);
-        INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created)
+        INSERT INTO {messages}(id,workspace_id,space_id,direction,text,created)
         VALUES('message','w','space','in','fixture 中😀',0);
         INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated)
         VALUES('item','w',1,'fixture 中😀','open','new',0,0);",
-    )
+        messages = Source::ChanMessage.shape().table
+    ))
     .unwrap();
     for (id, user, revoked) in [
         ("owner", "owner", None),
@@ -58,7 +60,7 @@ fn counts(conn: &Connection) -> Vec<i64> {
         "users",
         "access_tokens",
         "clients",
-        "chan_messages",
+        Source::ChanMessage.shape().table,
         "items",
     ]
     .into_iter()
@@ -148,7 +150,10 @@ fn converts_113_and_114_preserving_data_and_all_owners() {
                 0
             );
         }
-        for (table, column) in [("chan_messages", "text"), ("items", "title")] {
+        for (table, column) in [
+            (Source::ChanMessage.shape().table, "text"),
+            ("items", "title"),
+        ] {
             let text: String = conn
                 .query_row(&format!("SELECT {column} FROM {table}"), [], |r| r.get(0))
                 .unwrap();

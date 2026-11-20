@@ -1,16 +1,19 @@
 //! Real comms fixture shared by operation tests and the backend conformance hook.
 #![allow(dead_code, unexpected_cfgs)]
 use rusqlite::{Connection, params};
-use steve_store_sqlite::{digest::Source, schema};
+use steve_store_sqlite::{
+    digest::{RECEIPTS_TABLE, Source},
+    schema,
+};
 
 pub const TABLES: &[&str] = &[
     "spaces",
     "mail_threads",
-    "chan_messages",
-    "mail_messages",
+    Source::ChanMessage.shape().table,
+    Source::MailMessage.shape().table,
     "digest_pending",
     "digest_pending_convs",
-    "digest_receipts",
+    RECEIPTS_TABLE,
     "digest_cursors",
 ];
 pub fn install(c: &Connection) -> rusqlite::Result<()> {
@@ -56,15 +59,25 @@ pub fn install(c: &Connection) -> rusqlite::Result<()> {
     );
     let triggers: i64 = c.query_row(
         "SELECT count(*) FROM main.sqlite_schema WHERE type='trigger'
-         AND tbl_name IN ('chan_messages','mail_messages','digest_pending',
-                          'digest_pending_convs','digest_receipts')",
-        [],
+         AND tbl_name IN (?1,?2,'digest_pending','digest_pending_convs',?3)",
+        [
+            Source::ChanMessage.shape().table,
+            Source::MailMessage.shape().table,
+            RECEIPTS_TABLE,
+        ],
         |r| r.get(0),
     )?;
     assert_eq!(
         triggers, 0,
         "registered operations alone maintain the digest fixture"
     );
+    Ok(())
+}
+pub fn receipt(c: &Connection, workspace: &str, conv: &str, id: &str) -> rusqlite::Result<()> {
+    c.execute(
+        &format!("INSERT INTO {RECEIPTS_TABLE}(workspace_id,conv,message_id,seq,created) VALUES(?,?,?,1,0)"),
+        params![workspace, conv, id],
+    )?;
     Ok(())
 }
 #[allow(clippy::too_many_arguments)]
@@ -274,10 +287,7 @@ pub mod backend {
                 conv,
                 id,
             } => {
-                c.execute(
-                    "INSERT INTO digest_receipts(workspace_id,conv,message_id,seq,created) VALUES(?,?,?,1,0)",
-                    params![workspace,conv,id],
-                ).map_err(commit_error)?;
+                receipt(c, &workspace, &conv, &id).map_err(commit_error)?;
             }
             Change::Marker {
                 workspace,
@@ -404,12 +414,8 @@ pub mod backend {
                 };
                 Ok(State {
                     sources,
-                    receipts: read(
-                        "digest_receipts",
-                        &["workspace_id", "conv", "message_id"],
-                        3,
-                    )
-                    .map_err(api_error)?,
+                    receipts: read(RECEIPTS_TABLE, &["workspace_id", "conv", "message_id"], 3)
+                        .map_err(api_error)?,
                     pending: read(
                         "digest_pending",
                         &["workspace_id", "conv", "message_id", "at", "position"],
@@ -435,13 +441,15 @@ pub mod backend {
         fn audit(&self) -> Result<(), String> {
             self.read(|c| {
                 let workspaces: Vec<String> = c
-                    .prepare(
-                        "SELECT workspace_id FROM chan_messages
-                         UNION SELECT workspace_id FROM mail_messages
+                    .prepare(&format!(
+                        "SELECT workspace_id FROM {channel}
+                         UNION SELECT workspace_id FROM {mail}
                          UNION SELECT workspace_id FROM digest_pending
                          UNION SELECT workspace_id FROM digest_pending_convs
-                         UNION SELECT workspace_id FROM digest_receipts",
-                    )
+                         UNION SELECT workspace_id FROM {RECEIPTS_TABLE}",
+                        channel = Source::ChanMessage.shape().table,
+                        mail = Source::MailMessage.shape().table,
+                    ))
                     .map_err(api_error)?
                     .query_map([], |r| r.get(0))
                     .map_err(api_error)?
