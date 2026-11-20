@@ -497,3 +497,88 @@ async fn bots_seen_in_chat_cards_tools_and_chat_proposals() {
     .unwrap_err();
     assert!(e.contains("Invalid option"), "{e}");
 }
+
+#[tokio::test]
+async fn sg13_steward_object_kind_visibility_and_lifecycle_table() {
+    use steve_modules::contacts::stewards;
+    let t = env();
+    let r = app(&t);
+    let (_, person) = setup(&r).await;
+    let got = t
+        .store()
+        .transaction(|tx| {
+            identify(
+                tx,
+                WS,
+                ME,
+                "feishu",
+                "on_sg13",
+                &Hints {
+                    display_name: Some("Named".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    exec(
+        &t,
+        &format!(
+            "INSERT INTO connections (id,workspace_id,account_id,adapter,auth,created_by,created,updated) VALUES ('con_sg13','default','{}','feishu','oauth','usr_dev',1,1); INSERT INTO spaces (id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES ('sp_sg13','default','feishu','group','sg13','Room',1,1);",
+            got.account_id
+        ),
+    );
+    for (kind, id, name, foreign_visible) in [
+        ("account", got.account_id.as_str(), "Named", false),
+        ("connection", "con_sg13", "Named", false),
+        ("device", "dev_laptop", "笔记本", true),
+        ("bot", "steve", "Steve", false),
+        ("persona", "per_s", "Steve", false),
+        ("party", person.as_str(), "张三", false),
+        ("space", "sp_sg13", "Room", false),
+    ] {
+        let own = t
+            .store()
+            .reader(|c| stewards::object_info(c, WS, kind, id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.name, name, "{kind}");
+        assert_eq!(own.object_type, kind);
+        assert_eq!(own.object_id, id);
+        let foreign = t
+            .store()
+            .reader(|c| stewards::object_info(c, "w2", kind, id))
+            .unwrap();
+        assert_eq!(
+            foreign.is_some(),
+            foreign_visible,
+            "{kind}: devices are global"
+        );
+        if kind == "account" || kind == "connection" {
+            assert_eq!(own.party_id.as_deref(), Some(got.party_id.as_str()));
+        }
+    }
+    for (kind, id) in [("bot", "old"), ("party", "missing"), ("unknown", "steve")] {
+        assert!(
+            t.store()
+                .reader(|c| stewards::object_info(c, WS, kind, id))
+                .unwrap()
+                .is_none()
+        );
+    }
+    exec(
+        &t,
+        "UPDATE connections SET status='revoked' WHERE id='con_sg13'; UPDATE spaces SET status='archived' WHERE id='sp_sg13'; UPDATE personas SET deleted=1 WHERE id='per_s';",
+    );
+    for (kind, id) in [
+        ("connection", "con_sg13"),
+        ("space", "sp_sg13"),
+        ("persona", "per_s"),
+    ] {
+        assert!(
+            t.store()
+                .reader(|c| stewards::object_info(c, WS, kind, id))
+                .unwrap()
+                .is_none()
+        );
+    }
+}

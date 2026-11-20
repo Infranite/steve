@@ -1566,3 +1566,41 @@ async fn account_patch_applies_and_undoes() {
         ApiError::not_found("账号")
     );
 }
+
+#[test]
+fn sg13_exact_primary_and_extra_handle_precedence_table() {
+    for primary_known in [false, true] {
+        let t = env();
+        let first = ident(&t, "feishu", "on_sg13first", &named("First")).unwrap();
+        let second = ident(&t, "feishu", "on_sg13second", &named("Second")).unwrap();
+        let handle = if primary_known {
+            "on_sg13first"
+        } else {
+            "ou_sg13new"
+        };
+        let got = ident(
+            &t,
+            "feishu",
+            handle,
+            &Hints {
+                extra: vec![ExtraHandle {
+                    handle: "on_sg13second".into(),
+                    connection_id: Some("con_sg13".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = if primary_known { &first } else { &second };
+        assert_eq!(got.account_id, expected.account_id);
+        assert_eq!(got.party_id, expected.party_id);
+        assert!(!got.created && got.proposal.is_none());
+        assert_eq!(scalar::<i64>(&t, "SELECT count(*) FROM accounts"), 2);
+        assert_eq!(
+            ident(&t, "feishu", handle, &Hints::default())
+                .unwrap()
+                .account_id,
+            expected.account_id
+        );
+    }
+}
