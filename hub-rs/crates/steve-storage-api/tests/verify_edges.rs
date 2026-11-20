@@ -572,3 +572,59 @@ fn facts_roll_back_with_mutations_when_a_late_fact_is_duplicate() {
         .unwrap();
     assert!(row.is_none());
 }
+
+#[test]
+fn reference_backend_rejects_the_reserved_revision_column() {
+    let mut desc = CORE.to_wire();
+    desc.fields.push(FieldDesc {
+        name: "rev".into(),
+        ty: FieldType::Int,
+        nullable: false,
+    });
+    let result = MemStore::with_entities(vec![desc], Arc::new(ManualClock::new(Millis(1_000_000))));
+    assert!(matches!(
+        result,
+        Err(Error {
+            code: steve_types::Code::Invalid,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cursor_commit_does_not_prune_or_replace_old_recorded_receipts() {
+    #[derive(Deserialize)]
+    struct Ledger {
+        receipts: Vec<serde::de::IgnoredAny>,
+    }
+    fn count(store: &MemStore) -> usize {
+        let session = block_on(store.begin_export(Domain::Core)).unwrap();
+        let batch = block_on(store.export(&session, ExportCursor::default())).unwrap();
+        decode::<Ledger>(&batch.state).unwrap().receipts.len()
+    }
+    let clock = Arc::new(ManualClock::new(Millis(1_000_000)));
+    let store = MemStore::with_entities(descriptors(), clock.clone()).unwrap();
+    block_on(store.commit(unit(clock.now(), "old", vec![]))).unwrap();
+    clock.advance(32 * 86_400_000);
+    assert_eq!(count(&store), 1);
+    let mut u = unit(
+        clock.now(),
+        "cursor",
+        vec![Mutation::AdvanceCursor {
+            name: steve_storage_api::cursor::CursorName("consumer".into()),
+            to: steve_storage_api::cursor::Position(steve_storage_api::cursor::CursorKey::Int(1)),
+        }],
+    );
+    u.idempotency = Idempotency::Cursor;
+    u.preconditions.push(Precondition::Cursor {
+        name: steve_storage_api::cursor::CursorName("consumer".into()),
+        at: None,
+    });
+    u.digest = u.request_digest().unwrap();
+    block_on(store.commit(u)).unwrap();
+    assert_eq!(
+        count(&store),
+        1,
+        "cursor mode must leave the entire recorded ledger untouched"
+    );
+}

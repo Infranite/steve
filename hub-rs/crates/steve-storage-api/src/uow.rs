@@ -24,6 +24,12 @@ pub struct IdempotencyKey {
 pub enum Idempotency {
     #[default]
     Recorded,
+    /// UNSTABLE until the first real caller lands. Exactly one Cursor precondition and
+    /// one matching AdvanceCursor, strictly forward with unchanged position shape.
+    /// No receipt is stored or looked up; replay is Conflict with actual_position.
+    /// Facts are written only on the first successful advance. Intent digest reuse is
+    /// deliberately unchecked in this mode; callers must re-read on a raced advance.
+    Cursor,
     Natural {
         entity: String,
         index: String,
@@ -199,6 +205,51 @@ impl From<CommitError> for Error {
     }
 }
 impl UnitOfWork {
+    /// Validate Cursor idempotency before any effects or receipt lookup. Other
+    /// preconditions and mutations are allowed, but there is only one cursor advance.
+    pub fn validate_cursor_idempotency(&self) -> Result<(), Error> {
+        if self.idempotency != Idempotency::Cursor {
+            return Ok(());
+        }
+        let conditions: Vec<_> = self
+            .preconditions
+            .iter()
+            .filter_map(|p| match p {
+                Precondition::Cursor { name, at } => Some((name, at)),
+                _ => None,
+            })
+            .collect();
+        let advances: Vec<_> = self
+            .mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::AdvanceCursor { name, to } => Some((name, to)),
+                _ => None,
+            })
+            .collect();
+        fn shape(a: &crate::cursor::CursorKey, b: &crate::cursor::CursorKey) -> bool {
+            use crate::cursor::CursorKey::*;
+            match (a, b) {
+                (Int(_), Int(_)) | (Text(_), Text(_)) => true,
+                (Composite(a), Composite(b)) => {
+                    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| shape(a, b))
+                }
+                _ => false,
+            }
+        }
+        if let ([(name, from)], [(target, to)]) = (conditions.as_slice(), advances.as_slice())
+            && name == target
+            && from
+                .as_ref()
+                .is_none_or(|from| shape(&from.0, &to.0) && *to > from)
+        {
+            return Ok(());
+        }
+        Err(crate::error(
+            steve_types::Code::Invalid,
+            "cursor idempotency requires one strictly forward matching advance",
+        ))
+    }
     /// Canonical encoding includes domain, idempotency mode, conditions, effects and facts;
     /// excludes id, issued_at, digest and lane. Lists retain execution order. Row fields
     /// sort by UTF-8 name; duplicate names are invalid. JSON object keys sort recursively.

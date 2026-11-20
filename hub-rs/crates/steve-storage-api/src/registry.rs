@@ -1,4 +1,7 @@
 //! Registry of implemented named operations and queries. Generic CRUD is not counted.
+//! `rev` is reserved: entity fields must not use that name. A revision is the commit
+//! sequence within a physical file, not a per-row counter. Callers compare only equality;
+//! they must not assume an update gives the previous row revision plus one.
 use crate::{Domain, Error};
 
 /// A name is unique within a domain and kind; operation/query names should remain stable.

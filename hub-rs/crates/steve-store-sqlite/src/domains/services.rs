@@ -18,6 +18,21 @@ use steve_storage_api::{
     retention::{Budget, RetentionReport},
     *,
 };
+fn logged_query(reg: &Registry, c: &rusqlite::Connection, q: AnyQuery) -> Result<AnyOutput, Error> {
+    #[cfg(feature = "conformance")]
+    let _access = {
+        let desc = reg.query_context(&q)?;
+        let context = if desc.name.is_empty() {
+            crate::exec::access_log::named_context(&q.name, q.domain)
+        } else {
+            crate::exec::access_log::table_context(
+                &reg.entity(&desc.name, q.domain).map_err(Error::from)?.table,
+            )
+        };
+        crate::exec::access_log::Operation::on(c, &q.name, context)
+    };
+    reg.query_on(c, q)
+}
 fn invalid(s: &str) -> Error {
     error(steve_types::Code::Invalid, s)
 }
@@ -125,7 +140,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             .unchecked_transaction()
             .map_err(crate::domains::sql_error)
             .map_err(Error::from)?;
-        let output = reg.query_on(&tx, q)?;
+        let output = logged_query(reg, &tx, q)?;
         tx.commit()
             .map_err(crate::domains::sql_error)
             .map_err(Error::from)?;
@@ -147,7 +162,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
                 Ok((reg.query_context(&q)?, q))
             })
             .collect::<Result<_, _>>()?;
-        snapshot::read_batch_with(engine, d, queries, |c, _, q| reg.query_on(c, q))
+        snapshot::read_batch_with(engine, d, queries, |c, _, q| logged_query(reg, c, q))
     }
     fn begin_snapshot(
         &self,
@@ -167,8 +182,8 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             return Err(invalid("mixed-domain lease"));
         }
         let reg = self.registry.clone();
-        let result =
-            self.managers[&domain].with_connection(&lease, domain, move |c| reg.query_on(c, q));
+        let result = self.managers[&domain]
+            .with_connection(&lease, domain, move |c| logged_query(&reg, c, q));
         if result
             .as_ref()
             .is_err_and(|e| e.code == steve_types::Code::Stale)
@@ -194,7 +209,15 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
         n
     }
     fn begin_export(&self, _: &Engine, reg: &Registry, d: Domain) -> Result<ExportSession, Error> {
-        self.exports.begin_with(d, |c, d| reg.export_state(c, d))
+        // Generic domain export enumerates all its registered entities; attribute
+        // each MAX(rev) read to that entity's catalogue owner, not a named context.
+        #[cfg(feature = "conformance")]
+        let _access = crate::exec::access_log::Operation::enter("begin_export", "$entity");
+        self.exports.begin_with(d, |c, d| {
+            #[cfg(feature = "conformance")]
+            let _access = crate::exec::access_log::Operation::on(c, "export_state", "contract");
+            reg.export_state(c, d)
+        })
     }
     fn export(&self, s: &ExportSession, mut cursor: ExportCursor) -> Result<ExportBatch, Error> {
         let after = cursor.after.clone();
@@ -217,6 +240,11 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
                 .table
                 .clone();
         }
+        #[cfg(feature = "conformance")]
+        let _access = crate::exec::access_log::Operation::enter(
+            "export",
+            crate::exec::access_log::table_context(&cursor.entity),
+        );
         let mut batch = self.exports.export(s, cursor)?;
         let logical = self
             .registry
@@ -277,6 +305,12 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
         batch.entity = physical.clone();
         batch.digest = transfer::batch_digest(&batch)?;
         self.write(d, Lane::Admin, |c, runner| {
+            #[cfg(feature = "conformance")]
+            let _access = crate::exec::access_log::Operation::on(
+                c,
+                "import",
+                crate::exec::access_log::table_context(&physical.name),
+            );
             let receipt_key = format!("import:{wire_id}");
             use rusqlite::OptionalExtension;
             let prior: Option<String> = c
@@ -305,6 +339,9 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
                 .revisions
                 .advance_past(c, batch.session.rev)
                 .map_err(Error::from)?;
+            let capture = crate::exec::watch::Capture::begin(c, &runner.watches)
+                .map_err(crate::domains::sql_error)
+                .map_err(Error::from)?;
             let tx =
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
                     .map_err(crate::domains::sql_error)
@@ -322,6 +359,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             tx.commit()
                 .map_err(crate::domains::sql_error)
                 .map_err(Error::from)?;
+            capture.finish(true);
             Ok(report)
         })
     }
@@ -347,7 +385,16 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
         let bind_policy = crate::domains::retention::authorize(e)?;
         let mut after = lock(&self.after);
         let report = self.write(e.desc.domain, Lane::Background, |c, runner| {
+            #[cfg(feature = "conformance")]
+            let _access = crate::exec::access_log::Operation::on(
+                c,
+                "retention",
+                crate::exec::access_log::table_context(&e.table),
+            );
             let root = runner.reserve_root(c).map_err(Error::from)?;
+            let capture = crate::exec::watch::Capture::begin(c, &runner.watches)
+                .map_err(crate::domains::sql_error)
+                .map_err(Error::from)?;
             let tx =
                 rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)
                     .map_err(crate::domains::sql_error)
@@ -364,6 +411,7 @@ impl<E: Send + 'static> ReadServices for NativeReads<E> {
             tx.commit()
                 .map_err(crate::domains::sql_error)
                 .map_err(Error::from)?;
+            capture.finish(true);
             Ok(report)
         })?;
         let more = report.more();

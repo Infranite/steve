@@ -128,6 +128,7 @@ impl<E: Send + 'static> BatchRunner<Arc<Engine>> for EngineRunner<E> {
     }
 }
 struct Writer<E: Send + 'static> {
+    observer: crate::exec::watch::Observer,
     engine: Arc<Engine>,
     executor: Executor<Arc<Engine>, EngineRunner<E>>,
     runner: Arc<SqliteBatchRunner<E>>,
@@ -141,7 +142,8 @@ pub struct SqliteStore<E: Send + 'static = ()> {
     runtime: Option<tokio::runtime::Handle>,
 }
 impl<E: Send + 'static> SqliteStore<E> {
-    /// Engines must all come from the same validated layout. No new connection is opened here.
+    /// Engines must all come from the same validated layout. Writer connections are
+    /// reused; each file also has one idle read-only commit observer, outside its read pool.
     /// Construct within the owning Tokio runtime; it must outlive the store and its reads.
     pub fn new(
         engines: Vec<Engine>,
@@ -214,6 +216,7 @@ impl<E: Send + 'static> SqliteStore<E> {
                 )
             })?;
             let writer = Arc::new(Writer {
+                observer: crate::exec::watch::Observer::new(&engine)?,
                 engine,
                 executor,
                 runner,
@@ -313,6 +316,64 @@ impl<E: Send + 'static> SqliteStore<E> {
         let session = session.clone();
         blocking(self.runtime.clone(), move || reads.end_export(&session)).await
     }
+    fn register_tables(writer: &Writer<E>, tables: &[String], watch: &CommitWatch) {
+        if !tables.is_empty()
+            && let Ok(_grant) = writer.executor.grant(Lane::Interactive)
+        {
+            writer.runner.watches.subscribe_into(tables, watch);
+            crate::exec::watch::Capture::subscribed(&writer.runner.watches, tables);
+        }
+    }
+    /// Backend-only table-key bridge for the legacy Store::commit_wake facade.
+    /// It shares the entity watch registry, preupdate hook and publication boundary.
+    /// Subscribing inside a writer scope conservatively hints at its outer commit;
+    /// pure rollbacks remain quiet. Domain code uses DomainStore::watch instead.
+    pub fn commit_wake(&self, domain: Domain, tables: &[&str]) -> Arc<tokio::sync::Notify> {
+        struct NotifyHint(std::sync::Weak<tokio::sync::Notify>);
+        impl CommitHint for NotifyHint {
+            fn is_alive(&self) -> bool {
+                self.0.strong_count() > 0
+            }
+            fn notify(&self) {
+                if let Some(notify) = self.0.upgrade() {
+                    notify.notify_one();
+                }
+            }
+        }
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let writer = &self.writers[&domain];
+        let tables: Vec<_> = tables.iter().map(|s| (*s).to_owned()).collect();
+        if !tables.is_empty()
+            && let Ok(_grant) = writer.executor.grant(Lane::Interactive)
+        {
+            writer
+                .runner
+                .watches
+                .subscribe_hint(&tables, Arc::new(NotifyHint(Arc::downgrade(&wake))));
+            crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
+        }
+        wake
+    }
+    fn watch_across_files(&self, entities: &[EntityName]) -> CommitWatch {
+        let watch = CommitWatch::new();
+        let mut files = BTreeSet::new();
+        for writer in self.writers.values() {
+            if !files.insert(writer.engine.path()) {
+                continue;
+            }
+            let physical: Vec<_> = self
+                .registry
+                .entities()
+                .filter(|e| {
+                    entities.contains(&e.desc.name)
+                        && Arc::ptr_eq(&self.writers[&e.desc.domain], writer)
+                })
+                .map(|e| e.table.clone())
+                .collect();
+            Self::register_tables(writer, &physical, &watch);
+        }
+        watch
+    }
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
@@ -345,7 +406,9 @@ impl<E: Send + 'static> SqliteStore<E> {
         })?
     }
     /// Legacy bridge seam: allocate before the callback opens a transaction. The callback owns
-    /// COMMIT/rollback and pending events. Nested operations pass their existing RootRevision.
+    /// COMMIT/rollback and pending events; mark successful outer commits with
+    /// RootRevision::mark_committed (also covers empty commits). File-changing commits
+    /// are additionally observed for raw callbacks. Nested operations reuse the revision.
     pub fn with_root<T>(
         &self,
         domain: Domain,
@@ -359,6 +422,9 @@ impl<E: Send + 'static> SqliteStore<E> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
         let rev = w.runner.reserve_root(&c)?;
+        let observer = w.observer.begin().map_err(CommitError::Fatal)?;
+        let capture = crate::exec::watch::Capture::begin(&c, &w.runner.watches)
+            .map_err(crate::domains::sql_error)?;
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&c, &w.runner, &rev)));
         let leaked = !c.is_autocommit();
@@ -367,6 +433,9 @@ impl<E: Send + 'static> SqliteStore<E> {
         } else {
             Ok(())
         };
+        let committed = rev.was_committed() || observer.committed();
+        drop(observer);
+        capture.finish(committed);
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);
@@ -444,6 +513,9 @@ impl<E: Send + 'static> Drop for RootGuard<'_, E> {
 }
 // Written as boxed futures to implement the async_trait ABI without another macro dependency.
 impl<E: Send + 'static> DomainStore for SqliteStore<E> {
+    fn watch(&self, entities: &[EntityName]) -> CommitWatch {
+        self.watch_across_files(entities)
+    }
     fn hello(&self) -> &Hello {
         &self.hello
     }

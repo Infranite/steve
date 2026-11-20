@@ -18,6 +18,10 @@ use std::{
 };
 use steve_types::Code;
 
+#[path = "increments.rs"]
+mod increments;
+use increments::*;
+
 pub const SUITE_VERSION: u32 = 1;
 pub const SEED: u64 = 0x57e7_e202_6111_9002;
 #[derive(Clone, Copy, Debug)]
@@ -356,6 +360,20 @@ pub fn run_with_named(h: &dyn Harness, named: &[NamedCheck]) -> Report {
             idempotency_expiry,
         ),
         ("idempotency_natural", None, idempotency_natural),
+        ("cursor_idempotency_replay", None, cursor_idempotency_replay),
+        (
+            "cursor_idempotency_no_receipts",
+            None,
+            cursor_idempotency_no_receipts,
+        ),
+        ("cursor_idempotency_shape", None, cursor_idempotency_shape),
+        (
+            "retry_conflict_same_key_new_digest",
+            None,
+            retry_conflict_same_key_new_digest,
+        ),
+        ("retry_conflict_policy", None, retry_conflict_policy),
+        ("commit_watch", None, commit_watch),
         (
             "idempotency_after_crash",
             Some(Capability::Crash),

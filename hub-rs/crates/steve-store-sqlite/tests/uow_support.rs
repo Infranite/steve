@@ -164,7 +164,7 @@ pub fn open_store(
     };
     let mut engines = Vec::new();
     for file in engine.layout().files.keys() {
-        if engine.path() != dir.join(file) {
+        if engine.path() != engine.data_dir().join(file) {
             engines.push(engine.open_peer(file).unwrap());
         }
     }

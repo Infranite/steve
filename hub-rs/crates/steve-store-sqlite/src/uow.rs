@@ -12,7 +12,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use steve_storage_api::{
@@ -81,10 +81,19 @@ struct Receipt {
     result: Committed,
 }
 /// Opaque authority allocated before the outer legacy transaction. A rollback never returns it.
-pub struct RootRevision(Rev, usize);
+pub struct RootRevision(Rev, usize, AtomicBool);
 impl RootRevision {
     pub fn rev(&self) -> Rev {
         self.0
+    }
+    /// The legacy transaction owner calls this after a successful outer COMMIT,
+    /// including empty commits. It records publication intent, never commits SQL.
+    /// Raw callbacks that do not mark are still observed when the file changes.
+    pub fn mark_committed(&self) {
+        self.2.store(true, Ordering::Relaxed);
+    }
+    pub(crate) fn was_committed(&self) -> bool {
+        self.2.load(Ordering::Relaxed)
     }
 }
 pub struct Applied<E> {
@@ -95,6 +104,7 @@ pub struct Applied<E> {
 pub struct SqliteBatchRunner<E: Send + 'static> {
     pub registry: Arc<Registry>,
     pub revisions: Arc<RevAllocator>,
+    pub(crate) watches: CommitWatches,
     clock: Arc<dyn WallClock>,
     publisher: Arc<dyn Publisher<E>>,
 }
@@ -108,6 +118,7 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         Ok(Self {
             registry,
             revisions: Arc::new(RevAllocator::open(c)?),
+            watches: CommitWatches::default(),
             clock,
             publisher,
         })
@@ -116,6 +127,7 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         Ok(RootRevision(
             self.revisions.issue(c, 1)?[0],
             Arc::as_ptr(&self.revisions) as usize,
+            AtomicBool::new(false),
         ))
     }
     pub fn apply_in(
@@ -154,6 +166,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
     fn validate(&self, u: &UnitOfWork) -> Result<(), CommitError> {
         u.validate_age(self.clock.now())?;
         u.verify_digest().map_err(CommitError::Fatal)?;
+        u.validate_cursor_idempotency()
+            .map_err(CommitError::Fatal)?;
         for p in &u.preconditions {
             match p {
                 Precondition::Rev { entity, .. }
@@ -184,6 +198,61 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
             self.registry.check_topic(&f.topic, u.domain)?;
         }
         Ok(())
+    }
+    #[cfg(feature = "conformance")]
+    fn access_entity(
+        &self,
+        c: &Connection,
+        op: &str,
+        entity: &str,
+        domain: Domain,
+    ) -> crate::exec::access_log::Operation {
+        let context = self
+            .registry
+            .entity(entity, domain)
+            .map(|e| crate::exec::access_log::table_context(&e.table))
+            .unwrap_or_else(|_| "unmapped".into());
+        crate::exec::access_log::Operation::on(c, format!("{op}:{entity}"), context)
+    }
+    #[cfg(feature = "conformance")]
+    fn access_precondition(
+        &self,
+        c: &Connection,
+        p: &Precondition,
+        domain: Domain,
+    ) -> crate::exec::access_log::Operation {
+        match p {
+            Precondition::Rev { entity, .. }
+            | Precondition::Absent { entity, .. }
+            | Precondition::Present { entity, .. } => {
+                self.access_entity(c, "precondition", entity, domain)
+            }
+            _ => crate::exec::access_log::Operation::on(c, "cursor_precondition", "contract"),
+        }
+    }
+    #[cfg(feature = "conformance")]
+    fn access_mutation(
+        &self,
+        c: &Connection,
+        m: &Mutation,
+        domain: Domain,
+    ) -> crate::exec::access_log::Operation {
+        match m {
+            Mutation::Insert { entity, .. } => self.access_entity(c, "insert", entity, domain),
+            Mutation::Upsert { entity, .. } => self.access_entity(c, "upsert", entity, domain),
+            Mutation::Update { entity, .. } => self.access_entity(c, "update", entity, domain),
+            Mutation::Delete { entity, .. } => self.access_entity(c, "delete", entity, domain),
+            Mutation::DeleteWhere { entity, .. } => {
+                self.access_entity(c, "delete_where", entity, domain)
+            }
+            Mutation::Append { stream, .. } => self.access_entity(c, "append", &stream.0, domain),
+            Mutation::Op(o) => crate::exec::access_log::Operation::on(
+                c,
+                &o.name,
+                crate::exec::access_log::named_context(&o.name, domain),
+            ),
+            _ => crate::exec::access_log::Operation::on(c, "advance_cursor", "contract"),
+        }
     }
     fn natural(&self, u: &UnitOfWork) -> Result<Option<String>, CommitError> {
         let Idempotency::Natural { entity, index } = &u.idempotency else {
@@ -228,6 +297,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         )))
     }
     fn apply(&self, c: &Connection, u: &UnitOfWork, rev: Rev) -> Result<Committed, CommitError> {
+        #[cfg(feature = "conformance")]
+        let _access = crate::exec::access_log::Operation::on(c, "commit", "contract");
         self.validate(u)?;
         let d = domain_name(u.domain);
         let natural = self.natural(u)?;
@@ -246,6 +317,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
                 .map_err(sql_error)?;
             text.map(|s| serde_json::from_str(&s).map_err(|_| invalid("invalid natural receipt")))
                 .transpose()?
+        } else if u.idempotency == Idempotency::Cursor {
+            None
         } else {
             let stored: Option<(Vec<u8>, Vec<u8>)> = c
                 .query_row(
@@ -279,6 +352,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         }
         let mut failures = Vec::new();
         for p in &u.preconditions {
+            #[cfg(feature = "conformance")]
+            let _access = self.access_precondition(c, p, u.domain);
             let (ok, actual_rev, actual_position) = match p {
                 Precondition::Cursor { name, at } => {
                     let old = cursor(c, u.domain, name)?;
@@ -314,6 +389,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         let mut seqs = Vec::new();
         let mut touched = std::collections::BTreeSet::new();
         for mutation in &u.mutations {
+            #[cfg(feature = "conformance")]
+            let _access = self.access_mutation(c, mutation, u.domain);
             match mutation {
                 Mutation::Insert { entity, row } | Mutation::Upsert { entity, row } => {
                     let e = self.registry.entity(entity, u.domain)?;
@@ -425,7 +502,7 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
                 params![d, key, receipt],
             )
             .map_err(sql_error)?;
-        } else {
+        } else if u.idempotency != Idempotency::Cursor {
             c.execute("INSERT INTO uow_applied(domain,key,issued_at,digest,rev,result) VALUES(?,?,?,?,?,?)",params![d,identity,u.id.issued_at.0,u.digest.0.as_slice(),rev.0 as i64,serde_json::to_vec(&result).map_err(|_|invalid("invalid committed result"))?]).map_err(sql_error)?;
         }
         Ok(result)
@@ -440,6 +517,10 @@ impl<E: Send + 'static> BatchRunner<Connection> for SqliteBatchRunner<E> {
         }
         let n = jobs.len();
         let run = || -> Result<Vec<Result<Committed, CommitError>>, CommitError> {
+            #[cfg(feature = "conformance")]
+            let _access = crate::exec::access_log::Operation::on(c, "commit_batch", "contract");
+            let capture =
+                crate::exec::watch::Capture::begin(c, &self.watches).map_err(sql_error)?;
             let revisions = self.revisions.issue(c, n)?;
             let tx =
                 Transaction::new_unchecked(c, TransactionBehavior::Immediate).map_err(sql_error)?;
@@ -449,6 +530,11 @@ impl<E: Send + 'static> BatchRunner<Connection> for SqliteBatchRunner<E> {
                 .map(|(j, rev)| self.isolated(&tx, &j.unit, rev))
                 .collect::<Vec<_>>();
             tx.commit().map_err(sql_error)?;
+            capture.finish(
+                results
+                    .iter()
+                    .any(|r| r.as_ref().is_ok_and(|done| !done.replayed)),
+            );
             Ok(results)
         };
         let results = match catch_unwind(AssertUnwindSafe(run)) {
