@@ -4,7 +4,7 @@ name: CI
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
 # A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
-# client they bundle or this workflow), plus one macOS structure job for Rust changes. macOS runners
+# client they bundle or this workflow), plus one macOS structure job for Rust or guard/workflow changes. macOS runners
 # are scarce and were the queue every PR waited in. A push to main
 # and a merge queue run cover both platforms. Main pushes share one running and at most one pending run;
 # a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
@@ -122,7 +122,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then echo "apple=true" >> "$GITHUB_OUTPUT"; echo "structure=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > files.txt; then
             if grep -qE '^(apple/|web/|package(-lock)?\.json$|scripts/build-apple-client\.sh$|\.github/workflows/ci\.yml$)' files.txt; then echo "apple=true"; else echo "apple=false"; fi >> "$GITHUB_OUTPUT"
-            if grep -q '^hub-rs/' files.txt; then echo "structure=true"; else echo "structure=false"; fi >> "$GITHUB_OUTPUT"
+            if grep -qE '^(hub-rs/|scripts/structure_guard\.py$|\.github/workflows/ci\.yml$)' files.txt; then echo "structure=true"; else echo "structure=false"; fi >> "$GITHUB_OUTPUT"
           else
             echo "apple=true" >> "$GITHUB_OUTPUT"
             echo "structure=true" >> "$GITHUB_OUTPUT"
@@ -152,15 +152,16 @@ jobs:
         with:
           toolchain: 1.99.1
           components: clippy
-      # The trusted Rust cache contains dependencies only; workspace packages are removed before saving.
+      # Restore downloaded sources only; test-mode target artifacts do not help this check.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            hub-rs/target/debug
           key: rust-test-v1-macos-15-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml', 'hub-rs/crates/*/Cargo.toml', '.github/workflows/ci.yml') }}
           restore-keys: ${{ github.event_name == 'pull_request' && format('rust-test-v1-macos-15-{0}-1.99.1-', runner.arch) || '' }}
+      - name: Always rebuild workspace packages from this checkout
+        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
       - name: Guard production function structure
         run: python3 scripts/structure_guard.py
   # The Rust tests of each platform run in parallel shards (`--partition hash:k/N`, N from RUST_TEST_SHARDS):

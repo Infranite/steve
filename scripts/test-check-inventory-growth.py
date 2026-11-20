@@ -555,7 +555,14 @@ class WorkflowWiring(unittest.TestCase):
         self.assertIn("runs-on: macos-15", structure)
         self.assertIn("needs: changes", structure)
         commands = re.findall(r"(?m)^\s+run: (.+)$", structure)
-        self.assertEqual(commands, ["python3 scripts/structure_guard.py"])
+        self.assertEqual(commands, [
+            "cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev",
+            "python3 scripts/structure_guard.py",
+        ])
+        cache = next(step for step in self.steps("structure") if "actions/cache/restore@" in step)
+        paths = cache.split("          path: |\n", 1)[1].split("          key:", 1)[0]
+        self.assertEqual(paths.split(), ["~/.cargo/registry", "~/.cargo/git"])
+        self.assertLess(structure.index("actions/cache/restore@"), structure.index("Always rebuild workspace packages"))
         self.assertIn("components: clippy", structure)
         self.assertNotIn("structure_guard.py", self.job("rust-test"))
         self.assertIn("components: rustfmt", self.job("rust-test"))
@@ -572,7 +579,7 @@ class WorkflowWiring(unittest.TestCase):
                 self.assertEqual(self.condition(event, changed), included)
         self.assertFalse(self.condition("push", "true", cancelled=True))
 
-    def test_changes_in_hub_rs_include_structure_for_prs_and_api_failure_is_conservative(self):
+    def test_structure_input_paths_include_pr_job_and_api_failure_is_conservative(self):
         step = next(step for step in self.steps("changes") if "id: apple" in step)
         self.assertIn(".previous_filename", step)
         self.assertIn("structure: ${{ steps.apple.outputs.structure }}", self.job("changes"))
@@ -580,6 +587,10 @@ class WorkflowWiring(unittest.TestCase):
         script = script.replace("${{ github.repository }}", "example/repo")
         cases = [
             ("pull_request", ["hub-rs/crates/example/src/lib.rs"], False, "true"),
+            ("pull_request", ["scripts/structure_guard.py"], False, "true"),
+            ("pull_request", [".github/workflows/ci.yml"], False, "true"),
+            ("pull_request", ["scripts/structure_guard.py.bak"], False, "false"),
+            ("pull_request", [".github/workflows/ci.yml.bak"], False, "false"),
             ("pull_request", ["CONTRIBUTING.md"], False, "false"),
             ("pull_request", ["notes/moved.txt", "hub-rs/structure.txt"], False, "true"),
             ("pull_request", [], True, "true"),
