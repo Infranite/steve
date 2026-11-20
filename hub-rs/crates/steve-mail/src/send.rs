@@ -35,6 +35,9 @@ use crate::repo::{self, DraftRow, MessageRow, Rcpt, ThreadRow};
 use crate::store::{self, Mailbox};
 use crate::{Mail, lock, parse, settings};
 
+mod submission;
+mod validation;
+
 /// Attachments of one mail, together.
 pub const MAX_ATTACHMENTS_BYTES: i64 = 20 * 1024 * 1024;
 /// How often the queue looks for approved mail whose delay is over.
@@ -680,46 +683,7 @@ impl Mail {
             Ok(c) => c,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
-        let checked_hash = crate::disclosure::checked_hash(&d, &inputs);
-        let mut basis = crate::disclosure::basis(&d, &check);
-        basis["checked_content_hash"] = json!(checked_hash);
-        let refusal = self.0.m.store.transaction(|tx| -> MailResult<Option<SendOutcome>> {
-            let current = repo::draft(tx, &d.id)?;
-            let decision = base::decisions::get(tx, &approval.id)?;
-            let unchanged = current.as_ref() == Some(&stored)
-                && decision.as_ref().is_some_and(|a| {
-                    a.status == "resolved" && a.result == approval.result
-                })
-                && crate::disclosure::inputs(tx, &d)? == inputs;
-            if !unchanged {
-                self.blocked(tx, &d, "disclosure_changed", json!({"checked_content_hash": checked_hash}))?;
-                return Ok(Some(SendOutcome::Blocked {
-                    reason: steve_i18n::t!("mail.disclosure.changed").to_string(),
-                }));
-            }
-            tx.execute("UPDATE mail_drafts SET basis = ? WHERE id = ?", rusqlite::params![basis.to_string(), d.id])?;
-            base::audit(tx, &d.workspace_id, "steve", "mail.send.check", &d.id,
-                &json!({"verdict": check.verdict, "check_model": check.check_model, "content_hash": d.content_hash, "checked_content_hash": checked_hash, "decision": approval.id}))?;
-            if check.verdict != Verdict::Pass {
-                self.blocked(tx, &d, "disclosure", json!({"verdict": check.verdict, "checked_content_hash": checked_hash}))?;
-                return Ok(Some(SendOutcome::Blocked {
-                    reason: steve_i18n::t!("mail.disclosure.held").to_string(),
-                }));
-            }
-            // Authorization may change while the model is running. A paused connection waits as it
-            // did before; a revoked capability/connection cannot use the earlier permission.
-            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
-                Ok(()) => Ok(None),
-                Err(WriteRefusal::Later(_)) => {
-                    repo::draft_transition(tx, &d.id, &["sending"], "approved", self.now())?;
-                    Ok(Some(SendOutcome::Skipped))
-                }
-                Err(WriteRefusal::Never(why)) => {
-                    self.blocked(tx, &d, "connection", json!({"why": why}))?;
-                    Ok(Some(SendOutcome::Blocked { reason: why }))
-                }
-            }
-        })?;
+        let refusal = self.revalidate_send(&d, &stored, &approval, &check, &inputs)?;
         if let Some(outcome) = refusal {
             if let SendOutcome::Blocked { reason } = &outcome {
                 self.fail(&d, reason)?;
@@ -727,41 +691,18 @@ impl Mail {
             attempt.completed = true;
             return Ok(outcome);
         }
-        attempt.submitted = true;
-        let sent =
-            tokio::time::timeout(SEND_TIMEOUT, adapter.send(&cx, &built.mime, &built.meta)).await;
-        let result = match sent {
-            Ok(Ok(r)) => {
-                let msg = match self.record_sent(&d, &approval.id, &built, r.ext_id, now) {
-                    Ok(msg) => msg,
-                    Err(_) => return self.unknown(&d, "服务器已接受邮件，但本地发送记录保存失败"),
-                };
-                // From here on the send is confirmed and recorded, even if the optional copy
-                // hangs, fails, or this task is cancelled. It is outside SEND_TIMEOUT.
-                attempt.completed = true;
-                if let Some(item) = &d.item_id {
-                    self.0.link.hooks().sent(&d.workspace_id, item, &d.subject);
-                }
-                match tokio::time::timeout(
-                    COPY_TIMEOUT,
-                    adapter.copy_sent(&cx, &built.mime, &built.meta),
-                )
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    _ => {
-                        tracing::warn!(draft = %d.id, "mail sent; optional sent-folder copy did not finish")
-                    }
-                }
-                Ok(SendOutcome::Sent { message: msg })
-            }
-            Ok(Err(AdapterError::Transient(_) | AdapterError::Store(_))) | Err(_) => {
-                self.unknown(&d, "等待服务器确认时超时、断连或记录失败")
-            }
-            Ok(Err(e)) => self.fail(&d, &e.to_string()),
-        };
-        attempt.completed = result.is_ok();
-        result
+        self.submit(
+            &d,
+            &mut attempt,
+            submission::Submission {
+                adapter: adapter.as_ref(),
+                cx: &cx,
+                built: &built,
+                approval: &approval,
+                now,
+            },
+        )
+        .await
     }
 
     /// Recover only once, before this Mail singleton can claim any draft. Never age out an active

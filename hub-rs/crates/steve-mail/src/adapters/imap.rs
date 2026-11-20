@@ -30,6 +30,7 @@ use steve_modules::accounts::connections::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_util::sync::CancellationToken;
@@ -42,6 +43,8 @@ use crate::adapter::{
 };
 use crate::config::MailConfig;
 use crate::error::AdapterError;
+
+mod sync_flags;
 
 type Session = async_imap::Session<TlsStream<TcpStream>>;
 
@@ -1145,35 +1148,19 @@ impl ImapAdapter {
         // flags
         let last = f.last_uid.unwrap_or(0);
         if !first && last > 0 {
-            if caps.condstore
-                && let (Some(old), Some(high)) = (f.modseq, mb.highest_modseq)
-            {
-                if high as i64 > old {
-                    let updates: Vec<_> = fetch(
-                        s,
-                        &format!("UID FETCH 1:{last} (UID FLAGS) (CHANGEDSINCE {old})"),
-                    )
-                    .await?
-                    .into_iter()
-                    .filter_map(|it| Some((ext_id(&f.ext_id, validity, it.uid?), it.flags)))
-                    .collect();
-                    report.flag_updates += updates.len();
-                    sink.flags_batch(updates).await?;
-                }
-            } else if !caps.condstore
-                && f.flags_checked.is_none_or(|t| now - t >= FLAG_RECHECK_MS)
-                && mb.exists > 0
-            {
-                let from = mb.exists.saturating_sub(FLAG_RECHECK_COUNT - 1).max(1);
-                let updates: Vec<_> = fetch(s, &format!("FETCH {from}:* (UID FLAGS)"))
-                    .await?
-                    .into_iter()
-                    .filter_map(|it| Some((ext_id(&f.ext_id, validity, it.uid?), it.flags)))
-                    .collect();
-                report.flag_updates += updates.len();
-                sink.flags_batch(updates).await?;
-                f.flags_checked = Some(now);
-            }
+            sync_flags::refresh(
+                s,
+                caps,
+                f,
+                sync_flags::SelectedMailbox {
+                    data: &mb,
+                    validity,
+                },
+                now,
+                sink,
+                report,
+            )
+            .await?;
         }
         if first {
             f.flags_checked = Some(now);
