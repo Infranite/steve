@@ -85,50 +85,9 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     let pending_usage = Mutex::new(Vec::<UsageReport>::new());
     let lim = spec.run.limits.clone();
 
-    let spawned = |pid: u32| {
-        let pid = pid as i64;
-        let started = procs::start_time(pid);
-        let ok = inner
-            .j
-            .tx(|t| t.put_proc(&key, pid, 0, inner.incarnation, "job", started))
-            .is_ok();
-        if ok {
-            *group.lock().unwrap() = Some((pid, started));
-        }
-        ok
-    };
+    let spawned = |pid: u32| record_job_group(&inner, &key, &group, pid);
     let on_message = |m: u32, text: &str| {
-        let mut d = draft.lock().unwrap();
-        let mut evs = vec![];
-        if d.current != Some(m) || !text.starts_with(d.text.as_str()) {
-            d.current = Some(m);
-            d.n += 1;
-            d.text.clear();
-            evs.push(EventBody::MessageStarted {
-                message: message_id(&exec, d.n),
-                block: "b0".into(),
-                role: Role::Assistant,
-            });
-        }
-        let add = &text[d.text.len()..];
-        if !add.is_empty() {
-            evs.push(EventBody::TextDelta {
-                message: message_id(&exec, d.n),
-                block: "b0".into(),
-                utf8_offset: d.text.len() as u64,
-                text: add.to_string(),
-            });
-            output.fetch_add(add.len() as u64, Ordering::SeqCst);
-            d.text = text.to_string();
-        }
-        let evs = evs
-            .into_iter()
-            .map(|b| (Subject::Execution(exec.clone()), b))
-            .collect();
-        if let Err(error) = inner.j.events(evs, None) {
-            event_failed(&inner, &broken, &error);
-        }
-        inner.wake.notify_one();
+        record_draft(&inner, &exec, &draft, &output, &broken, m, text);
     };
     let stop_execution = Notify::new();
     let work = async {
@@ -197,19 +156,117 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     drop(work);
     let _ = std::fs::remove_dir_all(&dir);
     let pending_usage = pending_usage.lock().unwrap().clone();
+    complete_think(
+        ThinkAttempt {
+            inner: &inner,
+            op: &op,
+            exec: &exec,
+            key: &key,
+            budget_epoch,
+        },
+        recorded,
+        stopped,
+        ended,
+        pending_usage,
+    )
+    .await;
+}
+
+/// Record the born process before the gated think harness is allowed to proceed.
+fn record_job_group(
+    inner: &Inner,
+    key: &SessionId,
+    group: &Mutex<Option<(i64, Option<u64>)>>,
+    pid: u32,
+) -> bool {
+    let pid = pid as i64;
+    let started = procs::start_time(pid);
+    let ok = inner
+        .j
+        .tx(|t| t.put_proc(key, pid, 0, inner.incarnation, "job", started))
+        .is_ok();
+    if ok {
+        *group.lock().unwrap() = Some((pid, started));
+    }
+    ok
+}
+
+/// Journal a message replacement or suffix before waking the event sender.
+fn record_draft(
+    inner: &Inner,
+    exec: &ExecutionRef,
+    draft: &Mutex<Draft>,
+    output: &AtomicU64,
+    broken: &AtomicBool,
+    m: u32,
+    text: &str,
+) {
+    let mut d = draft.lock().unwrap();
+    let mut evs = vec![];
+    if d.current != Some(m) || !text.starts_with(d.text.as_str()) {
+        d.current = Some(m);
+        d.n += 1;
+        d.text.clear();
+        evs.push(EventBody::MessageStarted {
+            message: message_id(exec, d.n),
+            block: "b0".into(),
+            role: Role::Assistant,
+        });
+    }
+    let add = &text[d.text.len()..];
+    if !add.is_empty() {
+        evs.push(EventBody::TextDelta {
+            message: message_id(exec, d.n),
+            block: "b0".into(),
+            utf8_offset: d.text.len() as u64,
+            text: add.to_string(),
+        });
+        output.fetch_add(add.len() as u64, Ordering::SeqCst);
+        d.text = text.to_string();
+    }
+    let evs = evs
+        .into_iter()
+        .map(|b| (Subject::Execution(exec.clone()), b))
+        .collect();
+    if let Err(error) = inner.j.events(evs, None) {
+        event_failed(inner, broken, &error);
+    }
+    inner.wake.notify_one();
+}
+
+struct ThinkAttempt<'a> {
+    inner: &'a Inner,
+    op: &'a OperationId,
+    exec: &'a ExecutionRef,
+    key: &'a SessionId,
+    budget_epoch: u64,
+}
+
+/// Translate the settled attempt and retained Final reports into its terminal transaction.
+async fn complete_think(
+    attempt: ThinkAttempt<'_>,
+    recorded: Option<(i64, Option<u64>)>,
+    stopped: Stopped,
+    ended: Result<ApiResult<Ran>, Stop>,
+    pending_usage: Vec<UsageReport>,
+) {
+    let ThinkAttempt {
+        inner,
+        op,
+        exec,
+        key,
+        budget_epoch,
+    } = attempt;
     let gone = stopped.gone();
     let completion = match ended {
         Err(Stop::Shutdown) => {
             if gone && let Some((pgid, _)) = recorded {
-                let _ = inner.j.tx(|t| t.drop_proc(&key, pgid));
+                let _ = inner.j.tx(|t| t.drop_proc(key, pgid));
             }
             return;
         }
         _ if !gone => {
-            return finish(&inner, |t| {
-                unknown(&inner, t, &op, "the harness did not stop")
-            })
-            .await;
+            return finish(inner, |t| unknown(inner, t, op, "the harness did not stop")).await;
         }
         Err(Stop::End(outcome, error, stop_reason)) => Completion {
             outcome,
@@ -223,7 +280,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         },
         Ok(Ok(mut ran)) => {
             ran.usage.extend(pending_usage);
-            return end(&inner, &op, &exec, &key, recorded, ran, budget_epoch).await;
+            return end(inner, op, exec, key, recorded, ran, budget_epoch).await;
         }
     };
     let before = pending_usage
@@ -231,10 +288,10 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         .map(|report| EventBody::Usage { report })
         .collect();
     end_with(
-        &inner,
-        &op,
-        &exec,
-        &key,
+        inner,
+        op,
+        exec,
+        key,
         recorded,
         completion,
         before,
@@ -303,106 +360,13 @@ async fn acp_think(
     let mut prompt = vec![json!({"type": "text", "text": message})];
     prompt.extend(images.iter().map(Image::block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
-    let state_dirs = properties
-        .state
-        .as_ref()
-        .map(|st| st.ambient_dirs(&inner.cfg.acp.user_home))
-        .unwrap_or_default();
-    let writable: Vec<PathBuf> = std::iter::once(dir.to_path_buf())
-        .chain(state_dirs)
-        .flat_map(|p| {
-            let real = steve_research::guard::resolve(&p);
-            if real == p { vec![p] } else { vec![p, real] }
-        })
-        .collect();
-    if let Err(e) = std::fs::create_dir_all(dir.join("tmp")) {
-        return failed(OneShotError::Io(e));
-    }
-    // Keep the existing Auto sandbox policy: use the adapter's own read-only sandbox where
-    // declared, otherwise apply the host's read-only wrapper when the platform provides it.
-    let sandbox = if !properties.self_read_only
-        && properties.nested_sandbox
-        && steve_research_sandbox::available()
-    {
-        if cfg!(target_os = "macos") {
-            let Some(profile) = steve_research_sandbox::readonly_profile(&writable) else {
-                return failed(OneShotError::Failed(
-                    "invalid read-only sandbox paths".into(),
-                ));
-            };
-            // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
-            let profile = format!(
-                "{profile}{}",
-                inner.confine.seatbelt_rules().unwrap_or_default()
-            );
-            let path = dir.join("readonly.sb");
-            if let Err(e) = std::fs::write(&path, profile) {
-                return failed(OneShotError::Io(e));
-            }
-            Some(crate::acp_job::ReadonlySandbox::Seatbelt(path))
-        } else {
-            Some(crate::acp_job::ReadonlySandbox::Bwrap {
-                dir: dir.to_path_buf(),
-                writable: writable.clone(),
-            })
-        }
-    } else {
-        None
+    let sandbox = match think_sandbox(inner, dir, &properties) {
+        Ok(sandbox) => sandbox,
+        Err(error) => return failed(error),
     };
     let state = Mutex::new((None::<String>, 0u32, String::new()));
     let event = |ev: EventBody| {
-        let mut state = state.lock().unwrap();
-        match ev {
-            EventBody::MessageStarted {
-                message,
-                role: Role::Assistant,
-                ..
-            } => {
-                state.0 = Some(message);
-                state.1 += 1;
-                state.2.clear();
-            }
-            EventBody::TextDelta { message, text, .. }
-                if state.0.as_deref() == Some(message.as_str()) =>
-            {
-                state.2.push_str(&text);
-                on_message(state.1, &state.2);
-            }
-            diagnostic @ EventBody::Diagnostic { .. } => {
-                let exec = ExecutionRef::Job {
-                    job: spec.job.clone(),
-                    attempt: spec.run.attempt.clone(),
-                };
-                if let Err(error) = inner
-                    .j
-                    .events(vec![(Subject::Execution(exec), diagnostic)], None)
-                {
-                    event_failed(inner, broken, &error);
-                }
-                inner.wake.notify_one();
-            }
-            EventBody::Usage { report } => {
-                let final_id =
-                    (report.measurement == Measurement::Final).then(|| report.report_id.clone());
-                if final_id.is_some() {
-                    pending_usage.lock().unwrap().push(report.clone());
-                }
-                let exec = ExecutionRef::Job {
-                    job: spec.job.clone(),
-                    attempt: spec.run.attempt.clone(),
-                };
-                if let Err(error) = inner.j.events(
-                    vec![(Subject::Execution(exec), EventBody::Usage { report })],
-                    None,
-                ) {
-                    event_failed(inner, broken, &error);
-                } else if let Some(id) = final_id {
-                    pending_usage.lock().unwrap().retain(|r| r.report_id != id);
-                }
-                inner.wake.notify_one();
-            }
-            _ => {}
-        }
+        record_think_event(inner, spec, &state, on_message, pending_usage, broken, ev);
     };
     let wrap = crate::acp_job::wrap(
         sandbox.as_ref(),
@@ -442,6 +406,126 @@ async fn acp_think(
             stop_reason: "error".into(),
             usage: vec![],
         },
+    }
+}
+
+/// Build only the declared read-only sandbox and the directories the harness may write.
+fn think_sandbox(
+    inner: &Inner,
+    dir: &Path,
+    properties: &steve_acp::AdapterProperties,
+) -> Result<Option<crate::acp_job::ReadonlySandbox>, OneShotError> {
+    let state_dirs = properties
+        .state
+        .as_ref()
+        .map(|st| st.ambient_dirs(&inner.cfg.acp.user_home))
+        .unwrap_or_default();
+    let writable: Vec<PathBuf> = std::iter::once(dir.to_path_buf())
+        .chain(state_dirs)
+        .flat_map(|p| {
+            let real = steve_research::guard::resolve(&p);
+            if real == p { vec![p] } else { vec![p, real] }
+        })
+        .collect();
+    if let Err(e) = std::fs::create_dir_all(dir.join("tmp")) {
+        return Err(OneShotError::Io(e));
+    }
+    // Keep the existing Auto sandbox policy: use the adapter's own read-only sandbox where
+    // declared, otherwise apply the host's read-only wrapper when the platform provides it.
+    Ok(
+        if !properties.self_read_only
+            && properties.nested_sandbox
+            && steve_research_sandbox::available()
+        {
+            if cfg!(target_os = "macos") {
+                let Some(profile) = steve_research_sandbox::readonly_profile(&writable) else {
+                    return Err(OneShotError::Failed(
+                        "invalid read-only sandbox paths".into(),
+                    ));
+                };
+                // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
+                let profile = format!(
+                    "{profile}{}",
+                    inner.confine.seatbelt_rules().unwrap_or_default()
+                );
+                let path = dir.join("readonly.sb");
+                if let Err(e) = std::fs::write(&path, profile) {
+                    return Err(OneShotError::Io(e));
+                }
+                Some(crate::acp_job::ReadonlySandbox::Seatbelt(path))
+            } else {
+                Some(crate::acp_job::ReadonlySandbox::Bwrap {
+                    dir: dir.to_path_buf(),
+                    writable: writable.clone(),
+                })
+            }
+        } else {
+            None
+        },
+    )
+}
+
+/// Preserve draft identity, diagnostics and retryable Final usage from one ACP event.
+fn record_think_event(
+    inner: &Inner,
+    spec: &JobSpec,
+    state: &Mutex<(Option<String>, u32, String)>,
+    on_message: &(dyn Fn(u32, &str) + Send + Sync),
+    pending_usage: &Mutex<Vec<UsageReport>>,
+    broken: &AtomicBool,
+    ev: EventBody,
+) {
+    let mut state = state.lock().unwrap();
+    match ev {
+        EventBody::MessageStarted {
+            message,
+            role: Role::Assistant,
+            ..
+        } => {
+            state.0 = Some(message);
+            state.1 += 1;
+            state.2.clear();
+        }
+        EventBody::TextDelta { message, text, .. }
+            if state.0.as_deref() == Some(message.as_str()) =>
+        {
+            state.2.push_str(&text);
+            on_message(state.1, &state.2);
+        }
+        diagnostic @ EventBody::Diagnostic { .. } => {
+            let exec = ExecutionRef::Job {
+                job: spec.job.clone(),
+                attempt: spec.run.attempt.clone(),
+            };
+            if let Err(error) = inner
+                .j
+                .events(vec![(Subject::Execution(exec), diagnostic)], None)
+            {
+                event_failed(inner, broken, &error);
+            }
+            inner.wake.notify_one();
+        }
+        EventBody::Usage { report } => {
+            let final_id =
+                (report.measurement == Measurement::Final).then(|| report.report_id.clone());
+            if final_id.is_some() {
+                pending_usage.lock().unwrap().push(report.clone());
+            }
+            let exec = ExecutionRef::Job {
+                job: spec.job.clone(),
+                attempt: spec.run.attempt.clone(),
+            };
+            if let Err(error) = inner.j.events(
+                vec![(Subject::Execution(exec), EventBody::Usage { report })],
+                None,
+            ) {
+                event_failed(inner, broken, &error);
+            } else if let Some(id) = final_id {
+                pending_usage.lock().unwrap().retain(|r| r.report_id != id);
+            }
+            inner.wake.notify_one();
+        }
+        _ => {}
     }
 }
 

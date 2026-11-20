@@ -270,50 +270,7 @@ impl LocalNode {
         }
         let cfg = &self.0.cfg.acp;
         let id = &c.body.harness;
-        if !cfg.managed_adapter(id) || c.body.versions.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "Only installed components in this Node's managed prefix may be upgraded",
-            ));
-        }
-        let components = adapters::update_components(cfg, id);
-        let mut packages = BTreeMap::new();
-        {
-            let checks = self.0.harness_updates.checks.lock().unwrap();
-            for (component, target) in &c.body.versions {
-                let spec = components
-                    .iter()
-                    .find(|s| s.id == component)
-                    .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "Unknown component id"))?;
-                if !owned(cfg, id, spec) {
-                    return Err(ApiError::new(
-                        ErrorCode::Denied,
-                        "The selected component is external, missing or overridden; manage it on the Node",
-                    ));
-                }
-                let installed = installed(spec).ok_or_else(|| {
-                    ApiError::new(
-                        ErrorCode::Stale,
-                        "Component changed during the version read; refresh and retry",
-                    )
-                })?;
-                if installed != *target {
-                    let check = checks
-                        .get(&(id.clone(), component.clone()))
-                        .filter(|v| v.error.is_none() && now() - v.at < 86_400_000);
-                    if version(target).as_ref() != Some(target)
-                        || check.and_then(|v| v.latest.as_ref()) != Some(target)
-                        || !managed::newer(target, &installed)
-                    {
-                        return Err(ApiError::new(
-                            ErrorCode::Stale,
-                            "Component versions changed or have not been checked on this Node; refresh before upgrading",
-                        ));
-                    }
-                }
-                packages.insert(spec.package.expect("owned").to_string(), target.clone());
-            }
-        }
+        let (components, packages) = upgrade_packages(&self.0, &c)?;
         let req = adapter_setup::requirements(cfg, id).await;
         if let Some(e) = req.node_error.or(req.npm_error) {
             return Err(ApiError::new(ErrorCode::Unsupported, e));
@@ -332,44 +289,7 @@ impl LocalNode {
                 managed::prefix_lock(&cfg.steve_home, true)
                     .map_err(|e| ApiError::new(ErrorCode::Busy, e))?,
             );
-            // Recheck ownership and versions after locking the prefix; a CLI may have raced
-            // the registry read. Never downgrade or redirect an external command.
-            changed = false;
-            for (component, target) in &c.body.versions {
-                let spec = components
-                    .iter()
-                    .find(|s| s.id == component)
-                    .expect("validated");
-                if !owned(cfg, id, spec)
-                    || installed(spec).is_some_and(|v| managed::newer(&v, target))
-                {
-                    return Err(ApiError::new(
-                        ErrorCode::Stale,
-                        "Components changed before admission; refresh and retry",
-                    ));
-                }
-                let current = installed(spec).ok_or_else(|| {
-                    ApiError::new(
-                        ErrorCode::Stale,
-                        "Component changed before admission; refresh and retry",
-                    )
-                })?;
-                if current != *target {
-                    let checks = self.0.harness_updates.checks.lock().unwrap();
-                    let check = checks
-                        .get(&(id.clone(), component.clone()))
-                        .filter(|v| v.error.is_none() && now() - v.at < 86_400_000);
-                    if check.and_then(|v| v.latest.as_ref()) != Some(target)
-                        || !managed::newer(target, &current)
-                    {
-                        return Err(ApiError::new(
-                            ErrorCode::Stale,
-                            "Refresh component versions before retrying",
-                        ));
-                    }
-                    changed = true;
-                }
-            }
+            changed = recheck_components(&self.0, &components, &c.body)?;
             t.set_installation(&format!("upgrade:{id}"), &c.id)?;
             t.set_installation(id, &c.id)?;
             let mut d = Decided::accepted();
@@ -391,28 +311,24 @@ impl LocalNode {
                 let process_key = SessionId::new("maintenance_adapters").expect("static id");
                 let task_inner = inner.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let specs: Vec<_> = packages.iter().map(|(p,v)| (p.as_str(),v.as_str())).collect();
-                    let mut process = None;
-                    let result = managed::install_versions_observed(&npm, &task_inner.cfg.acp.steve_home, &specs, &prefix, |pid| {
-                        let started = crate::procs::start_time(i64::from(pid));
-                        task_inner.j.tx(|t| t.put_proc(&process_key, i64::from(pid), 0, task_inner.incarnation, "adapter-upgrade", started)).map_err(|_| "Could not record installer identity".to_string())?;
-                        process = Some((i64::from(pid), started));
-                        Ok(())
-                    });
-                    if let Some((pid, started)) = process {
-                        if !crate::procs::wait_gone(pid, started).gone() { return Err("Installer exit is unknown; reconcile this Node before retrying".into()); }
-                        task_inner.j.tx(|t| t.drop_proc(&process_key, pid)).map_err(|_| "Could not record installer exit".to_string())?;
-                    }
-                    result.map_err(|_| "npm upgrade failed or timed out; check this Node's network, npm configuration, disk space and Node.js version, then retry".to_string())?;
-                    for spec in adapters::update_components(&task_inner.cfg.acp, &body.harness) {
-                        if let Some(target) = body.versions.get(spec.id) {
-                            if !owned(&task_inner.cfg.acp, &body.harness, &spec) || installed(&spec).as_ref() != Some(target) { return Err("npm exited successfully but the requested component version was not installed; inspect this Node and retry".into()); }
-                        }
-                    }
-                    Ok(())
-                }).await.map_err(|_| "Upgrade task interrupted; inspect this Node before retrying".to_string()).and_then(|r|r);
-                let state = match result { Ok(()) => succeeded(), Err(e) => Observed::Finished { outcome: Outcome::Failed, result: None, error: Some(ApiError::new(ErrorCode::Internal,e)) } };
-                if inner.j.tx(|t| t.set_state(&op, &state)).is_err() { inner.fault(); }
+                    install_versions(&task_inner, &body, &packages, &npm, &prefix, &process_key)
+                })
+                .await
+                .map_err(|_| {
+                    "Upgrade task interrupted; inspect this Node before retrying".to_string()
+                })
+                .and_then(|r| r);
+                let state = match result {
+                    Ok(()) => succeeded(),
+                    Err(e) => Observed::Finished {
+                        outcome: Outcome::Failed,
+                        result: None,
+                        error: Some(ApiError::new(ErrorCode::Internal, e)),
+                    },
+                };
+                if inner.j.tx(|t| t.set_state(&op, &state)).is_err() {
+                    inner.fault();
+                }
                 inner.adapter_probes.forget().await;
                 inner.wake.notify_one();
             });
@@ -429,6 +345,167 @@ impl LocalNode {
         }
         Ok(receipt)
     }
+}
+
+/// Validate the selected components against this Node's owned, recently checked versions.
+fn upgrade_packages(
+    inner: &Inner,
+    c: &Command<UpgradeHarness>,
+) -> ApiResult<(Vec<UpdateComponent>, BTreeMap<String, String>)> {
+    let cfg = &inner.cfg.acp;
+    let id = &c.body.harness;
+    if !cfg.managed_adapter(id) || c.body.versions.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "Only installed components in this Node's managed prefix may be upgraded",
+        ));
+    }
+    let components = adapters::update_components(cfg, id);
+    let mut packages = BTreeMap::new();
+    {
+        let checks = inner.harness_updates.checks.lock().unwrap();
+        for (component, target) in &c.body.versions {
+            let spec = components
+                .iter()
+                .find(|s| s.id == component)
+                .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "Unknown component id"))?;
+            if !owned(cfg, id, spec) {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "The selected component is external, missing or overridden; manage it on the Node",
+                ));
+            }
+            let installed = installed(spec).ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Stale,
+                    "Component changed during the version read; refresh and retry",
+                )
+            })?;
+            if installed != *target {
+                let check = checks
+                    .get(&(id.clone(), component.clone()))
+                    .filter(|v| v.error.is_none() && now() - v.at < 86_400_000);
+                if version(target).as_ref() != Some(target)
+                    || check.and_then(|v| v.latest.as_ref()) != Some(target)
+                    || !managed::newer(target, &installed)
+                {
+                    return Err(ApiError::new(
+                        ErrorCode::Stale,
+                        "Component versions changed or have not been checked on this Node; refresh before upgrading",
+                    ));
+                }
+            }
+            packages.insert(spec.package.expect("owned").to_string(), target.clone());
+        }
+    }
+    Ok((components, packages))
+}
+
+/// Recheck ownership and checked targets while admission holds the managed prefix lock.
+fn recheck_components(
+    inner: &Inner,
+    components: &[UpdateComponent],
+    body: &UpgradeHarness,
+) -> ApiResult<bool> {
+    let cfg = &inner.cfg.acp;
+    let id = &body.harness;
+    // Recheck ownership and versions after locking the prefix; a CLI may have raced
+    // the registry read. Never downgrade or redirect an external command.
+    let mut changed = false;
+    for (component, target) in &body.versions {
+        let spec = components
+            .iter()
+            .find(|s| s.id == component)
+            .expect("validated");
+        if !owned(cfg, id, spec) || installed(spec).is_some_and(|v| managed::newer(&v, target)) {
+            return Err(ApiError::new(
+                ErrorCode::Stale,
+                "Components changed before admission; refresh and retry",
+            ));
+        }
+        let current = installed(spec).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Stale,
+                "Component changed before admission; refresh and retry",
+            )
+        })?;
+        if current != *target {
+            let checks = inner.harness_updates.checks.lock().unwrap();
+            let check = checks
+                .get(&(id.clone(), component.clone()))
+                .filter(|v| v.error.is_none() && now() - v.at < 86_400_000);
+            if check.and_then(|v| v.latest.as_ref()) != Some(target)
+                || !managed::newer(target, &current)
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Stale,
+                    "Refresh component versions before retrying",
+                ));
+            }
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Observe the installer identity and exit before verifying every requested package version.
+fn install_versions(
+    task_inner: &Inner,
+    body: &UpgradeHarness,
+    packages: &BTreeMap<String, String>,
+    npm: &Path,
+    prefix: &managed::PrefixLock,
+    process_key: &SessionId,
+) -> Result<(), String> {
+    let specs: Vec<_> = packages
+        .iter()
+        .map(|(p, v)| (p.as_str(), v.as_str()))
+        .collect();
+    let mut process = None;
+    let result = managed::install_versions_observed(
+        npm,
+        &task_inner.cfg.acp.steve_home,
+        &specs,
+        prefix,
+        |pid| {
+            let started = crate::procs::start_time(i64::from(pid));
+            task_inner
+                .j
+                .tx(|t| {
+                    t.put_proc(
+                        process_key,
+                        i64::from(pid),
+                        0,
+                        task_inner.incarnation,
+                        "adapter-upgrade",
+                        started,
+                    )
+                })
+                .map_err(|_| "Could not record installer identity".to_string())?;
+            process = Some((i64::from(pid), started));
+            Ok(())
+        },
+    );
+    if let Some((pid, started)) = process {
+        if !crate::procs::wait_gone(pid, started).gone() {
+            return Err("Installer exit is unknown; reconcile this Node before retrying".into());
+        }
+        task_inner
+            .j
+            .tx(|t| t.drop_proc(process_key, pid))
+            .map_err(|_| "Could not record installer exit".to_string())?;
+    }
+    result.map_err(|_| "npm upgrade failed or timed out; check this Node's network, npm configuration, disk space and Node.js version, then retry".to_string())?;
+    for spec in adapters::update_components(&task_inner.cfg.acp, &body.harness) {
+        if let Some(target) = body.versions.get(spec.id) {
+            if !owned(&task_inner.cfg.acp, &body.harness, &spec)
+                || installed(&spec).as_ref() != Some(target)
+            {
+                return Err("npm exited successfully but the requested component version was not installed; inspect this Node and retry".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn succeeded() -> Observed {
