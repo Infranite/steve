@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::process::Child;
 
 use serde_json::{Value, json};
@@ -109,22 +110,29 @@ impl Client {
             .build()
             .expect("client");
         let end = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let up = http
-                .get(format!("{}/healthz", h.base))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await;
-            if let Ok(r) = up
-                && r.json::<Value>()
-                    .await
-                    .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
-            {
-                break;
-            }
-            assert!(tokio::time::Instant::now() < end, "the Hub serves");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        eventually(
+            format!(
+                "The isolated Hub at {} serves healthy requests outside maintenance.",
+                h.base
+            ),
+            || async {
+                let up = http
+                    .get(format!("{}/healthz", h.base))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
+                if let Ok(r) = up
+                    && r.json::<Value>()
+                        .await
+                        .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+                {
+                    return true;
+                }
+                assert!(tokio::time::Instant::now() < end, "the Hub serves");
+                false
+            },
+        )
+        .await;
         let r = http
             .get(format!("{}/auth/dev", h.base))
             .send()

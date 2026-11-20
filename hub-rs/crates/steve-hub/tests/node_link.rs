@@ -8,7 +8,7 @@ mod node_harness;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use node_harness::*;
 use steve_acp::AcpConfig;
@@ -252,12 +252,16 @@ async fn a_local_node_runs_a_whole_turn_through_the_link() {
     h.session("s1");
     let rt = h.bind(&node, "s1");
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     rt.prompt(
         "s1",
@@ -325,12 +329,16 @@ async fn a_dropped_link_reconnects_and_replays_once() {
     h.session("s1");
     let rt = h.bind(&node, "s1");
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     rt.prompt("s1", "@say one @sleep 1200 @say two", "user", &[])
         .unwrap();
@@ -446,12 +454,16 @@ async fn a_remote_node_takes_only_its_owners_work() {
     let rt = h.bind(&node, "s1");
     assert!(rt.is_remote());
     let n = local_node(&h, id, &node).await;
-    for _ in 0..500 {
-        if phase(&h, "s1") == "ready" {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "Bound session s1 is ready before its prompt is submitted; {}",
+                h.dump()
+            )
+        }),
+        || phase(&h, "s1") == "ready",
+    )
+    .await;
     assert_eq!(phase(&h, "s1"), "ready", "{}", h.dump());
     // recorded at bind (path model S1): nobody asked for it, so the workspace's service principal
     let (p, a): (String, String) = h

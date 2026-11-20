@@ -7,6 +7,7 @@ use std::time::Duration;
 use steve_hub::{api::AppState, bus::Bus, config::Config};
 use steve_node::{LocalNode, NodeConfig, PolicyCeiling, Storage};
 use steve_node_api::*;
+use steve_runtime::testkit::{eventually, on_timeout};
 #[path = "../../steve-node/tests/fixtures/harness_updates.rs"]
 mod fixture;
 use fixture::*;
@@ -137,19 +138,27 @@ impl Env {
         r
     }
     async fn wait_receipt(&self, node: &str, operation: &str) -> Value {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
+        let latest = std::sync::Mutex::new(None::<Value>);
+        eventually(
+            on_timeout(|| async {
+                format!(
+                    "Upgrade {operation} for Node {node} has a finished pi receipt; last report: {:?}",
+                    latest.lock().unwrap()
+                )
+            }),
+            || async {
                 let r = self.report(node).await;
-                if r["runs"]["pi"]["operation"] == operation
-                    && r["runs"]["pi"]["state"]["state"] == "finished"
-                {
-                    return r;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap()
+                let finished = r["runs"]["pi"]["operation"] == operation
+                    && r["runs"]["pi"]["state"]["state"] == "finished";
+                *latest.lock().unwrap() = Some(r);
+                finished
+            },
+        )
+        .await;
+        latest
+            .into_inner()
+            .unwrap()
+            .expect("finished report observed")
     }
 }
 async fn start(node: Arc<dyn Node>) -> Env {

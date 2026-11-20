@@ -259,6 +259,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .is_empty()
     })
     .await;
+    // Deliberate negative window: a declined delete stays open and is not answered later.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -287,6 +288,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let before = set_modes();
     let (s, v) = e.call("PUT", "/api/yolo", Some(json!({"on": false}))).await;
     assert_eq!(s, 200, "{v}");
+    // Deliberate mode-switch quiet window after turning YOLO off; there is no positive ack for absence.
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(set_modes(), before, "no mode switch for YOLO off");
 
@@ -437,6 +439,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .is_empty()
     })
     .await;
+    // Deliberate negative window: the push stays with the user, without a late auto-answer.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -588,6 +591,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     )
     .await;
     let (ok_acts, kill_acts) = (acts(off_ok.clone()), acts(off_kill.clone()));
+    // Deliberate negative window: YOLO off must leave both visible cards without audit actions.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         ok_acts().is_empty() && kill_acts().is_empty(),

@@ -715,6 +715,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
             ) == 1
         })
         .await;
+    // Deliberate cross-process quiet window: a late resend must still be observed.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(n.got("断电验收-K7"), 1, "never re-run");
 }
@@ -1013,17 +1014,24 @@ async fn another_nodes_session_is_refused() {
     std::fs::write(&f, pairing.to_string()).unwrap();
     let mut impostor = nb.run();
     let t0 = std::time::Instant::now();
-    let status = loop {
-        if let Ok(Some(s)) = impostor.0.try_wait() {
-            break s;
-        }
-        assert!(
-            t0.elapsed() < Duration::from_secs(30),
-            "refused, not retried forever; node:\n{}",
-            nb.log()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
+    let mut status = None;
+    eventually_sync(
+        "The impostor Node process exits; its refusal status and log are checked next.",
+        || {
+            if let Ok(Some(s)) = impostor.0.try_wait() {
+                status = Some(s);
+                return true;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(30),
+                "refused, not retried forever; node:\n{}",
+                nb.log()
+            );
+            false
+        },
+    )
+    .await;
+    let status = status.expect("impostor exit observed");
     assert!(!status.success());
     assert!(nb.log().contains("refused"), "{}", nb.log());
     // and A's turn is untouched

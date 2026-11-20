@@ -263,9 +263,13 @@ async fn a_blob_is_written_whole_and_a_truncated_copy_is_repaired_on_the_next_up
         "written again"
     );
     assert_eq!(files_under(&root).len(), 1);
+    // An old mtime makes any accidental rewrite distinguishable without a clock delay.
+    std::fs::File::open(&blob)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+        .unwrap();
     // an intact copy is left alone
     let before = std::fs::metadata(&blob).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
     assert_eq!(upload().await, id);
     assert_eq!(
         std::fs::metadata(&blob).unwrap().modified().unwrap(),

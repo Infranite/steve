@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use steve_runtime::testkit::eventually_sync;
+use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -219,8 +219,22 @@ async fn a_bots_mcp_servers_and_secrets_never_reach_a_remote_node() {
     ));
     assert_eq!(uses, 0, "opening a harness takes no plugin secrets");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "The proxied session s1 finishes opening before secret-leak inspection; {}",
+                h.dump()
+            )
+        }),
+        || {
+            h.q::<i64>(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id='s1' AND phase='ready'",
+            ) == 1
+        },
+    )
+    .await;
     task.abort();
+    let _ = task.await;
     drop(local);
     h.store
         .with_conn(|c| {
