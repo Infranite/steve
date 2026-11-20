@@ -132,7 +132,7 @@ pub fn delete(c: &Connection, source: Source, id: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-#[cfg(sqlite_conformance)]
+#[cfg(any(feature = "conformance", sqlite_conformance))]
 pub mod backend {
     use super::*;
     use std::sync::Arc;

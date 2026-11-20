@@ -150,7 +150,7 @@ pub fn prepare_layout(dir: &std::path::Path, split: bool) {
     }
     assert!(dir.join(CORE_FILE).exists());
 }
-pub fn open_store(
+pub fn open_sync_store(
     dir: &std::path::Path,
     registry: Arc<Registry>,
     time: Arc<Time>,
@@ -169,10 +169,7 @@ pub fn open_store(
         }
     }
     engines.push(engine);
-    let _runtime = tokio::runtime::Handle::try_current()
-        .err()
-        .map(|_| runtime().enter());
-    steve_store_sqlite::store::SqliteStore::new(
+    steve_store_sqlite::store::SqliteStore::new_sync(
         engines,
         registry,
         time.clone(),
@@ -180,8 +177,18 @@ pub fn open_store(
         || false,
     )
     .unwrap()
-    .with_snapshot_clock(time)
-    .unwrap()
+}
+
+pub fn open_store(
+    dir: &std::path::Path,
+    registry: Arc<Registry>,
+    time: Arc<Time>,
+) -> steve_store_sqlite::store::SqliteStore<String> {
+    open_sync_store(dir, registry, time.clone())
+        .with_runtime(runtime().handle().clone())
+        .unwrap()
+        .with_snapshot_clock(time)
+        .unwrap()
 }
 
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {

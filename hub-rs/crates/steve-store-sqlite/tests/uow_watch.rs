@@ -404,3 +404,84 @@ fn first_subscription_after_autocommit_is_conservative_and_survives_later_rollba
         assert!(!ready_notify(&wake));
     });
 }
+
+#[test]
+fn synchronous_root_guard_owns_capture_and_publishes_once_on_release() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    for split in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        prepare_layout(dir.path(), split);
+        let store = open_sync_store(
+            dir.path(),
+            Arc::new(Registry::verification().unwrap()),
+            Arc::new(Time::default()),
+        );
+        store.install_registered().unwrap();
+        let clone = store.clone();
+        let wake = store.commit_wake(Domain::Comms, &["verify_comms"]);
+        let entity = store.watch(&["verify_comms".into()]);
+        let guard = clone.root_guard(Domain::Comms, Lane::Interactive).unwrap();
+        guard
+            .execute_batch(
+                "BEGIN; INSERT INTO verify_comms(id,value,rev) VALUES('sync',1,1); COMMIT",
+            )
+            .unwrap();
+        assert!(!ready_notify(&wake));
+        assert!(!ready(&entity));
+        assert!(store.root_guard(Domain::Comms, Lane::Admin).is_err());
+        drop(guard);
+        assert!(ready_notify(&wake));
+        assert!(!ready_notify(&wake));
+        assert!(ready(&entity));
+        assert!(!ready(&entity));
+        let guard = store.root_guard(Domain::Comms, Lane::Interactive).unwrap();
+        guard
+            .execute_batch("BEGIN; INSERT INTO verify_comms(id,value,rev) VALUES('abandoned',1,1)")
+            .unwrap();
+        drop(guard);
+        assert!(!ready_notify(&wake));
+        assert!(!ready(&entity));
+        assert!(tokio::runtime::Handle::try_current().is_err());
+    }
+}
+
+#[test]
+fn synchronous_root_guard_first_subscription_and_unwind_share_cleanup_exit() {
+    for split in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        prepare_layout(dir.path(), split);
+        let store = open_sync_store(
+            dir.path(),
+            Arc::new(Registry::verification().unwrap()),
+            Arc::new(Time::default()),
+        );
+        store.install_registered().unwrap();
+        let guard = store.root_guard(Domain::Core, Lane::Interactive).unwrap();
+        guard
+            .execute_batch(
+                "BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('before-subscribe',1,1)",
+            )
+            .unwrap();
+        let wake = store.commit_wake(Domain::Core, &["verify_core"]);
+        guard.execute_batch("COMMIT").unwrap();
+        assert!(!ready_notify(&wake));
+        drop(guard);
+        assert!(ready_notify(&wake));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = store.root_guard(Domain::Core, Lane::Interactive).unwrap();
+            guard
+                .execute_batch("BEGIN; INSERT INTO verify_core(id,value,rev) VALUES('panic',1,1)")
+                .unwrap();
+            panic!("direct root guard unwind");
+        }));
+        assert!(panic.is_err());
+        assert!(!ready_notify(&wake));
+        let guard = store.root_guard(Domain::Core, Lane::Interactive).unwrap();
+        guard
+            .execute_batch("INSERT INTO verify_core(id,value,rev) VALUES('durable',1,1)")
+            .unwrap();
+        assert!(!ready_notify(&wake));
+        drop(guard);
+        assert!(ready_notify(&wake));
+    }
+}

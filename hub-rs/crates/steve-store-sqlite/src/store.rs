@@ -443,8 +443,6 @@ impl<E: Send + 'static> SqliteStore<E> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
         let rev = w.runner.reserve_root(&c)?;
-        let capture = crate::exec::watch::Capture::begin(&c, &w.runner.watches)
-            .map_err(crate::domains::sql_error)?;
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&c, &w.runner, &rev)));
         let leaked = !c.is_autocommit();
@@ -453,7 +451,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         } else {
             Ok(())
         };
-        capture.finish();
+        // RootGuard publishes confirmed commits once, after rollback cleanup.
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);
@@ -485,10 +483,18 @@ impl<E: Send + 'static> SqliteStore<E> {
             ));
         }
         let connection = w.engine.writer_conn().map_err(CommitError::Fatal)?;
+        // SAFETY: this points into the Connection in Engine's mutex, not into the
+        // movable MutexGuard. RootGuard retains an Arc<Engine> (also if forgotten),
+        // is thread-bound, and finishes/drops Capture before releasing the mutex.
+        // Extending this borrow avoids a self-reference to the guard's own fields.
+        let captured_connection = unsafe { &*std::ptr::from_ref(&*connection) };
+        let capture = crate::exec::watch::Capture::begin(captured_connection, &w.runner.watches)
+            .map_err(crate::domains::sql_error)?;
         Ok(RootGuard {
-            engine: &w.engine,
             connection,
+            capture: Some(capture),
             _grant: grant,
+            engine: w.engine.clone(),
         })
     }
     /// Explicit verification/bootstrap only. Existing production tables must already have their
@@ -504,12 +510,15 @@ impl<E: Send + 'static> SqliteStore<E> {
 }
 /// Opaque root writer authorization. Only the executor can create it; borrowing
 /// the connection never escapes its authorization lifetime. Drop rolls back a
-/// leaked transaction, releases the mutex, then returns the executor's lease.
+/// leaked transaction, publishes confirmed table hints through Capture's single
+/// exit, releases the mutex, then returns the executor's lease.
 /// Kept thread-bound by RootGrant, and must never be held across await.
 pub struct RootGuard<'a, E: Send + 'static = ()> {
-    engine: &'a Engine,
+    // Capture drops before the mutex guard even if cleanup unwinds.
+    capture: Option<crate::exec::watch::Capture<'a>>,
     connection: std::sync::MutexGuard<'a, rusqlite::Connection>,
     _grant: RootGrant<Arc<Engine>, EngineRunner<E>>,
+    engine: Arc<Engine>,
 }
 impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
@@ -526,6 +535,9 @@ impl<E: Send + 'static> Drop for RootGuard<'_, E> {
     fn drop(&mut self) {
         if !self.connection.is_autocommit() {
             let _ = self.engine.rollback_root(&self.connection);
+        }
+        if let Some(capture) = self.capture.take() {
+            capture.finish();
         }
     }
 }
