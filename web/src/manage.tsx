@@ -561,9 +561,9 @@ function TagsPane() {
   return <div className="flex flex-col gap-8" data-tags-pane>
     <div className="flex flex-wrap items-center gap-2"><Segmented size="sm" value={cats.includes(tagCat) ? tagCat : "全部"} onChange={(v) => { tagCat = v; r() }} options={cats.map((c) => [c, catLabel(t, c)] as const)} /><span className="flex-1" /><Button size="sm" onClick={() => openSheet("tag", {})} data-new-tag-btn><PlusIcon />{t("manage:tags.new")}</Button></div>
     {!st.tags.length && <Empty title={t("manage:tags.empty")} sub={t("manage:tags.emptySub")} />}
-    {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
+    {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? [...kindTags(), ...domain.filter((tg) => tg.cat === c)] : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
       <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} note={kind ? t("manage:tags.intro") : undefined}>
-        <Panel>{xs.map((tg) => (
+        <Panel>{xs.map((tg) => { const kind = isKind(tg); return (
           <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{!kind && tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-tag-menu={tg.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
@@ -572,7 +572,7 @@ function TagsPane() {
                 {!kind && domain.length > 1 && <DropdownMenuItem onClick={() => { setMerge(tg.id); setInto(domain.find((x) => x.id !== tg.id && x.cat === tg.cat)?.id ?? domain.find((x) => x.id !== tg.id)!.id) }} data-merge-tag>{t("manage:tags.mergeTo")}</DropdownMenuItem>}
                 {!kind && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => setDel(tg.id)} data-del-tag><TrashIcon />{t("common:action.delete")}</DropdownMenuItem></>}
               </DropdownMenuContent></DropdownMenu>
-          </Row>))}</Panel></Section>) : null })}
+          </Row>)})}</Panel></Section>) : null })}
     <AlertDialog open={!!d} onOpenChange={(o) => !o && setDel(null)}><AlertDialogContent>
       <AlertDialogHeader><AlertDialogTitle>{t("manage:tags.delTitle", { name: d?.name })}</AlertDialogTitle><AlertDialogDescription>{t("manage:tags.delDesc", { count: del ? tagUses(del) : 0 })}</AlertDialogDescription></AlertDialogHeader>
       <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { deleteTag(del!); setDel(null) }} data-del-tag-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
@@ -604,7 +604,7 @@ export function TagDialog({ id, item, name }: { id?: string; item?: string; name
         <DialogHeader><DialogTitle className="type-title">{tg ? t("manage:tagDialog.edit") : t("manage:tagDialog.new")}</DialogTitle><DialogDescription className="type-callout">{t("manage:tagDialog.desc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
           <F label={t("manage:tagDialog.name")} htmlFor="tag-name" hint={dup ? t("manage:tagDialog.dup", { cat: catLabel(t, dup.cat) }) : undefined}><Input id="tag-name" autoFocus={!kind} disabled={kind} value={n} onChange={(e) => setN(e.target.value)} placeholder={t("manage:tagDialog.namePlaceholder")} /></F>
-          <F label={t("manage:tagDialog.cat")} hint={kind ? t("manage:tagDialog.catBuiltin") : undefined}><div>{kind ? <span className="type-callout text-muted-foreground">{t("manage:tagDialog.kind")}</span> : <Select testId="tag-cat" value={c} onChange={setC} options={DOMAIN_CATS.map((x) => ({ v: x, l: catLabel(t, x) }))} />}</div></F>
+          <F label={t("manage:tagDialog.cat")} hint={kind ? t("manage:tagDialog.catBuiltin") : undefined}><div>{kind ? <span className="type-callout text-muted-foreground">{t("manage:tagDialog.kind")}</span> : <Select testId="tag-cat" value={c} onChange={setC} options={(tg?.cat === KIND_CAT ? [KIND_CAT, ...DOMAIN_CATS] : DOMAIN_CATS).map((x) => ({ v: x, l: catLabel(t, x) }))} />}</div></F>
           <F label={t("manage:tagDialog.descLabel")} htmlFor="tag-desc"><Textarea id="tag-desc" className="min-h-20" value={d} onChange={(e) => setD(e.target.value)} placeholder={t("manage:tagDialog.descPlaceholder")} data-tag-desc /></F>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={!ok} onClick={() => void save()} data-testid="tag-go">{tg ? t("common:action.save") : t("manage:tagDialog.create")}</Button></DialogFooter>

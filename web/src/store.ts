@@ -1245,7 +1245,7 @@ const KIND_HUES = [["bug", "#d9777f"], ["feat", "#7aa7c7"], ["doc", "#8c7ae6"], 
 export const KINDS: [string, string, string][] = KIND_HUES.map(([n, c]) => liveList<[string, string, string]>([n, "", c], 1, () => t(`core:kind.${n}`)))
 /** categories a new or edited domain tag may have */
 export const DOMAIN_CATS = TAG_CATS.filter((c) => c !== KIND_CAT)
-export const isKind = (t?: Tag) => t?.cat === KIND_CAT
+export const isKind = (t?: Tag) => t?.cat === KIND_CAT && KINDS.some(([name]) => name === t.name)
 export const kindTags = () => KINDS.map(([n]) => st.tags.find((t) => isKind(t) && t.name === n)).filter(Boolean) as Tag[]
 export const kindColor = (name: string) => KINDS.find(([n]) => n === name)?.[2] ?? "currentColor"
 /** the item's category tag id; the Hub keeps exactly one */
