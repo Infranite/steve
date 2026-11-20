@@ -1044,3 +1044,147 @@ async fn name_job_finishes_when_channels_is_released() {
     );
     task.await;
 }
+
+/// Make the same local DM name need completion again, without generating another inbound kick.
+fn forget_dm_name(h: &H) {
+    let party = person(h, ids::CAROL.open_id).3;
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE parties SET name = ? WHERE id = ?",
+                rusqlite::params![ids::CAROL.open_id, party],
+            )?;
+            tx.execute(
+                "UPDATE accounts SET display_name = ? WHERE party_id = ? AND system_id = 'feishu'",
+                rusqlite::params![ids::CAROL.open_id, party],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+}
+
+async fn name_job_tick(h: &H, ms: i64) {
+    let at = h.env.clock.advance(ms);
+    steve_runtime::testkit::eventually_sync(
+        "name job completed the tick and prepared its next wait",
+        || h.env.clock.observed(at),
+    )
+    .await;
+}
+
+async fn name_job_waiting(h: &H) {
+    use steve_runtime::Clock;
+    steve_runtime::testkit::eventually_sync("name job prepared its first wait", || {
+        h.env.clock.observed(h.env.clock.now())
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn name_job_preserves_periodic_kicked_and_direct_scan_sequence() {
+    use steve_channels::names::PERIOD_MS;
+    let h = setup().await;
+    hear(
+        &h,
+        "oc_dm_cadence",
+        SpaceKind::Dm,
+        "陈卡罗",
+        "om_cadence",
+        ids::CAROL.open_id,
+        "hello",
+    )
+    .await;
+    let task = h.ch.spawn_names().unwrap();
+    name_job_waiting(&h).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        ids::CAROL.open_id,
+        "first run waits five seconds"
+    );
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(person(&h, ids::CAROL.open_id).1, "陈卡罗");
+    forget_dm_name(&h);
+    for _ in 0..2 {
+        name_job_tick(&h, 5_000).await;
+        assert_eq!(person(&h, ids::CAROL.open_id).1, ids::CAROL.open_id);
+    }
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        "陈卡罗",
+        "the first periodic scan kept the inbound kick due at twenty seconds"
+    );
+
+    forget_dm_name(&h);
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(person(&h, ids::CAROL.open_id).1, ids::CAROL.open_id);
+    h.ch.resolve_names(WS).await.unwrap();
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        "陈卡罗",
+        "direct calls bypass the job cooldown"
+    );
+    forget_dm_name(&h);
+    name_job_tick(&h, PERIOD_MS - 10_000).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        ids::CAROL.open_id,
+        "five seconds before the kicked run's interval ends"
+    );
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        "陈卡罗",
+        "exact thirty-minute boundary"
+    );
+    task.stop();
+    task.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_the_name_job_keeps_its_cooldown_but_a_new_channels_does_not() {
+    let h = setup().await;
+    hear(
+        &h,
+        "oc_dm_restart",
+        SpaceKind::Dm,
+        "陈卡罗",
+        "om_restart",
+        ids::CAROL.open_id,
+        "hello",
+    )
+    .await;
+    let task = h.ch.spawn_names().unwrap();
+    name_job_waiting(&h).await;
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(person(&h, ids::CAROL.open_id).1, "陈卡罗");
+    task.stop();
+    task.await;
+    forget_dm_name(&h);
+    h.env.clock.advance(1); // distinguish the new task's first wait from the old observation
+    let restarted = h.ch.spawn_names().unwrap();
+    name_job_waiting(&h).await;
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        ids::CAROL.open_id,
+        "same Channels retains the dispatched interval"
+    );
+    restarted.stop();
+    restarted.await;
+    let fresh = Channels::builder(h.env.modules.clone(), h.conns.clone(), h.sink.clone())
+        .profiles(Arc::new(FeishuApp::new()))
+        .build();
+    h.env.clock.advance(1);
+    let task = fresh.spawn_names().unwrap();
+    name_job_waiting(&h).await;
+    name_job_tick(&h, 5_000).await;
+    assert_eq!(
+        person(&h, ids::CAROL.open_id).1,
+        "陈卡罗",
+        "a new Channels starts with no dispatched interval"
+    );
+    task.stop();
+    task.await;
+}

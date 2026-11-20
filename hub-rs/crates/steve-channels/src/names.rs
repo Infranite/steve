@@ -20,13 +20,14 @@
 //! periodic run costs nothing when nothing is new.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use steve_modules::accounts::connections::repo as conn_repo;
 use steve_modules::accounts::{self, Enrichment, ExtraHandle, TenantHint, looks_like_handle};
+use steve_runtime::policy::{Limiter, RateLimit};
 
 use crate::channel::{HandleRef, Profile, ProfileAnswer, ProfileQuery, TenantInfo};
 use crate::{ChannelResult, Channels};
@@ -149,15 +150,19 @@ struct Memory {
     tenants: HashMap<String, (Option<TenantInfo>, i64)>,
     /// `ws` → when a kicked run is due.
     due: BTreeMap<String, i64>,
-    /// `ws` → last run.
-    last: HashMap<String, i64>,
     running: bool,
 }
 
 /// The name jobs' memory; part of [`Channels`].
-#[derive(Default)]
 pub struct Names {
     mem: Mutex<Memory>,
+    scans: Limiter<String>,
+}
+
+impl Default for Names {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(steve_runtime::SystemClock))
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -165,6 +170,20 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Names {
+    pub(crate) fn with_clock(clock: Arc<dyn steve_runtime::Clock>) -> Self {
+        Self {
+            mem: Mutex::new(Memory::default()),
+            scans: Limiter::with_clock(
+                RateLimit::Window {
+                    len: Duration::from_millis(PERIOD_MS as u64),
+                    max: 1,
+                    sliding: true,
+                },
+                clock,
+            ),
+        }
+    }
+
     /// Something new to name in `ws` (a sender without a name): one run after [`DEBOUNCE_MS`].
     /// `fresh`: a connection changed (verified, a permission granted) — forget what was looked up.
     pub fn kick(&self, ws: &str, now: i64, fresh: bool) {
@@ -183,6 +202,7 @@ impl Names {
 
     fn take_due(&self, now: i64, all: &[String]) -> Vec<String> {
         let mut m = lock(&self.mem);
+        self.scans.prune();
         let mut out: Vec<String> = m
             .due
             .iter()
@@ -193,12 +213,15 @@ impl Names {
             m.due.remove(w);
         }
         for w in all {
-            if !out.contains(w) && m.last.get(w).is_none_or(|t| now - t >= PERIOD_MS) {
+            if !out.contains(w) && self.scans.peek(w).is_ok() {
                 out.push(w.clone());
             }
         }
+        // Kicks bypass the ordinary cooldown and start a fresh sliding interval too.
+        // Record dispatch, even if resolution fails; direct resolve_names calls do not hit it.
+        // The policy clock keeps its high-water mark across wall-clock rewinds.
         for w in &out {
-            m.last.insert(w.clone(), now);
+            self.scans.hit(w);
         }
         out
     }
@@ -1239,5 +1262,112 @@ impl Channels {
         let lookups = self.profile_systems();
         let cands = self.store().reader(|c| candidates(c, ws, now, &lookups))?;
         Ok(cands.iter().filter(|c| !c.named).count())
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use steve_runtime::{Clock, FakeClock};
+
+    fn names(clock: &Arc<FakeClock>) -> Names {
+        Names::with_clock(clock.clone())
+    }
+
+    fn due(names: &Names, clock: &FakeClock, at: i64, all: &[&str]) -> Vec<String> {
+        clock.set(at);
+        let mut out = names.take_due(
+            clock.now(),
+            &all.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn periodic_scans_are_independent_per_workspace_and_kicks_reset_the_interval() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a", "b"]), ["a", "b"]);
+        names.kick("a", 5_000, false);
+        names.kick("a", 10_000, false); // a later kick must not postpone the first one
+        for (at, expected) in [
+            (20_000, vec![]),
+            (25_000, vec!["a"]),
+            (PERIOD_MS - 1, vec![]),
+            (PERIOD_MS, vec!["b"]),
+            (PERIOD_MS + 24_999, vec![]),
+            (PERIOD_MS + 25_000, vec!["a"]),
+        ] {
+            assert_eq!(due(&names, &clock, at, &["a", "b"]), expected, "at {at}");
+        }
+    }
+
+    #[test]
+    fn a_periodic_scan_does_not_consume_a_future_kick() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        names.kick("a", PERIOD_MS - 10_000, false);
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS + 9_999, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, PERIOD_MS + 10_000, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn fresh_kicks_clear_lookup_memory_without_refunding_the_scan_interval() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        {
+            let mut m = lock(&names.mem);
+            m.members.insert(("c".into(), "space".into()), 0);
+            m.handles.insert(("c".into(), "handle".into()), 0);
+            m.tenants.insert("c".into(), (None, 0));
+            m.running = true;
+        }
+        names.kick("a", 10_000, true);
+        {
+            let m = lock(&names.mem);
+            assert!(m.members.is_empty() && m.handles.is_empty() && m.tenants.is_empty());
+            assert!(m.running);
+        }
+        assert!(due(&names, &clock, 20_000, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, 30_000, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn dispatch_consumes_the_interval_without_a_success_acknowledgement() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        // The dispatched resolver may fail: there is no success acknowledgement to refund it.
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS - 1, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn a_kick_after_a_wall_clock_rewind_uses_the_policy_high_water_mark() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert_eq!(due(&names, &clock, PERIOD_MS, &["a"]), ["a"]);
+        clock.set(0);
+        names.kick("a", 0, false);
+        assert_eq!(due(&names, &clock, DEBOUNCE_MS, &["a"]), ["a"]);
+        // The old last-run map would admit at PERIOD_MS + DEBOUNCE_MS. The kick
+        // hits the limiter's prior high-water mark instead of moving its clock back.
+        assert!(due(&names, &clock, PERIOD_MS + DEBOUNCE_MS, &["a"]).is_empty());
+        assert_eq!(due(&names, &clock, 2 * PERIOD_MS, &["a"]), ["a"]);
+    }
+
+    #[test]
+    fn expired_workspace_intervals_are_pruned_even_when_no_workspace_is_live() {
+        let clock = Arc::new(FakeClock::new(0));
+        let names = names(&clock);
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
+        assert!(due(&names, &clock, PERIOD_MS, &[]).is_empty());
+        // Once expired and pruned, a wall-clock rewind must not resurrect the key.
+        assert_eq!(due(&names, &clock, 0, &["a"]), ["a"]);
     }
 }

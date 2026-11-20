@@ -208,6 +208,7 @@ impl ChannelsBuilder {
                 steve_modules::contacts::profile::register_lookup(id, &d.handle_system);
             }
         }
+        let names = Names::with_clock(self.modules.clock.clone());
         Channels(Arc::new(Inner {
             closed: tokio_util::sync::CancellationToken::new(),
             modules: self.modules,
@@ -227,7 +228,7 @@ impl ChannelsBuilder {
             decls: self.decls,
             party_hooks: self.party_hooks,
             yolo: self.yolo,
-            names: Names::default(),
+            names,
             knowledge: std::sync::OnceLock::new(),
         }))
     }
