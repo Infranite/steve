@@ -16,6 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 const FD_ENV: &str = "_STEVE_TEST_LIFELINE_FD";
 const PARENT_ENV: &str = "_STEVE_TEST_PARENT_PID";
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+// length(array) needs mawk >= 1.3.4 (or the system BSD/GNU awk).
 const GROUPS: &str = r#"
     { parent[$1]=$2; group[$1]=$3 }
     END {
@@ -60,10 +61,12 @@ unset _STEVE_TEST_LIFELINE_FD _STEVE_TEST_PARENT_PID
     # Bash 3 reports both timeout and EOF as status 1. Explicit release writes a line;
     # on EOF/timeout inspect the original direct child's parent, not a cached PID's existence.
     while ! IFS= read -r -t 1 -u "$life"; do
+        kill -0 "$owner" 2>/dev/null || break
         current=$(/bin/ps -p "$owner" -o ppid= | /usr/bin/awk '{$1=$1; print}')
-        [ "$current" = "$parent" ] || break
+        # A transient fork/ps failure is not evidence that parentage changed.
+        [ -z "$current" ] || [ "$current" = "$parent" ] || break
     done
-    groups=$(/bin/ps -axo pid=,ppid=,pgid= | /usr/bin/awk -v root="$owner" "$selector")
+    groups=$(/bin/ps -A -o pid=,ppid=,pgid= | /usr/bin/awk -v root="$owner" "$selector")
     eval "$teardown"
 ) </dev/null >/dev/null 2>&1 &
 eval "exec $life<&-"
@@ -104,8 +107,13 @@ impl Prepared {
             _lock: lock,
         })
     }
-    fn release(self) -> Lifeline {
-        self.life
+    fn release(self) -> LifeWriter {
+        let Self { life, _lock } = self;
+        let Lifeline { _read, write } = life;
+        // The next guarded spawn must not inherit the preceding spawn's read descriptor.
+        drop(_read);
+        drop(_lock);
+        write
     }
 }
 impl Lifeline {
@@ -126,7 +134,7 @@ impl Lifeline {
         })
     }
 }
-fn command(program: impl AsRef<OsStr>) -> std::process::Command {
+fn command(program: impl AsRef<OsStr>, watch: &str) -> std::process::Command {
     let mut c = std::process::Command::new("/bin/bash");
     // Privileged mode ignores BASH_ENV and imported functions without changing the target's env.
     c.args([
@@ -134,7 +142,7 @@ fn command(program: impl AsRef<OsStr>) -> std::process::Command {
         "--norc",
         "-p",
         "-c",
-        WATCH,
+        watch,
         "steve-test-watchdog",
         GROUPS,
         TEARDOWN,
@@ -226,7 +234,7 @@ pub struct Command {
 impl Command {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
-            inner: command(program),
+            inner: command(program, WATCH),
             stdio: [false; 3],
         }
     }
@@ -241,7 +249,7 @@ impl Command {
         Ok(Child {
             pid: child.id(),
             inner: Some(child),
-            life: Some(life.write),
+            life: Some(life),
         })
     }
     pub fn output(&mut self) -> io::Result<Output> {
@@ -340,7 +348,7 @@ pub struct AsyncCommand {
 impl AsyncCommand {
     pub fn new(program: impl AsRef<OsStr>) -> Self {
         Self {
-            inner: command(program).into(),
+            inner: command(program, WATCH).into(),
         }
     }
     builders!();
@@ -358,7 +366,7 @@ impl AsyncCommand {
         Ok(AsyncChild {
             pid: child.id().expect("spawned child PID"),
             inner: Some(child),
-            life: Some(life.write),
+            life: Some(life),
         })
     }
     pub async fn output(&mut self) -> io::Result<Output> {
@@ -498,6 +506,58 @@ mod tests {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
         c
+    }
+
+    #[tokio::test]
+    async fn empty_or_failed_parent_probes_do_not_kill_a_healthy_owner() {
+        for outcome in ["return 1", "return 0"] {
+            let fixture = Fixture::new();
+            // Replace only the parentage probe; exercise the actual timeout loop and teardown.
+            let watch = WATCH
+                .replacen(
+                    "owner=$$",
+                    &format!(
+                        r#"failed_probe() {{ printf 'probe\n' >> "$PROBES"; {outcome}; }}
+owner=$$"#
+                    ),
+                    1,
+                )
+                .replace("/bin/ps -p \"$owner\" -o ppid=", "failed_probe");
+            let mut command = Command {
+                inner: command("/bin/sleep", &watch),
+                stdio: [false; 3],
+            };
+            let mut child = command
+                .arg("600")
+                .env("PROBES", fixture.0.join("probes"))
+                .spawn()
+                .unwrap();
+            eventually_sync("two empty parent probes while owner stays alive", || {
+                child.try_wait().unwrap().is_some()
+                    || fs::read_to_string(fixture.0.join("probes"))
+                        .unwrap_or_default()
+                        .lines()
+                        .count()
+                        >= 2
+            })
+            .await;
+            assert!(child.try_wait().unwrap().is_none(), "{outcome}");
+            drop(child);
+        }
+    }
+
+    #[test]
+    fn releasing_the_spawn_lock_first_closes_the_inheritable_reader() {
+        let prepared = Prepared::new().unwrap();
+        let reader = prepared.life._read.as_raw_fd();
+        let contender = std::thread::spawn(move || {
+            let _lock = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // F_GETFD is 1 on the supported Unix platforms. No descriptor is allocated here.
+            unsafe { fcntl(reader, 1) }
+        });
+        let writer = prepared.release();
+        assert_eq!(contender.join().unwrap(), -1);
+        drop(writer);
     }
 
     #[test]
