@@ -94,26 +94,7 @@ async fn main() -> Result<()> {
                 home.0.display()
             );
         }
-        Some("pair") => {
-            let Some(url) = args.get(1) else { usage() };
-            let mut pin = None;
-            let mut name = std::env::var("HOSTNAME").unwrap_or_else(|_| "node".into());
-            let mut it = args[2..].iter();
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--pin" => pin = it.next().cloned(),
-                    "--name" => name = it.next().cloned().unwrap_or(name),
-                    _ => usage(),
-                }
-            }
-            let p = dial::pair(&home, url, &code()?, pin, &name).await?;
-            let id = Identity::load(&home.identity())?;
-            println!("paired as {} with hub {}", p.node_id, p.hub_id);
-            println!("fingerprint {}", identity::grouped(&id.fingerprint()));
-            println!(
-                "confirm this fingerprint on the hub (Devices, Add device: paste it or type its eight groups), then run: steve-node run"
-            );
-        }
+        Some("pair") => pair_command(&home, &args).await?,
         Some("run") => dial::run(&home).await?,
         Some("rotate") => {
             let fp = dial::rotate(&home).await?;
@@ -122,20 +103,7 @@ async fn main() -> Result<()> {
                 "restart the Node now (steve node restart): its running process still has the old key, which the hub no longer takes"
             );
         }
-        Some("status") => {
-            let id = Identity::load(&home.identity())?;
-            match home.pairing() {
-                Ok(p) => println!(
-                    "node {} ({}) paired with {} at {}\nfingerprint {}",
-                    p.node_id,
-                    p.name,
-                    p.hub_id,
-                    p.hub_url,
-                    identity::grouped(&id.fingerprint())
-                ),
-                Err(e) => println!("{e}\nfingerprint {}", identity::grouped(&id.fingerprint())),
-            }
-        }
+        Some("status") => print_status(&home)?,
         Some("adapters") => {
             let h = home.harness()?;
             let code = steve_acp::managed::cli(&home.0, h.node.as_deref(), &args[1..]);
@@ -143,17 +111,61 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
-        Some("forget") => {
-            // local only: revoking is the Hub's (its owner's) act
-            for f in [home.pairing_file(), home.identity()] {
-                match std::fs::remove_file(&f) {
-                    Ok(()) => println!("removed {}", f.display()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
+        Some("forget") => forget_pairing(&home)?,
         _ => usage(),
+    }
+    Ok(())
+}
+
+/// Parse pairing options, claim the code and show the fingerprint the owner confirms.
+async fn pair_command(home: &Home, args: &[String]) -> Result<()> {
+    let Some(url) = args.get(1) else { usage() };
+    let mut pin = None;
+    let mut name = std::env::var("HOSTNAME").unwrap_or_else(|_| "node".into());
+    let mut it = args[2..].iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pin" => pin = it.next().cloned(),
+            "--name" => name = it.next().cloned().unwrap_or(name),
+            _ => usage(),
+        }
+    }
+    let p = dial::pair(home, url, &code()?, pin, &name).await?;
+    let id = Identity::load(&home.identity())?;
+    println!("paired as {} with hub {}", p.node_id, p.hub_id);
+    println!("fingerprint {}", identity::grouped(&id.fingerprint()));
+    println!(
+        "confirm this fingerprint on the hub (Devices, Add device: paste it or type its eight groups), then run: steve-node run"
+    );
+    Ok(())
+}
+
+/// Report the local identity even when its pairing is missing.
+fn print_status(home: &Home) -> Result<()> {
+    let id = Identity::load(&home.identity())?;
+    match home.pairing() {
+        Ok(p) => println!(
+            "node {} ({}) paired with {} at {}\nfingerprint {}",
+            p.node_id,
+            p.name,
+            p.hub_id,
+            p.hub_url,
+            identity::grouped(&id.fingerprint())
+        ),
+        Err(e) => println!("{e}\nfingerprint {}", identity::grouped(&id.fingerprint())),
+    }
+    Ok(())
+}
+
+/// Forget local pairing and identity in order; revocation remains the Hub owner's action.
+fn forget_pairing(home: &Home) -> Result<()> {
+    // local only: revoking is the Hub's (its owner's) act
+    for f in [home.pairing_file(), home.identity()] {
+        match std::fs::remove_file(&f) {
+            Ok(()) => println!("removed {}", f.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }

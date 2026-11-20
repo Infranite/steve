@@ -447,39 +447,13 @@ async fn serve_with(
         // over tailcat, a new tunnel for every link: one whose far end went away (a Hub restart)
         // can stay up and lead nowhere
         let mut tunnel = None;
-        let url = match (&fixed, &over) {
-            (Some(url), _) => Ok(url.clone()),
-            (None, Some((addr, port))) => match Tunnel::open(addr, *port).await {
-                Ok(t) => ws_url(&tunnel.insert(t).url),
-                Err(e) => Err(e),
-            },
-            (None, None) => unreachable!(),
-        };
+        let url = dial_address(&fixed, &over, &mut tunnel).await;
         let linked = match &url {
             Ok(url) => {
                 let key = *known.lock().unwrap();
-                let learnt = |k: [u8; 32]| {
-                    *known.lock().unwrap() = Some(k);
-                    if let Some(h) = &home {
-                        remember(h, k);
-                    }
-                };
-                let pins_learnt = |pins: Vec<String>| {
-                    let joined = pins.join(",");
-                    if pins_now.lock().unwrap().as_deref() == Some(joined.as_str()) {
-                        return;
-                    }
-                    match tls::parse_pins(&joined) {
-                        Ok(t) => {
-                            *trust_now.lock().unwrap() = t;
-                            *pins_now.lock().unwrap() = Some(joined.clone());
-                            if let Some(h) = &home {
-                                remember_pins(h, &joined);
-                            }
-                        }
-                        Err(e) => tracing::warn!("the hub announced pins that do not parse: {e}"),
-                    }
-                };
+                let learnt = |k| learn_hub_key(&known, home.as_ref(), k);
+                let pins_learnt =
+                    |pins: Vec<String>| learn_hub_pins(&pins_now, &trust_now, home.as_ref(), pins);
                 let hub = HubOf {
                     id: &p.hub_id,
                     key,
@@ -505,33 +479,111 @@ async fn serve_with(
                 .is_none_or(|(t, at)| t != e || at.elapsed() >= RETELL)
         {
             let trust = trust_now.lock().unwrap().clone();
-            match tell_hub(url, &trust, &node_id, &p.hub_id, id, e).await {
-                Ok(()) => told = Some((e.clone(), std::time::Instant::now())),
-                Err(why) => tracing::info!("telling the hub why the link failed: {why}"),
-            }
+            told = report_link_fault(url, &trust, &node_id, p, id, e)
+                .await
+                .map(|e| (e, std::time::Instant::now()))
+                .or(told);
         }
         drop(tunnel);
-        match linked {
-            Ok(()) => backoff = Duration::from_millis(200),
-            Err(Stop::Refused(e)) => {
-                link.set(None);
-                status.failed(&format!("the hub refused this node: {e}"));
-                bail!("the hub refused this node: {e}");
-            }
-            Err(Stop::Retry(e)) => {
-                status.failed(&e);
-                tracing::info!("hub link: {e}");
-            }
-            // dialling again alone will not mend it: say so where it is seen
-            Err(Stop::Fault(e)) => {
-                status.failed(&e);
-                tracing::error!("hub link failed, trying again: {e}");
-            }
-        }
+        record_dial_result(linked, &status, &link, &mut backoff)?;
         link.set(None);
         // spread out: every Node of a restarted Hub dials again at once otherwise
         tokio::time::sleep(steve_node_wire::jitter(backoff)).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// Resolve this attempt's URL, retaining any new tunnel until the caller drops it.
+async fn dial_address(
+    fixed: &Option<String>,
+    over: &Option<(String, u16)>,
+    tunnel: &mut Option<Tunnel>,
+) -> Result<String> {
+    match (fixed, over) {
+        (Some(url), _) => Ok(url.clone()),
+        (None, Some((addr, port))) => match Tunnel::open(addr, *port).await {
+            Ok(t) => ws_url(&tunnel.insert(t).url),
+            Err(e) => Err(e),
+        },
+        (None, None) => unreachable!(),
+    }
+}
+
+/// Record whether a fault report reached the Hub; the caller owns the retell clock gate.
+async fn report_link_fault(
+    url: &str,
+    trust: &Trust,
+    node_id: &NodeId,
+    p: &Pairing,
+    id: &Identity,
+    e: &str,
+) -> Option<String> {
+    match tell_hub(url, trust, node_id, &p.hub_id, id, e).await {
+        Ok(()) => Some(e.to_string()),
+        Err(why) => {
+            tracing::info!("telling the hub why the link failed: {why}");
+            None
+        }
+    }
+}
+
+/// Persist the link result and stop only on an explicit refusal.
+fn record_dial_result(
+    linked: Result<(), Stop>,
+    status: &LinkStatus,
+    link: &HubLink,
+    backoff: &mut Duration,
+) -> Result<()> {
+    match linked {
+        Ok(()) => *backoff = Duration::from_millis(200),
+        Err(Stop::Refused(e)) => {
+            link.set(None);
+            status.failed(&format!("the hub refused this node: {e}"));
+            bail!("the hub refused this node: {e}");
+        }
+        Err(Stop::Retry(e)) => {
+            status.failed(&e);
+            tracing::info!("hub link: {e}");
+        }
+        // dialling again alone will not mend it: say so where it is seen
+        Err(Stop::Fault(e)) => {
+            status.failed(&e);
+            tracing::error!("hub link failed, trying again: {e}");
+        }
+    }
+    Ok(())
+}
+
+type HubKey = [u8; 32];
+
+/// Keep a newly proved Hub identity before persisting it in this Node's pairing.
+fn learn_hub_key(known: &std::sync::Mutex<Option<HubKey>>, home: Option<&Home>, k: HubKey) {
+    *known.lock().unwrap() = Some(k);
+    if let Some(h) = home {
+        remember(h, k);
+    }
+}
+
+/// Accept changed, valid pins and keep in-memory trust and the pairing in the same order.
+fn learn_hub_pins(
+    pins_now: &std::sync::Mutex<Option<String>>,
+    trust_now: &std::sync::Mutex<Trust>,
+    home: Option<&Home>,
+    pins: Vec<String>,
+) {
+    let joined = pins.join(",");
+    if pins_now.lock().unwrap().as_deref() == Some(joined.as_str()) {
+        return;
+    }
+    match tls::parse_pins(&joined) {
+        Ok(t) => {
+            *trust_now.lock().unwrap() = t;
+            *pins_now.lock().unwrap() = Some(joined.clone());
+            if let Some(h) = home {
+                remember_pins(h, &joined);
+            }
+        }
+        Err(e) => tracing::warn!("the hub announced pins that do not parse: {e}"),
     }
 }
 

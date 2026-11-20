@@ -422,11 +422,7 @@ async fn drive(home: &Path, lock: &Mutex<()>, op: &str, work: Arc<dyn Work>, t: 
             lock,
             op,
             &["draining", "cancelling"],
-            if cancelled.is_some() {
-                "cancelling"
-            } else {
-                "draining"
-            },
+            draining_phase(cancelled.is_some()),
             running,
             None,
         ) {
@@ -439,10 +435,10 @@ async fn drive(home: &Path, lock: &Mutex<()>, op: &str, work: Arc<dyn Work>, t: 
     loop {
         tokio::time::sleep(t.poll).await;
         if Instant::now() < until {
-            match load(home, op) {
-                Ok(Some(r)) if r.state.phase == "ready" => continue,
-                _ => return,
+            if removal_is_ready(home, op) {
+                continue;
             }
+            return;
         }
         let why = format!(
             "the hub did not confirm within {} s; the node takes work again",
@@ -453,6 +449,16 @@ async fn drive(home: &Path, lock: &Mutex<()>, op: &str, work: Arc<dyn Work>, t: 
         }
         return;
     }
+}
+
+/// Continue waiting only while the persisted removal still belongs to the ready phase.
+fn removal_is_ready(home: &Path, op: &str) -> bool {
+    matches!(load(home, op), Ok(Some(r)) if r.state.phase == "ready")
+}
+
+/// The ongoing drain's persisted phase, without changing its timers or transitions.
+fn draining_phase(cancelled: bool) -> &'static str {
+    if cancelled { "cancelling" } else { "draining" }
 }
 
 /// `steve-node remove-finish <op>`, detached from the service so stopping it does not stop the
@@ -522,17 +528,42 @@ pub fn run_remove(
     );
     let home = check_home(home)?;
     std::thread::sleep(pause);
+    stop_removal_service(&home, op, &mut r, svc)?;
+    uninstall_removal_service(&home, op, &mut r, svc, retry)?;
+    tracing::info!("node removal {op}: deleting {}", home.display());
+    std::fs::remove_dir_all(&home).with_context(|| format!("deleting {}", home.display()))?;
+    Ok(())
+}
+
+/// Stop the confirmed Node service, recording a refusal before returning its error.
+fn stop_removal_service(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn RemoveOps,
+) -> anyhow::Result<()> {
     tracing::info!("node removal {op}: stopping the service");
     if let Err(e) = svc.stop() {
         set_phase(
-            &home,
-            &mut r,
+            home,
+            r,
             "failed",
             0,
             Some(format!("stopping the node: {e:#}")),
         );
         return Err(e.context("stopping the node"));
     }
+    Ok(())
+}
+
+/// Retry the service-manager uninstall under the existing retry budget.
+fn uninstall_removal_service(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn RemoveOps,
+    retry: Duration,
+) -> anyhow::Result<()> {
     tracing::info!("node removal {op}: uninstalling the service");
     let mut tries = 0;
     loop {
@@ -545,8 +576,8 @@ pub fn run_remove(
             }
             Err(e) => {
                 set_phase(
-                    &home,
-                    &mut r,
+                    home,
+                    r,
                     "failed",
                     0,
                     Some(format!("uninstalling the service: {e:#}")),
@@ -555,8 +586,6 @@ pub fn run_remove(
             }
         }
     }
-    tracing::info!("node removal {op}: deleting {}", home.display());
-    std::fs::remove_dir_all(&home).with_context(|| format!("deleting {}", home.display()))?;
     Ok(())
 }
 

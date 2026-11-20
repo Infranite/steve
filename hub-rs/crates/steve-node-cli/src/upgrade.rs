@@ -678,30 +678,9 @@ pub fn run_switch(
         .context("no release to go back to")?;
     // let the node's answer to the switch reach the Hub before the node stops
     std::thread::sleep(poll.min(Duration::from_secs(1)));
-    tracing::info!("node upgrade {op}: stopping the service");
-    if let Err(e) = svc.stop() {
-        // still the old release, maybe still running: make sure it runs
-        let _ = svc.start();
-        set_phase(
-            home,
-            &mut r,
-            "failed",
-            Some(format!("stopping the node: {e:#}")),
-        );
+    let Some(started) = start_staged_release(home, op, &mut r, svc, &new) else {
         return Ok(r.state);
-    }
-    tracing::info!("node upgrade {op}: switching to {}", new.display());
-    if let Err(e) = svc.update(&new) {
-        let _ = svc.start();
-        set_phase(
-            home,
-            &mut r,
-            "failed",
-            Some(format!("switching the release: {e:#}")),
-        );
-        return Ok(r.state);
-    }
-    let started = svc.start();
+    };
     let deadline = Instant::now() + Duration::from_secs(r.request.health_secs.max(1) as u64);
     let mut linked = false;
     if started.is_ok() {
@@ -726,21 +705,62 @@ pub fn run_switch(
             r.request.health_secs
         ),
     };
+    rollback_release(home, op, &mut r, svc, &old, why);
+    Ok(r.state)
+}
+
+/// Stop and update before starting the staged build; failed preparation resumes the old one.
+fn start_staged_release(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn ServiceOps,
+    new: &Path,
+) -> Option<anyhow::Result<()>> {
+    tracing::info!("node upgrade {op}: stopping the service");
+    if let Err(e) = svc.stop() {
+        // still the old release, maybe still running: make sure it runs
+        let _ = svc.start();
+        set_phase(home, r, "failed", Some(format!("stopping the node: {e:#}")));
+        return None;
+    }
+    tracing::info!("node upgrade {op}: switching to {}", new.display());
+    if let Err(e) = svc.update(new) {
+        let _ = svc.start();
+        set_phase(
+            home,
+            r,
+            "failed",
+            Some(format!("switching the release: {e:#}")),
+        );
+        return None;
+    }
+    Some(svc.start())
+}
+
+/// Restore the old release after failed health admission, preserving short-circuit order.
+fn rollback_release(
+    home: &Path,
+    op: &str,
+    r: &mut Record,
+    svc: &mut dyn ServiceOps,
+    old: &Path,
+    why: String,
+) {
     tracing::warn!("node upgrade {op}: {why}; going back to {}", old.display());
     let back = svc
         .stop()
-        .and_then(|_| svc.update(&old))
+        .and_then(|_| svc.update(old))
         .and_then(|_| svc.start());
     match back {
-        Ok(()) => set_phase(home, &mut r, "rolled_back", Some(why)),
+        Ok(()) => set_phase(home, r, "rolled_back", Some(why)),
         Err(e) => set_phase(
             home,
-            &mut r,
+            r,
             "failed",
             Some(format!("{why}; going back failed too: {e:#}")),
         ),
     }
-    Ok(r.state)
 }
 
 #[cfg(test)]
