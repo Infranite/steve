@@ -879,3 +879,141 @@ fn sg8_enrichment_strong_handle_evidence_merge_direction_table() {
         assert!(!r.account_named && !r.promoted && !r.org_linked && !r.email_added);
     }
 }
+
+#[test]
+fn sg10_enrichment_email_self_and_visibility_evidence_table() {
+    for case in ["email", "mine_is_me", "other_is_me", "hidden_service"] {
+        let t = TestEnv::new(accounts::register);
+        let mine = t
+            .store()
+            .transaction(|tx| {
+                accounts::identify(
+                    tx,
+                    WS,
+                    ME,
+                    "feishu",
+                    "ou_sg10mine",
+                    &accounts::Hints::default(),
+                )
+            })
+            .unwrap();
+        let other = t
+            .store()
+            .transaction(|tx| {
+                accounts::identify(
+                    tx,
+                    WS,
+                    ME,
+                    if case == "email" { "mail" } else { "feishu" },
+                    if case == "email" {
+                        "evidence@example.test"
+                    } else {
+                        "on_sg10other"
+                    },
+                    &accounts::Hints::default(),
+                )
+            })
+            .unwrap();
+        t.store()
+            .with_conn(|c| {
+                match case {
+                    "email" | "mine_is_me" => {
+                        c.execute(
+                            "UPDATE parties SET contact_kind='real' WHERE id=?",
+                            [&other.party_id],
+                        )?;
+                    }
+                    "other_is_me" => {
+                        c.execute(
+                            "UPDATE parties SET contact_kind='real' WHERE id=?",
+                            [&mine.party_id],
+                        )?;
+                    }
+                    _ => {}
+                }
+                if case == "mine_is_me" || case == "other_is_me" {
+                    c.execute("UPDATE parties SET user_id=NULL WHERE user_id=?", [ME])?;
+                    c.execute(
+                        "UPDATE parties SET user_id=? WHERE id=?",
+                        rusqlite::params![
+                            ME,
+                            if case == "mine_is_me" {
+                                &mine.party_id
+                            } else {
+                                &other.party_id
+                            }
+                        ],
+                    )?;
+                }
+                if case == "hidden_service" {
+                    c.execute(
+                        "UPDATE parties SET visibility='private' WHERE id=?",
+                        [&other.party_id],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let e = if case == "email" {
+            Enrichment {
+                email: Some(" evidence@EXAMPLE.test ".into()),
+                ..Default::default()
+            }
+        } else {
+            Enrichment {
+                handles: vec![accounts::ExtraHandle {
+                    handle: "on_sg10other".into(),
+                    connection_id: None,
+                }],
+                ..Default::default()
+            }
+        };
+        let actor = if case == "hidden_service" {
+            "svc:sg10"
+        } else {
+            ME
+        };
+        let out = t
+            .store()
+            .transaction(|tx| {
+                accounts::enrich(
+                    tx,
+                    &[Arc::new(accounts::AccountHooks)],
+                    WS,
+                    actor,
+                    &mine.account_id,
+                    &e,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            out.merged_into.as_deref(),
+            (case == "email").then_some(other.party_id.as_str()),
+            "{case}"
+        );
+        let expected = if case == "email" {
+            &other.party_id
+        } else {
+            &mine.party_id
+        };
+        assert_eq!(&out.party_id, expected, "{case}");
+        let owner = t
+            .store()
+            .reader(|c| accounts::repo::get(c, &mine.account_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&owner.party_id, expected, "{case}");
+        assert!(
+            !out.email_added && !out.promoted && !out.account_named && !out.renamed,
+            "{case}"
+        );
+        if case == "hidden_service" {
+            let state = t
+                .store()
+                .reader(|c| contacts::repo::get(c, &other.party_id))
+                .unwrap()
+                .unwrap();
+            assert_eq!(state.status, "active");
+        }
+    }
+}

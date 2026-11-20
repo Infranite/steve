@@ -1032,3 +1032,68 @@ async fn a_restart_while_a_node_runs_a_use_fails_it_and_never_runs_it_again() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(nodes.ran.lock().unwrap().len(), 1, "never run again");
 }
+
+#[tokio::test]
+async fn sg10_use_validation_precedes_approval_and_execution_table() {
+    use steve_modules::vault::UseRequest;
+    for (env, files, stdin, missing_session, needle) in [
+        (
+            vec![("1BAD", "令牌")],
+            vec![],
+            None,
+            false,
+            "not a valid variable",
+        ),
+        (
+            vec![("TOKEN", "令牌")],
+            vec![("TOKEN", "令牌")],
+            None,
+            false,
+            "given twice",
+        ),
+        (vec![("TOKEN", "missing")], vec![], None, false, "No field"),
+        (vec![], vec![], None, false, "Nothing to inject"),
+        (vec![], vec![], Some("missing"), false, "No field"),
+        (
+            vec![("TOKEN", "令牌")],
+            vec![],
+            None,
+            true,
+            "inside a Steve session",
+        ),
+    ] {
+        let e = Env::new();
+        let item = e.token_item();
+        let mut cx = e.cx();
+        if missing_session {
+            cx.session_id = None;
+        }
+        let request = UseRequest {
+            item,
+            purpose: "inspect".into(),
+            command: "must-not-run".into(),
+            env: env.into_iter().map(|(a, b)| (a.into(), b.into())).collect(),
+            files: files
+                .into_iter()
+                .map(|(a, b)| (a.into(), b.into()))
+                .collect(),
+            stdin: stdin.map(String::from),
+            ..Default::default()
+        };
+        let error = e.uses.request(&cx, request).await.unwrap_err();
+        assert!(
+            error.to_string().contains(needle),
+            "{error}: expected {needle}"
+        );
+        assert_eq!(e.q::<i64>("SELECT count(*) FROM secret_uses", []), 0);
+        assert_eq!(
+            e.q::<i64>(
+                "SELECT count(*) FROM decisions WHERE subject_type='secret_use'",
+                []
+            ),
+            0
+        );
+        assert_eq!(e.uses.waiting(), 0);
+        assert!(e.sink.0.lock().unwrap().is_empty());
+    }
+}

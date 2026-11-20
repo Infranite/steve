@@ -687,3 +687,89 @@ async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
         1
     );
 }
+
+#[tokio::test]
+async fn sg10_mcp_secret_transport_and_failed_update_table() {
+    for (patch, status, same_item, value, transport) in [
+        (
+            json!({"args":["kept"]}),
+            200,
+            true,
+            Some("test-token"),
+            "stdio",
+        ),
+        (
+            json!({"env":[{"name":"K","secret":true,"value":"replacement"}]}),
+            200,
+            false,
+            Some("replacement"),
+            "stdio",
+        ),
+        (json!({"env":[]}), 200, false, None, "stdio"),
+        (
+            json!({"transport":"http","url":"https://mcp.test"}),
+            200,
+            false,
+            None,
+            "http",
+        ),
+        (
+            json!({"env":[{"name":"NEW","secret":true}]}),
+            400,
+            true,
+            Some("test-token"),
+            "stdio",
+        ),
+        (
+            json!({"transport":"http","url":"file:///bad"}),
+            400,
+            true,
+            Some("test-token"),
+            "stdio",
+        ),
+    ] {
+        let h = setup();
+        let (s, created)=req(&h,"POST","/capabilities/mcp-servers",Some(json!({"name":"sg10","transport":"stdio","command":"unused","env":[{"name":"K","secret":true,"value":"test-token"}],"bot":"dev"}))).await;
+        assert_eq!(s, 200, "{created}");
+        let id = created["id"].as_str().unwrap();
+        let old: Option<String> = q(
+            &h,
+            &format!("SELECT credential_item FROM mcp_servers WHERE id='{id}'"),
+        );
+        let audits: i64 = q(
+            &h,
+            &format!("SELECT count(*) FROM audit WHERE target='{id}'"),
+        );
+        let (actual, body) = req(
+            &h,
+            "PATCH",
+            &format!("/capabilities/mcp-servers/{id}"),
+            Some(patch.clone()),
+        )
+        .await;
+        assert_eq!(actual, status, "{patch} => {body}");
+        let current: Option<String> = q(
+            &h,
+            &format!("SELECT credential_item FROM mcp_servers WHERE id='{id}'"),
+        );
+        assert_eq!(current == old, same_item, "{patch}");
+        assert_eq!(
+            secret(&h, "s_dev", &secret_id(id, "env:K")).as_deref(),
+            value,
+            "{patch}"
+        );
+        let (_, got) = req(&h, "GET", "/capabilities/mcp-servers", None).await;
+        assert_eq!(got[0]["transport"], transport);
+        assert_eq!(
+            q::<i64>(
+                &h,
+                &format!("SELECT count(*) FROM audit WHERE target='{id}'")
+            ),
+            audits + i64::from(status == 200)
+        );
+        assert_eq!(q::<i64>(&h, "SELECT count(*) FROM mcp_servers"), 1);
+        assert!(
+            !got.to_string().contains("test-token") && !got.to_string().contains("replacement")
+        );
+    }
+}

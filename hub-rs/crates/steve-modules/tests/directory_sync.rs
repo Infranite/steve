@@ -676,3 +676,100 @@ async fn daily_runs_use_each_workspace_clock_before_the_system_or_owner_clock() 
         assert!(fx.sync.tick(at + 1).unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn sg10_snapshot_first_wins_and_team_lifecycle_table() {
+    for first_departed in [false, true] {
+        let fx = fixture(Snapshot {
+            departments: vec![],
+            users: vec![],
+        });
+        fx.connect(WS, CONN, "[\"directory.read\"]").await;
+        let conn = DirConnection {
+            id: CONN.into(),
+            workspace_id: WS.into(),
+            adapter: "feishu".into(),
+            label: "Directory".into(),
+            owner: ME.into(),
+        };
+        let mut first = user("sg10", " Alice ", &["d"], Some("sg10"));
+        first.departed = first_departed;
+        let snapshot = Snapshot {
+            departments: vec![
+                dept("", "ignored", None, None),
+                dept("d", " First ", Some("d"), Some("on_sg10")),
+                dept("d", "second duplicate", None, None),
+            ],
+            users: vec![
+                DirUser {
+                    id: String::new(),
+                    ..first.clone()
+                },
+                first.clone(),
+                DirUser {
+                    name: "duplicate".into(),
+                    departed: !first_departed,
+                    ..first.clone()
+                },
+            ],
+        };
+        let apply = |s: &Snapshot, now| {
+            fx.t.store()
+                .transaction(|tx| {
+                    steve_modules::contacts::sync::apply::apply(tx, &conn, "feishu", s, now)
+                })
+                .unwrap()
+        };
+        let initial = apply(&snapshot, 100);
+        assert_eq!(initial.teams, 1);
+        assert_eq!(initial.contacts, usize::from(!first_departed));
+        assert_eq!(fx.count("SELECT count(*) FROM team_details"), 1);
+        assert_eq!(fx.text("SELECT name FROM parties p JOIN team_details d ON p.id=d.party_id WHERE d.external_id='d'"),"First");
+        assert_eq!(
+            fx.count("SELECT count(*) FROM team_details WHERE parent_id IS NOT NULL"),
+            0,
+            "self-parent is excluded"
+        );
+        assert_eq!(
+            fx.count("SELECT count(*) FROM links WHERE predicate='reports_to'"),
+            0,
+            "self lead is excluded"
+        );
+        if !first_departed {
+            assert_eq!(fx.text("SELECT p.name FROM parties p JOIN accounts a ON p.id=a.party_id WHERE a.handle='on_sg10'"),"Alice");
+            assert_eq!(
+                fx.count("SELECT count(*) FROM team_members WHERE role='lead'"),
+                1,
+                "leader not duplicated as member"
+            );
+        }
+        let same = apply(&snapshot, 101);
+        assert_eq!(same, steve_modules::contacts::sync::SyncReport::default());
+        let vanished = Snapshot {
+            departments: vec![],
+            users: vec![DirUser {
+                departed: true,
+                ..first.clone()
+            }],
+        };
+        let gone = apply(&vanished, 102);
+        assert_eq!(gone.dissolved, 1);
+        assert_eq!(gone.departed, usize::from(!first_departed));
+        assert_eq!(fx.count("SELECT count(*) FROM team_members"), 0);
+        let returned = Snapshot {
+            departments: vec![dept("d", "First", None, Some("on_sg10"))],
+            users: vec![DirUser {
+                departed: false,
+                ..first
+            }],
+        };
+        let back = apply(&returned, 103);
+        assert_eq!(back.restored, 1);
+        assert_eq!(back.teams, 0);
+        assert_eq!(back.contacts, usize::from(first_departed));
+        assert_eq!(
+            fx.count("SELECT count(*) FROM team_members WHERE role='lead'"),
+            1
+        );
+    }
+}

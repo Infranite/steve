@@ -1544,3 +1544,83 @@ async fn sg8_fresh_bind_and_its_guard_commit_together_table() {
         }
     }
 }
+
+#[tokio::test]
+async fn sg10_existing_connection_refusal_branches_table() {
+    use steve_modules::accounts::connections::Owner;
+    for foreign_creator in [false, true] {
+        let mut info = AccountInfo::new("sg10@example.test", "SG10");
+        info.owner = Owner::Me;
+        let mut first_provider = FakeProvider::credential(info.clone());
+        first_provider.system = "mail";
+        let first_provider = Arc::new(first_provider);
+        let mut second_provider = FakeProvider::credential(info);
+        second_provider.system = "mail";
+        second_provider.id = "fake_second";
+        let h = setup(vec![first_provider, Arc::new(second_provider)]);
+        let who = caller(WS, ME);
+        let first = h
+            .conns
+            .connect(
+                &who,
+                "fake_cred",
+                vec![("secret".into(), Zeroizing::new("old".into()))],
+                json!({}),
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        if foreign_creator {
+            // A personal account now owned by this caller can still have another member's connection.
+            h.env
+                .store()
+                .with_conn(|c| {
+                    Ok(c.execute(
+                        "UPDATE connections SET created_by=? WHERE id=?",
+                        params![OTHER, first.connection_id],
+                    )?)
+                })
+                .unwrap();
+        }
+        let before = conn_of(&h, &first.account_id);
+        let error = h
+            .conns
+            .connect(
+                &who,
+                if foreign_creator {
+                    "fake_cred"
+                } else {
+                    "fake_second"
+                },
+                vec![("secret".into(), Zeroizing::new("new".into()))],
+                json!({}),
+                vec![],
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        let expected = if foreign_creator {
+            "这个账号已经由另一位成员接入，没有替换".to_string()
+        } else {
+            "这个账号已经通过「Fake」接入了".to_string()
+        };
+        assert_eq!(
+            error,
+            steve_modules::vault::VaultError::Api(steve_modules::ApiError::conflict(expected))
+        );
+        assert_eq!(conn_of(&h, &first.account_id), before);
+        assert_eq!(secret(&h, before[3].as_str().unwrap(), "secret"), "old");
+        assert_eq!(
+            q(&h, |c| c.query_row(
+                "SELECT count(*) FROM connections",
+                [],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap(),
+            1
+        );
+    }
+}
