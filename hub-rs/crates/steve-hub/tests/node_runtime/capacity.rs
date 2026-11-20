@@ -1,5 +1,6 @@
 use super::stream_interruption::{retry_at, say};
 use super::*;
+use steve_node_api::error as rpc_error;
 
 const STOP: &str = steve_core::runtime::MODEL_SERVICE_UNAVAILABLE;
 const ERROR: &str = "503 Service Unavailable: no eligible upstream account is currently available";
@@ -8,7 +9,7 @@ fn failure(error: &str) -> Completion {
     let mut c = build::done();
     c.outcome = Outcome::Failed;
     c.stop_reason = "error".into();
-    c.error = Some(ApiError::new(ErrorCode::Internal, error));
+    c.error = Some(rpc_error(Code::Internal, error));
     c.acted = true;
     c
 }

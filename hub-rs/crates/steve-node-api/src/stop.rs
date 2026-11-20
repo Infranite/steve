@@ -1,11 +1,11 @@
 //! Why a Node itself ended a turn or a job: deadline, output limit, a stuck ingress and the like.
 //!
-//! The wire carries the cause only as an [`ApiError`]'s code and `safe_detail`, so a Node of any
+//! The wire carries the cause only as an [`Error`]'s code and `safe_detail`, so a Node of any
 //! version tells it in the same words. The Node builds these errors with [`NodeStop::error`] and the
 //! Hub reads them back with [`NodeStop::of`] to say them in the user's language; a detail it does not
 //! recognize (an older or newer Node, a harness's own words) is shown as it came.
 
-use crate::common::{ApiError, ErrorCode};
+use crate::common::{Code, Error};
 
 /// The ends a Node decides on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +48,14 @@ const STALLED_TAIL: &str = " s (its journal or disk is stuck)";
 const LEGACY_FRAME_TOO_LARGE: &str = "the harness sent a message larger than 1 MiB";
 
 impl NodeStop {
-    pub fn code(self) -> ErrorCode {
+    pub fn code(self) -> Code {
         use NodeStop::*;
         match self {
-            Deadline | JobDeadline | HarnessIdle => ErrorCode::Expired,
-            HubUnreachable | HarnessGone | AdapterExited => ErrorCode::Offline,
-            OutputLimit | FrameTooLarge | JournalBudget | ResearchBudget => ErrorCode::Exhausted,
-            IngressStalled { .. } => ErrorCode::Busy,
-            JournalFails | NotRecorded | StoppedByNode => ErrorCode::Internal,
+            Deadline | JobDeadline | HarnessIdle => Code::Stale,
+            HubUnreachable | HarnessGone | AdapterExited => Code::Unavailable,
+            OutputLimit | FrameTooLarge | JournalBudget | ResearchBudget => Code::Exhausted,
+            IngressStalled { .. } => Code::Busy,
+            JournalFails | NotRecorded | StoppedByNode => Code::Internal,
         }
     }
 
@@ -81,12 +81,12 @@ impl NodeStop {
         fixed.to_string()
     }
 
-    pub fn error(self) -> ApiError {
-        ApiError::new(self.code(), self.detail())
+    pub fn error(self) -> Error {
+        crate::error(self.code(), self.detail())
     }
 
     /// The cause behind `e`, when a Node said one of these: same code, same words.
-    pub fn of(e: &ApiError) -> Option<NodeStop> {
+    pub fn of(e: &Error) -> Option<NodeStop> {
         use NodeStop::*;
         let d = e.safe_detail.as_str();
         let stop = if let Some(secs) = d
@@ -145,35 +145,32 @@ mod tests {
         ];
         for s in all {
             assert_eq!(NodeStop::of(&s.error()), Some(s), "{s:?}");
-            let other = if s.code() == ErrorCode::Invalid {
-                ErrorCode::Internal
+            let other = if s.code() == Code::Invalid {
+                Code::Internal
             } else {
-                ErrorCode::Invalid
+                Code::Invalid
             };
-            assert_eq!(NodeStop::of(&ApiError::new(other, s.detail())), None);
+            assert_eq!(NodeStop::of(&crate::error(other, s.detail())), None);
         }
         // the words Nodes sent before this type existed
         assert_eq!(
-            NodeStop::of(&ApiError::new(ErrorCode::Expired, "past its deadline")),
+            NodeStop::of(&crate::error(Code::Stale, "past its deadline")),
             Some(NodeStop::Deadline)
         );
         assert_eq!(
-            NodeStop::of(&ApiError::new(
-                ErrorCode::Busy,
+            NodeStop::of(&crate::error(
+                Code::Busy,
                 "the node took none of the harness's output for 60 s (its journal or disk is stuck)"
             )),
             Some(NodeStop::IngressStalled { secs: 60 })
         );
         assert_eq!(
-            NodeStop::of(&ApiError::new(
-                ErrorCode::Exhausted,
+            NodeStop::of(&crate::error(
+                Code::Exhausted,
                 "the harness sent a message larger than 1 MiB"
             )),
             Some(NodeStop::FrameTooLarge)
         );
-        assert_eq!(
-            NodeStop::of(&ApiError::new(ErrorCode::Internal, "boom")),
-            None
-        );
+        assert_eq!(NodeStop::of(&crate::error(Code::Internal, "boom")), None);
     }
 }

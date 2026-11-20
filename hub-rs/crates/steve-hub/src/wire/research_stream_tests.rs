@@ -252,6 +252,67 @@ impl Test {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discarded_research_failure_never_falls_back_to_the_next_model() {
+    use steve_node_api::testkit::{FakeNode, build};
+    use steve_runtime::testkit::eventually_sync;
+    let mut t = Test::new().await;
+    t.runtime.stop("use retained journal completion fixture");
+    let node = FakeNode::new("hub");
+    let runtime = NodeRuntime::new(t.store.clone(), node.clone(), Arc::new(Domain));
+    node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));
+    runtime.start();
+    eventually_sync("fixture reconciled", || runtime.is_reconciled()).await;
+    t.research.node.as_mut().unwrap().runtime = runtime.clone();
+    t.runtime = runtime;
+    let sink = Seen::default();
+    let mut request = t.request("discarded", &["first", "fallback"]);
+    request.models.harness = build::choice().harness;
+    request.main.harness = request.models.harness.clone();
+    let pending = t.run(request, &sink);
+    let complete = async {
+        eventually_sync("research job started", || {
+            node.log().iter().any(|(method, _)| *method == "start_job")
+        })
+        .await;
+        let execution: String = t
+            .store
+            .reader(|c| {
+                c.query_row(
+                    "SELECT execution FROM runtime_job_attempts LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from)
+            })
+            .unwrap();
+        let exec: ExecutionRef = serde_json::from_str(&execution).unwrap();
+        eventually_sync("research job recorded on Node", || {
+            node.job_spec(exec.attempt()).is_some()
+        })
+        .await;
+        let mut completion = build::done();
+        completion.outcome = Outcome::Failed;
+        completion.stop_reason = "error".into();
+        completion.transient = true;
+        completion.error = Some(NodeReason::error_detail_discarded(
+            "error details from before the upgrade were discarded",
+        ));
+        node.finish(&exec, completion).await.unwrap();
+    };
+    let (out, ()) = tokio::join!(pending, complete);
+    assert_eq!(out.end, RunEnd::Failed, "{out:?}");
+    assert_eq!(
+        node.log()
+            .iter()
+            .filter(|(method, _)| *method == "start_job")
+            .count(),
+        1
+    );
+    assert_eq!(t.specs().len(), 1);
+    t.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn research_model_failure_falls_back_before_any_text_or_tools() {
     let t = Test::new().await;
     let seen = Seen::default();

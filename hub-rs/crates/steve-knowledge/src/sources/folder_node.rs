@@ -12,12 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use steve_node_api::{
-    ApiError, Command, Cursor, ErrorCode, ExecutionControl, FileAddress, FileInfo, FileRead,
-    GrantId, HeldWhy, Observed, OperationId, Outcome, PageRequest, RelPath, Revision, RootPath,
-    ScanIssue, ScanLimits, ScanSpec, Timestamp, WorkspaceExecutor,
+    Code, Command, Cursor, Error, ExecutionControl, FileAddress, FileInfo, FileRead, GrantId,
+    HeldWhy, Observed, OperationId, Outcome, PageRequest, RelPath, Revision, RootPath, ScanIssue,
+    ScanLimits, ScanSpec, Timestamp, WorkspaceExecutor,
 };
 
 use crate::scan::{self, Entry, Gap, Held, MAX_FILE_BYTES};
@@ -208,8 +209,8 @@ async fn read(place: &FolderPlace, rel: &str, mut expected: Option<Revision>) ->
                 }
                 // not listed as a file any more: the read again tells what it is now
                 Ok(None) => return NodeRead::Changed,
-                Err(e) if e.code == ErrorCode::Offline => return NodeRead::Offline,
-                Err(e) if e.code == ErrorCode::Invalid => return NodeRead::Changed,
+                Err(e) if e.code == Code::Unavailable => return NodeRead::Offline,
+                Err(e) if e.code == Code::Invalid => return NodeRead::Changed,
                 Err(e) => {
                     tracing::debug!("kb.folder: list through the Node: {}", e.safe_detail);
                     return NodeRead::Refused(UNREADABLE);
@@ -220,11 +221,11 @@ async fn read(place: &FolderPlace, rel: &str, mut expected: Option<Revision>) ->
 }
 
 /// The version the Node lists for the file at `at` (`None`: no such file there now).
-async fn version_of(place: &FolderPlace, at: &RootPath) -> Result<Option<Revision>, ApiError> {
+async fn version_of(place: &FolderPlace, at: &RootPath) -> Result<Option<Revision>, Error> {
     let parent = at.rel.as_str().rsplit_once('/').map_or("", |(dir, _)| dir);
     let dir = RootPath {
         root: at.root.clone(),
-        rel: RelPath::new(parent).map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?,
+        rel: RelPath::new(parent).map_err(|e| rpc_error(Code::Invalid, e.to_string()))?,
     };
     let items = list(place, dir).await?;
     Ok(items
@@ -240,13 +241,13 @@ fn plain(rel: &str) -> bool {
         && rel.split('/').all(|c| !matches!(c, "" | "." | ".."))
 }
 
-async fn refused_read(place: &FolderPlace, at: &RootPath, e: ApiError) -> NodeRead {
+async fn refused_read(place: &FolderPlace, at: &RootPath, e: Error) -> NodeRead {
     match e.code {
-        ErrorCode::Conflict => NodeRead::Changed,
-        ErrorCode::Offline => NodeRead::Offline,
-        ErrorCode::Denied => NodeRead::Refused(super::folder::OUTSIDE),
+        Code::Conflict => NodeRead::Changed,
+        Code::Unavailable => NodeRead::Offline,
+        Code::Forbidden => NodeRead::Refused(super::folder::OUTSIDE),
         // missing, or not a file: only a listing tells which
-        ErrorCode::Invalid => match gone(place, at).await {
+        Code::Invalid => match gone(place, at).await {
             Ok(true) => NodeRead::Gone,
             Ok(false) => NodeRead::Refused(UNREADABLE),
             Err(()) => NodeRead::Offline,
@@ -278,8 +279,8 @@ async fn gone(place: &FolderPlace, at: &RootPath) -> Result<bool, ()> {
         .await;
         let items = match listed {
             Ok(items) => items,
-            Err(e) if e.code == ErrorCode::Offline => return Err(()),
-            Err(e) if e.code == ErrorCode::Invalid => continue, // not there either: look higher
+            Err(e) if e.code == Code::Unavailable => return Err(()),
+            Err(e) if e.code == Code::Invalid => continue, // not there either: look higher
             Err(_) => return Ok(false),
         };
         let next = steps[..=depth].join("/");
@@ -292,7 +293,7 @@ async fn gone(place: &FolderPlace, at: &RootPath) -> Result<bool, ()> {
     Ok(false)
 }
 
-async fn list(place: &FolderPlace, at: RootPath) -> Result<Vec<FileInfo>, ApiError> {
+async fn list(place: &FolderPlace, at: RootPath) -> Result<Vec<FileInfo>, Error> {
     let mut out = Vec::new();
     let mut cursor: Option<Cursor> = None;
     loop {
@@ -321,20 +322,18 @@ pub(crate) struct Scanned {
 }
 
 /// The stored reason a scan through the Node failed.
-fn scan_failed(e: &ApiError) -> String {
+fn scan_failed(e: &Error) -> String {
     tracing::info!(
         "kb.folder_scan: through the Node: {:?} {}",
         e.code,
         e.safe_detail
     );
     match e.code {
-        ErrorCode::Offline => OFFLINE.into(),
-        ErrorCode::Denied => "设备不允许读取这个文件夹".into(),
-        ErrorCode::Busy | ErrorCode::Exhausted => "设备正忙，稍后会再扫描".into(),
-        ErrorCode::Expired | ErrorCode::OutcomeUnknown | ErrorCode::Stale => {
-            "扫描中断了，稍后会再扫描".into()
-        }
-        ErrorCode::Invalid => "文件夹读不出来".into(),
+        Code::Unavailable => OFFLINE.into(),
+        Code::Forbidden => "设备不允许读取这个文件夹".into(),
+        Code::Busy | Code::Exhausted => "设备正忙，稍后会再扫描".into(),
+        Code::Stale | Code::OutcomeUnknown => "扫描中断了，稍后会再扫描".into(),
+        Code::Invalid => "文件夹读不出来".into(),
         _ => "扫描文件夹时出错".into(),
     }
 }

@@ -595,6 +595,7 @@ mod tests {
                 reply,
                 usage,
                 timed_out,
+                no_fallback: false,
                 reported_model: None,
             }
         }

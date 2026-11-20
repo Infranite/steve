@@ -45,7 +45,7 @@ pub use workspace::*;
 
 /// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
 /// A different value permits only the independent, permanent upgrade protocol.
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.

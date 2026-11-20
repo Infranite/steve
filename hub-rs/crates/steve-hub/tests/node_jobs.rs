@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
@@ -99,7 +100,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(rpc_error(Code::Unavailable, "no hub")),
         }
     }
 }
@@ -681,6 +682,63 @@ async fn a_timeout_ends_the_chain_on_both_paths() {
 /// The same calls over the fake Node, driven by hand: the draft as it is written, the answer from
 /// the completion, its usage booked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discarded_think_failure_never_falls_back_to_the_next_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let node = FakeNode::new("n1");
+    let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    rt.start();
+    eventually_sync("reconciled", || rt.is_reconciled()).await;
+    let gateway = Fallback {
+        one: NodePrint {
+            runtime: rt.clone(),
+            data_dir: dir.path().to_path_buf(),
+        },
+        fast: vec![],
+        smart: vec!["first".into(), "fallback".into()],
+        models: None,
+    };
+    let tools = ThinkTools::None;
+    let pending = gateway.attempt("想", Tier::Smart, Duration::from_secs(20), &tools, None);
+    let complete = async {
+        eventually_sync("the job started", || {
+            node.log().iter().any(|(m, _)| *m == "start_job")
+        })
+        .await;
+        let exec: ExecutionRef = serde_json::from_str(&q::<String>(
+            &store,
+            "SELECT execution FROM runtime_job_attempts",
+        ))
+        .unwrap();
+        eventually_sync("the job recorded", || {
+            node.job_spec(exec.attempt()).is_some()
+        })
+        .await;
+        let mut completion = build::done();
+        completion.outcome = Outcome::Failed;
+        completion.stop_reason = "timeout".into();
+        completion.transient = true;
+        completion.error = Some(NodeReason::error_detail_discarded(
+            "error details from before the upgrade were discarded",
+        ));
+        node.finish(&exec, completion).await.unwrap();
+    };
+    let (attempt, ()) = tokio::join!(pending, complete);
+    assert!(attempt.result.is_err());
+    assert_eq!(attempt.attempts, 1);
+    assert_eq!(attempt.model, "first");
+    assert_eq!(attempt.failures.len(), 1);
+    assert!(!attempt.failures[0].contains(steve_core::gateway::TIMED_OUT));
+    assert_eq!(
+        node.log().iter().filter(|(m, _)| *m == "start_job").count(),
+        1
+    );
+    rt.stop("test complete");
+}
+
+/// A fake Node reports actual streamed text and usage through the production job gateway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_fake_node_contract_streams_and_answers() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
@@ -827,6 +885,103 @@ fn outcome(store: &Store, attempt: &str) -> Option<String> {
 /// The Hub restarts with job attempts open: their callers are gone. One the Node never got ends
 /// here; a running one is cancelled; one the Node cannot tell the end of is abandoned. None is
 /// ever started again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_job_missing_on_abandon_ends_without_restarting() {
+    use steve_node_api::testkit::Scripted;
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let node = FakeNode::new("n1");
+    let gate = Arc::new(Gate::default());
+    node.connect(gate.clone());
+    let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+    *gate.0.lock().unwrap() = Some(Arc::downgrade(&rt));
+    rt.start();
+    eventually_sync("reconciled", || rt.is_reconciled()).await;
+    node.script_once("start_job", Scripted::Unknown);
+    node.script_once(
+        "abandon",
+        Scripted::Refuse(NodeReason::no_such_operation(
+            "op_ja_gone",
+            "arbitrary display words",
+        )),
+    );
+    orphan(&store, "job_gone", "ja_gone");
+    eventually_sync("missing unknown job ends", || {
+        outcome(&store, "ja_gone").as_deref() == Some("interrupted")
+    })
+    .await;
+    assert_eq!(
+        node.log().iter().filter(|(m, _)| *m == "start_job").count(),
+        1
+    );
+    assert_eq!(
+        q::<i64>(
+            &store,
+            "SELECT COUNT(*) FROM runtime_jobs WHERE state='open'"
+        ),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_retains_a_discarded_job_failure_without_starting_work() {
+    use steve_store::runtime as rt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let (operation, _) = orphan(&store, "job_retained", "ja_retained");
+    let mut completion = build::done();
+    completion.outcome = Outcome::Failed;
+    completion.stop_reason = steve_core::runtime::MODEL_SERVICE_UNAVAILABLE.into();
+    completion.transient = true;
+    completion.error = Some(NodeReason::error_detail_discarded(
+        "error details from before the upgrade were discarded",
+    ));
+    let receipt = Receipt {
+        operation: operation.clone(),
+        state: Observed::Finished {
+            outcome: Outcome::Failed,
+            result: Some(OperationResult::Execution(completion.clone())),
+            error: completion.error.clone(),
+        },
+    };
+    store
+        .transaction::<_, StoreError>(|tx| {
+            rt::merge_receipt_in(
+                tx,
+                operation.as_str(),
+                rt::ReceiptState::Finished,
+                false,
+                &serde_json::to_value(&receipt).unwrap(),
+                steve_store::now(),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let node = FakeNode::new("n1");
+    let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+    node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));
+    runtime.start();
+    eventually_sync("retained failure recovered", || {
+        outcome(&store, "ja_retained").as_deref() == Some("failed")
+    })
+    .await;
+    let stored: String = q(
+        &store,
+        "SELECT completion FROM runtime_job_attempts WHERE attempt_id='ja_retained'",
+    );
+    assert_eq!(
+        serde_json::from_str::<Completion>(&stored).unwrap(),
+        completion
+    );
+    assert!(!node.log().iter().any(|(method, _)| *method == "start_job"));
+    assert_eq!(
+        q::<i64>(&store, "SELECT COUNT(*) FROM runtime_job_attempts"),
+        1
+    );
+    runtime.stop("test complete");
+}
+
+/// Restart cleanup preserves every job's identity and never starts its task again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hub_restart_stops_open_job_attempts_and_runs_none_again() {
     let dir = tempfile::tempdir().unwrap();

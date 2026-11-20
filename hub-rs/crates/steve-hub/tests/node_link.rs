@@ -673,7 +673,7 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
         .unwrap();
     let start_sql = "SELECT operation_id FROM node_commands WHERE method='start_turn'";
     eventually_sync("ordinary call deferred offline", || h.q::<i64>(
-        "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'"
+        "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='unavailable'"
     ) == 1).await;
     let operation: String = h.q(start_sql);
     let generation: i64 =
@@ -695,13 +695,13 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     .await;
     eventually_sync("send loop retried on upgrade link", || {
         h.q::<i64>(&format!(
-            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
+            "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='unavailable' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
         )) == 1
     }).await;
     let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
     let error: String = h.q("SELECT json_extract(receipt,'$.last_error.code') FROM node_commands WHERE method='start_turn'");
     assert_eq!(state, "pending", "{}", h.dump());
-    assert_eq!(error, "offline");
+    assert_eq!(error, "unavailable");
     assert_eq!(
         h.q::<i64>("SELECT maybe_sent FROM node_commands WHERE method='start_turn'"),
         0

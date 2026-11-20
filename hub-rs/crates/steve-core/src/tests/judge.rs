@@ -1352,6 +1352,7 @@ impl crate::gateway::OneModel for Serves {
             reply: Ok((DONE.into(), None)),
             usage: vec![],
             timed_out: false,
+            no_fallback: false,
             reported_model: self.0.map(String::from),
         }
     }

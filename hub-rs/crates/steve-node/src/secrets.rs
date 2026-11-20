@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use steve_node_api::error as rpc_error;
 
 use steve_node_api::*;
 use zeroize::Zeroizing;
@@ -32,7 +33,7 @@ fn valid_var(v: &str) -> bool {
 /// What a command's secrets may be: env and file variables named well and once, one stdin at
 /// most, no header (that is a push's).
 pub(crate) fn check(refs: &[SecretRef], env: &[(String, String)]) -> ApiResult<()> {
-    let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+    let bad = |m: &str| Err(rpc_error(Code::Invalid, m.to_string()));
     let mut vars: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
     let mut stdin = false;
     for r in refs {

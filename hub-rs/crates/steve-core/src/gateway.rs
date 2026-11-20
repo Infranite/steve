@@ -146,6 +146,8 @@ pub struct Tried {
     pub usage: Vec<ModelUsage>,
     /// The try ran out of its time: the next model is not tried (it would most likely wait as long).
     pub timed_out: bool,
+    /// The runner has an explicit terminal result: its cause cannot authorize another model.
+    pub no_fallback: bool,
     /// The model the harness named in its own reports of this try ([`reported_model`]), before a
     /// report without one is booked under the model asked for.
     pub reported_model: Option<String>,
@@ -172,6 +174,7 @@ impl Tried {
             reply: Err(e),
             usage: vec![],
             timed_out: false,
+            no_fallback: false,
             reported_model: None,
         }
     }
@@ -216,6 +219,7 @@ impl Tried {
         }
         Tried {
             timed_out,
+            no_fallback: false,
             reply: reply
                 .map(|(text, reported)| {
                     (
@@ -799,7 +803,7 @@ impl<M: OneModel> Fallback<M> {
                     a.result = Err(e);
                     // a timeout is not the model's own fault (the provider or the harness is slow): the
                     // next one would wait as long, so the chain ends here; fast errors fall back
-                    if r.timed_out || handed_on {
+                    if r.timed_out || r.no_fallback || handed_on {
                         break;
                     }
                 }

@@ -35,6 +35,16 @@ use steve_node_api::*;
 use steve_store::runtime::{self as rt, ReceiptState, StreamKey};
 use steve_store::{FileRef, Store, StoreError, Tx};
 
+// A journal upgrade retained the outcome but discarded its former failure cause. Never infer
+// permission to retry it from the completion's older transient/service diagnostics.
+pub(super) fn discarded_error(completion: &Completion) -> Option<&Error> {
+    completion.error.as_ref().filter(|e| {
+        e.reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::ErrorDetailDiscarded))
+    })
+}
+
 mod apply;
 mod capacity_retry;
 mod command;
@@ -97,7 +107,7 @@ const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 /// words of ours, anything else as the Node said it. Stored (timeline, fail cards), so zh-CN;
 /// that is also the language a model reads it in where it reaches one (a gateway or research
 /// error), as the prompts are.
-pub(crate) fn said(e: &ApiError) -> String {
+pub(crate) fn said(e: &Error) -> String {
     steve_i18n::stored(|| match NodeStop::of(e) {
         Some(stop) => stop_text(stop),
         None if workspace_binding_conflict(e) => steve_i18n::t!("hub.node.workspace_conflict"),
@@ -106,9 +116,8 @@ pub(crate) fn said(e: &ApiError) -> String {
 }
 
 /// Only the Node's own immutable-workspace conflict; a harness's arbitrary conflict stays intact.
-pub(crate) fn workspace_binding_conflict(e: &ApiError) -> bool {
-    e.code == ErrorCode::Conflict
-        && e.safe_detail == "this resource's workspace was prepared otherwise"
+pub(crate) fn workspace_binding_conflict(e: &Error) -> bool {
+    e.code == Code::Conflict && e.safe_detail == "this resource's workspace was prepared otherwise"
 }
 
 fn stop_text(stop: NodeStop) -> String {
@@ -620,7 +629,7 @@ impl NodeRuntime {
                         me.rearm_waiting();
                         break;
                     }
-                    Err(e) if e.code == ErrorCode::Offline && !waited => {
+                    Err(e) if e.code == Code::Unavailable && !waited => {
                         waited = true;
                         tracing::info!(
                             "node {}: not linked yet; reconciling once it is",

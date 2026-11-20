@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 use steve_node_api::testkit::{FakeNode, RecordingSink};
 use steve_node_api::upgrade_v1 as v1;
 use steve_node_api::*;
@@ -110,6 +111,49 @@ async fn upgrade_rejects_every_ordinary_method_before_decode_or_execution_and_ke
     assert!(!connection.is_closed());
 }
 
+#[tokio::test]
+async fn an_upgrade_link_never_acknowledges_or_delivers_ordinary_events() {
+    use steve_node_wire::RemoteSink;
+    // Exercise the outbound event port as well as the inbound method fence above.
+    assert_eq!(v1::Mode::between(PROTOCOL, PROTOCOL - 1), v1::Mode::Upgrade);
+    assert_eq!(v1::Mode::between(PROTOCOL - 1, PROTOCOL), v1::Mode::Upgrade);
+    let (hub, node) = steve_node_wire::testkit::pair();
+    let count = Arc::new(Count::default());
+    let peer = Conn::spawn(hub.sink, hub.stream, 7, count.clone(), options("h"));
+    let connection = Conn::spawn(
+        node.sink,
+        node.stream,
+        7,
+        Arc::new(Count::default()),
+        options("n"),
+    );
+    let link = HubLink::new();
+    link.set(Some(connection.clone()));
+    let fake = FakeNode::new("n1");
+    let sink = Arc::new(RemoteSink(link));
+    fake.connect(sink.clone());
+    let subject = Subject::Operation {
+        operation: OperationId::new("op_retained").unwrap(),
+    };
+    fake.emit(subject, EventBody::AttemptStarted).await.unwrap();
+    assert_eq!(fake.delivery_failures(), 1);
+    let head = fake.streams().await.unwrap().pop().unwrap();
+    assert_eq!((head.produced, head.acknowledged), (1, 0));
+    let from = Watermark {
+        stream: head.stream,
+        epoch: head.epoch,
+        seq: 0,
+    };
+    let retained = fake.replay(from.clone(), 64 * 1024).await.unwrap();
+    assert_eq!(retained.events.len(), 1);
+    let failure = sink.commit(retained).await.unwrap_err();
+    assert_eq!(failure.code, Code::Unavailable);
+    assert_eq!(count.normal.load(Ordering::SeqCst), 0);
+    assert!(!connection.is_closed());
+    assert!(!peer.is_closed());
+    assert_eq!(fake.replay(from, 64 * 1024).await.unwrap().events.len(), 1);
+}
+
 struct Archive {
     reads: AtomicUsize,
     full: bool,
@@ -127,10 +171,7 @@ impl HubFiles for Archive {
         if !matches!(access, FileAccess::Operation { operation } if operation.as_str() == "op_upgrade")
             || id.as_str() != "node-upgrade.op_upgrade"
         {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
-                "not granted to this operation",
-            ));
+            return Err(rpc_error(Code::Forbidden, "not granted to this operation"));
         }
         assert!(max <= steve_node_wire::serve_hub::UPGRADE_CHUNK_BYTES);
         if self.full {
@@ -272,7 +313,7 @@ async fn all_five_methods_work_without_ordinary_protocol_payloads() {
     assert!(remote.ready_generation().is_none());
     assert_eq!(
         remote.probe(false).await.unwrap_err().retry,
-        RetryClass::SameOperation
+        Retry::Later { after_ms: None }
     );
     let probe = remote.probe_build().await.unwrap();
     assert_eq!(probe.build.unwrap().version, "1.9.0");
@@ -372,9 +413,13 @@ async fn downgrade_returns_the_permanent_error_and_never_switches_even_when_forc
             )
             .await
             .unwrap_err();
-        assert_eq!(
-            (error.code, error.retry),
-            (ErrorCode::Downgrade, RetryClass::Never)
+        assert_eq!((error.code, error.retry), (Code::Invalid, Retry::Never));
+        assert!(
+            error
+                .reason
+                .as_ref()
+                .unwrap()
+                .is(NodeReason::DowngradeRefused)
         );
         assert_eq!(
             remote
@@ -421,7 +466,7 @@ async fn ordinary_calls_remain_retryable_in_both_directions_without_writing_fram
             ] {
                 assert_eq!(
                     (error.code, error.retry),
-                    (ErrorCode::Offline, RetryClass::SameOperation)
+                    (Code::Unavailable, Retry::Later { after_ms: None })
                 );
             }
         }
@@ -456,7 +501,7 @@ async fn ordinary_calls_remain_retryable_in_both_directions_without_writing_fram
     ] {
         assert_eq!(
             (error.code, error.retry),
-            (ErrorCode::Offline, RetryClass::SameOperation)
+            (Code::Unavailable, Retry::Later { after_ms: None })
         );
     }
     // A running turn's Steve tool port must also refuse before using the upgrade socket.
@@ -470,7 +515,7 @@ async fn ordinary_calls_remain_retryable_in_both_directions_without_writing_fram
     let error = tools.catalog(execution.clone()).await.unwrap_err();
     assert_eq!(
         (error.code, error.retry),
-        (ErrorCode::Offline, RetryClass::SameOperation)
+        (Code::Unavailable, Retry::Later { after_ms: None })
     );
     let error = tools
         .call(ToolCall {
@@ -485,7 +530,7 @@ async fn ordinary_calls_remain_retryable_in_both_directions_without_writing_fram
         .unwrap_err();
     assert_eq!(
         (error.code, error.retry),
-        (ErrorCode::Offline, RetryClass::SameOperation)
+        (Code::Unavailable, Retry::Later { after_ms: None })
     );
     assert_eq!((hub.frames_written(), peer.frames_written()), before);
     assert!(node.log().is_empty());
@@ -523,7 +568,7 @@ async fn ordinary_blob_fetch_cannot_reach_the_upgrade_archive_port_even_on_a_nor
         .call("blob.fetch", payload.clone(), None)
         .await
         .unwrap_err();
-    assert_eq!(error.code, ErrorCode::Denied);
+    assert_eq!(error.code, Code::Forbidden);
     assert_eq!(archive.reads.load(Ordering::SeqCst), 0);
     peer.call_upgrade(
         v1::UPGRADE_FETCH,
@@ -581,11 +626,15 @@ async fn a_lost_or_unreadable_switch_answer_is_local_uncertainty_not_a_wire_erro
         }
         let error = call.await.unwrap().unwrap_err();
         assert_eq!(
-            (error.code, error.retry, error.operation),
             (
-                ErrorCode::OutcomeUnknown,
-                RetryClass::AfterReconcile,
-                Some(operation)
+                error.code,
+                error.retry,
+                error.params.0.get("operation").cloned()
+            ),
+            (
+                Code::OutcomeUnknown,
+                Retry::Later { after_ms: None },
+                Some(Param::Str(operation.to_string()))
             )
         );
         assert_eq!(connection.frames_written(), 1, "never resend a switch");
@@ -596,7 +645,7 @@ async fn a_lost_or_unreadable_switch_answer_is_local_uncertainty_not_a_wire_erro
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Offline
+            Code::Unavailable
         );
     }
 }
@@ -691,3 +740,6 @@ async fn foreign_ordinary_headers_are_refused_without_decoding_the_current_schem
         );
     }
 }
+
+#[path = "support/cross_build_upgrade.rs"]
+mod cross_build;

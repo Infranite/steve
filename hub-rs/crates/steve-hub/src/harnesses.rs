@@ -511,6 +511,7 @@ pub(crate) fn merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steve_node_api::error as rpc_error;
     use steve_node_api::{AdapterInfo, AdapterModel, AdapterOffer, PermissionMode};
 
     fn reported(id: &str, offer: Option<AdapterOffer>) -> HarnessCapability {
@@ -684,7 +685,7 @@ mod tests {
         let node = steve_node_api::testkit::FakeNode::new("local");
         node.refuse_next(
             "probe",
-            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "probe unavailable"),
+            rpc_error(steve_node_api::Code::Unavailable, "probe unavailable"),
         );
         hs.refresh(node.as_ref(), false).await;
         assert!(

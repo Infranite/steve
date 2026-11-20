@@ -74,7 +74,7 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
         h.q::<i64>(&format!(
             "SELECT COUNT(*) FROM node_event_inbox WHERE node_id='{b}'"
@@ -116,7 +116,7 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 
     // B calls Steve's tools as A's attempt: refused, the service never sees it
     let r = RemoteTools(lb.link.clone())
@@ -130,8 +130,8 @@ async fn a_node_cannot_speak_for_another() {
         })
         .await;
     assert!(
-        matches!(&r, Err(e) if e.code == ErrorCode::Denied)
-            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == Code::Forbidden)
+            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == Code::Forbidden),
         "{r:?}"
     );
     assert!(h.service.calls.lock().unwrap().is_empty());
@@ -146,7 +146,7 @@ async fn a_node_cannot_speak_for_another() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
 
     // the Hub asks B about A's session: B knows nothing of it
     let e = h
@@ -155,7 +155,7 @@ async fn a_node_cannot_speak_for_another() {
         .session(SessionId::new("sa").unwrap())
         .await
         .unwrap_err();
-    assert_ne!(e.code, ErrorCode::Offline);
+    assert_ne!(e.code, Code::Unavailable);
     // and A's own events still commit
     fa.emit(
         Subject::Execution(exec.clone()),

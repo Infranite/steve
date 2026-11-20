@@ -1,0 +1,1 @@
+{"v":11,"t":"res","id":"golden_1","re":"request_missing","gen":7,"deadline_at":0,"p":{"err":{"code":"not_found","retry":{"kind":"never"},"reason":"node.no_such_operation","params":{"operation":"missing_operation"},"safe_detail":"no such operation"}}}

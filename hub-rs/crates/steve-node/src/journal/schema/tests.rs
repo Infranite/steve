@@ -140,7 +140,7 @@ fn upgrade_refuses_live_or_unproven_process_groups_before_discarding_any_records
             let e = Writer::open(&p)
                 .err()
                 .expect("unproven group must block migration");
-            assert_eq!(e.code, ErrorCode::Unsupported, "{started} / {pgid}");
+            assert_eq!(e.code, Code::Unsupported, "{started} / {pgid}");
             assert!(e.safe_detail.contains("stop the old Node's processes"));
             assert_eq!(
                 c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))

@@ -152,11 +152,11 @@ enum Miss {
     Fail(ApiError),
 }
 
-fn miss(e: na::ApiError) -> Miss {
+fn miss(e: na::Error) -> Miss {
     match e.code {
-        na::ErrorCode::Unsupported => Miss::Unsupported,
-        na::ErrorCode::Invalid | na::ErrorCode::Denied => Miss::Gone,
-        na::ErrorCode::Offline => Miss::Fail(offline()),
+        na::Code::Unsupported => Miss::Unsupported,
+        na::Code::Invalid | na::Code::Forbidden => Miss::Gone,
+        na::Code::Unavailable => Miss::Fail(offline()),
         _ => Miss::Fail(ApiError::internal(e.safe_detail)),
     }
 }
@@ -821,25 +821,20 @@ mod tests {
 
     #[tokio::test]
     async fn an_offline_node_is_a_503_device_offline() {
-        let e = na::ApiError::new(na::ErrorCode::Offline, "link down");
+        let e = na::error(na::Code::Unavailable, "link down");
         assert_eq!(miss(e), Miss::Fail(ApiError::Json(503, "设备离线".into())));
-        let en = steve_i18n::scope("en", async {
-            miss(na::ApiError::new(na::ErrorCode::Offline, "x"))
-        })
-        .await;
+        let en =
+            steve_i18n::scope("en", async { miss(na::error(na::Code::Unavailable, "x")) }).await;
         assert_eq!(en, Miss::Fail(ApiError::Json(503, "Device offline".into())));
         assert_eq!(
             placement_error(PlacementError::Offline { device: "n".into() }),
             ApiError::Json(503, "设备离线".into())
         );
         assert_eq!(
-            miss(na::ApiError::new(na::ErrorCode::Unsupported, "files")),
+            miss(na::error(na::Code::Unsupported, "files")),
             Miss::Unsupported
         );
-        assert_eq!(
-            miss(na::ApiError::new(na::ErrorCode::Denied, "outside")),
-            Miss::Gone
-        );
+        assert_eq!(miss(na::error(na::Code::Forbidden, "outside")), Miss::Gone);
     }
 
     #[test]

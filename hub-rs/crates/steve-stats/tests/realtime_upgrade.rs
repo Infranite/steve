@@ -243,7 +243,7 @@ fn a_new_unsent_cancel_or_rejection_never_adds_unknown_coverage() {
     use steve_store::runtime::{self, ReceiptState};
     for payload in [
         serde_json::json!({"reason":"cancelled before it was sent"}),
-        serde_json::json!({"code":"invalid_request","retry":"never"}),
+        serde_json::json!({"code":"invalid","retry":{"kind":"never"},"reason":null,"params":{},"safe_detail":"rejected"}),
     ] {
         let (_d, path, c) = old_db();
         attempt(&c, "a");

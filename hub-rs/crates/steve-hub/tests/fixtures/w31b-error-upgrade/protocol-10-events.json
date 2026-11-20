@@ -1,0 +1,86 @@
+[
+  {
+    "schema": 1,
+    "id": "event_operation",
+    "at": 100,
+    "cursor": {
+      "stream": "op:op_legacy",
+      "epoch": "epoch_legacy",
+      "seq": 1
+    },
+    "subject": {
+      "of": "operation",
+      "operation": "op_legacy"
+    },
+    "body": {
+      "type": "operation_changed",
+      "receipt": {
+        "operation": "op_legacy",
+        "state": {
+          "state": "finished",
+          "outcome": "failed",
+          "result": {
+            "kind": "execution",
+            "outcome": "failed",
+            "stop_reason": "model_service_unavailable",
+            "error": {
+              "code": "internal",
+              "retry": "never",
+              "safe_detail": "stopped by the node"
+            },
+            "result": [
+              {
+                "type": "text",
+                "text": "保留\n引号\"，反斜杠\\，斜杠/，🙂"
+              }
+            ],
+            "transient": true,
+            "acted": false
+          },
+          "error": {
+            "code": "internal",
+            "retry": "never",
+            "safe_detail": "stopped by the node"
+          }
+        }
+      }
+    }
+  },
+  {
+    "schema": 1,
+    "id": "event_attempt",
+    "at": 101,
+    "cursor": {
+      "stream": "stream_legacy",
+      "epoch": "epoch_legacy",
+      "seq": 1
+    },
+    "subject": {
+      "of": "execution",
+      "type": "turn",
+      "session": "s_legacy",
+      "turn": "t_legacy",
+      "attempt": "a_legacy"
+    },
+    "body": {
+      "type": "attempt_ended",
+      "completion": {
+        "outcome": "failed",
+        "stop_reason": "model_service_unavailable",
+        "error": {
+          "code": "internal",
+          "retry": "never",
+          "safe_detail": "stopped by the node"
+        },
+        "result": [
+          {
+            "type": "text",
+            "text": "保留\n引号\"，反斜杠\\，斜杠/，🙂"
+          }
+        ],
+        "transient": true,
+        "acted": false
+      }
+    }
+  }
+]

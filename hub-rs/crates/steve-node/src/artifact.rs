@@ -9,6 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path};
+use steve_node_api::error as rpc_error;
 
 use serde::{Deserialize, Serialize};
 use steve_node_api::*;
@@ -29,14 +30,14 @@ pub(crate) struct Grant {
     pub inode: u64,
 }
 
-fn denied() -> ApiError {
-    ApiError::new(ErrorCode::Denied, "artifact outside its execution view")
+fn denied() -> Error {
+    rpc_error(Code::Forbidden, "artifact outside its execution view")
 }
 
-fn io_error(e: std::io::Error) -> ApiError {
+fn io_error(e: std::io::Error) -> Error {
     match e.raw_os_error() {
         Some(libc::ELOOP | libc::ENOTDIR) => denied(),
-        _ => ApiError::new(ErrorCode::Invalid, "artifact unavailable"),
+        _ => rpc_error(Code::Invalid, "artifact unavailable"),
     }
 }
 
@@ -237,7 +238,7 @@ fn read_open(
     }
     let version = crate::scan::version(&path, &before);
     if expected.is_some_and(|v| *v != version) {
-        return Err(ApiError::new(ErrorCode::Conflict, "the artifact changed"));
+        return Err(rpc_error(Code::Conflict, "the artifact changed"));
     }
     let offset = offset.min(before.len());
     file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
@@ -251,7 +252,7 @@ fn read_open(
         return Err(denied());
     }
     if crate::scan::version(&path, &after) != version {
-        return Err(ApiError::new(ErrorCode::Conflict, "the artifact changed"));
+        return Err(rpc_error(Code::Conflict, "the artifact changed"));
     }
     Ok(DeliveryChunk {
         size: before.len(),
@@ -322,10 +323,10 @@ mod tests {
         q.offset = 0;
         q.expected = Some(crate::scan::version(&p, &p.metadata().unwrap()));
         fs::write(&p, b"changed").unwrap();
-        assert_eq!(read(&g, &q).unwrap_err().code, ErrorCode::Conflict);
+        assert_eq!(read(&g, &q).unwrap_err().code, Code::Conflict);
         q.expected = None;
         q.view_digest = Digest::sha256(b"another view");
-        assert_eq!(read(&g, &q).unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(read(&g, &q).unwrap_err().code, Code::Forbidden);
         q = query(&g, "a");
         fs::write(&p, vec![b'x'; crate::scan::MAX_READ as usize + 1]).unwrap();
         let c = read(&g, &q).unwrap();
@@ -334,7 +335,7 @@ mod tests {
         fs::rename(&g.dir, t.path().join("old")).unwrap();
         fs::create_dir(&g.dir).unwrap();
         fs::write(&p, b"new workspace").unwrap();
-        assert_eq!(read(&g, &q).unwrap_err().code, ErrorCode::Denied);
+        assert_eq!(read(&g, &q).unwrap_err().code, Code::Forbidden);
     }
 
     #[test]
@@ -365,7 +366,7 @@ mod tests {
         ] {
             assert_eq!(
                 read(&g, &query(&g, name)).unwrap_err().code,
-                ErrorCode::Denied,
+                Code::Forbidden,
                 "{name}"
             );
         }
@@ -377,7 +378,7 @@ mod tests {
         symlink(t.path().join("moved"), work).unwrap();
         assert_eq!(
             read(&g, &query(&g, "sub/a")).unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
 

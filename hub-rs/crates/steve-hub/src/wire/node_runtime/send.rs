@@ -2,6 +2,7 @@
 //! refusal/outcome transitions.
 
 use super::*;
+use steve_node_api::error as rpc_error;
 
 /// A worker's hold on a command it sends.
 const LEASE_MS: i64 = 60_000;
@@ -64,7 +65,7 @@ impl NodeRuntime {
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.send_tx(|tx| match &sent {
             Ok(receipt) => self.receipt_in(tx, receipt).map(|end| (end, None)),
-            Err(e) if e.code == ErrorCode::OutcomeUnknown && e.retry == RetryClass::Never => {
+            Err(e) if e.code == Code::OutcomeUnknown && e.retry == Retry::Never => {
                 // Leasing already persisted maybe_sent=1. Do not resend or call this a refusal:
                 // the Node may have executed it. A later receipt/reconcile can settle unknown.
                 self.receipt_in(tx, &Receipt {
@@ -73,11 +74,11 @@ impl NodeRuntime {
                 }).map(|end| (end, None))
             }
             Err(e)
-                if e.retry == RetryClass::SameOperation || e.code == ErrorCode::OutcomeUnknown =>
+                if matches!(e.retry, Retry::Later { .. }) || e.code == Code::OutcomeUnknown =>
             {
                 // not refused for good, or maybe accepted: the very same command again later
-                let uncertain = e.retry != RetryClass::SameOperation;
-                let delay = if e.code == ErrorCode::Exhausted {
+                let uncertain = e.code == Code::OutcomeUnknown;
+                let delay = if e.code == Code::Exhausted {
                     self.exhausted_in(tx, &lease, e)?
                 } else {
                     1_000
@@ -222,7 +223,7 @@ impl NodeRuntime {
         &self,
         tx: &Tx,
         lease: &rt::CommandLease,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<i64, StoreError> {
         let before: Option<i64> = tx
             .query_row(
@@ -252,7 +253,7 @@ impl NodeRuntime {
     async fn send(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
         fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> ApiResult<Command<T>> {
             serde_json::from_value(v.clone())
-                .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))
+                .map_err(|e| rpc_error(Code::Invalid, format!("stored command: {e}")))
         }
         let n = &self.node;
         match l.method.as_str() {
@@ -266,10 +267,10 @@ impl NodeRuntime {
                         .store
                         .sessions()
                         .get(cmd.body.session.as_str())
-                        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?
+                        .map_err(|e| rpc_error(Code::Invalid, e.to_string()))?
                         .is_none_or(|s| s.status == "ended");
                     if ended {
-                        return Err(ApiError::new(ErrorCode::Invalid, "已结束的会话不能重开。"));
+                        return Err(rpc_error(Code::Invalid, "已结束的会话不能重开。"));
                     }
                     if let Ok(report) = n.probe(false).await {
                         let cap = report
@@ -288,7 +289,7 @@ impl NodeRuntime {
                             selection.as_object().unwrap(),
                             &[h],
                         )
-                        .map_err(|why| ApiError::new(ErrorCode::Invalid, why))?;
+                        .map_err(|why| rpc_error(Code::Invalid, why))?;
                     }
                 }
                 n.open_session(cmd).await
@@ -303,32 +304,27 @@ impl NodeRuntime {
                             [&l.operation], |r| r.get(0),
                         )?;
                         self.disabled_workflow_in(c, &session)
-                    }).map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
+                    }).map_err(|e| rpc_error(Code::Unavailable, e.to_string()))?
                 };
                 if let Some(why) = blocked {
                     // A prior uncertain send may already be running: only reconciliation can
                     // settle it, never manufacture a pre-admission rejection for it.
-                    return Err(ApiError::new(
-                        if l.maybe_sent {
-                            ErrorCode::OutcomeUnknown
-                        } else {
-                            ErrorCode::Invalid
-                        },
-                        why,
-                    ));
+                    return Err(if l.maybe_sent {
+                        rpc_error(Code::OutcomeUnknown, why).retry(Retry::Later { after_ms: None })
+                    } else {
+                        rpc_error(Code::Invalid, why)
+                    });
                 }
                 let limit = self
                     .store
                     .reader(|c| rt::session_limit(c, self.node_id.as_str()))
-                    .map_err(|e| {
-                        ApiError::new(ErrorCode::Offline, format!("session capacity: {e}"))
-                    })?;
+                    .map_err(|e| rpc_error(Code::Unavailable, format!("session capacity: {e}")))?;
                 // Reapply before each start, not once per Hub boot: a separately running Node may
                 // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
                 // Old peers retain their own limiter and return their actual refusal when full.
                 match n.set_session_capacity(limit as u32).await {
                     Ok(()) => {}
-                    Err(e) if e.code == ErrorCode::Unsupported => {}
+                    Err(e) if e.code == Code::Unsupported => {}
                     Err(e) => return Err(e),
                 }
                 n.start_turn(parse(&l.request)?).await
@@ -341,8 +337,8 @@ impl NodeRuntime {
             "abandon" => n.abandon(parse(&l.request)?).await,
             "recover" => n.recover(parse(&l.request)?).await,
             m if ledger::LEDGER_METHODS.contains(&m) => self.send_ledger(l).await,
-            other => Err(ApiError::new(
-                ErrorCode::Unsupported,
+            other => Err(rpc_error(
+                Code::Unsupported,
                 format!("the coordinator does not send {other}"),
             )),
         }
@@ -620,7 +616,7 @@ impl NodeRuntime {
                         &Completion {
                             outcome: Outcome::Interrupted,
                             stop_reason: "cancelled".into(),
-                            error: Some(ApiError::new(ErrorCode::Invalid, why)),
+                            error: Some(rpc_error(Code::Invalid, why)),
                             result: vec![],
                             continuation: None,
                             transient: false,
@@ -676,8 +672,8 @@ impl NodeRuntime {
             let c = Completion {
                 outcome: Outcome::Failed,
                 stop_reason: "error".into(),
-                error: Some(ApiError::new(
-                    ErrorCode::Invalid,
+                error: Some(rpc_error(
+                    Code::Invalid,
                     format!("the Node could not open the session again: {detail}"),
                 )),
                 result: vec![],
@@ -810,7 +806,7 @@ impl NodeRuntime {
         &self,
         tx: &Tx,
         op: &str,
-        e: Option<&ApiError>,
+        e: Option<&Error>,
     ) -> Result<Option<End>, StoreError> {
         let row: Option<(String, String, String)> = tx
             .query_row(
@@ -824,14 +820,16 @@ impl NodeRuntime {
         };
         let detail = e.map(|e| e.safe_detail.clone()).unwrap_or_default();
         let unknown_to_node = e.is_some_and(|e| {
-            e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation")
+            e.reason
+                .as_ref()
+                .is_some_and(|r| r.is(NodeReason::NoSuchOperation))
         });
         if unknown_to_node && state == "unknown" {
             let completion = Completion {
                 outcome: Outcome::Interrupted,
                 stop_reason: "error".into(),
-                error: Some(ApiError::new(
-                    ErrorCode::Invalid,
+                error: Some(rpc_error(
+                    Code::Invalid,
                     "the Node holds no record of this attempt: it did not run there",
                 )),
                 result: vec![],
@@ -859,12 +857,7 @@ impl NodeRuntime {
     /// The Node refused an attempt before running it. Refused because the Node had let the
     /// session go: nothing ran, the session opens again and the same turn goes as a new attempt
     /// (once). Otherwise the attempt ends as failed, its turn with it.
-    fn refused_attempt_in(
-        &self,
-        tx: &Tx,
-        op: &str,
-        e: &ApiError,
-    ) -> Result<Option<End>, StoreError> {
+    fn refused_attempt_in(&self, tx: &Tx, op: &str, e: &Error) -> Result<Option<End>, StoreError> {
         let row: Option<(String, i64, String, String)> = tx
             .query_row(
                 "SELECT a.attempt_id, a.revision, a.turn_id, t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=?",
@@ -875,7 +868,7 @@ impl NodeRuntime {
         let Some((attempt, rev, turn, session)) = row else {
             return Ok(None);
         };
-        let gone = e.code == ErrorCode::Invalid
+        let gone = e.code == Code::Invalid
             && (e.safe_detail.contains("open it again") || e.safe_detail.contains("not open"));
         let reopened_before: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='released')",

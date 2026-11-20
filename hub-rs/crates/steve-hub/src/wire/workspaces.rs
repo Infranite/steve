@@ -869,7 +869,7 @@ mod tests {
         let Applied::Failed(e) = again else {
             panic!("applied on old facts: {again:?}")
         };
-        assert_eq!(e.code, ErrorCode::Stale);
+        assert_eq!(e.code, Code::Stale);
         assert_eq!(git(&cwd, &["rev-parse", "HEAD"]), after.head);
         // the local Node off: the Hub's own git again
         let off = Workspaces::new(t.store.clone(), None, None, vec![]);
@@ -943,7 +943,7 @@ mod tests {
         let e = prepare(&t.node, "op_kb", root_of(&k1)).await.unwrap_err();
         assert_eq!(
             e.code,
-            ErrorCode::Denied,
+            Code::Forbidden,
             "a read-only root takes no workspace"
         );
     }
@@ -960,7 +960,7 @@ mod tests {
         // boot's roots do not have it
         assert_eq!(
             prepare(&t.node, "op_a", at.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         // the project event rebuilds them
         tx.try_send(steve_modules::testkit::notification(
@@ -1003,7 +1003,7 @@ mod tests {
         t.ws.refresh_roots().unwrap();
         assert_eq!(
             prepare(&t.node, "op_c", at).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         for what in [
             Subject::Project("p9"),

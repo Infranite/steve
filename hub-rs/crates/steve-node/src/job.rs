@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_acp::StateDirRuntime;
 use steve_acp::oneshot::{Image, OneShotError};
@@ -52,7 +53,7 @@ pub(crate) async fn stop_group(inner: &Inner, key: &SessionId) -> Stopped {
 /// Why the Node stopped an attempt before the harness ended it.
 enum Stop {
     /// It ends with this outcome and error (`None`: a cancel).
-    End(Outcome, Option<ApiError>, &'static str),
+    End(Outcome, Option<Error>, &'static str),
     /// The Node shuts down: the attempt stays open and is `unknown` at the next start.
     Shutdown,
 }
@@ -134,7 +135,7 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     let work = async {
         let prepared = tokio::select! {
             biased;
-            _ = stop_execution.notified() => return Err(ApiError::new(ErrorCode::Internal, "cancelled during preparation")),
+            _ = stop_execution.notified() => return Err(rpc_error(Code::Internal, "cancelled during preparation")),
             result = prepare(&inner, &exec, &spec, &dir) => result,
         };
         let (images, message) = match prepared {
@@ -529,7 +530,7 @@ async fn prepare(
     spec: &JobSpec,
     dir: &Path,
 ) -> ApiResult<(Vec<Image>, String)> {
-    let io = |e: std::io::Error| ApiError::new(ErrorCode::Internal, e.to_string());
+    let io = |e: std::io::Error| rpc_error(Code::Internal, e.to_string());
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).map_err(io)?;
     let mut text = vec![];
@@ -560,10 +561,10 @@ async fn prepare(
 }
 
 /// A local budget refusal stops this job; a journal IO failure faults the Node.
-fn event_failed(inner: &Inner, broken: &AtomicBool, error: &ApiError) {
+fn event_failed(inner: &Inner, broken: &AtomicBool, error: &Error) {
     match error.code {
-        ErrorCode::Exhausted => broken.store(true, Ordering::SeqCst),
-        ErrorCode::Internal => inner.fault(),
+        Code::Exhausted => broken.store(true, Ordering::SeqCst),
+        Code::Internal => inner.fault(),
         // Journal event writes produce only Exhausted (budget) or Internal (storage).
         // Other API errors do not identify either condition and must not set their flags.
         _ => {}
@@ -655,8 +656,8 @@ async fn end(
             ..ended_with(Outcome::Succeeded, "end_turn")
         },
         Ok(_) => Completion {
-            error: Some(ApiError::new(
-                ErrorCode::Internal,
+            error: Some(rpc_error(
+                Code::Internal,
                 format!("the harness stopped: {}", ran.stop_reason),
             )),
             ..ended_with(Outcome::Failed, &ran.stop_reason)
@@ -666,27 +667,24 @@ async fn end(
             let (outcome, code, kind, detail) = match e {
                 OneShotError::OutputLimit => (
                     Outcome::Cancelled,
-                    ErrorCode::Exhausted,
+                    Code::Exhausted,
                     "error",
                     NodeStop::OutputLimit.detail(),
                 ),
                 OneShotError::Timeout(_) => (
                     Outcome::TimedOut,
-                    ErrorCode::Expired,
+                    Code::Stale,
                     "timeout",
                     NodeStop::Deadline.detail(),
                 ),
-                e @ OneShotError::Unsupported(_) => (
-                    Outcome::Failed,
-                    ErrorCode::Unsupported,
-                    "error",
-                    e.to_string(),
-                ),
-                e => (Outcome::Failed, ErrorCode::Internal, "error", e.to_string()),
+                e @ OneShotError::Unsupported(_) => {
+                    (Outcome::Failed, Code::Unsupported, "error", e.to_string())
+                }
+                e => (Outcome::Failed, Code::Internal, "error", e.to_string()),
             };
             Completion {
                 outcome,
-                error: Some(ApiError::new(code, detail)),
+                error: Some(rpc_error(code, detail)),
                 transient,
                 ..ended_with(outcome, kind)
             }
@@ -911,7 +909,7 @@ mod recording_tests {
 
     #[tokio::test]
     async fn local_event_errors_distinguish_journal_budget_from_io_failure() {
-        for code in [ErrorCode::Exhausted, ErrorCode::Internal, ErrorCode::Busy] {
+        for code in [Code::Exhausted, Code::Internal, Code::Busy] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
             let node = LocalNode::open(NodeConfig {
@@ -938,13 +936,9 @@ mod recording_tests {
             })
             .unwrap();
             let broken = AtomicBool::new(false);
-            event_failed(
-                &node.0,
-                &broken,
-                &ApiError::new(code, "event write fixture"),
-            );
-            assert_eq!(broken.load(Ordering::SeqCst), code == ErrorCode::Exhausted);
-            assert_eq!(node.0.faulted(), code == ErrorCode::Internal);
+            event_failed(&node.0, &broken, &rpc_error(code, "event write fixture"));
+            assert_eq!(broken.load(Ordering::SeqCst), code == Code::Exhausted);
+            assert_eq!(node.0.faulted(), code == Code::Internal);
             let limits = Limits {
                 deadline: Timestamp(now() + 60_000),
                 offline_until: Timestamp(now() + 60_000),
@@ -959,13 +953,13 @@ mod recording_tests {
                 node.0.j.budget_epoch(),
             );
             match (code, stop) {
-                (ErrorCode::Exhausted, Some(Stop::End(Outcome::Cancelled, Some(error), _))) => {
+                (Code::Exhausted, Some(Stop::End(Outcome::Cancelled, Some(error), _))) => {
                     assert_eq!(error, NodeStop::JournalBudget.error())
                 }
-                (ErrorCode::Internal, Some(Stop::End(Outcome::Failed, Some(error), _))) => {
+                (Code::Internal, Some(Stop::End(Outcome::Failed, Some(error), _))) => {
                     assert_eq!(error, NodeStop::JournalFails.error())
                 }
-                (ErrorCode::Busy, None) => {}
+                (Code::Busy, None) => {}
                 _ => panic!("wrong journal stop classification for {code:?}"),
             }
         }

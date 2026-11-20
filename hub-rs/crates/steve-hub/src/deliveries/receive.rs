@@ -291,6 +291,7 @@ async fn read_source(src: &Source) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use steve_node_api::error as rpc_error;
     use steve_node_api::*;
     use steve_node_wire::{Conn, ConnOptions, Handler, RemoteNode};
 
@@ -307,8 +308,8 @@ mod tests {
                     steve_node_wire::methods::EXECUTION_DELIVERY_READ,
                     "old Node must not fall back to workspace or general fs.read"
                 );
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
+                return Err(rpc_error(
+                    Code::Unsupported,
                     "old Node lacks execution deliveries",
                 ));
             }
@@ -318,7 +319,7 @@ mod tests {
                 "no fallback to general fs.read"
             );
             if self.mode == 1 {
-                return Err(ApiError::new(ErrorCode::Unsupported, "old Node"));
+                return Err(rpc_error(Code::Unsupported, "old Node"));
             }
             let q: FileRead = steve_node_wire::conn::from_value(p)?;
             let FileAddress::Root(path) = q.path else {
@@ -342,7 +343,7 @@ mod tests {
                 r.version = Revision::new("changed").unwrap();
             }
             if self.mode == 4 && q.offset > 0 {
-                return Err(ApiError::new(ErrorCode::Offline, "link cut"));
+                return Err(rpc_error(Code::Unavailable, "link cut"));
             }
             Ok(serde_json::to_value(r).unwrap())
         }

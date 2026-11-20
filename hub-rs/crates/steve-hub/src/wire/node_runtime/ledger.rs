@@ -13,6 +13,7 @@
 
 use super::*;
 use serde::Serialize;
+use steve_node_api::error as rpc_error;
 
 /// The methods that go through the ledger.
 pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspace"];
@@ -41,7 +42,7 @@ pub struct LedgerEntry {
     /// The Node's last receipt (accepted, running, unknown or finished with its result).
     pub receipt: Option<Receipt>,
     /// Why the Node refused it before accepting it (`rejected`).
-    pub refusal: Option<ApiError>,
+    pub refusal: Option<Error>,
 }
 
 impl LedgerEntry {
@@ -216,14 +217,14 @@ impl NodeRuntime {
     pub(super) async fn send_ledger(&self, l: &rt::CommandLease) -> ApiResult<Receipt> {
         fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> ApiResult<Command<T>> {
             serde_json::from_value(v.clone())
-                .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))
+                .map_err(|e| rpc_error(Code::Invalid, format!("stored command: {e}")))
         }
         let id = OperationId::try_from(l.operation.clone())
-            .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("stored command: {e}")))?;
+            .map_err(|e| rpc_error(Code::Invalid, format!("stored command: {e}")))?;
         if l.maybe_sent {
             return match self.node.operation(id.clone()).await {
                 Ok(r) => Ok(r),
-                Err(e) if e.code == ErrorCode::Invalid => Ok(Receipt {
+                Err(e) if e.reason.as_ref().is_some_and(|r| r.is(NodeReason::NoSuchOperation)) => Ok(Receipt {
                     operation: id,
                     state: Observed::Unknown {
                         reason: "an earlier send may have reached the Node, which has no record of it: not sent again".into(),
@@ -236,8 +237,8 @@ impl NodeRuntime {
             "exec" => self.node.exec(parse(&l.request)?).await,
             "git_apply" => self.node.git_apply(parse(&l.request)?).await,
             "tidy_workspace" => self.node.tidy_workspace(parse(&l.request)?).await,
-            other => Err(ApiError::new(
-                ErrorCode::Unsupported,
+            other => Err(rpc_error(
+                Code::Unsupported,
                 format!("{other} is not a ledger operation"),
             )),
         }

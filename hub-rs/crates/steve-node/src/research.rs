@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_node_api::*;
 use steve_research as r;
@@ -81,19 +82,19 @@ impl LocalNode {
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
+                return Err(rpc_error(
+                    Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));
             }
             if running_jobs(t)? >= jobs {
-                return Err(ApiError::new(ErrorCode::Exhausted, "no job capacity"));
+                return Err(rpc_error(Code::Exhausted, "no job capacity"));
             }
             if let Some((_, other)) = t.attempt(&spec.run.attempt)?
                 && other != c.id
             {
-                return Err(ApiError::new(
-                    ErrorCode::Conflict,
+                return Err(rpc_error(
+                    Code::Conflict,
                     "this attempt already ran under another operation",
                 ));
             }
@@ -118,25 +119,22 @@ impl LocalNode {
     /// Everything that can be refused before the job is accepted.
     fn research_plan(&self, spec: &JobSpec) -> ApiResult<Plan> {
         let Some(base) = self.0.research.cfg.lock().unwrap().clone() else {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "this node runs no research jobs",
             ));
         };
         if self.0.cfg.capacity.jobs == 0 {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
-                "this node runs no jobs",
-            ));
+            return Err(rpc_error(Code::Unsupported, "this node runs no jobs"));
         }
         spec.check()?;
         let JobWork::Research(job) = &spec.work else {
-            return Err(ApiError::new(ErrorCode::Internal, "not a research job"));
+            return Err(rpc_error(Code::Internal, "not a research job"));
         };
         let run = &spec.run;
         if !self.0.cfg.acp.adapters.contains_key(&run.choice.harness) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 format!("no research harness {} on this node", run.choice.harness),
             ));
         }
@@ -148,15 +146,15 @@ impl LocalNode {
             PermissionMode::Plan => false,
             PermissionMode::FullAccess if p.sandbox == SandboxRequirement::None => true,
             _ => {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
+                return Err(rpc_error(
+                    Code::Invalid,
                     "a research job's permissions are plan, or full_access without a sandbox",
                 ));
             }
         };
         if p.network != NetworkScope::Unrestricted {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "this node cannot restrict a harness's network",
             ));
         }
@@ -177,8 +175,8 @@ impl LocalNode {
             .map(|at| workspace::resolve(&roots, at, false))
             .collect::<ApiResult<Vec<PathBuf>>>()?;
         if job.steve_tools && self.0.tools_url.lock().unwrap().is_none() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "this node serves no Steve tools",
             ));
         }
@@ -639,12 +637,12 @@ fn completion(
         r::RunStatus::Violated(v) => (
             Outcome::Failed,
             "violation",
-            Some(ApiError::new(ErrorCode::Denied, v.to_string())),
+            Some(rpc_error(Code::Forbidden, v.to_string())),
         ),
         r::RunStatus::Failed(e) => (
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, e.clone())),
+            Some(rpc_error(Code::Internal, e.clone())),
         ),
     };
     Completion {

@@ -19,7 +19,7 @@
 //!
 //! `Reason` belongs only in `Error`, for display and branches that need no data. `params` is only
 //! for display and diagnostics. Facts whose data drives logic belong in typed protocol fields
-//! (including `NodeStop`), never in `params` or parsed safe detail. Each fact takes exactly one
+//! rather than `params` or parsed safe detail. Stop causes use error reasons. Each fact takes one
 //! route: a typed protocol field or an error reason, never parallel representations in both.
 
 pub mod automation;

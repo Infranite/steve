@@ -806,7 +806,7 @@ async fn another_nodes_session_is_refused() {
         })
         .await
         .expect_err("refused");
-    assert_eq!(e.code, ErrorCode::Denied);
+    assert_eq!(e.code, Code::Forbidden);
     assert_eq!(
         h.count("SELECT COUNT(*) FROM events WHERE session_id=?", &sid),
         before
@@ -832,8 +832,8 @@ async fn another_nodes_session_is_refused() {
         })
         .await;
     assert!(
-        matches!(&r, Err(e) if e.code == ErrorCode::Denied)
-            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == ErrorCode::Denied),
+        matches!(&r, Err(e) if e.code == Code::Forbidden)
+            || matches!(&r, Ok(ToolResult::Failed { error }) if error.code == Code::Forbidden),
         "{r:?}"
     );
 
@@ -964,7 +964,7 @@ async fn another_nodes_session_is_refused() {
             .commit(batch.clone())
             .await
             .expect_err("a body naming another node's work is refused");
-        assert_eq!(e.code, ErrorCode::Denied, "{batch:?}");
+        assert_eq!(e.code, Code::Forbidden, "{batch:?}");
     }
     assert_eq!(
         h.count("SELECT COUNT(*) FROM decisions WHERE session_id=?", &sid),

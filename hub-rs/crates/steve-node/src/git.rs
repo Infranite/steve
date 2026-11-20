@@ -29,6 +29,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 
 use sha2::Digest as _;
 use steve_node_api::*;
@@ -58,8 +59,8 @@ const BASES: &[&str] = &[
     "refs/heads/master",
 ];
 
-fn invalid(what: impl Into<String>) -> ApiError {
-    ApiError::new(ErrorCode::Invalid, what)
+fn invalid(what: impl Into<String>) -> Error {
+    rpc_error(Code::Invalid, what)
 }
 
 /// A ref or revision the Hub names: never empty, never an option, no NUL, no space.
@@ -98,14 +99,14 @@ impl Git<'_> {
     fn out(&self, args: &[&str], cap: usize) -> ApiResult<(Vec<u8>, bool)> {
         self.c.read(self.dir, args, cap).map_err(|f| match f {
             Failed::Git(e) => invalid(e),
-            Failed::Pipe(e) => ApiError::new(ErrorCode::Internal, e),
+            Failed::Pipe(e) => rpc_error(Code::Internal, e),
         })
     }
     /// What git printed, or `None` when git refused.
     fn may(&self, args: &[&str]) -> ApiResult<Option<String>> {
         match self.line(args) {
             Ok(s) => Ok(Some(s)),
-            Err(e) if e.code == ErrorCode::Invalid => Ok(None),
+            Err(e) if e.code == Code::Invalid => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -145,12 +146,9 @@ impl Git<'_> {
         let r = self
             .c
             .read_with(self.dir, args, env, input, cap, deadline)
-            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+            .map_err(|f| rpc_error(Code::Internal, String::from(f)))?;
         if r.code.is_none() {
-            return Err(ApiError::new(
-                ErrorCode::Internal,
-                "git cancelled or timed out",
-            ));
+            return Err(rpc_error(Code::Internal, "git cancelled or timed out"));
         }
         Ok(r)
     }
@@ -252,8 +250,7 @@ impl Git<'_> {
         let real = self.may(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         match real.filter(|r| Path::new(r).exists()) {
             Some(r) => {
-                std::fs::copy(&r, index)
-                    .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+                std::fs::copy(&r, index).map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
             }
             None => {
                 step(&["read-tree", "HEAD"])?;
@@ -334,7 +331,7 @@ impl Git<'_> {
                             truncated,
                         },
                     ),
-                    Err(e) if e.code == ErrorCode::Invalid => (sha, not_found()),
+                    Err(e) if e.code == Code::Invalid => (sha, not_found()),
                     Err(e) => return Err(e),
                 }
             }
@@ -414,8 +411,8 @@ impl Git<'_> {
             }
             GitRead::Diff { range, max } => {
                 let Some(from) = &range.from else {
-                    return Err(ApiError::new(
-                        ErrorCode::Unsupported,
+                    return Err(rpc_error(
+                        Code::Unsupported,
                         "a diff needs the side it is from",
                     ));
                 };
@@ -494,8 +491,8 @@ impl Git<'_> {
                 (String::new(), GitAnswer::RemoteUrl { url })
             }
             GitRead::TrackedIgnored { .. } => {
-                return Err(ApiError::new(
-                    ErrorCode::Unsupported,
+                return Err(rpc_error(
+                    Code::Unsupported,
                     "this git read is not served here yet",
                 ));
             }
@@ -650,11 +647,11 @@ pub(crate) fn facts(c: &Commands, dir: &Path, q: &GitQuery) -> ApiResult<GitFact
                 &[],
                 NET_DEADLINE,
             )
-            .map_err(|f| ApiError::new(ErrorCode::Internal, String::from(f)))?;
+            .map_err(|f| rpc_error(Code::Internal, String::from(f)))?;
         match r.code {
             Some(0) => {}
             Some(_) => return Err(invalid(format!("fetch: {}", r.stderr))),
-            None => return Err(ApiError::new(ErrorCode::Internal, "fetch timed out")),
+            None => return Err(rpc_error(Code::Internal, "fetch timed out")),
         }
     }
     let (head, branch, status, revision) = observe(&g, q.heads_only)?;
@@ -708,7 +705,7 @@ fn observe(g: &Git, heads_only: bool) -> ApiResult<(String, Option<String>, Vec<
     h.update(&status);
     let kind = if heads_only { "h" } else { "g" };
     let revision = Revision::new(format!("{kind}{}", &hex::encode(h.finalize())[..32]))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
     Ok((head, branch, status, revision))
 }
 
@@ -743,7 +740,7 @@ pub(crate) fn rebase(
     let g = Git { c, dir };
     let before = now(c, dir)?;
     if before.revision != *expected || before.head != expected_head {
-        return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+        return Err(rpc_error(Code::Stale, "changed since"));
     }
     let onto = g.must(onto)?;
     let tracked = text(
@@ -752,12 +749,12 @@ pub(crate) fn rebase(
     );
     if !tracked.is_empty() {
         let lines: Vec<&str> = tracked.lines().take(10).collect();
-        return Err(ApiError::new(ErrorCode::Busy, lines.join("\n")));
+        return Err(rpc_error(Code::Busy, lines.join("\n")));
     }
     if g.test(&["merge-base", "--is-ancestor", &onto, "HEAD"])? {
         return Ok(before);
     }
-    let pipe = |f| ApiError::new(ErrorCode::Internal, String::from(f));
+    let pipe = |f| rpc_error(Code::Internal, String::from(f));
     let r = c
         .write_with(dir, &["rebase", &onto], &[], REBASE_DEADLINE)
         .map_err(pipe)?;
@@ -785,17 +782,14 @@ pub(crate) fn rebase(
         ])?
         .is_some_and(|p| Path::new(&p).exists())
     {
-        return Err(ApiError::new(
-            ErrorCode::Internal,
+        return Err(rpc_error(
+            Code::Internal,
             format!("the rebase could not be backed out: {}", abort.stderr),
         ));
     }
     Err(match (r.code, files.is_empty()) {
-        (None, _) => ApiError::new(
-            ErrorCode::Internal,
-            "the rebase timed out and was backed out",
-        ),
-        (_, false) => ApiError::new(ErrorCode::Conflict, files),
+        (None, _) => rpc_error(Code::Internal, "the rebase timed out and was backed out"),
+        (_, false) => rpc_error(Code::Conflict, files),
         (_, true) => invalid(r.stderr),
     })
 }
@@ -894,7 +888,7 @@ fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
     c.args(args);
     let mut child = c
         .spawn()
-        .map_err(|e| ApiError::new(ErrorCode::Internal, format!("git: {e}")))?;
+        .map_err(|e| rpc_error(Code::Internal, format!("git: {e}")))?;
     let pgid = child.id() as libc::pid_t;
     let drain = |p: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -922,12 +916,12 @@ fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
     let Some(status) = status else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(ApiError::new(ErrorCode::Expired, "git took too long"));
+        return Err(rpc_error(Code::Stale, "git took too long"));
     };
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
     if stdout.len() > READ_CAP {
-        return Err(ApiError::new(ErrorCode::Exhausted, "git printed too much"));
+        return Err(rpc_error(Code::Exhausted, "git printed too much"));
     }
     Ok(Out {
         code: status.code(),
@@ -1020,8 +1014,8 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
         remote_branch,
     } = a
     else {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
+        return Err(rpc_error(
+            Code::Unsupported,
             "this node applies no merge yet",
         ));
     };
@@ -1064,7 +1058,7 @@ pub(crate) fn check_push_shape(a: &GitAction) -> ApiResult<()> {
         }
     }
     if !target_allowed(forbid_real_hosts(), url) {
-        return Err(ApiError::new(ErrorCode::Denied, HOST_FORBIDDEN));
+        return Err(rpc_error(Code::Forbidden, HOST_FORBIDDEN));
     }
     Ok(())
 }
@@ -1091,20 +1085,20 @@ pub(crate) fn check_push(c: &Commands, dir: &Path, apply: &GitApply) -> ApiResul
     if let Some(want) = origin_must_be {
         let at = g.may(&["config", "--get", &format!("remote.{remote}.url")])?;
         if at.as_deref().and_then(github_repo) != Some(want.to_lowercase()) {
-            return Err(ApiError::new(ErrorCode::Denied, WRONG_REMOTE));
+            return Err(rpc_error(Code::Forbidden, WRONG_REMOTE));
         }
     }
     match g.commit(&format!("refs/heads/{branch}"))? {
-        None => return Err(ApiError::new(ErrorCode::Stale, NO_BRANCH)),
+        None => return Err(rpc_error(Code::Stale, NO_BRANCH)),
         Some(sha) if sha != *expected_local => {
-            return Err(ApiError::new(ErrorCode::Stale, BRANCH_MOVED));
+            return Err(rpc_error(Code::Stale, BRANCH_MOVED));
         }
         Some(_) => {}
     }
     let heads_only = apply.expected.as_str().starts_with('h');
     let (head, _, _, revision) = observe(&g, heads_only)?;
     if revision != apply.expected || head != apply.expected_head {
-        return Err(ApiError::new(ErrorCode::Stale, "changed since"));
+        return Err(rpc_error(Code::Stale, "changed since"));
     }
     let common = PathBuf::from(g.line(&["rev-parse", "--git-common-dir"])?);
     let common = if common.is_absolute() {
@@ -1260,7 +1254,7 @@ mod tests {
         assert!(rev("main").is_ok());
         assert!(rev("steve/st-1").is_ok());
         for bad in ["", "-n", "--output=/tmp/x", "a b", "a\0b"] {
-            assert_eq!(rev(bad).unwrap_err().code, ErrorCode::Invalid, "{bad:?}");
+            assert_eq!(rev(bad).unwrap_err().code, Code::Invalid, "{bad:?}");
         }
     }
 

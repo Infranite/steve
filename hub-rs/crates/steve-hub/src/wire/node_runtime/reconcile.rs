@@ -2,6 +2,7 @@
 //! released sessions, orphaned permission cards and stranger Node work (D7).
 
 use super::*;
+use steve_node_api::error as rpc_error;
 
 impl NodeRuntime {
     // ── reconciling with the Node (Hub start) ──
@@ -105,7 +106,7 @@ impl NodeRuntime {
     /// no record of is held with a note (that work is never given up on its own). Returns how many
     /// things changed.
     pub async fn reconcile(&self) -> ApiResult<usize> {
-        let internal = |e: StoreError| ApiError::new(ErrorCode::Internal, e.to_string());
+        let internal = |e: StoreError| rpc_error(Code::Internal, e.to_string());
         // the Node's ledger, all pages of one snapshot
         let NodeSnapshot { entries, heads } = read_snapshot(&*self.node, 200).await?;
         // its events up to that moment, applied before the ledger is compared
@@ -138,7 +139,7 @@ impl NodeRuntime {
             };
             match self.node.session(id).await {
                 Ok(v) => views.push((s, Some(v))),
-                Err(e) if e.code == ErrorCode::Invalid => views.push((s, None)),
+                Err(e) if e.code == Code::Invalid => views.push((s, None)),
                 Err(e) => return Err(e),
             }
         }

@@ -6,6 +6,7 @@ use super::node_tools::{authorize, internal};
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 use std::path::PathBuf;
+use steve_node_api::error as rpc_error;
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
@@ -100,7 +101,7 @@ pub fn job_input(
 ) -> ApiResult<ArtifactRef> {
     use sha2::Digest as _;
     if !component(workspace) {
-        return Err(ApiError::new(ErrorCode::Invalid, "bad workspace id"));
+        return Err(rpc_error(Code::Invalid, "bad workspace id"));
     }
     let sha = hex::encode(sha2::Sha256::digest(bytes));
     let id = format!(
@@ -156,8 +157,8 @@ pub fn job_input(
         }
     }
 }
-fn denied() -> ApiError {
-    ApiError::new(ErrorCode::Denied, "artifact not granted to this execution")
+fn denied() -> Error {
+    rpc_error(Code::Forbidden, "artifact not granted to this execution")
 }
 fn component(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0'])
@@ -168,10 +169,10 @@ impl HubFiles for NodeFiles {
         let (svc, source) = self
             .reply_source
             .as_ref()
-            .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "reply capture unsupported"))?;
+            .ok_or_else(|| rpc_error(Code::Unsupported, "reply capture unsupported"))?;
         let source = source
             .upgrade()
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "reply Node unavailable"))?;
+            .ok_or_else(|| rpc_error(Code::Unavailable, "reply Node unavailable"))?;
         svc.capture_reply(&self.node, source.as_ref(), q).await
     }
 
@@ -183,10 +184,7 @@ impl HubFiles for NodeFiles {
         max: u32,
     ) -> ApiResult<ReadChunk> {
         if max == 0 {
-            return Err(ApiError::new(
-                ErrorCode::Invalid,
-                "nonzero read size required",
-            ));
+            return Err(rpc_error(Code::Invalid, "nonzero read size required"));
         }
         // an upgrade's archive: granted to its operation, not to an execution
         if let FileAccess::Operation { operation } = &access
@@ -224,7 +222,7 @@ impl HubFiles for NodeFiles {
             .get(id.as_str())
             .map_err(internal)?
             // granted, but no longer on the Hub: asking again will not bring it back
-            .ok_or_else(|| ApiError::new(ErrorCode::Conflict, "artifact gone from the hub"))?;
+            .ok_or_else(|| rpc_error(Code::Conflict, "artifact gone from the hub"))?;
         if row.workspace_id != workspace
             || row.size < 0
             || row.size as u64 != artifact.size
@@ -238,7 +236,7 @@ impl HubFiles for NodeFiles {
             return Err(denied());
         }
         if offset > artifact.size {
-            return Err(ApiError::new(ErrorCode::Invalid, "offset past EOF"));
+            return Err(rpc_error(Code::Invalid, "offset past EOF"));
         }
         // data/files/<workspace>/<sha256[..2]>/<id>: every part was checked above to be one plain path
         // component, so the path stays under data/files by construction
@@ -263,16 +261,13 @@ impl HubFiles for NodeFiles {
                 Ok(f) => f,
                 // the blob is gone from the Hub: it will not come back by asking again
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ApiError::new(
-                        ErrorCode::Conflict,
-                        "artifact missing on the hub",
-                    ));
+                    return Err(rpc_error(Code::Conflict, "artifact missing on the hub"));
                 }
                 Err(e) => return Err(internal(e)),
             };
             let meta = file.metadata().map_err(internal)?;
             if !meta.is_file() || meta.len() != size {
-                return Err(ApiError::new(ErrorCode::Conflict, "artifact size changed"));
+                return Err(rpc_error(Code::Conflict, "artifact size changed"));
             }
             file.seek(SeekFrom::Start(offset)).map_err(internal)?;
             let len = (max.min(256 * 1024) as u64).min(size - offset) as usize;
@@ -437,7 +432,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Invalid
+            Code::Invalid
         );
         let op = h
             .store
@@ -466,7 +461,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         h.store
             .transaction::<_, StoreError>(|tx| {
@@ -483,7 +478,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         h.store
             .transaction::<_, StoreError>(|tx| {
@@ -508,14 +503,14 @@ mod tests {
         )
         .await
         .expect("the open does not wait for a writer");
-        assert_eq!(r.unwrap_err().code, ErrorCode::Conflict);
+        assert_eq!(r.unwrap_err().code, Code::Conflict);
         // gone from the Hub (its blob, then its row): a conflict, which the Node does not retry
         std::fs::remove_file(path.join(&f.id)).unwrap();
         let e = files
             .fetch(access.clone(), id.clone(), 0, 1)
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+        assert_eq!(e.code, Code::Conflict, "{e:?}");
         h.store
             .transaction::<_, StoreError>(|tx| {
                 tx.execute("DELETE FROM files WHERE id='fil_test'", [])?;
@@ -523,7 +518,7 @@ mod tests {
             })
             .unwrap();
         let e = files.fetch(access, id, 0, 1).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Conflict, "{e:?}");
+        assert_eq!(e.code, Code::Conflict, "{e:?}");
     }
 
     /// A job attempt reads the inputs its frozen prompt names, while it is live, and nothing else.
@@ -615,7 +610,7 @@ mod tests {
             (FileAccess::Execution(mine.clone()), &other.id),
             (FileAccess::Execution(theirs), &png.id),
         ] {
-            assert_eq!(read(access, id).await.unwrap_err().code, ErrorCode::Denied);
+            assert_eq!(read(access, id).await.unwrap_err().code, Code::Forbidden);
         }
         // a finished attempt reads nothing anymore
         store
@@ -628,7 +623,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
     }
 }

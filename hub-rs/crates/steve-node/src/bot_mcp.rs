@@ -93,6 +93,7 @@ async fn vars(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use steve_node_api::error as rpc_error;
 
     struct Hub(Mutex<Vec<(String, String)>>);
 
@@ -107,7 +108,7 @@ mod tests {
                 "bmcp_1#env:TOKEN" => Ok(SecretBytes::new(b"tok-123".to_vec())),
                 "bmcp_2#header:Authorization" => Ok(SecretBytes::new(b"Bearer abc".to_vec())),
                 "bmcp_3#header:X" => Ok(SecretBytes::new(b"a\nb".to_vec())),
-                _ => Err(ApiError::new(ErrorCode::Denied, "no")),
+                _ => Err(rpc_error(Code::Forbidden, "no")),
             }
         }
     }

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
+use steve_node_api::error as rpc_error;
 
 use tokio::time::Instant as IdleInstant;
 
@@ -36,12 +37,12 @@ pub(super) fn sandbox_mode(
         }
     }
     if !properties.nested_sandbox && *requirement != SandboxRequirement::None {
-        return Err(ApiError::new(
-            ErrorCode::Unsupported,
+        return Err(rpc_error(
+            Code::Unsupported,
             "adapter cannot provide the requested research sandbox",
         ));
     }
-    let unsupported = |why: &str| Err(ApiError::new(ErrorCode::Unsupported, why));
+    let unsupported = |why: &str| Err(rpc_error(Code::Unsupported, why));
     match requirement {
         SandboxRequirement::None => Ok(r::SandboxMode::Off),
         SandboxRequirement::Required { guarantees } if guarantees.is_empty() => {
@@ -810,7 +811,7 @@ mod tests {
             )
             .unwrap_err()
             .code,
-            ErrorCode::Unsupported,
+            Code::Unsupported,
         );
     }
 }

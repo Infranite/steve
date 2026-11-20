@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_core::gateway::{
     OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
@@ -105,7 +106,7 @@ pub(super) struct Think {
 }
 
 /// The completion the Hub writes for an attempt it ends on its own word.
-fn ended(outcome: Outcome, stop_reason: &str, error: Option<ApiError>) -> Completion {
+fn ended(outcome: Outcome, stop_reason: &str, error: Option<Error>) -> Completion {
     Completion {
         outcome,
         stop_reason: stop_reason.into(),
@@ -506,7 +507,7 @@ impl NodeRuntime {
         tx: &Tx,
         method: &str,
         attempt: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<(), StoreError> {
         match method {
             "start_job" => {
@@ -526,22 +527,19 @@ impl NodeRuntime {
     /// An abandon that did not go through. The Node has no record of the attempt: it did not run
     /// there, and it ends interrupted. Otherwise it stays as it is (a person's Stop is not needed:
     /// its caller is gone either way).
-    fn job_abandon_failed_in(
-        &self,
-        tx: &Tx,
-        attempt: &str,
-        e: &ApiError,
-    ) -> Result<(), StoreError> {
-        let unknown_to_node =
-            e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation");
+    fn job_abandon_failed_in(&self, tx: &Tx, attempt: &str, e: &Error) -> Result<(), StoreError> {
+        let unknown_to_node = e
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::NoSuchOperation));
         if unknown_to_node
             && jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.state == AttemptState::Unknown)
         {
             let c = ended(
                 Outcome::Interrupted,
                 "error",
-                Some(ApiError::new(
-                    ErrorCode::Invalid,
+                Some(rpc_error(
+                    Code::Invalid,
                     "the Node holds no record of this attempt: it did not run there",
                 )),
             );
@@ -766,9 +764,14 @@ impl Drop for Waiting {
 /// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
 /// adapter's words), so the caller sees the very error an in-process run gives.
 fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
-    if c.error
-        .as_ref()
-        .is_some_and(|e| e.code == ErrorCode::Exhausted)
+    if let Some(error) = discarded_error(c) {
+        return OneShotError::Harness {
+            text: super::said(error),
+            code: None,
+            transient: false,
+        };
+    }
+    if c.error.as_ref().is_some_and(|e| e.code == Code::Exhausted)
         && c.error
             .as_ref()
             .is_some_and(|e| e.safe_detail == "the output limit was reached")
@@ -801,6 +804,33 @@ fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
             code: None,
             transient: false,
         },
+    }
+}
+
+/// Present the retained completion and final usage without changing the gateway's model policy.
+fn call_reply(
+    end: &Completion,
+    usage: &[UsageReport],
+    timeout: Duration,
+) -> Result<(String, Option<f64>), OneShotError> {
+    if end.outcome == Outcome::Succeeded {
+        let text = end
+            .result
+            .iter()
+            .filter_map(|p| match p {
+                Part::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        // the run's dollars: each model's, as the harness's total was booked to them
+        let costs: Vec<f64> = usage
+            .iter()
+            .filter_map(|r| r.cost.as_ref().and_then(steve_core::gateway::cost_f64))
+            .collect();
+        Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
+    } else {
+        Err(call_error(end, timeout))
     }
 }
 
@@ -900,27 +930,10 @@ impl OneModel for NodePrint {
         // what the harness named itself, before a report without a name is booked under `model`
         let reported = steve_core::gateway::reported_model(&usage);
         let usage = normalized_usage(usage, model);
-        let reply = if end.outcome == Outcome::Succeeded {
-            let text = end
-                .result
-                .iter()
-                .filter_map(|p| match p {
-                    Part::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            // the run's dollars: each model's, as the harness's total was booked to them
-            let costs: Vec<f64> = usage
-                .iter()
-                .filter_map(|r| r.cost.as_ref().and_then(steve_core::gateway::cost_f64))
-                .collect();
-            Ok((text, (!costs.is_empty()).then(|| costs.iter().sum::<f64>())))
-        } else {
-            Err(call_error(&end, call.timeout))
-        };
+        let reply = call_reply(&end, &usage, call.timeout);
         Tried {
             reported_model: reported,
+            no_fallback: discarded_error(&end).is_some(),
             ..Tried::of(reply, usage)
         }
     }
@@ -1295,11 +1308,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discarded_details_are_a_permanent_job_error_despite_old_transient_hints() {
+        for stop in [
+            "error",
+            "timeout",
+            steve_core::runtime::MODEL_SERVICE_UNAVAILABLE,
+        ] {
+            let mut completion = ended(
+                Outcome::Failed,
+                stop,
+                Some(NodeReason::error_detail_discarded(
+                    "error details from before the upgrade were discarded",
+                )),
+            );
+            completion.transient = true;
+            assert!(matches!(
+                call_error(&completion, Duration::from_secs(1)),
+                OneShotError::Harness {
+                    transient: false,
+                    ..
+                }
+            ));
+        }
+        let mut ordinary = ended(
+            Outcome::Failed,
+            "error",
+            Some(rpc_error(Code::Internal, "temporary")),
+        );
+        ordinary.transient = true;
+        assert!(matches!(
+            call_error(&ordinary, Duration::from_secs(1)),
+            OneShotError::Harness {
+                transient: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_tool_refused_on_a_node_is_the_typed_error_of_an_in_process_run() {
         let refused = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, steve_acp::TOOL_REFUSED)),
+            Some(rpc_error(Code::Internal, steve_acp::TOOL_REFUSED)),
         );
         assert!(matches!(
             call_error(&refused, Duration::from_secs(1)),
@@ -1308,7 +1359,7 @@ mod tests {
         let other = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, "the provider said no")),
+            Some(rpc_error(Code::Internal, "the provider said no")),
         );
         assert!(matches!(
             call_error(&other, Duration::from_secs(1)),

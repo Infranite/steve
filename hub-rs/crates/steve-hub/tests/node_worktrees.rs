@@ -4,6 +4,7 @@
 //! session opens again; an item paused while its session opened starts nothing.
 
 use std::sync::{Arc, Mutex};
+use steve_node_api::error as rpc_error;
 use steve_runtime::testkit::eventually_sync;
 
 use steve_hub::wire::node_runtime::{
@@ -269,14 +270,14 @@ async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again
     let h = hub();
     h.node.refuse_next(
         "prepare_workspace",
-        ApiError::new(ErrorCode::Invalid, "git worktree: not a worktree of repo"),
+        rpc_error(Code::Invalid, "git worktree: not a worktree of repo"),
     );
     h.bind(worktree());
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
     eventually_sync("the failure", || {
         h.facts()
             .iter()
-            .any(|f| matches!(f, WorkspaceFact::PrepareFailed { session, error: Some(e) } if session == S && e.code == ErrorCode::Invalid))
+            .any(|f| matches!(f, WorkspaceFact::PrepareFailed { session, error: Some(e) } if session == S && e.code == Code::Invalid))
     })
     .await;
     // the open never goes (it would wait forever); the session is let go, the message stays

@@ -1,4 +1,5 @@
 use super::*;
+use steve_node_api::error as rpc_error;
 
 const ERROR: &str = "stream disconnected before completion: upstream stream interrupted";
 const STOP: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
@@ -185,7 +186,7 @@ async fn provider_stream_interruption_accepts_adapter_errors_and_stop_reasons() 
         }
         let mut c = build::done();
         c.stop_reason = stop.into();
-        c.error = error.map(|e| ApiError::new(ErrorCode::Internal, e));
+        c.error = error.map(|e| rpc_error(Code::Internal, e));
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
         eventually_sync("provider retry", || h.attempts().len() == 2).await;
@@ -276,7 +277,7 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
         let mut c = build::done();
         c.outcome = Outcome::Failed;
         c.stop_reason = "error".into();
-        c.error = Some(ApiError::new(ErrorCode::Internal, ERROR));
+        c.error = Some(rpc_error(Code::Internal, ERROR));
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
         if state == "cancel" {
@@ -290,5 +291,48 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
             h.ends()[0].1,
             if state == "cancel" { "cancelled" } else { STOP }
         );
+    }
+}
+
+#[tokio::test]
+async fn discarded_failure_details_never_reclassify_or_retry_old_completion_hints() {
+    for stop in [
+        "error",
+        STOP,
+        steve_core::runtime::MODEL_SERVICE_UNAVAILABLE,
+        steve_node_api::NODE_RESTARTED,
+    ] {
+        let h = clocked_hub();
+        h.bind();
+        let exec = h.running("retained failure after journal upgrade").await;
+        let mut completion = build::done();
+        completion.outcome = Outcome::Failed;
+        completion.stop_reason = stop.into();
+        completion.transient = true;
+        completion.error = Some(NodeReason::error_detail_discarded(
+            "error details from before the upgrade were discarded",
+        ));
+        let expected = serde_json::to_value(&completion).unwrap();
+        h.node.finish(&exec, completion).await.unwrap();
+        eventually_sync("discarded failure ends its turn", || h.ends().len() == 1).await;
+        assert_eq!(h.ends()[0].1, "node.error_detail_discarded");
+        assert_eq!(
+            h.q::<String>("SELECT status FROM sessions WHERE id='s1'"),
+            "error"
+        );
+        let stored: String =
+            h.q("SELECT completion FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+            expected
+        );
+        h.advance_to(h.clock().now() + 20 * 60_000).await;
+        assert_eq!(
+            h.count("start_turn"),
+            1,
+            "a discarded cause cannot authorize retry"
+        );
+        assert_eq!(h.attempts().len(), 1);
+        assert_eq!(h.q::<i64>("SELECT retry_ordinal FROM runtime_turns"), 0);
     }
 }

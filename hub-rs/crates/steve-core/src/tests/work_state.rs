@@ -616,6 +616,28 @@ fn a_quota_that_is_back_later_is_waited_for_not_continued() {
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
 
+#[test]
+fn discarded_failure_details_do_not_authorize_a_takeover_continue() {
+    let k = kit(2);
+    let i = k.item("run", "执行", None);
+    let s = k.session(&i, "idle");
+    k.rt.prompt(&s, "做吧", "me", &[]).unwrap();
+    let error = steve_types::devices::NodeReason::error_detail_discarded(
+        "error details from before the upgrade were discarded",
+    );
+    k.rt.end_turn(
+        &k.core,
+        &s,
+        error.reason.as_ref().unwrap().as_str(),
+        Some(&error.safe_detail),
+    );
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+    assert!(steve_lines(&k, &i).is_empty());
+    assert_eq!(k.open_fails(&i).len(), 1);
+    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
+    assert_eq!(k.rt.prompts_of(&s).len(), 1);
+}
+
 /// The look before a continue is spent does not take the item's own stop card for a wait: a voided
 /// delivery still reaches an agent whose earlier stop left a card open.
 #[test]

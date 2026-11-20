@@ -620,15 +620,7 @@ impl r::AttemptRunner for OnNode<'_> {
             };
         };
         let report = c.job.as_ref().map(|j| &j.end);
-        let killed = self.stopped
-            || matches!(
-                report,
-                Some(
-                    api::JobEnd::Stopped
-                        | api::JobEnd::Budget { .. }
-                        | api::JobEnd::Violated { .. }
-                )
-            );
+        let killed = attempt_must_end(&c, self.stopped);
         let error = (c.outcome != api::Outcome::Succeeded).then(|| {
             c.error
                 .as_ref()
@@ -644,6 +636,17 @@ impl r::AttemptRunner for OnNode<'_> {
             error,
         }
     }
+}
+
+/// An explicit terminal decision must not fall through to the next research model. A journal
+/// upgrade deliberately discarded the old cause, so it supplies no permission to try again.
+fn attempt_must_end(c: &api::Completion, stopped: bool) -> bool {
+    stopped
+        || super::node_runtime::discarded_error(c).is_some()
+        || matches!(
+            c.job.as_ref().map(|j| &j.end),
+            Some(api::JobEnd::Stopped | api::JobEnd::Budget { .. } | api::JobEnd::Violated { .. })
+        )
 }
 
 impl OnNode<'_> {

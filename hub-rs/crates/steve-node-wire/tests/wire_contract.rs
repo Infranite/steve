@@ -175,14 +175,14 @@ async fn unknown_methods_are_unsupported_and_the_link_stays() {
         )
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     // a Node→Hub method sent to the Node is unknown there too
     let e = w
         .hub_conn
         .call("events.commit", json!({"events": []}), None)
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     assert!(w.remote.probe(false).await.is_ok(), "still up");
 }
 
@@ -192,7 +192,7 @@ async fn old_nodes_refuse_the_update_handshake_before_a_remote_upgrade_is_sent()
     let w = wire(fake.clone(), 1);
     assert_eq!(
         w.remote.harness_updates(false).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     let c = Command {
         id: op("optional_upgrade"),
@@ -205,14 +205,14 @@ async fn old_nodes_refuse_the_update_handshake_before_a_remote_upgrade_is_sent()
         },
     };
     let error = w.remote.upgrade_harness(c).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.code, Code::Unsupported);
     assert!(error.safe_detail.contains("harness-updates-v1"));
     assert_eq!(
         fake.operation(op("optional_upgrade"))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::NotFound
     );
 }
 
@@ -261,7 +261,7 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
     }
     assert_eq!(
         w.remote.set_session_capacity(0).await.unwrap_err().code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     assert_eq!(w.remote.probe(false).await.unwrap().capacity.sessions, 256);
 }
@@ -282,13 +282,13 @@ async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     w.remote.set_colocated(true);
     // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
     // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
     let error = w.remote.install_harness(command).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.code, Code::Unsupported);
     assert!(
         error
             .safe_detail
@@ -347,7 +347,7 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.upgrade_stage(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     fake.set_upgradable(true);
     assert_eq!(
@@ -400,7 +400,7 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
     };
     assert_eq!(
         w.remote.remove_begin(ask.clone()).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     assert!(fake.removal_calls().is_empty());
     fake.set_features(vec![FEATURE_NODE_REMOVE.into()]);
@@ -427,4 +427,58 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
         fake.removal_calls(),
         vec![("begin", op.clone()), ("commit", op.clone())]
     );
+}
+
+#[tokio::test]
+async fn an_actual_ordinary_error_frame_matches_the_protocol_11_sample() {
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use steve_node_wire::{Conn, ConnOptions, Envelope, Frame, Kind, NodeServer};
+
+    assert_eq!(
+        PROTOCOL, 11,
+        "ordinary wire changes require a new versioned sample"
+    );
+    let (server, mut peer) = steve_node_wire::testkit::pair();
+    let node = FakeNode::new("n1");
+    let conn = Conn::spawn(
+        server.sink,
+        server.stream,
+        7,
+        NodeServer::new(node),
+        ConnOptions {
+            side: "golden",
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            ..Default::default()
+        },
+    );
+    let request = Envelope {
+        v: PROTOCOL,
+        t: Kind::Req,
+        id: "request_missing".into(),
+        re: None,
+        m: steve_node_wire::methods::OP_INSPECT.into(),
+        generation: 7,
+        trace: None,
+        deadline_at: 0,
+        p: json!("missing_operation"),
+    };
+    peer.sink
+        .send(Frame::Text(request.encode().unwrap()))
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), peer.stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Frame::Text(text) = frame else {
+        panic!("expected an ordinary response")
+    };
+    assert_eq!(
+        text,
+        include_str!("fixtures/ordinary/11-missing-operation.json").trim_end()
+    );
+    conn.close(None, 1000, "test complete");
 }

@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+use steve_node_api::error as rpc_error;
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -668,7 +669,7 @@ fn display(h: &Homes, p: &Path) -> String {
 /// Where a history entry is: a key [`listed`] lists, or `session:<id>` (a harness session,
 /// looked up by its id). Anything else is `invalid`. Blocking.
 pub fn locate(h: &Homes, source: &HistoryRef) -> ApiResult<HistoryLocation> {
-    let not_listed = || ApiError::new(ErrorCode::Invalid, "not a history this node lists");
+    let not_listed = || rpc_error(Code::Invalid, "not a history this node lists");
     let (file, id) = if let Some(id) = source.key.strip_prefix("session:") {
         // an id, never a path: it is joined into a file name
         if !plain_id(id) {
@@ -733,9 +734,10 @@ impl Imports {
         m.retain(|_, i| i.at.elapsed() < IMPORT_TTL);
         match m.get(op) {
             Some(i) if &i.digest == digest => Ok(true),
-            Some(_) => {
-                Err(ApiError::new(ErrorCode::Conflict, "another import under this id").on(op))
-            }
+            Some(_) => Err(steve_node_api::on_operation(
+                rpc_error(Code::Conflict, "another import under this id"),
+                op,
+            )),
             None => Ok(false),
         }
     }
@@ -761,14 +763,17 @@ impl Imports {
     pub(crate) fn page(&self, op: &OperationId, page: &PageRequest) -> ApiResult<ImportedPage> {
         let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let Some(i) = m.get(op) else {
-            return Err(ApiError::new(ErrorCode::Invalid, "no such import").on(op));
+            return Err(steve_node_api::on_operation(
+                rpc_error(Code::Invalid, "no such import"),
+                op,
+            ));
         };
         let from = match &page.cursor {
             None => 0,
             Some(c) => c
                 .as_str()
                 .parse::<usize>()
-                .map_err(|_| ApiError::new(ErrorCode::Invalid, "bad cursor"))?,
+                .map_err(|_| rpc_error(Code::Invalid, "bad cursor"))?,
         };
         let limit = (page.limit.clamp(1, 1000)) as usize;
         let end = (from + limit).min(i.events.len());

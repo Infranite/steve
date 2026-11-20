@@ -770,15 +770,17 @@ impl NodeRuntime {
             [turn],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let stream = c.stop_reason == stream_retry::STREAM_INTERRUPTED;
-        let capacity = c.stop_reason == capacity_retry::UNAVAILABLE;
+        let discarded = discarded_error(c).is_some();
+        let stream = !discarded && c.stop_reason == stream_retry::STREAM_INTERRUPTED;
+        let capacity = !discarded && c.stop_reason == capacity_retry::UNAVAILABLE;
         let service = stream || capacity;
         let capacity_wait = if capacity {
             self.capacity_wait_in(tx, turn, ordinal, c)?
         } else {
             None
         };
-        let retry = c.outcome == Outcome::Failed
+        let retry = !discarded
+            && c.outcome == Outcome::Failed
             && ((service && self.stream_retry_allowed_in(tx, session)?)
                 || (!service && c.transient && !c.acted))
             && !cancelled
@@ -857,35 +859,7 @@ impl NodeRuntime {
                     rusqlite::params![json!({"deadline":w.deadline,"error":w.error,"retries":w.retries}).to_string(),turn],
                 )?;
             }
-            let text = if capacity {
-                let error = c
-                    .error
-                    .as_ref()
-                    .map(|e| e.safe_detail.as_str())
-                    .unwrap_or_default();
-                if capacity_wait.as_ref().is_some_and(|w| w.at == w.deadline) {
-                    format!(
-                        "模型服务容量不足，预计恢复时间超出本轮等待上限；等待至 15 分钟上限后提示处理，期间不提前请求；{error}"
-                    )
-                } else {
-                    format!(
-                        "模型服务容量不足，{} 秒后自动重试（第 {} 次，上限 3 次 / 15 分钟）；{error}",
-                        (delay + 999) / 1000,
-                        ordinal + 1
-                    )
-                }
-            } else {
-                format!(
-                    "{}，{} 秒后自动重试（第 {} 次）",
-                    if stream {
-                        "模型服务流中断"
-                    } else {
-                        "推理网关暂时不可用"
-                    },
-                    delay / 1000,
-                    ordinal + 1
-                )
-            };
+            let text = retry_notice(c, capacity, stream, ordinal, delay, capacity_wait.as_ref());
             rt::add_event_in(
                 tx,
                 session,
@@ -905,11 +879,23 @@ impl NodeRuntime {
         // a session the business side ended is let go once its last turn is over (the release it
         // asked for while the turn ran waited for this)
         self.release_if_ended_in(tx, session)?;
-        status_in(tx, session, settled_status(&c.stop_reason))?;
+        status_in(
+            tx,
+            session,
+            if discarded {
+                "error"
+            } else {
+                settled_status(&c.stop_reason)
+            },
+        )?;
         Ok(Some(End {
             session: session.to_string(),
             attempt: Some(last_attempt_in(tx, turn)?),
-            stop: c.stop_reason.clone(),
+            // Core can continue ordinary harness errors/restarts or settle service failures.
+            // The retained completion is unchanged; a discarded cause authorizes neither.
+            stop: discarded_error(c)
+                .and_then(|e| e.reason.as_ref())
+                .map_or_else(|| c.stop_reason.clone(), |r| r.as_str().to_owned()),
             error: c.error.as_ref().map(|e| {
                 if capacity && ordinal >= capacity_retry::RETRIES {
                     format!("已自动重试 {ordinal} 次仍失败，已达次数上限；{}", said(e))
@@ -1016,4 +1002,44 @@ pub(super) fn role_lookup_in(
             .and_then(|r| serde_json::from_value(Value::String(r)).ok()),
         steps,
     ))
+}
+
+/// Display the already persisted retry decision without changing its time or classification.
+fn retry_notice(
+    c: &Completion,
+    capacity: bool,
+    stream: bool,
+    ordinal: i64,
+    delay: i64,
+    capacity_wait: Option<&capacity_retry::CapacityWait>,
+) -> String {
+    if capacity {
+        let error = c
+            .error
+            .as_ref()
+            .map(|e| e.safe_detail.as_str())
+            .unwrap_or_default();
+        if capacity_wait.as_ref().is_some_and(|w| w.at == w.deadline) {
+            format!(
+                "模型服务容量不足，预计恢复时间超出本轮等待上限；等待至 15 分钟上限后提示处理，期间不提前请求；{error}"
+            )
+        } else {
+            format!(
+                "模型服务容量不足，{} 秒后自动重试（第 {} 次，上限 3 次 / 15 分钟）；{error}",
+                (delay + 999) / 1000,
+                ordinal + 1
+            )
+        }
+    } else {
+        format!(
+            "{}，{} 秒后自动重试（第 {} 次）",
+            if stream {
+                "模型服务流中断"
+            } else {
+                "推理网关暂时不可用"
+            },
+            delay / 1000,
+            ordinal + 1
+        )
+    }
 }

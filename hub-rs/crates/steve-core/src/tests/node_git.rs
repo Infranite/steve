@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -34,7 +35,7 @@ struct OnNode {
     /// Runs once, right before the next apply (something moves meanwhile).
     before_apply: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     applies: Mutex<Vec<String>>,
-    read_errors: Mutex<Vec<ApiError>>,
+    read_errors: Mutex<Vec<Error>>,
 }
 
 fn command<T>(op: &str, body: T) -> Command<T> {
@@ -164,7 +165,7 @@ impl OnNode {
 
     fn offline(&self) -> ApiResult<()> {
         match self.offline.load(Ordering::SeqCst) {
-            true => Err(ApiError::new(ErrorCode::Offline, "设备离线")),
+            true => Err(rpc_error(Code::Unavailable, "设备离线")),
             false => Ok(()),
         }
     }

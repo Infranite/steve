@@ -612,14 +612,14 @@ impl NodeRuntime {
         &self,
         tx: &Tx,
         op: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<Option<String>, StoreError> {
         let session: String = tx.query_row(
             "SELECT json_extract(request,'$.body.session') FROM node_commands WHERE operation_id=?",
             [op],
             |r| r.get(0),
         )?;
-        if matches!(e.code, ErrorCode::Conflict | ErrorCode::Stale)
+        if matches!(e.code, Code::Conflict | Code::Stale)
             && let Some(mut d) = desired_in(tx, &session)?
             && d.refreshes < MAX_REFRESHES
         {

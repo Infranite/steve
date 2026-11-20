@@ -994,3 +994,87 @@ fn command_text_recognition_and_literal_comparisons_are_rejected() {
     let raw = "macro_rules! text { ($s:expr) => { $s == \"busy\" }; }";
     assert!(!command_problems(&scan::production(raw).unwrap(), 1).is_empty());
 }
+
+// Protocol 11 removes these Node-owned types. NodeStop is removed with protocol 12.
+const REMOVED_NODE_ERRORS: &[&str] = &["ErrorCode", "RetryClass", "ApiError"];
+
+fn removed_node_error_sites(source: &Source) -> Vec<String> {
+    let mut found = BTreeSet::new();
+    if source.rel.starts_with("steve-node-api/") {
+        for name in REMOVED_NODE_ERRORS {
+            for at in scan::find_in(&source.code, name) {
+                let end = at + name.len();
+                if source
+                    .code
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    continue;
+                }
+                let line = source.code[..at].bytes().filter(|b| *b == b'\n').count() + 1;
+                found.insert(format!("{}:{line}: {name}", source.rel));
+            }
+        }
+    }
+    for (at, path) in scan::uses(&source.code) {
+        let canonical = path.split(" as ").next().unwrap();
+        if canonical.starts_with("steve_node_api::")
+            && REMOVED_NODE_ERRORS.contains(&canonical.rsplit("::").next().unwrap())
+        {
+            let line = source.code[..at].bytes().filter(|b| *b == b'\n').count() + 1;
+            found.insert(format!("{}:{line}: {canonical}", source.rel));
+        }
+    }
+    for name in REMOVED_NODE_ERRORS {
+        let pattern = format!("steve_node_api::{name}");
+        for at in scan::find_in(&source.code, &pattern) {
+            let end = at + pattern.len();
+            if source
+                .code
+                .as_bytes()
+                .get(end)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            {
+                continue;
+            }
+            let line = source.code[..at].bytes().filter(|b| *b == b'\n').count() + 1;
+            found.insert(format!("{}:{line}: {pattern}", source.rel));
+        }
+    }
+    found.into_iter().collect()
+}
+
+#[test]
+fn ordinary_node_errors_use_the_shared_contract_without_recreating_removed_types() {
+    let mut groups = sources();
+    for name in NODE {
+        groups.push(((*name).into(), scan::crate_sources(crates_dir(), name)));
+    }
+    let found: Vec<_> = groups
+        .iter()
+        .flat_map(|(_, files)| files.iter())
+        .flat_map(removed_node_error_sites)
+        .collect();
+    assert!(found.is_empty(), "removed Node error types: {found:#?}");
+}
+
+#[test]
+fn removed_node_error_scope_preserves_other_domains_and_sees_renamed_imports() {
+    let unrelated = Source {
+        rel: "steve-hub/src/error.rs".into(),
+        code: scan::production("use steve_modules::ApiError; use rusqlite::ErrorCode; enum ApiError { Invalid } fn f() { let _: crate::error::ApiError; }").unwrap(),
+    };
+    assert!(removed_node_error_sites(&unrelated).is_empty());
+    let node = Source {
+        rel: "steve-node-api/src/common.rs".into(),
+        code: scan::production("pub struct ApiError; pub use foo::RetryClass as Hidden;").unwrap(),
+    };
+    assert_eq!(removed_node_error_sites(&node).len(), 2);
+    let caller = Source {
+        rel: "steve-x/src/lib.rs".into(),
+        code: scan::production("use steve_node_api::{common::ApiError as Failure, RetryClass};")
+            .unwrap(),
+    };
+    assert_eq!(removed_node_error_sites(&caller).len(), 2);
+}

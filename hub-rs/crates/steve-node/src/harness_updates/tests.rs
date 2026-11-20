@@ -180,7 +180,7 @@ async fn node_release_upgrade_and_component_installation_exclude_each_other_even
     let lease = adapter_setup::Lease::reserve(&n.0, "pi").unwrap();
     assert_eq!(
         n.upgrade_stage(stage.clone()).await.unwrap_err().code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert_eq!(
         n.upgrade_switch(UpgradeSwitch {
@@ -191,13 +191,13 @@ async fn node_release_upgrade_and_component_installation_exclude_each_other_even
         .await
         .unwrap_err()
         .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     drop(lease);
     let cli = managed::prefix_lock(&f.home, true).unwrap();
     assert_eq!(
         n.upgrade_stage(stage.clone()).await.unwrap_err().code,
-        ErrorCode::Busy
+        Code::Busy
     );
     drop(cli);
     assert_eq!(n.upgrade_stage(stage).await.unwrap().phase, "staged");
@@ -207,7 +207,7 @@ async fn node_release_upgrade_and_component_installation_exclude_each_other_even
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     assert!(adapter_setup::Lease::reserve(&n.0, "pi").is_none());
     n.upgrade_switch(UpgradeSwitch {
@@ -293,7 +293,7 @@ async fn upgrade_is_idempotent_verifies_versions_and_preserves_provider_files() 
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     let mut conflict = c.clone();
     conflict
@@ -302,7 +302,7 @@ async fn upgrade_is_idempotent_verifies_versions_and_preserves_provider_files() 
         .insert("adapter".into(), "3.0.0".into());
     assert_eq!(
         n.upgrade_harness(conflict).await.unwrap_err().code,
-        ErrorCode::Conflict
+        Code::Conflict
     );
     f.unmark("hold");
     assert!(matches!(
@@ -411,7 +411,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Stale
+        Code::Stale
     );
     let active = f.command("active_exec", "2.0.0");
     n.accept("exec", &active, |_| Ok(Decided::accepted()))
@@ -421,7 +421,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     n.0.j.tx(|t| t.set_state(&active.id, &succeeded())).unwrap();
     let prefix = managed::prefix_lock(&f.home, false).unwrap();
@@ -430,7 +430,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     drop(prefix);
     n.0.node_upgrading.store(true, Ordering::SeqCst);
@@ -439,7 +439,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Busy
+        Code::Busy
     );
     n.0.node_upgrading.store(false, Ordering::SeqCst);
     assert_eq!(f.installs(), 0);
@@ -453,7 +453,7 @@ async fn policy_active_work_prefix_locks_and_unchecked_targets_block_installatio
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(denied.installs(), 0);
     n.shutdown().await;
@@ -513,7 +513,7 @@ async fn external_and_symlinked_components_are_read_only() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Unsupported
+        Code::Unsupported
     );
     n.shutdown().await;
     drop(n);
@@ -538,7 +538,7 @@ async fn external_and_symlinked_components_are_read_only() {
     cmd.body.versions.remove("pi");
     assert_eq!(
         n.upgrade_harness(cmd).await.unwrap_err().code,
-        ErrorCode::Denied
+        Code::Forbidden
     );
     assert_eq!(f.installs(), 0);
     assert_eq!(

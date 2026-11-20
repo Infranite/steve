@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use steve_knowledge::repo::{self, DocRow};
@@ -35,8 +36,8 @@ struct Faulty {
     reads: AtomicUsize,
 }
 
-fn offline() -> ApiError {
-    ApiError::new(ErrorCode::Offline, "gone")
+fn offline() -> Error {
+    rpc_error(Code::Unavailable, "gone")
 }
 
 impl Faulty {

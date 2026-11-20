@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -39,14 +40,14 @@ impl HubLink {
     fn live_conn(&self) -> ApiResult<Arc<Conn>> {
         self.current()
             .filter(|c| !c.is_closed())
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "hub not connected"))
+            .ok_or_else(|| rpc_error(Code::Unavailable, "hub not connected"))
     }
 
     fn conn(&self) -> ApiResult<Arc<Conn>> {
         let conn = self.live_conn()?;
         if conn.is_upgrade() {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(rpc_error(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             ));
         }
@@ -117,7 +118,7 @@ impl EventSink for RemoteSink {
 /// The operation a lost tool call is asked about under.
 fn tool_op(id: &CallId) -> ApiResult<OperationId> {
     OperationId::new(derived_id("tool", id.as_str()))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, format!("{e:?}")))
+        .map_err(|e| rpc_error(Code::Internal, format!("{e:?}")))
 }
 
 #[async_trait]
@@ -137,14 +138,12 @@ impl HubTools for RemoteTools {
             .await
         {
             Ok(v) => match answer_of(TOOL_CALL, v, Some(&op)) {
-                Err(e) if e.code == ErrorCode::OutcomeUnknown => {
+                Err(e) if e.code == Code::OutcomeUnknown => {
                     Ok(ToolResult::Unknown { operation: op })
                 }
                 r => r,
             },
-            Err(e) if e.code == ErrorCode::OutcomeUnknown => {
-                Ok(ToolResult::Unknown { operation: op })
-            }
+            Err(e) if e.code == Code::OutcomeUnknown => Ok(ToolResult::Unknown { operation: op }),
             Err(e) => Err(e),
         }
     }
@@ -176,8 +175,8 @@ impl HubFiles for RemoteFiles {
             && id.as_str().starts_with(upgrade_bridge::ARTIFACT_PREFIX)
         {
             if id.as_str() != format!("{}{operation}", upgrade_bridge::ARTIFACT_PREFIX) {
-                return Err(ApiError::new(
-                    ErrorCode::Denied,
+                return Err(rpc_error(
+                    Code::Forbidden,
                     "archive belongs to another operation",
                 ));
             }
@@ -192,15 +191,12 @@ impl HubFiles for RemoteFiles {
                 .call_upgrade(upgrade_v1::UPGRADE_FETCH, to_value(&request)?, None)
                 .await?;
             let response: upgrade_v1::FetchResponse =
-                crate::upgrade::decode(value).map_err(ApiError::from)?;
+                crate::upgrade::decode(value).map_err(Error::from)?;
             if response.offset != offset
                 || response.bytes.len() > max as usize
                 || (!response.eof && response.bytes.is_empty())
             {
-                return Err(ApiError::new(
-                    ErrorCode::Invalid,
-                    "invalid upgrade chunk bounds",
-                ));
+                return Err(rpc_error(Code::Invalid, "invalid upgrade chunk bounds"));
             }
             return Ok(response.into());
         }
@@ -242,8 +238,8 @@ impl HubSecrets for RemoteSecrets {
             .go(SECRET_TAKE, &SecretArgs { operation, id }, Some(&op))
             .await
         {
-            Err(e) if e.code == ErrorCode::OutcomeUnknown => Err(ApiError::new(
-                ErrorCode::Stale,
+            Err(e) if e.code == Code::OutcomeUnknown => Err(rpc_error(
+                Code::Stale,
                 "secret.take: the answer was lost, the secret may be used up",
             )),
             r => r,
