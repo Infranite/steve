@@ -385,107 +385,8 @@ fn write_projection(
 ) -> Result<()> {
     let ok = a.ok || pending;
     let mut usages = a.usage.clone();
-    let has_tokens = |u: &ModelUsage| {
-        [
-            u.tokens.input,
-            u.tokens.output,
-            u.tokens.cache_read,
-            u.tokens.cache_write,
-        ]
-        .iter()
-        .any(Option::is_some)
-    };
-    if usages.iter().any(has_tokens) {
-        // Model-less/context fee companions carry evidence, not another model request row.
-        // The reported quote stays in the total, with its original attribution in detail.
-        let mut companions = vec![];
-        usages.retain(|u| {
-            if !has_tokens(u) && u.detail["accounting_tokens"] == false {
-                companions.push(u.clone());
-                false
-            } else {
-                true
-            }
-        });
-        if !companions.is_empty() {
-            let first = usages
-                .iter_mut()
-                .find(|u| has_tokens(u))
-                .expect("a token row");
-            for companion in &companions {
-                first.cost_reported = match (first.cost_reported, companion.cost_reported) {
-                    (Some(a), Some(b)) => Some(a + b),
-                    (a, b) => a.or(b),
-                };
-            }
-            if !first.detail.is_object() {
-                first.detail = json!({"reported_detail":first.detail});
-            }
-            first.detail["cost_companions"] = json!(companions.iter().map(|u|json!({"model":u.model,"cost_reported":u.cost_reported,"detail":u.detail})).collect::<Vec<_>>());
-        }
-    } else {
-        // A cost-only call with no token peer is genuinely unavailable, even when its source
-        // was a context counter. Unlike a durable turn it has no separate missing-attempt row.
-        for u in &mut usages {
-            if u.detail["accounting_tokens"] == false {
-                u.detail["accounting_tokens"] = json!(true);
-            }
-        }
-    }
-    // A retry that reports no consumption is not an extra gateway request row. Keep its
-    // actual zeros (and missing fields) as evidence instead of replacing them with unknowns.
-    let reported = |u: &ModelUsage| {
-        let t = &u.tokens;
-        [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
-            .iter()
-            .any(Option::is_some)
-            || u.cost_reported.is_some()
-    };
-    let (mut rows, mut unspent): (Vec<_>, Vec<_>) = usages.into_iter().partition(|u| {
-        let t = &u.tokens;
-        [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
-            .iter()
-            .any(|x| x.is_some_and(|x| x != 0))
-            || u.cost_reported.is_some_and(|c| c != 0.0)
-    });
-    if rows.is_empty() {
-        let zero = unspent
-            .iter()
-            .rposition(|u| u.model == a.model && reported(u))
-            // With one try, the adapter may report a canonical model name instead of the
-            // requested alias. With retries, another model's zero says nothing about the
-            // answering model's missing usage.
-            .or_else(|| {
-                (a.attempts <= 1)
-                    .then(|| unspent.iter().position(reported))
-                    .flatten()
-            });
-        rows.push(match zero {
-            Some(i) => unspent.remove(i),
-            // No usage reported (a timeout, a crash): one unknown row still counts the call.
-            None => ModelUsage {
-                model: a.model.clone(),
-                detail: json!({"scope": "none"}),
-                ..ModelUsage::default()
-            },
-        });
-    }
-    let unspent: Vec<_> = unspent
-        .into_iter()
-        .filter(reported)
-        .map(|u| {
-            json!({
-                "model": u.model,
-                "tokens": {
-                    "input": u.tokens.input, "output": u.tokens.output,
-                    "cache_read": u.tokens.cache_read, "cache_write": u.tokens.cache_write,
-                    "reasoning": u.tokens.reasoning,
-                },
-                "cost_reported": u.cost_reported,
-                "detail": u.detail,
-            })
-        })
-        .collect();
+    fold_companion_costs(&mut usages);
+    let ProjectionRows { rows, unspent } = projection_rows(a, usages);
     remove_usage_in(tx, "live_call_id", call_id)?;
     {
         for (i, mut usage) in rows.into_iter().enumerate() {
@@ -563,6 +464,121 @@ fn write_projection(
         }
         Ok(())
     }
+}
+
+/// Attach model-less context fees to the first token-bearing usage, retaining their evidence.
+fn fold_companion_costs(usages: &mut Vec<ModelUsage>) {
+    let has_tokens = |u: &ModelUsage| {
+        [
+            u.tokens.input,
+            u.tokens.output,
+            u.tokens.cache_read,
+            u.tokens.cache_write,
+        ]
+        .iter()
+        .any(Option::is_some)
+    };
+    if usages.iter().any(has_tokens) {
+        // Model-less/context fee companions carry evidence, not another model request row.
+        // The reported quote stays in the total, with its original attribution in detail.
+        let mut companions = vec![];
+        usages.retain(|u| {
+            if !has_tokens(u) && u.detail["accounting_tokens"] == false {
+                companions.push(u.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !companions.is_empty() {
+            let first = usages
+                .iter_mut()
+                .find(|u| has_tokens(u))
+                .expect("a token row");
+            for companion in &companions {
+                first.cost_reported = match (first.cost_reported, companion.cost_reported) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+            }
+            if !first.detail.is_object() {
+                first.detail = json!({"reported_detail":first.detail});
+            }
+            first.detail["cost_companions"] = json!(companions.iter().map(|u|json!({"model":u.model,"cost_reported":u.cost_reported,"detail":u.detail})).collect::<Vec<_>>());
+        }
+    } else {
+        // A cost-only call with no token peer is genuinely unavailable, even when its source
+        // was a context counter. Unlike a durable turn it has no separate missing-attempt row.
+        for u in usages {
+            if u.detail["accounting_tokens"] == false {
+                u.detail["accounting_tokens"] = json!(true);
+            }
+        }
+    }
+}
+
+struct ProjectionRows {
+    rows: Vec<ModelUsage>,
+    unspent: Vec<Value>,
+}
+
+/// Select request rows while preserving answering-model zero precedence and other unspent evidence.
+fn projection_rows(a: &CallFinish, usages: Vec<ModelUsage>) -> ProjectionRows {
+    // A retry that reports no consumption is not an extra gateway request row. Keep its
+    // actual zeros (and missing fields) as evidence instead of replacing them with unknowns.
+    let reported = |u: &ModelUsage| {
+        let t = &u.tokens;
+        [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
+            .iter()
+            .any(Option::is_some)
+            || u.cost_reported.is_some()
+    };
+    let (mut rows, mut unspent): (Vec<_>, Vec<_>) = usages.into_iter().partition(|u| {
+        let t = &u.tokens;
+        [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
+            .iter()
+            .any(|x| x.is_some_and(|x| x != 0))
+            || u.cost_reported.is_some_and(|c| c != 0.0)
+    });
+    if rows.is_empty() {
+        let zero = unspent
+            .iter()
+            .rposition(|u| u.model == a.model && reported(u))
+            // With one try, the adapter may report a canonical model name instead of the
+            // requested alias. With retries, another model's zero says nothing about the
+            // answering model's missing usage.
+            .or_else(|| {
+                (a.attempts <= 1)
+                    .then(|| unspent.iter().position(reported))
+                    .flatten()
+            });
+        rows.push(match zero {
+            Some(i) => unspent.remove(i),
+            // No usage reported (a timeout, a crash): one unknown row still counts the call.
+            None => ModelUsage {
+                model: a.model.clone(),
+                detail: json!({"scope": "none"}),
+                ..ModelUsage::default()
+            },
+        });
+    }
+    let unspent: Vec<_> = unspent
+        .into_iter()
+        .filter(reported)
+        .map(|u| {
+            json!({
+                "model": u.model,
+                "tokens": {
+                    "input": u.tokens.input, "output": u.tokens.output,
+                    "cache_read": u.tokens.cache_read, "cache_write": u.tokens.cache_write,
+                    "reasoning": u.tokens.reasoning,
+                },
+                "cost_reported": u.cost_reported,
+                "detail": u.detail,
+            })
+        })
+        .collect();
+    ProjectionRows { rows, unspent }
 }
 
 pub fn model_usage(r: UsageReport) -> ModelUsage {

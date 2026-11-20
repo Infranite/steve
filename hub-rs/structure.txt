@@ -52,10 +52,7 @@ steve-hub	crates/steve-hub/src/nodes/tailcat.rs	cognitive_complexity	29
 steve-hub	crates/steve-hub/src/nodes/upgrade.rs	too_many_lines	136
 steve-hub	crates/steve-hub/src/nodes/vitals.rs	cognitive_complexity	33
 steve-hub	crates/steve-hub/src/plugins/mod.rs	cognitive_complexity	28
-steve-hub	crates/steve-hub/src/upgrades/cli.rs	too_many_lines	140,137
 steve-hub	crates/steve-hub/src/upgrades/maintenance.rs	too_many_lines	105
-steve-hub	crates/steve-hub/src/upgrades/runner.rs	too_many_lines	194
-steve-hub	crates/steve-hub/src/upgrades/signing.rs	cognitive_complexity	41
 steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	cognitive_complexity	32
 steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	too_many_lines	127,105
 steve-hub	crates/steve-hub/src/wire/core.rs	cognitive_complexity	46
@@ -88,5 +85,4 @@ steve-node-wire	crates/steve-node-wire/src/conn.rs	too_many_lines	108
 steve-stats	crates/steve-stats/src/metrics.rs	too_many_lines	347,107
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
-steve-store	crates/steve-store/src/repo/gateway_ledger.rs	too_many_lines	169
 steve-store	crates/steve-store/src/repo/workflows.rs	too_many_lines	116,115,108

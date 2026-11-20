@@ -365,33 +365,23 @@ impl Owner {
                 .stdout,
         )?;
         let manifest = document(&release.join("release.json"), uid)?;
-        stable(
-            info["version"]
-                .as_str()
-                .context("missing installed version")?,
-        )?;
-        if info["target"] != "aarch64-apple-darwin"
-            || info["commit"]
-                .as_str()
-                .is_none_or(|s| s.len() != 40 || !s.bytes().all(|c| c.is_ascii_hexdigit()))
-            || ["version", "commit"]
-                .iter()
-                .any(|key| info[*key] != manifest[*key])
-        {
-            bail!("installed Hub and release identities disagree")
-        }
-        if info["upgrade_runner"]["journal"] != 1 || info["upgrade_runner"]["native"] != true {
-            bail!("installed Hub does not provide the native upgrade runner")
-        }
+        verify_installed_build(&info, &manifest)?;
         owner.info = info;
-        let config = owner
+        owner.inspect_service(home)?;
+        Ok(owner)
+    }
+
+    /// Verify the installed launch definition and bind its literal settings to this owner.
+    fn inspect_service(&mut self, home: &Path) -> Result<()> {
+        let uid = self.uid;
+        let config = self
             .account_home
             .join("Library/LaunchAgents")
-            .join(format!("{}.plist", owner.label()));
+            .join(format!("{}.plist", self.label()));
         owned(config.parent().unwrap().parent().unwrap(), true, uid)?;
         owned(config.parent().unwrap(), true, uid)?;
-        let definition = owner.plist(&config)?;
-        if definition["Label"] != owner.identity["label"]
+        let definition = self.plist(&config)?;
+        if definition["Label"] != self.identity["label"]
             || ["Program", "RootDirectory", "UserName", "GroupName"]
                 .iter()
                 .any(|key| definition.get(*key).is_some())
@@ -417,7 +407,7 @@ impl Owner {
             .is_some_and(|p| p.as_str() != home.to_str())
             || environment
                 .get("HOME")
-                .is_some_and(|p| p.as_str() != owner.account_home.to_str())
+                .is_some_and(|p| p.as_str() != self.account_home.to_str())
         {
             bail!("installed service names another home")
         }
@@ -428,15 +418,15 @@ impl Owner {
         } else {
             String::new()
         };
-        (owner.repository, owner.port) = settings(&env_text, &environment)?;
+        (self.repository, self.port) = settings(&env_text, &environment)?;
         let record = home.join("services/hub.json");
         if fs::symlink_metadata(&record).is_ok() {
             owned(record.parent().unwrap(), true, uid)?;
-            if document(&record, uid)?["label"] != owner.identity["label"] {
+            if document(&record, uid)?["label"] != self.identity["label"] {
                 bail!("service record differs from signing identity")
             }
         }
-        Ok(owner)
+        Ok(())
     }
 
     fn actor(&self) -> String {
@@ -818,81 +808,7 @@ impl Owner {
         if stable(version)? <= stable(self.info["version"].as_str().unwrap())? {
             bail!("upgrade target must be newer than installed Hub")
         }
-        let (op, plist) = {
-            let _runner = owned_lock(&updates.join("runner.lock"), self.uid, false)?;
-            let _release = owned_lock(&self.home.join("releases/.release.lock"), self.uid, true)?;
-            let job = self.job()?;
-            if !matches!(job, "absent" | "exited") {
-                bail!("upgrade job is live or unknown; it was not stopped")
-            }
-            directory(&self.home.join("logs"), self.uid)?;
-            directory(&self.home.join("logs/release"), self.uid)?;
-            directory(&updates.join("runner"), self.uid)?;
-            let id = uuid::Uuid::new_v4().to_string();
-            let at = now();
-            let log = self
-                .home
-                .join("logs/release")
-                .join(format!("upgrade-{version}-{}.log", &id[..8]));
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&log)?;
-            let op = Operation {
-                id: id.clone(),
-                idempotency_key: key.into(),
-                version: version.into(),
-                phase: "staging".into(),
-                created_at: at,
-                updated_at: at,
-                requested_by: self.actor(),
-                approved_by: Some(self.actor()),
-                approved_at: Some(at),
-                error: None,
-                previous: None,
-                target: None,
-                backup: None,
-                progress: None,
-                drain: None,
-                runner: Some(runner::Spec {
-                    kind: "release_bundle".into(),
-                    source: format!("https://github.com/{}.git", self.repository),
-                    commit: Some(manifest.commit),
-                    log: Some(log.to_string_lossy().into_owned()),
-                    launched_at: Some(at),
-                    ..Default::default()
-                }),
-            };
-            let label = format!("{}.upgrade", self.label());
-            let plist = updates.join("runner").join(format!("{id}.plist"));
-            let args = [
-                self.binary.to_string_lossy().into_owned(),
-                "--upgrade-runner".into(),
-                self.home.to_string_lossy().into_owned(),
-                id.clone(),
-            ];
-            let body = runner::plist(
-                &label,
-                &args,
-                &self.environment(),
-                log.to_str().context("invalid log path")?,
-            );
-            write_bytes(&plist, body.as_bytes())?;
-            if job == "exited" {
-                self.command(
-                    &[
-                        "/bin/launchctl",
-                        "bootout",
-                        &format!("gui/{}/{label}", self.uid),
-                    ],
-                    true,
-                )?;
-            }
-            Updates::journal(&self.home).save(&op)?;
-            atomic(&updates.join("active.json"), &json!({"id":id}))?;
-            (op, plist)
-        };
+        let (op, plist) = self.stage_request(&updates, version, key, manifest)?;
         if let Err(error) = self.command(
             &[
                 "/bin/launchctl",
@@ -923,6 +839,89 @@ impl Owner {
         }
         self.operation(&op.id)
     }
+    /// Under the runner/release locks, persist one approved operation and its launch plist.
+    fn stage_request(
+        &self,
+        updates: &Path,
+        version: &str,
+        key: &str,
+        manifest: Manifest,
+    ) -> Result<(Operation, PathBuf)> {
+        let _runner = owned_lock(&updates.join("runner.lock"), self.uid, false)?;
+        let _release = owned_lock(&self.home.join("releases/.release.lock"), self.uid, true)?;
+        let job = self.job()?;
+        if !matches!(job, "absent" | "exited") {
+            bail!("upgrade job is live or unknown; it was not stopped")
+        }
+        directory(&self.home.join("logs"), self.uid)?;
+        directory(&self.home.join("logs/release"), self.uid)?;
+        directory(&updates.join("runner"), self.uid)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let at = now();
+        let log = self
+            .home
+            .join("logs/release")
+            .join(format!("upgrade-{version}-{}.log", &id[..8]));
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log)?;
+        let op = Operation {
+            id: id.clone(),
+            idempotency_key: key.into(),
+            version: version.into(),
+            phase: "staging".into(),
+            created_at: at,
+            updated_at: at,
+            requested_by: self.actor(),
+            approved_by: Some(self.actor()),
+            approved_at: Some(at),
+            error: None,
+            previous: None,
+            target: None,
+            backup: None,
+            progress: None,
+            drain: None,
+            runner: Some(runner::Spec {
+                kind: "release_bundle".into(),
+                source: format!("https://github.com/{}.git", self.repository),
+                commit: Some(manifest.commit),
+                log: Some(log.to_string_lossy().into_owned()),
+                launched_at: Some(at),
+                ..Default::default()
+            }),
+        };
+        let label = format!("{}.upgrade", self.label());
+        let plist = updates.join("runner").join(format!("{id}.plist"));
+        let args = [
+            self.binary.to_string_lossy().into_owned(),
+            "--upgrade-runner".into(),
+            self.home.to_string_lossy().into_owned(),
+            id.clone(),
+        ];
+        let body = runner::plist(
+            &label,
+            &args,
+            &self.environment(),
+            log.to_str().context("invalid log path")?,
+        );
+        write_bytes(&plist, body.as_bytes())?;
+        if job == "exited" {
+            self.command(
+                &[
+                    "/bin/launchctl",
+                    "bootout",
+                    &format!("gui/{}/{label}", self.uid),
+                ],
+                true,
+            )?;
+        }
+        Updates::journal(&self.home).save(&op)?;
+        atomic(&updates.join("active.json"), &json!({"id":id}))?;
+        Ok((op, plist))
+    }
+
     fn status(&self, id: Option<&str>) -> Result<Value> {
         let updates = self.home.join("updates");
         if updates.exists() {
@@ -940,6 +939,29 @@ impl Owner {
             json!({"actor":self.actor(),"current":self.info,"operation":operation,"job":self.job()?}),
         )
     }
+}
+
+/// Hold the Hub binary and release manifest to the same stable, native-runner identity.
+fn verify_installed_build(info: &Value, manifest: &Value) -> Result<()> {
+    stable(
+        info["version"]
+            .as_str()
+            .context("missing installed version")?,
+    )?;
+    if info["target"] != "aarch64-apple-darwin"
+        || info["commit"]
+            .as_str()
+            .is_none_or(|s| s.len() != 40 || !s.bytes().all(|c| c.is_ascii_hexdigit()))
+        || ["version", "commit"]
+            .iter()
+            .any(|key| info[*key] != manifest[*key])
+    {
+        bail!("installed Hub and release identities disagree")
+    }
+    if info["upgrade_runner"]["journal"] != 1 || info["upgrade_runner"]["native"] != true {
+        bail!("installed Hub does not provide the native upgrade runner")
+    }
+    Ok(())
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {

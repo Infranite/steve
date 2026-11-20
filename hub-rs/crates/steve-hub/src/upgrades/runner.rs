@@ -678,87 +678,16 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()>
         )
     }
 
-    // the tag, from the configured repository only; it must be the commit the release manifest names
-    say(format!("fetch {tag} from {}", spec.source));
-    match git(
-        &repo,
-        &[
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            &spec.source,
-            &format!("refs/tags/{tag}"),
-        ],
-    ) {
-        Ok(out) if out.status.success() => {
-            let fetched = git_commit(&repo, "FETCH_HEAD").unwrap_or_default();
-            if fetched != commit {
-                bail!(
-                    "{}",
-                    steve_i18n::t!(
-                        "hub.upgrade.local.tag_mismatch",
-                        tag = tag.as_str(),
-                        got = fetched.as_str(),
-                        commit = commit.as_str()
-                    )
-                )
-            }
-        }
-        Ok(out) => say(format!(
-            "fetch failed ({}); using what the checkout has",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Err(e) => say(format!("fetch failed ({e}); using what the checkout has")),
-    }
-    if let Some(local) = git_commit(&repo, &format!("refs/tags/{tag}"))
-        && local != commit
-    {
-        bail!(
-            "{}",
-            steve_i18n::t!(
-                "hub.upgrade.local.tag_mismatch",
-                tag = tag.as_str(),
-                got = local.as_str(),
-                commit = commit.as_str()
-            )
-        )
-    }
-    if git_commit(&repo, &commit).as_deref() != Some(commit.as_str()) {
-        bail!(
-            "{}",
-            steve_i18n::t!("hub.upgrade.local.commit_missing", commit = commit.as_str())
-        )
-    }
+    fetch_release(&repo, &spec, &tag, &commit)?;
 
-    // that commit's own release scripts: the checkout's working tree is never used or touched
-    let archive = git(&repo, &["archive", "--format=tar", &commit, "ops"])?;
-    if !archive.status.success() {
-        bail!(
-            "git archive {commit} ops: {}",
-            String::from_utf8_lossy(&archive.stderr).trim()
-        )
-    }
-    let _ = fs::remove_dir_all(ops);
-    fs::create_dir_all(ops)?;
-    tar::Archive::new(archive.stdout.as_slice()).unpack(ops)?;
-    let script = ops.join("ops/local-release.py");
-    if !script.is_file() {
-        bail!("{tag} has no ops/local-release.py")
-    }
+    let script = release_script(&repo, &commit, ops, &tag)?;
 
     let candidate = u
         .home
         .join("releases")
         .join(format!("{version}-local-{}", &commit[..7]));
-    let built = |dir: &Path| {
-        read::<Value>(&dir.join("release.json")).is_ok_and(|m| {
-            m["version"].as_str() == Some(version.as_str())
-                && m["commit"].as_str() == Some(commit.as_str())
-        }) && dir.join("bin/steve-hub").is_file()
-            && dir.join("web/dist/index.html").is_file()
-    };
     if candidate.exists() {
-        if !built(&candidate) {
+        if !candidate_built(&candidate, &version, &commit) {
             bail!(
                 "{}",
                 steve_i18n::t!(
@@ -793,49 +722,8 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()>
         } else {
             None
         };
-        let mut build = Command::new(&spec.python);
-        build
-            .arg("-I")
-            .arg(&script)
-            .args([
-                "build",
-                &commit,
-                "--version",
-                &version,
-                "--repo",
-                &spec.repo,
-            ])
-            .stdout(Stdio::piped());
-        if pass.is_some() {
-            build.arg("--keychain-pass-stdin").stdin(Stdio::piped());
-        } else {
-            build.stdin(Stdio::null());
-        }
-        let mut child = build.spawn()?;
-        if let (Some(p), Some(mut stdin)) = (pass, child.stdin.take()) {
-            use std::io::Write;
-            let line = zeroize::Zeroizing::new(format!("{}\n", p.as_str()));
-            // a script that exits before reading it only closes the pipe early
-            let _ = stdin.write_all(line.as_bytes());
-        }
-        // local-release.py prints this line once it holds releases/.release.lock and has found no
-        // candidate, just before it makes the directory: only then is the directory this run's
-        let started = format!(
-            " build {version} from {commit} into {}",
-            candidate.display()
-        );
-        let mut ours = false;
-        if let Some(out) = child.stdout.take() {
-            use std::io::{BufRead, Write};
-            for line in std::io::BufReader::new(out).lines() {
-                let Ok(line) = line else { break };
-                ours |= line.ends_with(&started);
-                println!("{line}");
-                let _ = std::io::stdout().flush();
-            }
-        }
-        let status = child.wait()?;
-        if !status.success() || !built(&candidate) {
+        let (status, ours) = build_candidate(&spec, &script, &commit, &version, pass, &candidate)?;
+        if !status.success() || !candidate_built(&candidate, &version, &commit) {
             // a half-built directory of this run would only block the next attempt; one another build
             // made (it took the lock between the check above and this build) is left alone
             if ours {
@@ -855,6 +743,139 @@ fn run(u: &Updates, op: &mut Operation, ops: &Path, trust: &Trust) -> Result<()>
     u.phase(op, "ready", None)?;
 
     deploy(u, op, &spec, &script, &candidate)
+}
+
+/// Fetch only the configured source and require both fetched and local tags to bind the manifest commit.
+fn fetch_release(repo: &Path, spec: &Spec, tag: &str, commit: &str) -> Result<()> {
+    // the tag, from the configured repository only; it must be the commit the release manifest names
+    say(format!("fetch {tag} from {}", spec.source));
+    match git(
+        repo,
+        &[
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            &spec.source,
+            &format!("refs/tags/{tag}"),
+        ],
+    ) {
+        Ok(out) if out.status.success() => {
+            let fetched = git_commit(repo, "FETCH_HEAD").unwrap_or_default();
+            if fetched != commit {
+                bail!(
+                    "{}",
+                    steve_i18n::t!(
+                        "hub.upgrade.local.tag_mismatch",
+                        tag = tag,
+                        got = fetched.as_str(),
+                        commit = commit
+                    )
+                )
+            }
+        }
+        Ok(out) => say(format!(
+            "fetch failed ({}); using what the checkout has",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => say(format!("fetch failed ({e}); using what the checkout has")),
+    }
+    if let Some(local) = git_commit(repo, &format!("refs/tags/{tag}"))
+        && local != commit
+    {
+        bail!(
+            "{}",
+            steve_i18n::t!(
+                "hub.upgrade.local.tag_mismatch",
+                tag = tag,
+                got = local.as_str(),
+                commit = commit
+            )
+        )
+    }
+    if git_commit(repo, commit).as_deref() != Some(commit) {
+        bail!(
+            "{}",
+            steve_i18n::t!("hub.upgrade.local.commit_missing", commit = commit)
+        )
+    }
+
+    Ok(())
+}
+
+/// Materialize only the selected commit's release scripts, never its mutable working tree.
+fn release_script(repo: &Path, commit: &str, ops: &Path, tag: &str) -> Result<PathBuf> {
+    // that commit's own release scripts: the checkout's working tree is never used or touched
+    let archive = git(repo, &["archive", "--format=tar", commit, "ops"])?;
+    if !archive.status.success() {
+        bail!(
+            "git archive {commit} ops: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )
+    }
+    let _ = fs::remove_dir_all(ops);
+    fs::create_dir_all(ops)?;
+    tar::Archive::new(archive.stdout.as_slice()).unpack(ops)?;
+    let script = ops.join("ops/local-release.py");
+    if !script.is_file() {
+        bail!("{tag} has no ops/local-release.py")
+    }
+
+    Ok(script)
+}
+
+/// A reusable candidate must contain the manifest identity and both installed artifacts.
+fn candidate_built(dir: &Path, version: &str, commit: &str) -> bool {
+    read::<Value>(&dir.join("release.json")).is_ok_and(|m| {
+        m["version"].as_str() == Some(version) && m["commit"].as_str() == Some(commit)
+    }) && dir.join("bin/steve-hub").is_file()
+        && dir.join("web/dist/index.html").is_file()
+}
+
+/// Stream a build and return whether its output acknowledged ownership of the candidate directory.
+fn build_candidate(
+    spec: &Spec,
+    script: &Path,
+    commit: &str,
+    version: &str,
+    pass: Option<zeroize::Zeroizing<String>>,
+    candidate: &Path,
+) -> Result<(std::process::ExitStatus, bool)> {
+    let mut build = Command::new(&spec.python);
+    build
+        .arg("-I")
+        .arg(script)
+        .args(["build", commit, "--version", version, "--repo", &spec.repo])
+        .stdout(Stdio::piped());
+    if pass.is_some() {
+        build.arg("--keychain-pass-stdin").stdin(Stdio::piped());
+    } else {
+        build.stdin(Stdio::null());
+    }
+    let mut child = build.spawn()?;
+    if let (Some(p), Some(mut stdin)) = (pass, child.stdin.take()) {
+        use std::io::Write;
+        let line = zeroize::Zeroizing::new(format!("{}\n", p.as_str()));
+        // a script that exits before reading it only closes the pipe early
+        let _ = stdin.write_all(line.as_bytes());
+    }
+    // local-release.py prints this line once it holds releases/.release.lock and has found no
+    // candidate, just before it makes the directory: only then is the directory this run's
+    let started = format!(
+        " build {version} from {commit} into {}",
+        candidate.display()
+    );
+    let mut ours = false;
+    if let Some(out) = child.stdout.take() {
+        use std::io::{BufRead, Write};
+        for line in std::io::BufReader::new(out).lines() {
+            let Ok(line) = line else { break };
+            ours |= line.ends_with(&started);
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+    let status = child.wait()?;
+    Ok((status, ours))
 }
 
 /// A published artifact takes the same verified deployment path as an explicit maintainer build.

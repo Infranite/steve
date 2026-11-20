@@ -347,22 +347,27 @@ pub async fn migrate_background(home: PathBuf) {
             }
             return;
         }
-        match migrate(&home, store.as_ref(), Some(&kc)) {
-            Moved::Nothing => {}
-            Moved::Moved(Rotated::Yes) => tracing::info!(
-                "signing: the keychain password moved from {FILE} into the key store and was changed"
-            ),
-            Moved::Moved(Rotated::No(why)) => tracing::warn!(
-                "signing: the keychain password moved from {FILE} into the key store, not changed: {why}"
-            ),
-            Moved::Kept(why) => tracing::warn!("signing: {FILE} stays: {why}"),
-        }
+        report_migration(migrate(&home, store.as_ref(), Some(&kc)));
     });
     if let Err(error) = migration.await {
         if error.is_panic() {
             std::panic::resume_unwind(error.into_panic());
         }
         tracing::warn!("signing migration task: {error}");
+    }
+}
+
+/// Report the original source-file migration outcome without changing its recovery policy.
+fn report_migration(result: Moved) {
+    match result {
+        Moved::Nothing => {}
+        Moved::Moved(Rotated::Yes) => tracing::info!(
+            "signing: the keychain password moved from {FILE} into the key store and was changed"
+        ),
+        Moved::Moved(Rotated::No(why)) => tracing::warn!(
+            "signing: the keychain password moved from {FILE} into the key store, not changed: {why}"
+        ),
+        Moved::Kept(why) => tracing::warn!("signing: {FILE} stays: {why}"),
     }
 }
 
