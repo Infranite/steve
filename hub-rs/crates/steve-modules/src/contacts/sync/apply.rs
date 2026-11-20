@@ -191,7 +191,10 @@ pub fn apply(
         &team_of,
         &dissolved,
         &contact_of,
-        (&mut r, &mut touched),
+        SyncChanges {
+            report: &mut r,
+            touched: &mut touched,
+        },
     )?;
 
     // reports_to
@@ -223,6 +226,11 @@ pub fn apply(
     Ok(r)
 }
 
+struct SyncChanges<'a> {
+    report: &'a mut SyncReport,
+    touched: &'a mut BTreeSet<String>,
+}
+
 fn sync_members(
     tx: &Tx,
     ws: &str,
@@ -230,9 +238,9 @@ fn sync_members(
     team_of: &HashMap<String, String>,
     dissolved: &[String],
     contact_of: &HashMap<String, String>,
-    changes: (&mut SyncReport, &mut BTreeSet<String>),
+    changes: SyncChanges<'_>,
 ) -> ApiResult<()> {
-    let (r, touched) = changes;
+    let SyncChanges { report: r, touched } = changes;
     // members and leads; a dissolved department has nobody in it any more
     for team in dissolved {
         members(tx, ws, team, &[], r)?;
@@ -264,9 +272,7 @@ fn sync_members(
     Ok(())
 }
 
-/// Upserts a team per department, sets parents, dissolves the vanished ones; returns department id →
-/// team id, and the teams dissolved now.
-#[allow(clippy::too_many_arguments)]
+/// Revises a known team when its name changes or its department returns.
 fn refresh_team(
     tx: &Tx,
     actor: &str,
@@ -303,6 +309,9 @@ fn refresh_team(
     Ok(())
 }
 
+/// Upserts a team per department, sets parents, dissolves the vanished ones; returns department id →
+/// team id, and the teams dissolved now.
+#[allow(clippy::too_many_arguments)]
 fn teams(
     tx: &Tx,
     conn: &DirConnection,

@@ -714,6 +714,13 @@ async fn sg10_mcp_secret_transport_and_failed_update_table() {
             "http",
         ),
         (
+            json!({"transport":"http","url":"https://mcp.test","headers":[{"name":"X-Mode","value":"inspect"},{"name":"X-Token","secret":true,"value":"http-secret"}]}),
+            200,
+            false,
+            None,
+            "http",
+        ),
+        (
             json!({"env":[{"name":"NEW","secret":true}]}),
             400,
             true,
@@ -760,6 +767,20 @@ async fn sg10_mcp_secret_transport_and_failed_update_table() {
         );
         let (_, got) = req(&h, "GET", "/capabilities/mcp-servers", None).await;
         assert_eq!(got[0]["transport"], transport);
+        if patch.get("headers").is_some() {
+            assert_eq!(
+                secret(&h, "s_dev", &secret_id(id, "header:X-Token")).as_deref(),
+                Some("http-secret")
+            );
+            assert_eq!(
+                got[0]["headers"],
+                json!([{"name":"X-Mode","value":"inspect"},{"name":"X-Token","secret":true}])
+            );
+            assert!(got[0]["command"].is_null());
+            assert_eq!(got[0]["env"], json!([]));
+            assert!(!got.to_string().contains("http-secret"));
+        }
+
         assert_eq!(
             q::<i64>(
                 &h,

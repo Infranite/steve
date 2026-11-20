@@ -328,7 +328,6 @@ fn pending_use(
     cx: &UseCx,
     r: &UseRequest,
     place: Option<&NodePlace>,
-    session: &str,
     context: &UseContext,
     injections: Vec<Injection>,
 ) -> VaultResult<Pending> {
@@ -339,6 +338,7 @@ fn pending_use(
         project,
         ..
     } = context;
+    let session = context.session.as_str();
     // on a Node the directory is checked there, inside the session's workspace
     let (cwd, node) = match place {
         None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
@@ -365,7 +365,7 @@ fn pending_use(
         None => json!({ "scratch": true }),
     };
     let use_id = uid("su");
-    let pending = Pending {
+    Ok(Pending {
         ws: cx.ws.clone(),
         item_id: item.id.clone(),
         title: item.title.clone(),
@@ -381,8 +381,7 @@ fn pending_use(
             timeout: Duration::from_secs(secs),
         },
         node,
-    };
-    Ok(pending)
+    })
 }
 
 fn pending_row(
@@ -398,7 +397,7 @@ fn pending_row(
     let session = context.session.as_str();
     let shown = r.command.clone();
     let at = now();
-    let row = UseRecord {
+    UseRecord {
         id: use_id.clone(),
         workspace_id: cx.ws.clone(),
         item_id: item.id.clone(),
@@ -417,8 +416,7 @@ fn pending_row(
         exit_code: None,
         created: at,
         finished: None,
-    };
-    row
+    }
 }
 
 enum Job {
@@ -670,13 +668,13 @@ impl SecretUses {
             .ok_or_else(|| ApiError::rule("steve_secret_use only works inside a Steve session."))?;
         let context = self.use_context(cx, r, session)?;
         let injections = request_injections(&context.fields, r)?;
-        let pending = pending_use(cx, r, place, session, &context, injections)?;
+        let pending = pending_use(cx, r, place, &context, injections)?;
         let use_id = pending.spec.use_id.clone();
         let mut row = pending_row(cx, r, place, &context, &pending);
         let store = self.0.vault.store();
         let item = &context.item;
         let grant =
-            store.reader(|c| grants::covering(c, &cx.ws, &item, &cx.bot_id, &pending.scope))?;
+            store.reader(|c| grants::covering(c, &cx.ws, item, &cx.bot_id, &pending.scope))?;
         if let Some(g) = grant {
             row.status = "running".into();
             row.grant_id = Some(g.clone());
@@ -743,7 +741,7 @@ impl SecretUses {
         let use_id = pending.spec.use_id.clone();
         let shown = &r.command;
         let cwd = &pending.spec.cwd;
-        let high = !grants::grantable(&item);
+        let high = !grants::grantable(item);
         let mut question = format!("{bot_name} 想用「{}」：{}", item.title, r.purpose.trim());
         if item.template == BANK_CARD {
             question.push_str("（这次使用可能涉及付款）");
