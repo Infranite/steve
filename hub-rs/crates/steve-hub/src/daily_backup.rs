@@ -68,7 +68,17 @@ pub fn status(home: &Path, db: &Path, on: bool, keep_days: u64) -> Value {
         .iter()
         .rev()
         .find(|m| m.reason == Reason::Daily)
-        .map(|m| json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes}));
+        .map(|m| {
+            // What the file archive takes on disk now; a removed archive counts zero.
+            let files_bytes: u64 = m
+                .files
+                .artifacts
+                .iter()
+                .filter_map(|a| std::fs::metadata(m.directory.join(&a.name)).ok())
+                .map(|f| f.len())
+                .sum();
+            json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes,"files_bytes":files_bytes})
+        });
     let retention = backup::retention_status(&out).unwrap_or_else(|_| backup::RetentionStatus {
         failures: 1,
         max_bytes: backup::TOTAL_BYTES,

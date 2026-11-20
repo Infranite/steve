@@ -70,14 +70,16 @@ pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String>
 pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf>> {
     let parts: Vec<&str> = PARTS
         .into_iter()
-        .filter(|p| fs::symlink_metadata(home.join(p)).is_ok())
+        .filter(|p| home.join(p).exists())
         .collect();
     if parts.is_empty() {
+        report_skipped(&[]);
         return Ok(None);
     }
     let dest = out.join("files.tar");
     let partial = out.join("files.tar.partial");
     let _ = fs::remove_file(&partial);
+    let mut skipped = vec![];
     let written = (|| {
         let file = fs::OpenOptions::new()
             .write(true)
@@ -87,26 +89,16 @@ pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf
         let mut b = tar::Builder::new(file);
         b.follow_symlinks(false);
         for part in parts {
-            let path = home.join(part);
-            if !fs::symlink_metadata(&path)?.is_dir() {
-                b.append_path_with_name(&path, part)?;
-            } else if part == "signing" {
-                for entry in fs::read_dir(&path)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    if name == NOT_COPIED {
-                        continue;
-                    }
-                    let inside = Path::new(part).join(&name);
-                    if entry.file_type()?.is_dir() {
-                        b.append_dir_all(&inside, entry.path())?;
-                    } else {
-                        b.append_path_with_name(entry.path(), &inside)?;
-                    }
-                }
-            } else {
-                b.append_dir_all(part, &path)?;
-            }
+            // Only item workspaces contain regenerable toolchain data. The other parts
+            // hold durable user files even when their names or markers resemble caches.
+            append(
+                &mut b,
+                home,
+                Path::new(part),
+                &mut skipped,
+                true,
+                part == "workspaces",
+            )?;
         }
         let mut file = b.into_inner()?;
         file.flush()?;
@@ -120,14 +112,101 @@ pub(crate) fn archive(home: &Path, out: &Path) -> std::io::Result<Option<PathBuf
         let _ = fs::remove_file(&partial);
         return Err(error);
     }
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    report_skipped(&skipped);
     Ok(Some(dest))
+}
+
+#[derive(Debug)]
+struct SkippedDir {
+    path: PathBuf,
+    bytes: u64,
+}
+fn report_skipped(skipped: &[SkippedDir]) {
+    let mut bytes = 0u64;
+    for entry in skipped {
+        bytes = bytes.saturating_add(entry.bytes);
+        tracing::debug!(path = %entry.path.display(), bytes = entry.bytes,
+            "backup: skipped regenerable directory");
+    }
+    tracing::info!(
+        skipped_dirs = skipped.len(),
+        skipped_bytes = bytes,
+        "backup: regenerable directories skipped"
+    );
+}
+
+/// A part's root is followed (it may be the owner's link to another disk); nothing below it is.
+/// Only the workspace part enables the shared cache predicate, at any depth.
+fn append(
+    archive: &mut tar::Builder<fs::File>,
+    home: &Path,
+    relative: &Path,
+    skipped: &mut Vec<SkippedDir>,
+    top_level: bool,
+    skip_caches: bool,
+) -> std::io::Result<()> {
+    let path = home.join(relative);
+    let metadata = if top_level {
+        fs::metadata(&path)?
+    } else {
+        fs::symlink_metadata(&path)?
+    };
+    if relative == Path::new("signing").join(NOT_COPIED) {
+        return Ok(());
+    }
+    if skip_caches && metadata.is_dir() && steve_core::workspace::is_disposable_dir(&path, None) {
+        skipped.push(SkippedDir {
+            path: relative.to_owned(),
+            bytes: logical_bytes(&path),
+        });
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        // Keep the signing layout: its children, without a root entry.
+        if relative != Path::new("signing") {
+            archive.append_dir(relative, &path)?;
+        }
+        for entry in fs::read_dir(&path)? {
+            append(
+                archive,
+                home,
+                &relative.join(entry?.file_name()),
+                skipped,
+                false,
+                skip_caches,
+            )?;
+        }
+    } else {
+        archive.append_path_with_name(&path, relative)?;
+    }
+    Ok(())
+}
+
+/// Logging only: disappearing or unreadable cache entries contribute zero and never fail a backup.
+/// Links are not followed while measuring a skipped directory.
+fn logical_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let mut bytes = if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    };
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+            bytes = bytes.saturating_add(logical_bytes(&entry.path()));
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn archive_excludes_keychain_password_and_never_follows_symlinks() {
+    fn archive_excludes_keychain_password_and_follows_only_part_roots() {
         let home = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
@@ -149,20 +228,23 @@ mod tests {
                 )
             })
             .collect();
+        // A part root that is a link is followed (main's daily backup semantics since v0.5.0);
+        // links below a part root are stored as links.
         assert!(
             entries
                 .iter()
-                .any(|(name, link)| name == "secrets" && *link)
+                .any(|(name, link)| name.trim_end_matches('/') == "secrets" && !*link)
         );
+        assert!(entries.iter().any(|(name, _)| name == "secrets/secret"));
         assert!(
             entries
                 .iter()
                 .any(|(name, link)| name == "signing/link" && *link)
         );
         assert!(
-            !entries
-                .iter()
-                .any(|(name, _)| name.contains("keychain-pass") || name.ends_with("secret"))
+            !entries.iter().any(
+                |(name, _)| name.contains("keychain-pass") || name.starts_with("signing/link/")
+            )
         );
     }
     #[test]

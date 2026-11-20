@@ -6,7 +6,7 @@ Dir	steve-acp/src/transcript.rs	2
 Dir	steve-confine/src/control.rs	1
 Dir	steve-confine/src/profile.rs	1
 Dir	steve-core/src/workspace.rs	6
-Dir	steve-hub/src/admin/backup.rs	1
+Dir	steve-hub/src/admin/backup.rs	2
 Dir	steve-hub/src/api/outputs.rs	1
 Dir	steve-hub/src/api/projects.rs	2
 Dir	steve-hub/src/nodes/install.rs	1
