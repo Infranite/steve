@@ -53,6 +53,9 @@ struct Record {
     previous_release: Option<PathBuf>,
 }
 
+/// How long before the switch helper's deadline a new release still claims the switch.
+const CLAIM_MARGIN_MS: i64 = 30_000;
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -158,6 +161,38 @@ pub fn note_linked(home: &Path) {
             set_phase(home, &mut r, "linked", None);
         }
     }
+}
+
+/// Called by a Node about to upgrade its journal's schema, before it opens the journal: no older
+/// release can open it afterwards, so going back would leave a Node that cannot start. A switch
+/// helper still waiting for this build — possibly from the release being replaced, which knows
+/// only `linked` as success — is told now, before the upgrade, that the switch is through. One
+/// whose wait is over or nearly over may already be going back: the journal is left as it is and
+/// this start fails, for the previous release to start in its place.
+pub fn claim_switch_before_journal_upgrade(home: &Path) -> anyhow::Result<()> {
+    claim_switch(home, own_build().as_ref(), now())
+}
+
+fn claim_switch(home: &Path, me: Option<&BuildIdentity>, t: i64) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let Some(me) = me else { return Ok(()) };
+    for mut r in records(home) {
+        if r.state.phase != "switching" || r.request.build != *me {
+            continue;
+        }
+        let wait = r.request.health_secs as i64 * 1000;
+        let op = r.state.operation.as_str().to_owned();
+        // the helper's own wait starts after it stopped the old release, so this is earlier
+        anyhow::ensure!(
+            t < r.state.updated.0 + wait - (wait / 4).min(CLAIM_MARGIN_MS),
+            "node upgrade {op}: the switch helper is done waiting; leaving the journal to the release it goes back to"
+        );
+        r.state.phase = "linked".into();
+        r.state.error = None;
+        r.state.updated = Timestamp(t);
+        save(home, &r).with_context(|| format!("node upgrade {op}: claiming the switch"))?;
+    }
+    Ok(())
 }
 
 /// A Node installed as a service from a release bundle, running from the release its service
@@ -1247,6 +1282,126 @@ mod tests {
         assert!(s.error.unwrap().contains("did not link"));
         assert_eq!(svc.current, home.path().join("releases/old"));
         assert_eq!(svc.calls.last().unwrap(), "start");
+    }
+
+    /// The service around a release that upgrades the journal (its schema version, as text) when
+    /// it starts and then, like a Node that cannot reach its Hub, never links. `claims`: it claims
+    /// the switch before upgrading, as this release does. The previous release starts only on a
+    /// journal it can read.
+    struct Upgrading {
+        home: PathBuf,
+        current: PathBuf,
+        journal: PathBuf,
+        claims: bool,
+        me: BuildIdentity,
+        old_started: Option<bool>,
+    }
+
+    impl ServiceOps for Upgrading {
+        fn stop(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn update(&mut self, release: &Path) -> anyhow::Result<()> {
+            self.current = release.to_owned();
+            Ok(())
+        }
+        fn start(&mut self) -> anyhow::Result<()> {
+            let version: u32 = std::fs::read_to_string(&self.journal)?.parse()?;
+            if self.current.ends_with("new") {
+                if version < 4 {
+                    if self.claims {
+                        claim_switch(&self.home, Some(&self.me), now())?;
+                    }
+                    std::fs::write(&self.journal, "4")?;
+                }
+            } else {
+                // "journal needs a newer Node", again and again
+                self.old_started = Some(version <= 3);
+            }
+            Ok(())
+        }
+    }
+
+    fn upgrading(home: &Path, op: &str, claims: bool) -> Upgrading {
+        switching(home, op);
+        let journal = home.join("journal-version");
+        std::fs::write(&journal, "3").unwrap();
+        Upgrading {
+            home: home.into(),
+            current: home.join("releases/old"),
+            journal,
+            claims,
+            me: load(home, op).unwrap().unwrap().request.build,
+            old_started: None,
+        }
+    }
+
+    #[test]
+    fn going_back_after_the_journal_upgrade_leaves_a_node_that_cannot_start() {
+        // what a helper does when the new release does not claim the switch
+        let home = tempfile::tempdir().unwrap();
+        let mut svc = upgrading(home.path(), "nup_stuck", false);
+        let s = run_switch(
+            home.path(),
+            "nup_stuck",
+            &mut svc,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(s.phase, "rolled_back");
+        assert_eq!(std::fs::read_to_string(&svc.journal).unwrap(), "4");
+        assert_eq!(svc.old_started, Some(false));
+    }
+
+    #[test]
+    fn a_release_that_upgrades_the_journal_claims_the_switch_first() {
+        let home = tempfile::tempdir().unwrap();
+        let mut svc = upgrading(home.path(), "nup_claim", true);
+        let s = run_switch(
+            home.path(),
+            "nup_claim",
+            &mut svc,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(s.phase, "succeeded");
+        assert_eq!(svc.current, home.path().join("releases/new"));
+        assert_eq!(std::fs::read_to_string(&svc.journal).unwrap(), "4");
+        assert_eq!(svc.old_started, None, "never went back");
+    }
+
+    #[test]
+    fn past_the_helpers_wait_the_journal_is_left_for_the_release_it_goes_back_to() {
+        let home = tempfile::tempdir().unwrap();
+        let mut svc = upgrading(home.path(), "nup_late", true);
+        let mut r = load(home.path(), "nup_late").unwrap().unwrap();
+        // health_secs is 1: the wait is over
+        r.state.updated = Timestamp(now() - 1_000);
+        save(home.path(), &r).unwrap();
+        let s = run_switch(home.path(), "nup_late", &mut svc, Duration::from_millis(10)).unwrap();
+        assert_eq!(s.phase, "rolled_back");
+        assert_eq!(std::fs::read_to_string(&svc.journal).unwrap(), "3");
+        assert_eq!(svc.old_started, Some(true));
+    }
+
+    #[test]
+    fn only_a_waiting_switch_to_this_build_is_claimed() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_other");
+        let me = load(home.path(), "nup_other")
+            .unwrap()
+            .unwrap()
+            .request
+            .build;
+        let mut other = me.clone();
+        other.commit = "another".into();
+        claim_switch(home.path(), Some(&other), now()).unwrap();
+        claim_switch(home.path(), None, now()).unwrap();
+        let r = load(home.path(), "nup_other").unwrap().unwrap();
+        assert_eq!(r.state.phase, "switching");
+        claim_switch(home.path(), Some(&me), now()).unwrap();
+        let r = load(home.path(), "nup_other").unwrap().unwrap();
+        assert_eq!(r.state.phase, "linked");
     }
 
     #[test]

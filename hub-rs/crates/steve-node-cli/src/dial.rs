@@ -228,7 +228,12 @@ pub async fn run(home: &Home) -> Result<()> {
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
-    let node = LocalNode::open(home.node_config(node_id)?).map_err(|e| anyhow!("{e}"))?;
+    let cfg = home.node_config(node_id)?;
+    // past a schema upgrade, going back to the release before cannot work
+    if LocalNode::journal_upgrade_pending(&cfg.home).map_err(|e| anyhow!("{e}"))? {
+        crate::upgrade::claim_switch_before_journal_upgrade(&home.0)?;
+    }
+    let node = LocalNode::open(cfg).map_err(|e| anyhow!("{e}"))?;
     // installed as a service from a release: its Hub may upgrade it
     if let Some(u) = crate::upgrade::ServiceUpgrader::detect(&home.0) {
         node.set_upgrader(u);

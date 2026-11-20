@@ -379,6 +379,23 @@ fn conv<T>(r: Result<T, BadId>) -> rusqlite::Result<T> {
     })
 }
 
+/// See [`crate::journal_upgrade_pending`].
+pub(crate) fn upgrade_pending(path: &Path) -> ApiResult<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    // read-write without create: a WAL journal left by a crash cannot be read read-only
+    let c = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(internal)?;
+    let version: i64 = c
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(internal)?;
+    Ok(version > 0 && version < VERSION)
+}
+
 pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(ErrorCode::Internal, format!("journal: {e}"))
 }

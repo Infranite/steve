@@ -884,3 +884,25 @@ fn failed_ledger_deletion_rolls_back_everything() {
     drop(c);
     assert_eq!(Writer::open(&p).unwrap().1, 8);
 }
+
+#[test]
+fn an_upgrade_is_pending_only_for_an_older_journal_and_checking_changes_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("node.sqlite3");
+    assert!(
+        !crate::journal::upgrade_pending(&path).unwrap(),
+        "no journal yet"
+    );
+    assert!(!path.exists(), "checking creates nothing");
+    drop(v3(&path, true, false, 3));
+    assert!(crate::journal::upgrade_pending(&path).unwrap());
+    assert!(
+        crate::journal::upgrade_pending(&path).unwrap(),
+        "checking upgrades nothing"
+    );
+    drop(crate::journal::Writer::open(&path).unwrap());
+    assert!(
+        !crate::journal::upgrade_pending(&path).unwrap(),
+        "already v4"
+    );
+}

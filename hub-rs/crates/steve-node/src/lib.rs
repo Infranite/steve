@@ -1466,6 +1466,13 @@ impl LocalNode {
         self.0.confine.state()
     }
 
+    /// Whether opening the journal under `home` (a [`NodeConfig::home`]) upgrades its schema,
+    /// after which no older release can open it. Reads the version only; creates and changes
+    /// nothing.
+    pub fn journal_upgrade_pending(home: &Path) -> ApiResult<bool> {
+        journal::upgrade_pending(&home.join("node.sqlite3"))
+    }
+
     /// Takes the home (one Node per journal) and opens a new incarnation. A normal v4 restart
     /// stops nothing: groups left by the old incarnation keep their sessions held until the Hub
     /// abandons them. The one-time v3 upgrade refuses to discard the old command and process
