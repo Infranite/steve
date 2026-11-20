@@ -100,8 +100,7 @@ steve-digest	crates/steve-digest/src/facts.rs	cognitive_complexity	33
 steve-digest	crates/steve-digest/src/facts.rs	too_many_lines	251
 steve-digest	crates/steve-digest/src/todo_tools.rs	too_many_lines	162
 steve-flow	crates/steve-flow/src/corrections.rs	too_many_lines	139
-steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29,27
-steve-flow	crates/steve-flow/src/engine.rs	too_many_lines	333
+steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29
 steve-flow	crates/steve-flow/src/exec.rs	too_many_lines	121
 steve-flow	crates/steve-flow/src/expr.rs	too_many_lines	115
 steve-flow	crates/steve-flow/src/ingest.rs	cognitive_complexity	30
