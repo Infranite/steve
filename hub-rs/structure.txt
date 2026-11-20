@@ -56,16 +56,13 @@ steve-core	crates/steve-core/src/pull.rs	too_many_lines	469
 steve-core	crates/steve-core/src/release.rs	too_many_lines	235,126
 steve-core	crates/steve-core/src/shadow.rs	cognitive_complexity	26
 steve-core	crates/steve-core/src/shadow.rs	too_many_lines	149
-steve-core	crates/steve-core/src/sweep.rs	too_many_lines	111
 steve-core	crates/steve-core/src/takeover.rs	too_many_lines	161,129
-steve-core	crates/steve-core/src/thread/flowback.rs	too_many_lines	113
 steve-core	crates/steve-core/src/thread/handle.rs	cognitive_complexity	35
 steve-core	crates/steve-core/src/thread/handle.rs	too_many_lines	255,108,102
 steve-core	crates/steve-core/src/thread/mod.rs	cognitive_complexity	27
 steve-core	crates/steve-core/src/thread/mod.rs	too_many_lines	120
 steve-core	crates/steve-core/src/thread/research.rs	cognitive_complexity	39
 steve-core	crates/steve-core/src/thread/research.rs	too_many_lines	249
-steve-core	crates/steve-core/src/thread/suggest.rs	too_many_lines	163
 steve-core	crates/steve-core/src/work.rs	cognitive_complexity	30
 steve-core	crates/steve-core/src/work.rs	too_many_lines	134
 steve-core	crates/steve-core/src/workflow.rs	cognitive_complexity	35,26

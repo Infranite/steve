@@ -371,116 +371,156 @@ pub fn cleanup(db: &Db, ws: &str) -> Result<Vec<String>> {
     let msgs = db.messages_in(ws, "steve", 100_000)?;
     let notices = db.messages_in(ws, "notify", 100_000)?;
     let mut hid = vec![];
-    let hide = |m: &Message, hid: &mut Vec<String>| -> Result<()> {
-        db.message_patch_meta(
-            &m.id,
-            &with_meta(m, |o| {
-                o.insert("hidden".into(), json!(true));
-            }),
-        )?;
-        hid.push(m.id.clone());
-        Ok(())
-    };
     /* release notices belong to the notifications */
     for m in &msgs {
         if !hidden(m) && m.author == "steve" && m.meta.get("notice").is_some_and(|n| n.is_object())
         {
-            hide(m, &mut hid)?;
+            hide_legacy_message(db, m, &mut hid)?;
         }
     }
     for ti in th.items(ws)? {
         let item = ti.item_id.as_str();
-        let mut events: Vec<(i64, Update<'static>)> = vec![];
         let announce = ti
             .reply_msg
             .as_deref()
             .and_then(|r| msgs.iter().find(|m| m.id == r));
-        if let Some(a) = announce
-            && let Some(list) = a.meta.get("updates").and_then(Value::as_array)
-        {
-            for v in list {
-                if let Some(u) = update_of(v) {
-                    events.push((v["at"].as_i64().unwrap_or(a.created), u));
-                }
-            }
-        }
-        for m in msgs.iter().filter(|m| {
-            m.item_id.as_deref() == Some(item)
-                && m.author == "steve"
-                && m.meta.get("update").is_some_and(|u| u.is_object())
-        }) {
-            let Some(u) = update_of(&m.meta["update"]) else {
-                continue;
-            };
-            events.push((m.meta["update"]["at"].as_i64().unwrap_or(m.created), u));
-            if u_is_answer(m) {
-                /* a question's answer: a normal message from now on */
-                db.message_patch_meta(
-                    &m.id,
-                    &with_meta(m, |o| {
-                        if let Some(x) = o.remove("update") {
-                            o.insert("was_update".into(), x);
-                        }
-                    }),
-                )?;
-            } else if !hidden(m) {
-                hide(m, &mut hid)?;
-            }
-        }
-        for n in notices
-            .iter()
-            .filter(|n| n.item_id.as_deref() == Some(item))
-        {
-            if n.meta["notice"]["level"] == "success" {
-                events.push((
-                    n.created,
-                    Update {
-                        kind: "release",
-                        /* “已发布Hub 和前端新版本 20261102-…” → the version */
-                        text: n
-                            .text
-                            .rsplit("新版本 ")
-                            .next()
-                            .and_then(|v| v.split_whitespace().next())
-                            .unwrap_or("")
-                            .trim_end_matches('（')
-                            .to_string(),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
+        let mut events = announcement_events(announce);
+        collect_legacy_messages(db, item, &msgs, &mut events, &mut hid)?;
+        collect_release_notices(item, &notices, &mut events);
         events.sort_by_key(|(t, _)| *t);
         let Some(a) = announce else { continue };
-        let mut card = a
-            .meta
-            .get("card")
-            .cloned()
-            .unwrap_or_else(|| json!({"item": item, "state": "run", "at": a.created}));
-        for (t, u) in &events {
-            card = merged(Some(&card), item, u, *t);
-        }
-        /* a decision answered since is not pending any more */
-        if let Some(d) = card.get("decision").and_then(Value::as_str)
-            && db.decision(d)?.is_none_or(|d| d.status != "open")
-            && let Some(o) = card.as_object_mut()
-        {
-            o.remove("decision");
-        }
-        db.message_patch_meta(
-            &a.id,
-            &with_meta(a, |o| {
-                o.insert("card".into(), card);
-                if let Some(x) = o.remove("updates") {
-                    o.insert("was_updates".into(), x);
-                }
-            }),
-        )?;
+        write_legacy_card(db, item, a, &events)?;
     }
     let mut set = Map::new();
     set.insert(CLEANUP_KEY.into(), json!("v1"));
     db.settings_set(ws, &set, "steve")?;
     Ok(hid)
+}
+
+/// Hide a legacy message without deleting it, preserving the cleanup's result order.
+fn hide_legacy_message(db: &Db, m: &Message, hid: &mut Vec<String>) -> Result<()> {
+    db.message_patch_meta(
+        &m.id,
+        &with_meta(m, |o| {
+            o.insert("hidden".into(), json!(true));
+        }),
+    )?;
+    hid.push(m.id.clone());
+    Ok(())
+}
+
+/// Read the events embedded in the original announcement.
+fn announcement_events(announce: Option<&Message>) -> Vec<(i64, Update<'static>)> {
+    let mut events: Vec<(i64, Update<'static>)> = vec![];
+    if let Some(a) = announce
+        && let Some(list) = a.meta.get("updates").and_then(Value::as_array)
+    {
+        for v in list {
+            if let Some(u) = update_of(v) {
+                events.push((v["at"].as_i64().unwrap_or(a.created), u));
+            }
+        }
+    }
+    events
+}
+
+/// Fold legacy lifecycle messages, retaining full answers as ordinary messages.
+fn collect_legacy_messages(
+    db: &Db,
+    item: &str,
+    msgs: &[Message],
+    events: &mut Vec<(i64, Update<'static>)>,
+    hid: &mut Vec<String>,
+) -> Result<()> {
+    for m in msgs.iter().filter(|m| {
+        m.item_id.as_deref() == Some(item)
+            && m.author == "steve"
+            && m.meta.get("update").is_some_and(|u| u.is_object())
+    }) {
+        let Some(u) = update_of(&m.meta["update"]) else {
+            continue;
+        };
+        events.push((m.meta["update"]["at"].as_i64().unwrap_or(m.created), u));
+        if u_is_answer(m) {
+            /* a question's answer: a normal message from now on */
+            db.message_patch_meta(
+                &m.id,
+                &with_meta(m, |o| {
+                    if let Some(x) = o.remove("update") {
+                        o.insert("was_update".into(), x);
+                    }
+                }),
+            )?;
+        } else if !hidden(m) {
+            hide_legacy_message(db, m, hid)?;
+        }
+    }
+    Ok(())
+}
+
+/// Add successful notification releases to the item's event history.
+fn collect_release_notices(
+    item: &str,
+    notices: &[Message],
+    events: &mut Vec<(i64, Update<'static>)>,
+) {
+    for n in notices
+        .iter()
+        .filter(|n| n.item_id.as_deref() == Some(item))
+    {
+        if n.meta["notice"]["level"] == "success" {
+            events.push((
+                n.created,
+                Update {
+                    kind: "release",
+                    /* “已发布Hub 和前端新版本 20261102-…” → the version */
+                    text: n
+                        .text
+                        .rsplit("新版本 ")
+                        .next()
+                        .and_then(|v| v.split_whitespace().next())
+                        .unwrap_or("")
+                        .trim_end_matches('（')
+                        .to_string(),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+}
+
+/// Merge events into the announcement and clear decisions that are no longer pending.
+fn write_legacy_card(
+    db: &Db,
+    item: &str,
+    a: &Message,
+    events: &[(i64, Update<'static>)],
+) -> Result<()> {
+    let mut card = a
+        .meta
+        .get("card")
+        .cloned()
+        .unwrap_or_else(|| json!({"item": item, "state": "run", "at": a.created}));
+    for (t, u) in events {
+        card = merged(Some(&card), item, u, *t);
+    }
+    /* a decision answered since is not pending any more */
+    if let Some(d) = card.get("decision").and_then(Value::as_str)
+        && db.decision(d)?.is_none_or(|d| d.status != "open")
+        && let Some(o) = card.as_object_mut()
+    {
+        o.remove("decision");
+    }
+    db.message_patch_meta(
+        &a.id,
+        &with_meta(a, |o| {
+            o.insert("card".into(), card);
+            if let Some(x) = o.remove("updates") {
+                o.insert("was_updates".into(), x);
+            }
+        }),
+    )?;
+    Ok(())
 }
 
 /// A flow-back message that is the answer to a question the user asked (posted back in full).
