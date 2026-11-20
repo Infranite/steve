@@ -39,7 +39,11 @@ fn failure_insert_contains_error_and_repeats_only_the_latest_matching_record() {
     let first = record(&e, "bad graph", 1, 1000);
     assert_eq!(record(&e, "bad graph", 1, 61_000), first);
     let repeated = history(&e).pop().unwrap();
-    assert_eq!(repeated.error.as_deref(), Some("bad graph"));
+    assert_eq!(repeated.error.as_deref(), Some(runs::START_REJECTED_CODE));
+    assert_eq!(
+        repeated.context["error_fingerprint"],
+        steve_store::sha("bad graph")
+    );
     assert_eq!(repeated.context["start_failures"], 2);
     assert_eq!(repeated.context["first_at"], 1000);
     assert_eq!(repeated.started, 61_000);
@@ -361,7 +365,14 @@ fn changed_errors_start_new_history_with_view_counts_and_first_times() {
     record(&e, "changed error", 1, 121_000);
     let changed = history(&e)[0].clone();
     assert_eq!(changed.view().start_failures, Some(1));
-    assert_eq!(changed.view().error.as_deref(), Some("changed error"));
+    assert_eq!(
+        changed.view().error.as_deref(),
+        Some(steve_flow::scheduler::start_rejected().as_str())
+    );
+    assert_eq!(
+        changed.context["error_fingerprint"],
+        steve_store::sha("changed error")
+    );
     assert_eq!(changed.view().first_at, Some(121_000));
     record(&e, "first error", 1, 181_000);
     let rows = history(&e);
@@ -454,7 +465,8 @@ fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() 
         diagnostic.run_id, id,
         "newer valid metadata does not hide the old damage"
     );
-    assert!(diagnostic.message.contains("修改调度或 Bot 即可恢复"));
+    assert_eq!(diagnostic.code, "startup_metadata_recovered");
+    assert!(!diagnostic.message.contains("修改调度或 Bot 即可恢复"));
 }
 
 #[test]
@@ -545,4 +557,138 @@ fn startup_rejection_and_recovery_diagnostics_follow_the_readers_language() {
             assert!(d.message.contains(recovery));
         });
     }
+}
+
+#[tokio::test]
+async fn r4g_startup_storage_is_language_neutral_and_views_follow_the_reader() {
+    use serde_json::json;
+    use steve_flow::scheduler;
+    use steve_modules::testkit::{ME, call, caller};
+    let e = FlowEnv::new();
+    let (status,schedule)=call(&e.router(),Some(&caller(WS,ME)),"POST","/schedules",Some(&json!({"name":"startup","cron":"0 9 * * *","what":"report","bot":"steve","mode":"report"}))).await;
+    assert_eq!(status, 200, "{schedule}");
+    let flow = schedule["id"].as_str().unwrap();
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [flow])?;
+            Ok(())
+        })
+        .unwrap();
+    for (n, lang) in [steve_i18n::ZH_CN, steve_i18n::EN].into_iter().enumerate() {
+        steve_i18n::with(lang, || {
+            scheduler::start_from_source(
+                &e.flow,
+                WS,
+                flow,
+                "digest.bot",
+                3,
+                1000 + n as i64 * 60_000,
+                |_| Ok(true),
+            )
+        })
+        .unwrap();
+    }
+    let rows = e
+        .env
+        .store()
+        .reader(|c| runs::page(c, WS, flow, None, 50))
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "language changes cannot split the same internal rejection"
+    );
+    let row = &rows[0];
+    assert_eq!(row.error.as_deref(), Some("startup_rejected"));
+    assert_eq!(row.outcome_label, "startup_rejected");
+    assert_eq!(
+        row.context["start_error"],
+        json!({"code":"startup_rejected","params":{}})
+    );
+    assert_eq!(row.context["start_failures"], 2);
+    assert_eq!(row.view().startup.unwrap().attempts, 2);
+    for (lang, expected) in [
+        (steve_i18n::ZH_CN, "此调度无法启动"),
+        (steve_i18n::EN, "This schedule could not start"),
+    ] {
+        let view = steve_i18n::with(lang, || row.view());
+        assert!(view.error.as_ref().unwrap().contains(expected));
+        assert_eq!(view.error.as_deref(), Some(view.outcome_label.as_str()));
+        let (status, body) = steve_i18n::scope(
+            lang,
+            call(
+                &e.router(),
+                Some(&caller(WS, ME)),
+                "GET",
+                &format!("/schedules/{flow}/runs"),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body[0]["start_failures"], 2);
+        assert!(
+            body[0]["error"].as_str().unwrap().contains(expected),
+            "{lang}: {body}"
+        );
+    }
+    e.env.store().with_conn(|c| { c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&row.id])?;Ok(()) }).unwrap();
+    let (status, body) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/schedules/{flow}"),
+        Some(&json!({"name":"saved configuration"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let diagnostic = e
+        .env
+        .store()
+        .reader(|c| runs::startup_diagnostic(c, WS, flow, "digest.bot"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        diagnostic.code, "startup_metadata_recovered",
+        "saving alone removes the obsolete recovery instruction"
+    );
+    assert_eq!(diagnostic.run_id, row.id);
+}
+
+#[test]
+fn r4g_diagnostics_distinguish_recovered_and_unattributed_history() {
+    let e = FlowEnv::new();
+    let damaged = bounded(&e, "bad", 1, 1000);
+    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&damaged])?;Ok(())}).unwrap();
+    bounded(&e, "another configuration", 2, 61_000);
+    let diagnostic = e
+        .env
+        .store()
+        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic.code, "startup_metadata_recovered");
+    assert!(!diagnostic.message.contains("修改调度或 Bot 即可恢复"));
+    assert_eq!(diagnostic.run_id, damaged);
+    let unattributed = ordinary(&e, 100_000);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE flow_runs SET context='broken' WHERE id=?",
+                [&unattributed],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let diagnostic = e
+        .env
+        .store()
+        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic.code, "startup_metadata_unattributed");
+    assert!(!diagnostic.message.contains("修改调度或 Bot 即可恢复"));
+    assert_eq!(diagnostic.run_id, unattributed);
 }

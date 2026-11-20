@@ -14,8 +14,9 @@ pub use unpublished::{UNPUBLISHED_START_BATCH, cleanup_unpublished_digest_starts
 mod start_failures;
 pub(crate) use start_failures::record_start_rejection;
 pub use start_failures::{
-    FailedStart, StartupCheck, StartupDiagnostic, StartupState, StartupStatus, StartupSummary,
-    record_start_failure, record_started, startup_check, startup_diagnostic, startup_state,
+    FailedStart, START_REJECTED_CODE, StartupCheck, StartupDiagnostic, StartupState, StartupStatus,
+    StartupSummary, record_start_failure, record_started, startup_check, startup_diagnostic,
+    startup_state,
 };
 
 /// Runs kept per schedule regardless of age, and the age below which every run is kept.
@@ -91,6 +92,10 @@ impl RunRow {
 
     /// One entry of `GET /schedules/:id/runs`.
     pub fn view(&self) -> RunView {
+        let startup_error = (self.status == "failed"
+            && self.error.as_deref() == Some(START_REJECTED_CODE))
+        .then(|| start_failures::error_text(&self.context))
+        .flatten();
         RunView {
             id: self.id.clone(),
             at: self.at(),
@@ -98,10 +103,12 @@ impl RunRow {
             ended: self.ended,
             trigger: self.trigger_kind.clone(),
             status: self.status.clone(),
-            outcome_label: self.outcome_label.clone(),
+            outcome_label: startup_error
+                .clone()
+                .unwrap_or_else(|| self.outcome_label.clone()),
             item_id: self.work_item_id.clone(),
             cost_usd: self.cost,
-            error: self.error.clone(),
+            error: startup_error.or_else(|| self.error.clone()),
             start_failures: self.context.get("start_failures").and_then(Value::as_i64),
             first_at: self.context.get("first_at").and_then(Value::as_i64),
             startup: start_failures::summary(&self.context),

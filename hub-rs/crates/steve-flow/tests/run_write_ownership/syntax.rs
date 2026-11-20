@@ -195,12 +195,28 @@ fn masked(source: &str) -> String {
 // closing delimiter: in particular a cfg(test) last field must not hide a later impl.
 fn skipped_end(code: &str, start: usize) -> usize {
     let mut stack = Vec::new();
+    let mut expression = false;
     for (offset, b) in code.as_bytes()[start..].iter().enumerate() {
         let at = start + offset;
         match b {
             b'{' => stack.push(b'}'),
             b'(' => stack.push(b')'),
             b'[' => stack.push(b']'),
+            b'=' if stack.is_empty() && code.as_bytes().get(at + 1) == Some(&b'>') => {
+                expression = true
+            }
+            // Type fields/items can contain nested generics; in a match-arm expression only
+            // an explicit turbofish opens generics, never a less-than comparison.
+            b'<' if stack.iter().all(|d| *d == b'>')
+                && (!expression || code[..at].trim_end().ends_with("::")) =>
+            {
+                stack.push(b'>')
+            }
+            b'>' if stack.last() == Some(&b'>')
+                && code.as_bytes().get(at.wrapping_sub(1)) != Some(&b'-') =>
+            {
+                stack.pop();
+            }
             b'}' | b')' | b']' => {
                 if stack.last() != Some(b) {
                     return at;
@@ -353,4 +369,42 @@ fn matching_files(pattern: &std::path::Path) -> Vec<std::path::PathBuf> {
     walk(base, &re, &mut out);
     out.sort();
     out
+}
+
+// Follow declared module ownership instead of guessing from a file's name. Attribute paths
+// are relative to the declaring file; ordinary children follow Rust's foo.rs/foo/mod.rs rule.
+pub fn modules(source: &str, file: &std::path::Path, test_only: bool) -> Vec<std::path::PathBuf> {
+    let code = masked(source);
+    let declarations = regex::Regex::new(
+        r"(?s)((?:#\s*\[[^\]]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+    )
+    .unwrap();
+    let test = regex::Regex::new(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]").unwrap();
+    let path = regex::Regex::new(r##"#\s*\[\s*path\s*=\s*("(?:\\.|[^"\\])*")\s*\]"##).unwrap();
+    declarations
+        .captures_iter(&code)
+        .flat_map(|decl| {
+            let attrs = decl.get(1).unwrap();
+            if test_only && !test.is_match(attrs.as_str()) {
+                return vec![];
+            }
+            let original = &source[attrs.range()];
+            if let Some(path) = path.captures(original) {
+                let name: String = serde_json::from_str(path.get(1).unwrap().as_str()).unwrap();
+                return vec![file.parent().unwrap().join(name)];
+            }
+            let parent = file.parent().unwrap();
+            let base = match file.file_stem().and_then(|s| s.to_str()) {
+                Some("lib" | "main" | "mod") => parent.to_path_buf(),
+                Some(stem) => parent.join(stem),
+                None => parent.to_path_buf(),
+            };
+            let name = decl.get(2).unwrap().as_str();
+            vec![
+                base.join(format!("{name}.rs")),
+                base.join(name).join("mod.rs"),
+            ]
+        })
+        .filter(|p| p.is_file())
+        .collect()
 }

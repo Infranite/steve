@@ -36,6 +36,27 @@ pub struct StartupSummary {
     pub limit: i64,
 }
 
+/// Persisted identity, independent of any worker/request locale. Parameters are empty for
+/// this rejection today; keeping an explicit object makes the stored contract unambiguous.
+pub const START_REJECTED_CODE: &str = "startup_rejected";
+fn error_identity() -> Value {
+    json!({"code":START_REJECTED_CODE,"params":{}})
+}
+fn valid_error(context: &Value) -> bool {
+    context
+        .get("start_error")
+        .is_some_and(|value| *value == error_identity())
+}
+pub(super) fn error_text(context: &Value) -> Option<String> {
+    context.get("start_error").map(|_| {
+        if valid_error(context) {
+            crate::scheduler::start_rejected()
+        } else {
+            steve_i18n::t!("flow.startup.metadata_invalid")
+        }
+    })
+}
+
 fn metadata(context: &Value) -> Result<Metadata, String> {
     let meta: Metadata =
         serde_json::from_value(context["startup"].clone()).map_err(|e| e.to_string())?;
@@ -50,9 +71,10 @@ fn metadata(context: &Value) -> Result<Metadata, String> {
         return Err("Invalid startup budget".into());
     }
     if meta.state != StartupStatus::Started
-        && (context["start_failures"]
-            .as_i64()
-            .is_none_or(|n| n < 1 || n > meta.attempts)
+        && (!valid_error(context)
+            || context["start_failures"]
+                .as_i64()
+                .is_none_or(|n| n < 1 || n > meta.attempts)
             || context["first_at"].as_i64().is_none())
     {
         return Err("Invalid startup failure history".into());
@@ -79,10 +101,35 @@ pub struct StartupDiagnostic {
     pub flow_id: String,
     pub run_id: String,
 }
-fn diagnostic(row: &StartupRecord, flow: &str) -> StartupDiagnostic {
+fn diagnostic(
+    row: &StartupRecord,
+    flow: &str,
+    source: &str,
+    revision: Option<&Value>,
+) -> StartupDiagnostic {
+    let (code, message) = if row.context["source"].as_str() != Some(source) {
+        (
+            "startup_metadata_unattributed",
+            steve_i18n::t!("flow.startup.metadata_unattributed"),
+        )
+    } else if revision.is_some_and(|current| {
+        row.context["startup"]
+            .get("revision")
+            .is_some_and(|old| old != current)
+    }) {
+        (
+            "startup_metadata_recovered",
+            steve_i18n::t!("flow.startup.metadata_recovered"),
+        )
+    } else {
+        (
+            "startup_metadata_invalid",
+            steve_i18n::t!("flow.startup.metadata_invalid"),
+        )
+    };
     StartupDiagnostic {
-        code: "startup_metadata_invalid",
-        message: steve_i18n::t!("flow.startup.metadata_invalid"),
+        code,
+        message,
         flow_id: flow.into(),
         run_id: row.id.clone(),
     }
@@ -95,8 +142,15 @@ pub fn startup_diagnostic(
     flow: &str,
     source: &str,
 ) -> FlowResult<Option<StartupDiagnostic>> {
+    let revision = match crate::scheduler::startup_revision(c, ws, flow)? {
+        Some(revision) => Some(revision),
+        None => inspect_records(c, ws, flow, source, false, Some)?
+            .filter(|row| !row.unreadable && metadata(&row.context).is_ok())
+            .map(|row| row.context["startup"]["revision"].clone()),
+    };
     inspect_records(c, ws, flow, source, true, |row| {
-        (row.unreadable || metadata(&row.context).is_err()).then(|| diagnostic(&row, flow))
+        (row.unreadable || metadata(&row.context).is_err())
+            .then(|| diagnostic(&row, flow, source, revision.as_ref()))
     })
 }
 
@@ -112,6 +166,7 @@ pub struct FailedStart<'a> {
     pub flow_id: &'a str,
     pub flow_version: i64,
     pub source: &'a str,
+    /// Internal rejection identity/details for the low-level recorder, never localized for storage.
     pub error: &'a str,
     pub now: i64,
     pub revision: &'a Value,
@@ -195,7 +250,12 @@ pub fn startup_check(
             attempts: meta.attempts,
             limit: meta.limit,
         }))),
-        _ => Ok(StartupCheck::Invalid(diagnostic(&row, flow))),
+        _ => Ok(StartupCheck::Invalid(diagnostic(
+            &row,
+            flow,
+            source,
+            Some(revision),
+        ))),
     }
 }
 
@@ -251,7 +311,7 @@ pub fn record_start_failure(tx: &Tx, f: &FailedStart<'_>) -> FlowResult<String> 
     record_start_rejection(tx, f, f.error)
 }
 
-/// The visible explanation is stable; only a fingerprint of the original rejection is stored.
+/// Store only a stable code/parameter object and a fingerprint of the internal rejection.
 /// Distinct errors still split history even when their safe user-facing explanation is identical.
 pub(crate) fn record_start_rejection(
     tx: &Tx,
@@ -284,7 +344,8 @@ pub(crate) fn record_start_rejection(
     };
     let previous = row.filter(|r| {
         r.status == "failed"
-            && r.error.as_deref() == Some(f.error)
+            && r.error.as_deref() == Some(START_REJECTED_CODE)
+            && valid_error(&r.context)
             && r.context["error_fingerprint"] == fingerprint
             && r.flow_version == f.flow_version
             && r.context["source"] == f.source
@@ -320,7 +381,7 @@ pub(crate) fn record_start_rejection(
         limit: f.limit,
     };
     let context = json!({"at":f.now,"first_at":first_at,"trigger":"manual","source":f.source,
-        "start_failures":failures,"startup":meta,"error_fingerprint":fingerprint});
+        "start_failures":failures,"startup":meta,"error_fingerprint":fingerprint,"start_error":error_identity()});
     let reused = previous.is_some();
     let run = match previous {
         Some(r) => r.id,
@@ -332,8 +393,8 @@ pub(crate) fn record_start_rejection(
                 flow_version: f.flow_version,
                 trigger_kind: "manual",
                 status: "failed",
-                outcome_label: f.error,
-                error: Some(f.error),
+                outcome_label: START_REJECTED_CODE,
+                error: Some(START_REJECTED_CODE),
                 cursor: None,
                 context: &context,
                 now: f.now,
@@ -343,7 +404,7 @@ pub(crate) fn record_start_rejection(
     if reused {
         tx.execute(
             "UPDATE flow_runs SET error=?1,outcome_label=?1,context=?2,started=?3,ended=?3 WHERE id=?4",
-            params![f.error, context.to_string(), f.now, run],
+            params![START_REJECTED_CODE, context.to_string(), f.now, run],
         )?;
         publish(tx, f.ws, f.flow_id, &run);
     }

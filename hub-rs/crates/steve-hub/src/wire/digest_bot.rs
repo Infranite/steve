@@ -356,9 +356,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].ended, Some(now));
+        assert_eq!(rows[0].error.as_deref(), Some(runs::START_REJECTED_CODE));
         assert_eq!(
-            rows[0].error.as_deref(),
-            Some(steve_flow::scheduler::start_rejected().as_str())
+            rows[0].context["start_error"],
+            json!({"code":runs::START_REJECTED_CODE,"params":{}})
         );
         assert_eq!(
             e.env
@@ -445,7 +446,15 @@ mod tests {
             serde_json::to_value(&view).unwrap()["start_failures"],
             START_LIMIT
         );
-        assert_eq!(view.error, last.error);
+        assert_eq!(last.error.as_deref(), Some(runs::START_REJECTED_CODE));
+        assert_eq!(
+            last.context["start_error"],
+            json!({"code":runs::START_REJECTED_CODE,"params":{}})
+        );
+        assert_eq!(
+            view.error.as_deref(),
+            Some(steve_flow::scheduler::start_rejected().as_str())
+        );
         assert_eq!(
             last.attempts, 0,
             "flow action retry attempts are independent"

@@ -254,3 +254,44 @@ fn current_dead_budget_survives_old_marker_cleanup_and_reopening() {
         steve_store::Store::open(e.env.store().path(), steve_store::NoPublisher).unwrap();
     assert_eq!(reopened.reader(read).unwrap().unwrap(), before);
 }
+
+#[test]
+fn r4g_old_localized_startup_rows_are_deleted_not_converted() {
+    let e = FlowEnv::new();
+    let mut ctx = context();
+    ctx["start_failures"] = json!(2);
+    ctx["first_at"] = json!(NOW - 60_000);
+    ctx["error_fingerprint"] = json!("a".repeat(64));
+    ctx["startup"] =
+        json!({"format":1,"revision":{"flow":1},"state":"retrying","attempts":2,"limit":3});
+    let id = old(&e, &ctx);
+    let child = dependents(&e, &id);
+    let mut without_fingerprint = ctx.clone();
+    without_fingerprint
+        .as_object_mut()
+        .unwrap()
+        .remove("error_fingerprint");
+    let old_without_fingerprint = old(&e, &without_fingerprint);
+    e.env.store().with_conn(|c| { c.execute_batch("CREATE TRIGGER reject_text_cleanup BEFORE DELETE ON flow_runs BEGIN SELECT RAISE(ABORT,'cleanup refused'); END")?;Ok(()) }).unwrap();
+    assert!(
+        e.env
+            .store()
+            .transaction(runs::cleanup_unpublished_digest_starts)
+            .is_err()
+    );
+    assert!(get(&e, &id).is_some() && get(&e, &old_without_fingerprint).is_some());
+    assert_eq!(counts(&e, &id), (1, 1, 3, 1));
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DROP TRIGGER reject_text_cleanup")?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(clean(&e), 2);
+    assert!(get(&e, &id).is_none());
+    assert!(get(&e, &old_without_fingerprint).is_none());
+    assert!(get(&e, &child).is_some());
+    assert_eq!(counts(&e, &id), (0, 0, 1, 1));
+    assert_eq!(clean(&e), 0);
+}

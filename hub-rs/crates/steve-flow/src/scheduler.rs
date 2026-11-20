@@ -24,7 +24,8 @@ use steve_runtime::schedule::CronExpr;
 pub const BATCH: usize = 200;
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
-/// Stable owner-facing rejection; detailed decoder/storage messages belong in the log.
+/// Reader-localized rejection for projections only; persisted startup errors use the stable code.
+/// Detailed decoder/storage messages belong in the log.
 pub fn start_rejected() -> String {
     steve_i18n::t!("flow.startup.rejected")
 }
@@ -515,7 +516,7 @@ pub fn start_from_source(
                         flow_id: id,
                         flow_version: revision["flow_version"].as_i64().expect("flow revision"),
                         source,
-                        error: &start_rejected(),
+                        error: runs::START_REJECTED_CODE,
                         now,
                         revision: &revision,
                         limit,

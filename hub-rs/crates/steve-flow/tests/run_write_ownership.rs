@@ -29,6 +29,9 @@ fn historical(path: &Path) -> bool {
 fn observe(sql: &str, file: &str, writers: &mut Vec<String>, found: &mut Inventory) {
     if mentions(sql) {
         *found.entry(file.into()).or_default() += 1;
+        if sql.trim().eq_ignore_ascii_case("flow_runs") {
+            *found.entry(format!("bare:{file}")).or_default() += 1;
+        }
     }
     if writes(sql) {
         writers.push(file.into());
@@ -71,15 +74,69 @@ fn scan_inventory(path: &Path, root: &Path, writers: &mut Vec<String>, found: &m
 fn scan(path: &Path, root: &Path, writers: &mut Vec<String>) {
     scan_inventory(path, root, writers, &mut Inventory::new());
 }
-fn walk(dir: &Path, root: &Path, writers: &mut Vec<String>, found: &mut Inventory) {
+fn source_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            if !["target", ".git"].contains(&path.file_name().unwrap().to_str().unwrap()) {
-                walk(&path, root, writers, found);
+            if !["target", ".git", "tests"].contains(&path.file_name().unwrap().to_str().unwrap()) {
+                source_files(&path, files);
             }
         } else if path.extension().is_some_and(|x| x == "rs" || x == "sql") {
-            scan_inventory(&path, root, writers, found);
+            files.push(path);
+        }
+    }
+}
+fn test_sources(files: &[std::path::PathBuf]) -> std::collections::BTreeSet<std::path::PathBuf> {
+    let canonical = |p: std::path::PathBuf| p.canonicalize().unwrap();
+    let mut tests = std::collections::BTreeSet::new();
+    for file in files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+    {
+        for module in syntax::modules(&std::fs::read_to_string(file).unwrap(), file, true) {
+            tests.insert(canonical(module));
+        }
+    }
+    let mut queue: Vec<_> = tests.iter().cloned().collect();
+    while let Some(file) = queue.pop() {
+        for module in syntax::modules(&std::fs::read_to_string(&file).unwrap(), &file, false) {
+            let module = canonical(module);
+            if tests.insert(module.clone()) {
+                queue.push(module);
+            }
+        }
+    }
+    // A module used by live code as well as tests is still production, as are its descendants.
+    loop {
+        let mut live = Vec::new();
+        for file in files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs") && !tests.contains(*f))
+        {
+            let source = production(&std::fs::read_to_string(file).unwrap());
+            live.extend(
+                syntax::modules(&source, file, false)
+                    .into_iter()
+                    .map(canonical),
+            );
+        }
+        let mut removed = false;
+        for file in live {
+            removed |= tests.remove(&file);
+        }
+        if !removed {
+            break;
+        }
+    }
+    tests
+}
+fn walk(dir: &Path, root: &Path, writers: &mut Vec<String>, found: &mut Inventory) {
+    let mut files = Vec::new();
+    source_files(dir, &mut files);
+    let excluded = test_sources(&files);
+    for file in files {
+        if !excluded.contains(&file) {
+            scan_inventory(&file, root, writers, found);
         }
     }
 }
@@ -109,14 +166,21 @@ fn flow_alone_owns_production_run_writes_across_the_workspace() {
     let bless = std::env::var_os("STEVE_FLOW_RUN_TABLES_BLESS").is_some();
     if let Ok(text) = std::fs::read_to_string(&list) {
         assert!(!init, "cannot reinitialize an existing run-table inventory");
-        let listed: Inventory = text
+        let mut listed = Inventory::new();
+        for line in text
             .lines()
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|line| {
-                let (file, count) = line.split_once('\t').expect("file<TAB>count");
-                (file.into(), count.parse().unwrap())
-            })
-            .collect();
+        {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 3, "file<TAB>total<TAB>bare subset");
+            let total: usize = fields[1].parse().unwrap();
+            let bare: usize = fields[2].parse().unwrap();
+            assert!(bare <= total);
+            listed.insert(fields[0].into(), total);
+            if bare > 0 {
+                listed.insert(format!("bare:{}", fields[0]), bare);
+            }
+        }
         compare(&found, &listed).unwrap();
         if !bless {
             assert_eq!(
@@ -134,9 +198,15 @@ fn flow_alone_owns_production_run_writes_across_the_workspace() {
     if init || bless {
         let body = found
             .iter()
-            .map(|(file, count)| format!("{file}\t{count}\n"))
+            .filter(|(file, _)| !file.starts_with("bare:"))
+            .map(|(file, count)| {
+                format!(
+                    "{file}\t{count}\t{}\n",
+                    found.get(&format!("bare:{file}")).copied().unwrap_or(0)
+                )
+            })
             .collect::<String>();
-        std::fs::write(list,format!("# flow_runs literals outside Flow: reads only; exact equality, only shrink.\n{body}")).unwrap();
+        std::fs::write(list,format!("# flow_runs literals outside Flow: total and bare-identifier subset; reads only, exact equality, only shrink.\n{body}")).unwrap();
     }
 }
 #[test]
@@ -338,4 +408,98 @@ fn the_reader_inventory_can_only_shrink_and_never_licenses_a_writer() {
         vec!["reader.rs"],
         "a listed table reader is still forbidden to write"
     );
+}
+
+#[test]
+fn r4g_generic_test_fields_and_items_do_not_leak_test_sql_into_production() {
+    for source in [
+        r#"struct S { #[cfg(test)] fixture: Result<String,Vec<u8>>, live:u8 } fn read(){query("SELECT * FROM flow_runs");}"#,
+        r#"#[cfg(test)] fn f<T,U>() {execute("DELETE FROM flow_runs");} fn read(){query("SELECT * FROM flow_runs");}"#,
+        r#"struct S { #[cfg(test)] fixture: Map<String,Box<dyn Fn(i32,i32)->Result<i32,i32>>>, live:u8 } fn read(){query("SELECT * FROM flow_runs");}"#,
+    ] {
+        let text = production(source);
+        let groups = groups(&text);
+        assert_eq!(
+            groups.iter().filter(|s| mentions(s)).collect::<Vec<_>>(),
+            vec![&"SELECT * FROM flow_runs".to_owned()],
+            "{text}"
+        );
+        assert!(
+            !text.contains("String"),
+            "the entire generic test field/item is removed: {text}"
+        );
+    }
+}
+
+#[test]
+fn r4g_bare_table_constants_cannot_borrow_a_readers_inventory_allowance() {
+    let known = "reader.rs";
+    let mut reader = Inventory::new();
+    observe("SELECT * FROM flow_runs", known, &mut vec![], &mut reader);
+    let mut dynamic = Inventory::new();
+    for text in groups(
+        r#"const TABLE:&str="flow_runs";fn write(){execute(format!("DELETE FROM {TABLE}"));}"#,
+    ) {
+        observe(&text, known, &mut vec![], &mut dynamic);
+    }
+    assert!(
+        compare(&dynamic, &reader).is_err(),
+        "a bare identifier is a separate inventory kind from a read query"
+    );
+}
+
+#[test]
+fn r4g_external_cfg_test_modules_are_not_scanned_as_production() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let src = root.join("crates/other/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "#[cfg(test)] mod tests;\nmod live;").unwrap();
+    std::fs::write(
+        src.join("tests.rs"),
+        r#"fn fixture(){execute("DELETE FROM flow_runs");}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("live.rs"),
+        r#"fn live(){query("SELECT * FROM flow_runs");}"#,
+    )
+    .unwrap();
+    let mut writers = vec![];
+    let mut found = Inventory::new();
+    walk(&root, &root, &mut writers, &mut found);
+    assert!(writers.is_empty(), "{writers:?}");
+    assert_eq!(
+        found,
+        BTreeMap::from([("crates/other/src/live.rs".into(), 1)])
+    );
+    // An explicitly named test module and its ordinary child are excluded, too.
+    std::fs::write(
+        src.join("lib.rs"),
+        "#[cfg(test)] #[path=\"fixture.rs\"] mod tests;\nmod live;",
+    )
+    .unwrap();
+    std::fs::write(src.join("fixture.rs"), "mod nested;").unwrap();
+    std::fs::create_dir_all(src.join("fixture")).unwrap();
+    std::fs::write(
+        src.join("fixture/nested.rs"),
+        r#"fn fixture(){execute("UPDATE flow_runs SET status='done'");}"#,
+    )
+    .unwrap();
+    // Remove the first fixture, so the second layout has no undeclared standalone file.
+    std::fs::remove_file(src.join("tests.rs")).unwrap();
+    writers.clear();
+    found.clear();
+    walk(&root, &root, &mut writers, &mut found);
+    assert!(writers.is_empty(), "{writers:?}");
+    assert_eq!(
+        found,
+        BTreeMap::from([("crates/other/src/live.rs".into(), 1)])
+    );
+    // A live reference to that same module wins: test ownership cannot hide a writer.
+    std::fs::write(src.join("lib.rs"),"#[cfg(test)] #[path=\"fixture.rs\"] mod tests;\n#[path=\"fixture.rs\"] mod shared; mod live;").unwrap();
+    writers.clear();
+    found.clear();
+    walk(&root, &root, &mut writers, &mut found);
+    assert_eq!(writers, vec!["crates/other/src/fixture/nested.rs"]);
 }

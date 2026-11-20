@@ -195,13 +195,18 @@ const startupHistory = async ({ width, height, scheme, locale }) => {
   page.setDefaultTimeout(10000)
   await page.clock.setFixedTime(new Date(Date.UTC(2030, 10, 20, 9)))
   const errors = [], writes = []; page.on("pageerror", (e) => errors.push(e.message))
+  // The API projects this persisted code for the requesting reader. The UI displays the
+  // returned explanation unchanged while repeated-count and total-budget semantics stay fixed.
+  const rejection = locale === "zh-CN" ? "此调度无法启动。请检查调度和 Bot 配置，保存其中一项后重试。"
+    : "This schedule could not start. Check the schedule and Bot configuration, then save either one to try again."
+  const projectedRuns = startupRuns.map((r) => r.id === "repeated" ? { ...r, error: rejection, outcome_label: rejection } : r)
   await page.route("**/*", async (route) => {
     const req = route.request(), u = new URL(req.url())
     if (u.origin !== base) return route.abort()
     if (!u.pathname.startsWith("/api/")) return route.continue()
     if (req.method() !== "GET") writes.push(req.method() + " " + u.pathname)
     const p = u.pathname.slice(4)
-    const data = p === "/schedules" ? [schedule] : p === "/schedules/digest_schedule/runs" ? startupRuns
+    const data = p === "/schedules" ? [schedule] : p === "/schedules/digest_schedule/runs" ? projectedRuns
       : p === "/signals" ? { stats: { total: 0, need: 0, item: 0, quiet: 0 }, items: [] }
       : p === "/flow-settings/allow-private" ? { hosts: [] } : []
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) })
@@ -249,6 +254,7 @@ const startupHistory = async ({ width, height, scheme, locale }) => {
     await page.locator('[data-schedule-run="new_error"]').click()
     assert.equal(await dead.locator("[data-run-error]").count(), 0)
     await page.locator('[data-schedule-run="repeated"]').click()
+    assert.equal(await row("repeated").locator("[data-run-error]").textContent(), rejection)
     assert.match(await row("repeated").locator("[data-run-budget]").innerText(), /2 \/ 3/)
     assert.match(await row("repeated").locator('[data-run-startup="retrying"]').innerText(), zh ? /等待重试/ : /waiting to retry/)
     await fits(); await shot("startup-retrying")

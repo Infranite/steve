@@ -604,7 +604,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
     let last = runs::last_real(c, &s.workspace_id, &s.id, None)?.map(|r| Last {
         at: r.at(),
         status: r.status.clone(),
-        text: r.outcome_label.clone(),
+        text: r.view().outcome_label,
         item_id: r.work_item_id.clone(),
         cost_usd: r.cost,
     });
