@@ -488,3 +488,339 @@ fn u_is_answer(m: &Message) -> bool {
     m.meta.get("postback").is_some_and(crate::gateway::truthy)
         || m.meta["update"]["full"].as_bool() == Some(true)
 }
+
+#[cfg(test)]
+mod sg24_tests {
+    use super::*;
+    use crate::repo::WS;
+    use crate::testkit::Kit;
+
+    fn message(
+        k: &Kit,
+        space: &str,
+        author: &str,
+        item: Option<&str>,
+        text: &str,
+        meta: Value,
+        at: i64,
+    ) -> String {
+        let id = k
+            .db()
+            .message_add_in(WS, space, author, text, item, &meta)
+            .unwrap();
+        k.db()
+            .exec("UPDATE messages SET created=? WHERE id=?", &[&at, &id])
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn sg24_cleanup_preserves_hidden_order_event_order_and_full_answers() {
+        let k = Kit::new();
+        let item = k.item("run", "执行", None);
+        let origin = message(&k, "steve", "me", None, "original", json!({}), 1);
+        let updates = json!([
+            {"kind":"fail","text":"initial failure","at":20},
+            {"kind":"unsupported","text":"ignored","at":99}
+        ]);
+        let host = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "announcement",
+            json!({"updates":updates,"keep":"host"}),
+            10,
+        );
+        k.db()
+            .store()
+            .thread()
+            .item_add(&item, WS, &origin, Some(&host), false)
+            .unwrap();
+        let dual = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "notice and event",
+            json!({"notice":{},"update":{"kind":"fail","text":"later failure","at":25}}),
+            11,
+        );
+        let delivery = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "delivery",
+            json!({"update":{"kind":"deliver","text":"short result","at":30}}),
+            12,
+        );
+        let answer = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "answer",
+            json!({"postback":true,"update":{"kind":"reply","text":"answer","ref":origin,"at":40}}),
+            13,
+        );
+        let full = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "full result",
+            json!({"update":{"kind":"deliver","text":"full result","full":true,"at":50}}),
+            14,
+        );
+        let old_hidden = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "already hidden",
+            json!({"hidden":true,"update":{"kind":"done","at":60}}),
+            15,
+        );
+        let notice = message(
+            &k,
+            "steve",
+            "steve",
+            None,
+            "old release notice",
+            json!({"notice":{}}),
+            16,
+        );
+        let ignored = [
+            message(
+                &k,
+                "steve",
+                "me",
+                Some(&item),
+                "user event",
+                json!({"notice":{},"update":{"kind":"drop"}}),
+                17,
+            ),
+            message(
+                &k,
+                "steve",
+                "steve",
+                Some(&item),
+                "unsupported event",
+                json!({"update":{"kind":"release"}}),
+                18,
+            ),
+            message(
+                &k,
+                "steve",
+                "steve",
+                Some(&item),
+                "nonobject notice",
+                json!({"notice":"text"}),
+                19,
+            ),
+            message(
+                &k,
+                "chan:fixture",
+                "steve",
+                Some(&item),
+                "other conversation",
+                json!({"notice":{},"update":{"kind":"drop"}}),
+                20,
+            ),
+        ];
+        let released = message(
+            &k,
+            "notify",
+            "steve",
+            Some(&item),
+            "已发布Hub 和前端新版本 v24（ extra",
+            json!({"notice":{"level":"success"}}),
+            70,
+        );
+        message(
+            &k,
+            "notify",
+            "steve",
+            Some(&item),
+            "failed",
+            json!({"notice":{"level":"fail"}}),
+            80,
+        );
+        let before: Vec<_> = ignored
+            .iter()
+            .map(|id| k.db().message(id).unwrap().unwrap())
+            .collect();
+        let hid = cleanup(k.db(), WS).unwrap();
+        // The notice pass precedes the item pass and both read the original snapshot:
+        // a notice that also carries an update appears twice, as in the old implementation.
+        assert_eq!(hid, [dual.clone(), notice, dual.clone(), delivery.clone()]);
+        for id in [&dual, &delivery, &old_hidden] {
+            assert!(hidden(&k.db().message(id).unwrap().unwrap()));
+        }
+        for id in [&answer, &full] {
+            let m = k.db().message(id).unwrap().unwrap();
+            assert!(!hidden(&m));
+            assert!(m.meta.get("update").is_none());
+            assert!(m.meta["was_update"].is_object());
+        }
+        let m = k.db().message(&host).unwrap().unwrap();
+        assert_eq!(m.text, "announcement");
+        assert_eq!(m.meta["keep"], "host");
+        assert!(m.meta.get("updates").is_none());
+        assert_eq!(m.meta["was_updates"], updates);
+        assert_eq!(
+            m.meta["card"],
+            json!({
+                "item":item,"state":"release","at":70,
+                "delivery":{"text":"full result","full":true,"at":50},
+                "reply":{"text":"answer","ref":origin,"at":40},
+                "released":{"version":"v24","at":70}
+            })
+        );
+        for (id, expected) in ignored.iter().zip(before) {
+            let actual = k.db().message(id).unwrap().unwrap();
+            assert_eq!((actual.text, actual.meta), (expected.text, expected.meta));
+        }
+        assert!(!hidden(&k.db().message(&released).unwrap().unwrap()));
+        assert_eq!(k.db().setting(WS, CLEANUP_KEY, "").unwrap(), "v1");
+        let late = message(
+            &k,
+            "steve",
+            "steve",
+            None,
+            "late notice",
+            json!({"notice":{}}),
+            90,
+        );
+        assert!(cleanup(k.db(), WS).unwrap().is_empty());
+        assert!(!hidden(&k.db().message(&late).unwrap().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn sg24_cleanup_keeps_open_decisions_and_clears_closed_or_missing_ones() {
+        for state in ["open", "resolved", "missing"] {
+            let k = Kit::new();
+            let item = k.item("run", "执行", None);
+            let decision = if state == "missing" {
+                "missing".to_string()
+            } else {
+                let id = k.decision(&item, None, "ask", "item", &["yes"]);
+                if state == "resolved" {
+                    k.db()
+                        .exec("UPDATE decisions SET status='resolved' WHERE id=?", &[&id])
+                        .unwrap();
+                }
+                id
+            };
+            let origin = message(&k, "steve", "me", None, "origin", json!({}), 1);
+            let host = message(
+                &k,
+                "steve",
+                "steve",
+                Some(&item),
+                "host",
+                json!({"card":{"item":item,"state":"ask","decision":decision,"keep":true}}),
+                10,
+            );
+            k.db()
+                .store()
+                .thread()
+                .item_add(&item, WS, &origin, Some(&host), false)
+                .unwrap();
+            assert!(cleanup(k.db(), WS).unwrap().is_empty());
+            let card = k.db().message(&host).unwrap().unwrap().meta["card"].clone();
+            assert_eq!(card["keep"], true);
+            if state == "open" {
+                assert_eq!(card["decision"], decision);
+            } else {
+                assert!(card.get("decision").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sg24_cleanup_processes_orphans_and_preserves_stable_ties_and_created_fallback() {
+        let k = Kit::new();
+        let orphan = k.item("run", "执行", None);
+        let origin = message(&k, "steve", "me", None, "origin", json!({}), 1);
+        k.db()
+            .store()
+            .thread()
+            .item_add(&orphan, WS, &origin, Some("missing-host"), false)
+            .unwrap();
+        let old = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&orphan),
+            "orphan event",
+            json!({"update":{"kind":"done"}}),
+            2,
+        );
+        let item = k.item("run", "执行", None);
+        let host = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "host",
+            json!({"updates":[{"kind":"fail","text":"announce first","at":10},{"kind":"ask","text":"created fallback"}]}),
+            10,
+        );
+        k.db()
+            .store()
+            .thread()
+            .item_add(&item, WS, &origin, Some(&host), false)
+            .unwrap();
+        let event = message(
+            &k,
+            "steve",
+            "steve",
+            Some(&item),
+            "same time",
+            json!({"update":{"kind":"drop","at":10}}),
+            11,
+        );
+        // Thread::items visits newest first, before the older orphan.
+        assert_eq!(cleanup(k.db(), WS).unwrap(), [event, old]);
+        let card = k.db().message(&host).unwrap().unwrap().meta["card"].clone();
+        assert_eq!(card, json!({"item":item,"state":"drop","at":10}));
+        assert!(k.db().message("missing-host").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sg24_cleanup_failure_keeps_earlier_writes_and_does_not_mark_completion() {
+        let k = Kit::new();
+        let item = k.item("run", "执行", None);
+        let origin = message(&k, "steve", "me", None, "origin", json!({}), 1);
+        let host = message(&k, "steve", "steve", Some(&item), "host", json!({}), 2);
+        k.db()
+            .store()
+            .thread()
+            .item_add(&item, WS, &origin, Some(&host), false)
+            .unwrap();
+        let notice = message(
+            &k,
+            "steve",
+            "steve",
+            None,
+            "notice",
+            json!({"notice":{}}),
+            3,
+        );
+        k.db().exec("CREATE TRIGGER sg24_refuse_card BEFORE UPDATE OF meta ON messages WHEN OLD.text='host' BEGIN SELECT RAISE(ABORT,'sg24 card refused'); END", &[]).unwrap();
+        assert!(
+            cleanup(k.db(), WS)
+                .unwrap_err()
+                .to_string()
+                .contains("sg24 card refused")
+        );
+        assert!(hidden(&k.db().message(&notice).unwrap().unwrap()));
+        assert_eq!(k.db().message(&host).unwrap().unwrap().meta, json!({}));
+        assert_eq!(k.db().setting(WS, CLEANUP_KEY, "").unwrap(), "");
+        k.db().exec("DROP TRIGGER sg24_refuse_card", &[]).unwrap();
+        assert!(cleanup(k.db(), WS).unwrap().is_empty());
+        assert_eq!(k.db().setting(WS, CLEANUP_KEY, "").unwrap(), "v1");
+    }
+}

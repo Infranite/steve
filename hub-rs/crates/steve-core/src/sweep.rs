@@ -756,3 +756,297 @@ impl Core {
         Ok(n)
     }
 }
+
+#[cfg(test)]
+mod sg24_tests {
+    use super::*;
+    use crate::derive::{Card, Due, ItemState, SessionState, Wait};
+
+    fn context() -> (Facts, Derived, Signals, WorkPolicy) {
+        let p = WorkPolicy::default();
+        let f = Facts {
+            now: 10_000,
+            item: ItemState {
+                id: "item".into(),
+                phase: CLOSING.into(),
+                cycle: 7,
+                scope_revision: 9,
+                ..Default::default()
+            },
+            session: Some(SessionState {
+                id: "session".into(),
+                turn: Some("turn".into()),
+                last_activity: 200,
+                ..Default::default()
+            }),
+            stall_after: 2_000,
+            ..Default::default()
+        };
+        let mut d = derive(&f, &p);
+        d.code = "other";
+        d.lane = Lane::Running;
+        d.settled = Settled::Evaluable;
+        d.row = 4;
+        d.next_at = None;
+        d.next_step = None;
+        d.detail = None;
+        (
+            f,
+            d,
+            Signals {
+                last_record: 350,
+                ..Default::default()
+            },
+            p,
+        )
+    }
+
+    fn enable(reason: &str, f: &mut Facts, d: &mut Derived, s: &mut Signals, p: &WorkPolicy) {
+        let op = || OpSignal {
+            id: reason.into(),
+            label: format!("{reason} label"),
+            since: 100,
+            ..Default::default()
+        };
+        match reason {
+            "merge_declined" => {
+                f.merge_declined = true;
+                s.pr_declined = Some(12);
+                s.declined_op = Some("release".into());
+            }
+            "node_gone_closing" | "node_gone" => {
+                f.session.as_mut().unwrap().offline_since = Some(110);
+                if reason == "node_gone" {
+                    f.item.phase = "active".into();
+                }
+            }
+            "answered_while_paused" => {
+                f.item.paused = true;
+                s.answered = Some(Answered {
+                    decision_id: "answer".into(),
+                    at: 120,
+                });
+            }
+            "paused_silent" => {
+                f.item.paused = true;
+                s.paused_at = Some(300);
+            }
+            "deploy_waiting" => s.deploy_waiting = Some(op()),
+            "required_failed" => s.required_failed = Some(op()),
+            "pr_unfixed" => {
+                s.pr_problem = Some(PrProblem {
+                    op: "release".into(),
+                    problem: "conflict".into(),
+                    pr: Some(12),
+                    told: true,
+                })
+            }
+            "hooks_silent" => s.hooks_open = Some(op()),
+            "build_long" => s.build_running = Some(op()),
+            "nobody" => d.code = "nobody",
+            "stopped" => d.code = "stopped",
+            "unowned" => d.code = "unknown",
+            "follow_up" => d.code = "follow_up",
+            "stall_question" => {
+                d.code = "running";
+                f.session.as_mut().unwrap().running = true;
+            }
+            "long_wait" => {
+                d.code = "waiting";
+                f.waits.push(Wait {
+                    id: "wait".into(),
+                    cycle: 7,
+                    what: "external work".into(),
+                    wakes: p.wait_note_after(),
+                    ..Default::default()
+                });
+            }
+            "silent" => {
+                if d.code != "waiting" {
+                    d.code = "closing";
+                }
+                d.detail = Some("waiting detail".into());
+                d.next_step = Some(NextStep::Due {
+                    kind: Due::Closing,
+                    id: Some("due-op".into()),
+                    at: Some(800),
+                });
+            }
+            _ => panic!("unknown test rule {reason}"),
+        }
+    }
+
+    fn expected(reason: &str) -> (i64, Option<String>, Option<String>) {
+        match reason {
+            "merge_declined" => (10_000, Some("#12".into()), Some("release".into())),
+            "node_gone_closing" | "node_gone" => (110, None, None),
+            "answered_while_paused" => (120, Some("answer".into()), Some("answer".into())),
+            "paused_silent" => (350, None, None),
+            "deploy_waiting" | "hooks_silent" | "build_long" => {
+                (100, Some(format!("{reason} label")), Some(reason.into()))
+            }
+            "required_failed" => (
+                200,
+                Some("required_failed label".into()),
+                Some("required_failed".into()),
+            ),
+            "pr_unfixed" => (200, Some("#12 conflict".into()), Some("release".into())),
+            "nobody" | "stopped" | "follow_up" => (10_000, None, None),
+            "unowned" | "stall_question" => (200, None, None),
+            "long_wait" => (10_000, Some("external work".into()), Some("wait".into())),
+            "silent" => (350, Some("waiting detail".into()), Some("due-op".into())),
+            _ => panic!("unknown test rule {reason}"),
+        }
+    }
+
+    fn assert_hit(reason: &str, f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) {
+        let hit = matched(f, d, s, p).expect(reason);
+        assert_eq!(hit.reason, reason);
+        assert_eq!(
+            (hit.since, hit.detail, hit.target),
+            expected(reason),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn sg24_every_rule_keeps_its_payload_clock_and_plan_scope() {
+        for reason in [
+            "merge_declined",
+            "node_gone_closing",
+            "node_gone",
+            "answered_while_paused",
+            "paused_silent",
+            "deploy_waiting",
+            "required_failed",
+            "pr_unfixed",
+            "hooks_silent",
+            "build_long",
+            "nobody",
+            "stopped",
+            "unowned",
+            "follow_up",
+            "stall_question",
+            "long_wait",
+            "silent",
+        ] {
+            let (mut f, mut d, mut s, p) = context();
+            enable(reason, &mut f, &mut d, &mut s, &p);
+            assert_hit(reason, &f, &d, &s, &p);
+            let w = plan(&f, &d, &s, &p).unwrap();
+            let since = expected(reason).0;
+            let due = match reason {
+                "node_gone_closing" | "node_gone" => since + p.get("nobody_offline"),
+                "paused_silent" | "hooks_silent" | "silent" => since + p.get("silent_min"),
+                "required_failed" | "pr_unfixed" | "unowned" => since + 2_000,
+                "stall_question" => since + p.get("stall_min"),
+                "build_long" => since + p.get("build_remind"),
+                "follow_up" => {
+                    assert!(matches!(rule_of(reason).unwrap().clock, Clock::Next));
+                    since
+                }
+                _ => since.min(f.now),
+            };
+            assert_eq!(w.due_at, due, "{reason}");
+            assert_eq!((w.row, w.code, w.scope_revision), (4, d.code, 9));
+            assert_eq!(
+                (w.session_id.as_str(), w.turn_id.as_str()),
+                ("session", "turn")
+            );
+            assert_eq!(
+                (w.detail, w.target),
+                (expected(reason).1, expected(reason).2.unwrap_or_default())
+            );
+        }
+    }
+
+    #[test]
+    fn sg24_coexisting_adjacent_rules_keep_the_first_match() {
+        // Alternate phase/code branches cannot hold together. Each code branch is also
+        // exercised beside the preceding build rule; waiting and silent do coexist.
+        for (first, second) in [
+            ("merge_declined", "node_gone_closing"),
+            ("merge_declined", "node_gone"),
+            ("node_gone_closing", "answered_while_paused"),
+            ("node_gone", "answered_while_paused"),
+            ("answered_while_paused", "paused_silent"),
+            ("paused_silent", "deploy_waiting"),
+            ("deploy_waiting", "required_failed"),
+            ("required_failed", "pr_unfixed"),
+            ("pr_unfixed", "hooks_silent"),
+            ("hooks_silent", "build_long"),
+            ("build_long", "nobody"),
+            ("build_long", "stopped"),
+            ("build_long", "unowned"),
+            ("build_long", "follow_up"),
+            ("build_long", "stall_question"),
+            ("build_long", "long_wait"),
+            ("long_wait", "silent"),
+        ] {
+            let (mut f, mut d, mut s, p) = context();
+            enable(first, &mut f, &mut d, &mut s, &p);
+            enable(second, &mut f, &mut d, &mut s, &p);
+            assert_hit(first, &f, &d, &s, &p);
+        }
+    }
+
+    #[test]
+    fn sg24_rule_guards_and_optional_payloads_keep_their_boundaries() {
+        let (mut f, mut d, mut s, p) = context();
+        assert!(matched(&f, &d, &s, &p).is_none());
+        enable("pr_unfixed", &mut f, &mut d, &mut s, &p);
+        s.pr_problem.as_mut().unwrap().pr = Some(0);
+        let hit = matched(&f, &d, &s, &p).unwrap();
+        assert_eq!(hit.detail.as_deref(), Some("conflict"));
+        s.pr_problem.as_mut().unwrap().told = false;
+        assert!(matched(&f, &d, &s, &p).is_none());
+        enable("deploy_waiting", &mut f, &mut d, &mut s, &p);
+        for settled in [Settled::Busy, Settled::Unknown] {
+            d.settled = settled;
+            assert!(matched(&f, &d, &s, &p).is_none());
+            enable("hooks_silent", &mut f, &mut d, &mut s, &p);
+            assert_hit("hooks_silent", &f, &d, &s, &p);
+            s.hooks_open = None;
+        }
+        s.deploy_waiting = None;
+        d.settled = Settled::Evaluable;
+        enable("long_wait", &mut f, &mut d, &mut s, &p);
+        f.waits[0].cycle = 6;
+        assert_eq!(matched(&f, &d, &s, &p).unwrap().reason, "silent");
+        f.waits[0].cycle = 7;
+        f.waits[0].wakes = p.wait_note_after() - 1;
+        assert_eq!(matched(&f, &d, &s, &p).unwrap().reason, "silent");
+        d.lane = Lane::NeedsYou;
+        assert!(matched(&f, &d, &s, &p).is_none());
+        d.code = "running";
+        f.session = None;
+        assert!(matched(&f, &d, &s, &p).is_none());
+        d.code = "quota";
+        d.lane = Lane::Running;
+        d.next_step = Some(NextStep::Control { action: "resume" });
+        let hit = matched(&f, &d, &s, &p).unwrap();
+        assert_eq!((hit.reason, hit.since, hit.target), ("silent", 350, None));
+    }
+
+    #[test]
+    fn sg24_plan_outer_guards_override_every_matching_rule_and_next_clock_uses_next_at() {
+        let (mut f, mut d, mut s, p) = context();
+        enable("merge_declined", &mut f, &mut d, &mut s, &p);
+        f.cards.push(Card::default());
+        assert!(plan(&f, &d, &s, &p).is_none());
+        f.cards.clear();
+        f.item.phase = CLOSED.into();
+        assert!(plan(&f, &d, &s, &p).is_none());
+        f.item.phase = CLOSING.into();
+        d.lane = Lane::Done;
+        assert!(plan(&f, &d, &s, &p).is_none());
+        d.lane = Lane::Running;
+        f.merge_declined = false;
+        enable("follow_up", &mut f, &mut d, &mut s, &p);
+        d.next_at = Some(42_000);
+        assert_eq!(plan(&f, &d, &s, &p).unwrap().due_at, 42_000);
+        f.session = None;
+        let w = plan(&f, &d, &s, &p).unwrap();
+        assert_eq!((w.session_id, w.turn_id), (String::new(), String::new()));
+    }
+}
