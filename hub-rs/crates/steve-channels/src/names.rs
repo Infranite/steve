@@ -787,26 +787,7 @@ impl Channels {
         rep.lookups += 1;
         match a.resolve_profiles(&cx, &q).await {
             Ok(ans) => {
-                let missing: Vec<(&str, &str)> = ans
-                    .missing_scopes
-                    .iter()
-                    .map(|(s, p)| (s.as_str(), p.as_str()))
-                    .collect();
-                let granted: Vec<&str> = ans.granted_scopes.iter().map(String::as_str).collect();
-                for (s, _) in &missing {
-                    let k = (i.id.clone(), s.to_string());
-                    if !rep.missing.contains(&k) {
-                        rep.missing.push(k);
-                    }
-                }
-                if !missing.is_empty() || !granted.is_empty() {
-                    let (id, now) = (i.id.clone(), self.now());
-                    if let Err(e) = self.store().transaction(|tx| {
-                        conn_repo::note_permissions(tx, &id, &missing, &granted, now)
-                    }) {
-                        tracing::warn!(conn = i.id, "names: permissions not noted: {e}");
-                    }
-                }
+                self.note_profile_permissions(i, &ans, rep);
                 Some(ans)
             }
             Err(e) => {
@@ -816,6 +797,30 @@ impl Channels {
                     rep.failed_conns.push(i.id.clone());
                 }
                 None
+            }
+        }
+    }
+
+    fn note_profile_permissions(&self, i: &Identity, ans: &ProfileAnswer, rep: &mut NameReport) {
+        let missing: Vec<(&str, &str)> = ans
+            .missing_scopes
+            .iter()
+            .map(|(s, p)| (s.as_str(), p.as_str()))
+            .collect();
+        let granted: Vec<&str> = ans.granted_scopes.iter().map(String::as_str).collect();
+        for (s, _) in &missing {
+            let k = (i.id.clone(), s.to_string());
+            if !rep.missing.contains(&k) {
+                rep.missing.push(k);
+            }
+        }
+        if !missing.is_empty() || !granted.is_empty() {
+            let (id, now) = (i.id.clone(), self.now());
+            if let Err(e) = self
+                .store()
+                .transaction(|tx| conn_repo::note_permissions(tx, &id, &missing, &granted, now))
+            {
+                tracing::warn!(conn = i.id, "names: permissions not noted: {e}");
             }
         }
     }

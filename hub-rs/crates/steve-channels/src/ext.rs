@@ -264,30 +264,7 @@ impl ChannelSide {
         if self.decl.handle_system.is_empty() {
             return Err(format!("adapter {want} declares no handle system"));
         }
-        match (self.decl.mode, self.act_as_user.is_some()) {
-            (Mode::Bot, true) => {
-                return Err(format!(
-                    "adapter {want} acts as the user but is not declared Mode::Own"
-                ));
-            }
-            (Mode::Own, false) => {
-                return Err(format!(
-                    "adapter {want} is declared Mode::Own without an act-as-user view"
-                ));
-            }
-            _ => {}
-        }
-        if self.decl.mode == Mode::Own
-            && !self
-                .provider
-                .caps()
-                .contains(&crate::spaces::SEND_AS_USER_CAP)
-        {
-            return Err(format!(
-                "adapter {want} is declared Mode::Own but its provider has no {} capability",
-                crate::spaces::SEND_AS_USER_CAP
-            ));
-        }
+        self.check_own_mode(want)?;
         if let Some(a) = &self.adapter
             && a.features() != self.decl.features
         {
@@ -346,6 +323,34 @@ impl ChannelSide {
                 "adapter {want}'s provider identity is {} but the side is declared {:?}",
                 self.provider.integration().identity,
                 self.decl.mode
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_own_mode(&self, want: &str) -> Result<(), String> {
+        match (self.decl.mode, self.act_as_user.is_some()) {
+            (Mode::Bot, true) => {
+                return Err(format!(
+                    "adapter {want} acts as the user but is not declared Mode::Own"
+                ));
+            }
+            (Mode::Own, false) => {
+                return Err(format!(
+                    "adapter {want} is declared Mode::Own without an act-as-user view"
+                ));
+            }
+            _ => {}
+        }
+        if self.decl.mode == Mode::Own
+            && !self
+                .provider
+                .caps()
+                .contains(&crate::spaces::SEND_AS_USER_CAP)
+        {
+            return Err(format!(
+                "adapter {want} is declared Mode::Own but its provider has no {} capability",
+                crate::spaces::SEND_AS_USER_CAP
             ));
         }
         Ok(())

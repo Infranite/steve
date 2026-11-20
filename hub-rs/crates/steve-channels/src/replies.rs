@@ -211,34 +211,21 @@ impl Replies {
         }
         // a contact you starred: whatever the composer made of it, it reaches you as a card, its
         // reply (if any) the card's candidate draft (crate::decide)
-        let starred = plan.mode == Mode::Own
-            && ch
-                .store()
-                .reader(|c| crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref()))?;
-        if starred {
-            let mut g = r.generation.clone();
-            if g.outcome == crate::deliver::Outcome::Reply && g.draft.trim().is_empty() {
-                g.draft = r.text.clone();
-            }
-            if g.outcome != crate::deliver::Outcome::AskOwner {
-                g.reason = crate::decide::Reason::Starred.code().into();
-            }
-            let d = ch.store().transaction(|tx| {
-                crate::decide::open_card(
-                    tx,
-                    plan,
-                    &crate::decide::Card::of(&g, "", Mode::Own, true),
-                )
-            })?;
-            return Ok(Some(Acted {
-                label: STARRED_ASKED.into(),
-                decision_id: Some(d),
-                ..Acted::default()
-            }));
+        if let Some(a) = starred_reply(ch, plan, &r)? {
+            return Ok(Some(a));
         }
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }
+        self.deliver_composed_reply(ch, plan, r).await
+    }
+
+    async fn deliver_composed_reply(
+        &self,
+        ch: &Channels,
+        plan: &Plan,
+        r: compose::Reply,
+    ) -> ChannelResult<Option<Acted>> {
         // needs_approval already carries needs_commitment (decide::settle)
         let approve =
             plan.act == Act::Draft || plan.mode == Mode::Own || r.generation.needs_approval;
@@ -279,43 +266,7 @@ impl Replies {
             return Ok(None);
         };
         let ws = plan.ws.clone();
-        let (req, owner) = ch.store().reader(|c| -> ChannelResult<_> {
-            let space = spaces::get(c, &plan.space_id)?
-                .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
-            let set = spaces::settings(c, &space.id)?;
-            let d = &set.item_defaults;
-            let persona_bot = match plan.mode {
-                Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
-                Mode::Own => None,
-            };
-            let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
-            let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
-            let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
-            let goal = item_goal(&plan.text, &context, from_owner);
-            let space_name = spaces::display_title(c, &space)?;
-            let title = {
-                let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if flat.is_empty() {
-                    format!("来自「{space_name}」的消息")
-                } else {
-                    flat.chars().take(TITLE_MAX).collect()
-                }
-            };
-            let req = bot.map(|bot| ItemRequest {
-                requester: None,
-                ws: ws.clone(),
-                title,
-                goal,
-                bot,
-                project: d["project_id"].as_str().map(String::from),
-                tag_ids: compose::str_list(&d["tags"]),
-                source: (space_name, LINK_SOURCE.into()),
-                propose: mode == ItemMode::Propose,
-                accept_auto: false,
-                run_id: String::new(),
-            });
-            Ok((req, personas::owner_name_for_space(c, &ws, &space.id)?))
-        })?;
+        let (req, owner) = prepare_item_request(ch, plan, &ws, mode)?;
         let Some(req) = req else {
             tracing::warn!(ws, "channel item: the workspace has no Bot");
             return Ok(None);
@@ -615,4 +566,74 @@ impl Responder for Replies {
     fn outbound(&self) -> Option<&dyn Outbound> {
         Some(self.outbound.as_ref())
     }
+}
+
+fn starred_reply(ch: &Channels, plan: &Plan, r: &compose::Reply) -> ChannelResult<Option<Acted>> {
+    let starred = plan.mode == Mode::Own
+        && ch
+            .store()
+            .reader(|c| crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref()))?;
+    if starred {
+        let mut g = r.generation.clone();
+        if g.outcome == crate::deliver::Outcome::Reply && g.draft.trim().is_empty() {
+            g.draft = r.text.clone();
+        }
+        if g.outcome != crate::deliver::Outcome::AskOwner {
+            g.reason = crate::decide::Reason::Starred.code().into();
+        }
+        let d = ch.store().transaction(|tx| {
+            crate::decide::open_card(tx, plan, &crate::decide::Card::of(&g, "", Mode::Own, true))
+        })?;
+        return Ok(Some(Acted {
+            label: STARRED_ASKED.into(),
+            decision_id: Some(d),
+            ..Acted::default()
+        }));
+    }
+    Ok(None)
+}
+
+fn prepare_item_request(
+    ch: &Channels,
+    plan: &Plan,
+    ws: &str,
+    mode: ItemMode,
+) -> ChannelResult<(Option<ItemRequest>, String)> {
+    ch.store().reader(|c| -> ChannelResult<_> {
+        let space = spaces::get(c, &plan.space_id)?
+            .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+        let set = spaces::settings(c, &space.id)?;
+        let d = &set.item_defaults;
+        let persona_bot = match plan.mode {
+            Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.bot_id),
+            Mode::Own => None,
+        };
+        let bot = compose::pick_bot(c, &ws, &[d["bot_id"].as_str(), persona_bot.as_deref()])?;
+        let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
+        let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
+        let goal = item_goal(&plan.text, &context, from_owner);
+        let space_name = spaces::display_title(c, &space)?;
+        let title = {
+            let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat.is_empty() {
+                format!("来自「{space_name}」的消息")
+            } else {
+                flat.chars().take(TITLE_MAX).collect()
+            }
+        };
+        let req = bot.map(|bot| ItemRequest {
+            requester: None,
+            ws: ws.to_string(),
+            title,
+            goal,
+            bot,
+            project: d["project_id"].as_str().map(String::from),
+            tag_ids: compose::str_list(&d["tags"]),
+            source: (space_name, LINK_SOURCE.into()),
+            propose: mode == ItemMode::Propose,
+            accept_auto: false,
+            run_id: String::new(),
+        });
+        Ok((req, personas::owner_name_for_space(c, &ws, &space.id)?))
+    })
 }

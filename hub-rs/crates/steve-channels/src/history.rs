@@ -265,26 +265,12 @@ impl Channels {
                     continue;
                 }
             };
-            let got = tokio::time::timeout(
-                TIMEOUT,
-                view.read(&cx, &row.external_id, from, to, limit + 1),
-            )
-            .await;
-            let mut msgs = match got {
-                Ok(Ok(m)) => m,
-                Ok(Err(e)) => {
-                    tracing::warn!(conn, "im read: the remote refused: {e}");
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!(conn, "im read: the remote took too long");
-                    continue;
-                }
+            let Some(msgs) =
+                fetch_remote_history(view.as_ref(), &cx, &row.external_id, from, to, limit, &conn)
+                    .await
+            else {
+                continue;
             };
-            msgs.retain(|m| m.created >= from && m.created <= to);
-            msgs.sort_by_key(|m| m.created);
-            let mut seen = std::collections::HashSet::new();
-            msgs.retain(|m| m.external_id.is_empty() || seen.insert(m.external_id.clone()));
             let ws = viewer.ws.clone();
             let lines = store.reader(|c| -> ChannelResult<Vec<Line>> {
                 let (account, _) = crate::bindings::connection_account(c, &ws, &conn)?;
@@ -322,4 +308,32 @@ impl Channels {
         page.lines.truncate(limit);
         Ok(page)
     }
+}
+
+async fn fetch_remote_history(
+    view: &dyn HistoryRead,
+    cx: &ConnCx,
+    space_ext_id: &str,
+    from: i64,
+    to: i64,
+    limit: usize,
+    conn: &str,
+) -> Option<Vec<InboundMessage>> {
+    let got = tokio::time::timeout(TIMEOUT, view.read(cx, space_ext_id, from, to, limit + 1)).await;
+    let mut msgs = match got {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            tracing::warn!(conn, "im read: the remote refused: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(conn, "im read: the remote took too long");
+            return None;
+        }
+    };
+    msgs.retain(|m| m.created >= from && m.created <= to);
+    msgs.sort_by_key(|m| m.created);
+    let mut seen = std::collections::HashSet::new();
+    msgs.retain(|m| m.external_id.is_empty() || seen.insert(m.external_id.clone()));
+    Some(msgs)
 }

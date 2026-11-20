@@ -391,6 +391,101 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
         Mode::Bot => personas::owner_name_for_space(c, ws, &space.id)?,
     };
     let owner_only = crate::conversations::owner_only(c, ws, &space, &plan.connection_id)?;
+    let AudienceFacts {
+        external,
+        unknown,
+        disclosure,
+    } = audience_facts(c, plan, &space, owner_only)?;
+    let is_owner = crate::conversations::sender_is_owner(c, ws, plan.sender_party_id.as_deref())?;
+    // what the message said, as stored (before notes were added for the composer)
+    let stored = crate::inbound::stored(c, &plan.message_id).ok();
+    let raw = stored
+        .as_ref()
+        .map_or(plan.text.as_str(), |m| m.text.as_str());
+    let typed_by_human = sender_typed_by_human(c, plan, raw)?;
+    let chat_kind = ChatKind::of(&space.kind);
+    // the trigger settings of the identity that answers (your own account's)
+    let settings = spaces::channel_settings(c, ws, &plan.connection_id)?
+        .map(|s| Trigger::from_value(&s.trigger));
+    let (placement, mark) = placement_and_mark(plan, &space, chat_kind, &settings);
+    let trigger = plan.trigger.as_ref().map(|_| {
+        let mentions = stored
+            .as_ref()
+            .map(|m| m.mention_names.clone())
+            .unwrap_or_default();
+        let (word, instruction) = settings
+            .as_ref()
+            .and_then(|t| t.split(raw, &mentions))
+            .map(|(w, i)| (w.to_string(), i))
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    crate::rules::strip_leading_mentions(raw, &mentions)
+                        .trim()
+                        .to_string(),
+                )
+            });
+        TriggerFacts {
+            word,
+            instruction,
+            source_message: plan.message_id.clone(),
+        }
+    });
+    Ok(ImContext {
+        platform,
+        connection: plan.connection_id.clone(),
+        account_name,
+        account,
+        persona,
+        owner,
+        chat_id: space.id.clone(),
+        chat_name: crate::spaces::display_title(c, &space)?,
+        chat_kind,
+        members: space.people(),
+        has_external: space.has_external,
+        external,
+        unknown,
+        thread_root: thread_root(c, &space.id, &plan.message_id)?,
+        message: plan.message_id.clone(),
+        placement,
+        sender_party: plan.sender_party_id.clone(),
+        sender_name: plan.sender_name.clone(),
+        is_owner,
+        typed_by_human,
+        disclosure,
+        mark,
+        trigger,
+    })
+}
+
+fn sender_typed_by_human(c: &Connection, plan: &Plan, raw: &str) -> ChannelResult<bool> {
+    let by_bot: bool = match plan.sender_account_id.as_deref() {
+        Some(a) => c
+            .query_row(
+                "SELECT kind IN ('app_bot', 'bot') FROM accounts WHERE id = ?",
+                [a],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+        None => false,
+    };
+    Ok(!by_bot && !crate::arbiter::looks_automated(raw))
+}
+
+struct AudienceFacts {
+    external: Vec<Named>,
+    unknown: i64,
+    disclosure: Disclosure,
+}
+
+fn audience_facts(
+    c: &Connection,
+    plan: &Plan,
+    space: &spaces::SpaceRow,
+    owner_only: bool,
+) -> ChannelResult<AudienceFacts> {
+    let ws = &plan.ws;
     let card = crate::conversation_card::build(
         c,
         ws,
@@ -443,28 +538,19 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
     } else {
         Disclosure::Internal
     };
-    let is_owner = crate::conversations::sender_is_owner(c, ws, plan.sender_party_id.as_deref())?;
-    // what the message said, as stored (before notes were added for the composer)
-    let stored = crate::inbound::stored(c, &plan.message_id).ok();
-    let raw = stored
-        .as_ref()
-        .map_or(plan.text.as_str(), |m| m.text.as_str());
-    let by_bot: bool = match plan.sender_account_id.as_deref() {
-        Some(a) => c
-            .query_row(
-                "SELECT kind IN ('app_bot', 'bot') FROM accounts WHERE id = ?",
-                [a],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false),
-        None => false,
-    };
-    let typed_by_human = !by_bot && !crate::arbiter::looks_automated(raw);
-    let chat_kind = ChatKind::of(&space.kind);
-    // the trigger settings of the identity that answers (your own account's)
-    let settings = spaces::channel_settings(c, ws, &plan.connection_id)?
-        .map(|s| Trigger::from_value(&s.trigger));
+    Ok(AudienceFacts {
+        external,
+        unknown,
+        disclosure,
+    })
+}
+
+fn placement_and_mark(
+    plan: &Plan,
+    space: &spaces::SpaceRow,
+    chat_kind: ChatKind,
+    settings: &Option<Trigger>,
+) -> (Placement, Mark) {
     let trigger_turn = plan.trigger.is_some() && plan.mode == Mode::Own;
     let placement = if trigger_turn {
         match settings.as_ref().map(|t| t.reply).unwrap_or_default() {
@@ -489,54 +575,7 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
         (Mode::Own, true) => Mark::Off,
         (Mode::Own, false) => Mark::OwnerApproves,
     };
-    let trigger = plan.trigger.as_ref().map(|_| {
-        let mentions = stored
-            .as_ref()
-            .map(|m| m.mention_names.clone())
-            .unwrap_or_default();
-        let (word, instruction) = settings
-            .as_ref()
-            .and_then(|t| t.split(raw, &mentions))
-            .map(|(w, i)| (w.to_string(), i))
-            .unwrap_or_else(|| {
-                (
-                    String::new(),
-                    crate::rules::strip_leading_mentions(raw, &mentions)
-                        .trim()
-                        .to_string(),
-                )
-            });
-        TriggerFacts {
-            word,
-            instruction,
-            source_message: plan.message_id.clone(),
-        }
-    });
-    Ok(ImContext {
-        platform,
-        connection: plan.connection_id.clone(),
-        account_name,
-        account,
-        persona,
-        owner,
-        chat_id: space.id.clone(),
-        chat_name: crate::spaces::display_title(c, &space)?,
-        chat_kind,
-        members: space.people(),
-        has_external: space.has_external,
-        external,
-        unknown,
-        thread_root: thread_root(c, &space.id, &plan.message_id)?,
-        message: plan.message_id.clone(),
-        placement,
-        sender_party: plan.sender_party_id.clone(),
-        sender_name: plan.sender_name.clone(),
-        is_owner,
-        typed_by_human,
-        disclosure,
-        mark,
-        trigger,
-    })
+    (placement, mark)
 }
 
 impl ImContext {
@@ -577,30 +616,7 @@ impl ImContext {
             "  <as_whom>{}</as_whom>\n",
             escape(&self.as_whom())
         ));
-        let mut external: Vec<String> = self
-            .external
-            .iter()
-            .take(POLICY.external_named)
-            .map(|p| match &p.org {
-                Some(o) => format!("{}(外部·{})", e(&p.name), e(o)),
-                None => format!("{}(外部)", e(&p.name)),
-            })
-            .collect();
-        if self.external.len() > POLICY.external_named {
-            external.push(format!(
-                "另有 {} 位",
-                self.external.len() - POLICY.external_named
-            ));
-        }
-        let external = if external.is_empty() {
-            if self.has_external {
-                "有外部成员，名单未记录".to_string()
-            } else {
-                "0".to_string()
-            }
-        } else {
-            format!("{}: {}", self.external.len(), external.join("、"))
-        };
+        let external = self.external_label(&e);
         s.push_str(&format!(
             "  <chat id=\"{}\" name=\"{}\" kind=\"{}\" members=\"{}\" external=\"{}\" unknown=\"{}\"/>\n",
             escape(&self.chat_id),
@@ -665,6 +681,33 @@ impl ImContext {
         s.push_str("  </rules>\n");
         s.push_str(CLOSE);
         s
+    }
+
+    fn external_label(&self, e: impl Fn(&str) -> String) -> String {
+        let mut external: Vec<String> = self
+            .external
+            .iter()
+            .take(POLICY.external_named)
+            .map(|p| match &p.org {
+                Some(o) => format!("{}(外部·{})", e(&p.name), e(o)),
+                None => format!("{}(外部)", e(&p.name)),
+            })
+            .collect();
+        if self.external.len() > POLICY.external_named {
+            external.push(format!(
+                "另有 {} 位",
+                self.external.len() - POLICY.external_named
+            ));
+        }
+        if external.is_empty() {
+            if self.has_external {
+                "有外部成员，名单未记录".to_string()
+            } else {
+                "0".to_string()
+            }
+        } else {
+            format!("{}: {}", self.external.len(), external.join("、"))
+        }
     }
 }
 

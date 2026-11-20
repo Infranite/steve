@@ -51,32 +51,7 @@ pub fn seen(
           WHERE s.workspace_id = ?1 AND {vis}
           GROUP BY s.id"
     ))?;
-    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
-    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
-    if !parties.is_empty() {
-        let vis2 = visible_sql("?2");
-        let mut st = c.prepare(&format!(
-            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
-                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
-               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
-               JOIN spaces s ON s.id = m.space_id
-              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
-                AND s.workspace_id = ?1 AND {vis2} AND {}
-              GROUP BY a.party_id, s.id",
-            seen_visible_sql("m", "?2")
-        ))?;
-        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
-        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
-            ))
-        })?;
-        for row in rows {
-            let (party, sp) = row?;
-            mentioned.entry(party).or_default().push(sp);
-        }
-    }
+    let mut mentioned = mentioned_spaces(c, viewer, parties)?;
     let mut last_q = c.prepare(&format!(
         "SELECT m.text, m.created, s.id, s.name FROM chan_messages m JOIN spaces s ON s.id = m.space_id
           WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
@@ -147,4 +122,38 @@ pub fn seen(
         ));
     }
     Ok(out)
+}
+
+fn mentioned_spaces(
+    c: &Connection,
+    viewer: &Viewer,
+    parties: &[String],
+) -> ChannelResult<HashMap<String, Vec<SpaceRow>>> {
+    // Where they were @-mentioned, for all of `parties` in one pass over the mentions.
+    let mut mentioned: HashMap<String, Vec<SpaceRow>> = HashMap::new();
+    if !parties.is_empty() {
+        let vis2 = visible_sql("?2");
+        let mut st = c.prepare(&format!(
+            "SELECT a.party_id, s.id, s.name, s.kind, MAX(m.created) FROM chan_messages m,
+                    json_each(CASE WHEN json_valid(m.mentions) THEN m.mentions ELSE '[]' END) j
+               JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
+               JOIN spaces s ON s.id = m.space_id
+              WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
+                AND s.workspace_id = ?1 AND {vis2} AND {}
+              GROUP BY a.party_id, s.id",
+            seen_visible_sql("m", "?2")
+        ))?;
+        let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
+        let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+            ))
+        })?;
+        for row in rows {
+            let (party, sp) = row?;
+            mentioned.entry(party).or_default().push(sp);
+        }
+    }
+    Ok(mentioned)
 }
