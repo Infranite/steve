@@ -518,3 +518,53 @@ fn committed_event_observer_can_read_and_reenter_the_same_root() {
         })
         .unwrap();
 }
+
+#[test]
+fn one_raw_guard_preserves_separate_batches_for_each_physical_commit() {
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Batches(Arc<Mutex<Vec<Vec<steve_store::BusEvent>>>>);
+    impl steve_store::Publisher for Batches {
+        fn publish_batch(&self, events: Vec<steve_store::BusEvent>) {
+            self.0.lock().unwrap().push(events);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let batches = Batches(Arc::default());
+    let store = Store::open(dir.path().join("steve.sqlite3"), batches.clone()).unwrap();
+    store.ensure_workspace().unwrap();
+    store
+        .with_conn(|c| Ok(c.execute_batch("CREATE TABLE root_effects(id TEXT)")?))
+        .unwrap();
+    batches.0.lock().unwrap().clear();
+    let guard = store
+        .domain_store()
+        .root_guard(Domain::Core, Lane::Interactive)
+        .unwrap();
+    guard.execute_batch("BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "a1");
+    stage_effects(&store, "a2");
+    guard.execute_batch("COMMIT; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "b");
+    guard.execute_batch("COMMIT; BEGIN IMMEDIATE").unwrap();
+    stage_effects(&store, "discarded");
+    guard.execute_batch("ROLLBACK").unwrap();
+    drop(guard);
+    assert_eq!(
+        *batches.0.lock().unwrap(),
+        vec![
+            vec![effect_event("a1"), effect_event("a2")],
+            vec![effect_event("b")]
+        ]
+    );
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT count(*) FROM root_effects", [], |r| r
+                    .get::<_, i64>(0))?,
+                3
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}
