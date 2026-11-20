@@ -1595,14 +1595,14 @@ END;
 
 -- Final fresh-install seeds; historical data backfills are not replayed.
 INSERT INTO attention_meta VALUES (1, lower(hex(randomblob(16))));
+INSERT INTO "attr_defs" VALUES ('ad_phone','*','both','phone','电话','phone','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs" VALUES ('ad_address','*','both','address','地址','address','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs" VALUES ('ad_birthday','*','contact','birthday','生日','date','[]','reasoning','builtin','active',0);
-INSERT INTO "attr_defs" VALUES ('ad_call','*','contact','call','偏好的称呼','text','[]','public','builtin','active',0);
-INSERT INTO "attr_defs" VALUES ('ad_contract','*','org','contract','合同','text','[]','reasoning','builtin','active',0);
-INSERT INTO "attr_defs" VALUES ('ad_lang','*','contact','lang','语言','text','[]','public','builtin','active',0);
-INSERT INTO "attr_defs" VALUES ('ad_phone','*','both','phone','电话','phone','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs" VALUES ('ad_tz','*','contact','tz','时区','text','[]','public','builtin','active',0);
+INSERT INTO "attr_defs" VALUES ('ad_lang','*','contact','lang','语言','text','[]','public','builtin','active',0);
+INSERT INTO "attr_defs" VALUES ('ad_call','*','contact','call','偏好的称呼','text','[]','public','builtin','active',0);
 INSERT INTO "attr_defs" VALUES ('ad_website','*','org','website','网站','url','[]','public','builtin','active',0);
+INSERT INTO "attr_defs" VALUES ('ad_contract','*','org','contract','合同','text','[]','reasoning','builtin','active',0);
 INSERT INTO sqlite_sequence(name,seq) VALUES ('audit',0);
 INSERT INTO sqlite_sequence(name,seq) VALUES ('feed_entries',0);
 INSERT INTO sqlite_sequence(name,seq) VALUES ('gateway_result_ready',0);
