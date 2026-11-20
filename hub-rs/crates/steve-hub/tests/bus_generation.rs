@@ -132,8 +132,8 @@ fn s1_workspace_events_only_invalidate_their_workspace() {
 }
 
 #[test]
-fn s1_hub_and_user_events_invalidate_globally() {
-    // Client presence is stateless even though its audience is User.
+fn s1_hub_events_invalidate_globally() {
+    // Client presence is stateless even though its audience is Hub-wide.
     for ty in ["device", "release.hold", "node"] {
         let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
             Default::default(),

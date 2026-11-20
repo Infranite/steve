@@ -60,7 +60,7 @@ async fn read_until_barrier(body: Body) -> BTreeSet<String> {
 }
 
 #[tokio::test]
-async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
+async fn actual_sse_filter_preserves_workspace_and_hub_audiences() {
     let home = tempfile::tempdir().unwrap();
     let vars = [
         ("HOME", home.path().display().to_string()),
@@ -89,12 +89,12 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         bus.clone(),
     );
     let mut streams = vec![];
-    for (ws, user, owner, sees_ws, sees_user) in [
-        ("workspace-a", "user-a", false, true, true),
-        ("workspace-b", "user-a", false, false, true),
-        ("workspace-a", "user-b", false, true, false),
-        ("workspace-b", "owner", true, false, true),
-        ("workspace-b", "", false, false, false),
+    for (ws, user, owner, sees_ws) in [
+        ("workspace-a", "user-a", false, true),
+        ("workspace-b", "user-a", false, false),
+        ("workspace-a", "user-b", false, true),
+        ("workspace-b", "owner", true, false),
+        ("workspace-b", "", false, false),
     ] {
         let ctx = Ctx {
             ws: ws.into(),
@@ -113,7 +113,7 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         )
         .await;
         assert_eq!(response.headers()["content-type"], "text/event-stream");
-        streams.push((response.into_body(), sees_ws, sees_user));
+        streams.push((response.into_body(), sees_ws));
     }
     bus.publish_batch(vec![
         PeopleEvent::Party {
@@ -150,14 +150,15 @@ async fn actual_sse_filter_preserves_workspace_user_and_hub_audiences() {
         }
         .into(),
     ]);
-    for (body, sees_ws, sees_user) in streams {
+    for (body, sees_ws) in streams {
         let seen = read_until_barrier(body).await;
-        let mut expected = BTreeSet::from(["release.hold".to_owned()]);
+        let mut expected = BTreeSet::from([
+            "release.hold".to_owned(),
+            "node".to_owned(),
+            "client".to_owned(),
+        ]);
         if sees_ws {
             expected.extend(["party".to_owned(), "steve.thinking".to_owned()]);
-        }
-        if sees_user {
-            expected.extend(["node".to_owned(), "client".to_owned()]);
         }
         assert_eq!(seen, expected);
     }

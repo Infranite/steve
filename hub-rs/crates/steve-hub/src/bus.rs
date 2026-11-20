@@ -8,32 +8,6 @@ pub use steve_types::{BusEvent, Scope};
 use steve_types::{DomainEvent, Envelope, LiveEvent, Rev, Scoped};
 use tokio::sync::broadcast;
 
-/// Who a stream is for: the workspace it shows, and who is signed in.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Viewer {
-    pub ws: String,
-    /// `users.id`; empty for none.
-    pub user: String,
-    /// The Hub's owner (`users.role`): sees what concerns any user's devices.
-    pub owner: bool,
-}
-
-impl From<&str> for Viewer {
-    /// Nobody signed in, in workspace `ws`.
-    fn from(ws: &str) -> Viewer {
-        Viewer {
-            ws: ws.into(),
-            ..Default::default()
-        }
-    }
-}
-
-impl From<String> for Viewer {
-    fn from(ws: String) -> Viewer {
-        Viewer::from(ws.as_str())
-    }
-}
-
 /// A typed notification in dispatcher order, with its optional replay position.
 #[derive(Debug)]
 pub struct Delivery {
@@ -46,15 +20,10 @@ pub struct Delivery {
 
 impl Delivery {
     pub fn visible_to(&self, ws: &str) -> bool {
-        self.visible(&Viewer::from(ws))
-    }
-
-    pub fn visible(&self, v: &Viewer) -> bool {
         match self.envelope.scope() {
             Scope::Hub => true,
             // An event without a workspace reaches nobody, not the viewers who lack one too.
-            Scope::Ws(w) => !w.as_str().is_empty() && w.as_str() == v.ws,
-            Scope::User(u) => v.owner || (!u.as_str().is_empty() && u.as_str() == v.user),
+            Scope::Ws(w) => !w.as_str().is_empty() && w.as_str() == ws,
         }
     }
 }
@@ -734,25 +703,21 @@ mod tests {
         assert_eq!(json(&second)["id"], "two");
         assert!(first.visible_to("a") && !first.visible_to("b"));
         assert!(second.visible_to("b") && !second.visible_to("a"));
-        bus.publish(DomainEvent::from(DevicesEvent::Node {
-            id: "n".into(),
-            user: "u".into(),
-        }));
-        let personal = next(&mut rx).await;
-        for (user, owner, want) in [
-            ("u", false, true),
-            ("other", false, false),
-            ("owner", true, true),
-            ("", false, false),
+        for event in [
+            DevicesEvent::Node {
+                id: "n".into(),
+                user: "u".into(),
+            },
+            DevicesEvent::Client {
+                id: "c".into(),
+                user: "u".into(),
+            },
         ] {
-            assert_eq!(
-                personal.visible(&Viewer {
-                    ws: "a".into(),
-                    user: user.into(),
-                    owner
-                }),
-                want
-            );
+            bus.publish(DomainEvent::from(event));
+            let all = next(&mut rx).await;
+            for ws in ["a", "b", ""] {
+                assert!(all.visible_to(ws));
+            }
         }
         bus.publish(DomainEvent::from(DevicesEvent::Device { id: "hub".into() }));
         let all = next(&mut rx).await;
