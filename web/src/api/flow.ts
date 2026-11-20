@@ -45,7 +45,12 @@ export type SourcePatch = { paused?: boolean; triage_bot?: string | null; types?
 
 /** `brief`: your morning brief (Steve turns it on; only its name, time and switch change) */
 export type ScheduleMode = "item_auto" | "item" | "propose" | "report" | "brief"
-export type ScheduleRun = { id: string; at: number; started: number; ended: number | null; trigger: "time" | "manual" | "catch_up"; status: "done" | "failed" | "skipped" | "running" | "waiting"; outcome_label: string; item_id: string | null; cost_usd: number; error: string | null }
+export type ScheduleRun = {
+  id: string; at: number; started: number; ended: number | null; trigger: "time" | "manual" | "catch_up"; status: "done" | "failed" | "skipped" | "running" | "waiting"; outcome_label: string; item_id: string | null; cost_usd: number; error: string | null
+  /** Same-error count and first occurrence; at remains the most recent occurrence. */
+  start_failures?: number; first_at?: number
+  startup?: { source: string; state: "started" | "retrying" | "dead"; attempts: number; limit: number }
+}
 export type Schedule = {
   id: string; name: string; when: string; describe: string; cron: string; tz: string; what: string; bot: string; mode: ScheduleMode
   project_id: string | null; tags: string[]; missed: "catch_up_once" | "skip"; overlap: "skip" | "run"; budget_usd: number; enabled: boolean; next_at: number | null

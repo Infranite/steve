@@ -1,6 +1,7 @@
 /* #/auto/schedules — 定时任务 (schedules.md §9, prototype Schedules / NewScheduleDialog) */
 import { useEffect, useState, type ReactNode } from "react"
 import { ChevronRightIcon, ClockIcon, HistoryIcon, PlayIcon, PlusIcon } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
@@ -17,7 +18,7 @@ import { HubError } from "@/api"
 import { runtimeSetupHref } from "@/runtime-access"
 import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
-import { num } from "@/i18n/format"
+import { date, num } from "@/i18n/format"
 
 const MODES: ScheduleMode[] = ["item_auto", "item", "propose", "report"]
 /** how a schedule runs, in the current language */
@@ -102,16 +103,35 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
 /** one run: its time, what came of it, how it was triggered; an error opens in place, an item opens the item */
 function RunRow({ r }: { r: ScheduleRun }) {
   const [open, setOpen] = useState(false)
+  const t = useT(), startup = r.startup
   const on = r.item_id ? () => go("#/items/" + r.item_id) : r.error ? () => setOpen(!open) : undefined
+  const counted = r.start_failures != null
+  const stamp = (ts: number) => <time dateTime={new Date(ts).toISOString()} title={date(ts, { dateStyle: "medium", timeStyle: "medium" })}>{when(ts)}</time>
   return (
     <li>
-      <button type="button" disabled={!on} onClick={on} aria-expanded={r.error && !r.item_id ? open : undefined} className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left type-footnote enabled:hover:bg-accent" data-schedule-run={r.id}>
-        <StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} /><span className="w-20 shrink-0 tabular-nums text-muted-foreground">{when(r.at)}</span>
-        <span className={cn("min-w-0 flex-1 truncate", r.error && "text-destructive")}>{r.error || r.outcome_label || RUN_STATUS[r.status]?.[0]}</span>
-        <span className="shrink-0 text-muted-foreground">{triggerLabel(r.trigger)}{r.cost_usd ? " · " + usd(r.cost_usd) : ""}</span>
-        {r.item_id && <ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" aria-hidden />}
+      <button type="button" disabled={!on} onClick={on} aria-expanded={r.error && !r.item_id ? open : undefined} className="flex w-full items-start gap-2 rounded-md px-1 py-1.5 text-left type-footnote enabled:hover:bg-accent" data-schedule-run={r.id}>
+        <span className="mt-1 shrink-0"><StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} /></span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className={cn("min-w-0 flex-1 truncate", r.error && "text-destructive")}>{r.error || r.outcome_label || RUN_STATUS[r.status]?.[0]}</span>
+            <span className="shrink-0 text-muted-foreground">{startup?.source === "digest.bot" ? t("auto:schedule.digestQueue") : triggerLabel(r.trigger)}{r.cost_usd ? " · " + usd(r.cost_usd) : ""}</span>
+            {r.item_id && <ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" aria-hidden />}
+          </span>
+          {counted ? <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground" data-run-failures>
+            <Badge variant="secondary" size="sm">{t("auto:schedule.sameError", { count: r.start_failures })}</Badge>
+            {r.first_at != null && <span data-run-first>{t("auto:schedule.firstFailure")} {stamp(r.first_at)}</span>}
+            <span data-run-latest>{t("auto:schedule.latestFailure")} {stamp(r.at)}</span>
+          </span> : <span className="text-muted-foreground">{stamp(r.at)}</span>}
+          {startup?.state === "started" && <span className="ml-2 text-muted-foreground" data-run-started>{t("auto:schedule.startupStarted")}</span>}
+        </span>
       </button>
-      {open && r.error && <div className="mb-1 ml-5 rounded-md bg-destructive/8 px-2 py-1.5 type-footnote [overflow-wrap:anywhere] text-foreground/85" data-run-error>{r.error}</div>}
+      {open && r.error && <div className="mb-1 ml-5 space-y-2 rounded-md bg-destructive/8 px-2 py-1.5 type-footnote [overflow-wrap:anywhere] text-foreground/85">
+        {startup && <div className="space-y-1 border-b border-border pb-2" data-run-startup={startup.state}>
+          <div className="font-medium" data-run-budget>{t("auto:schedule.startupBudget", { attempts: num(startup.attempts), limit: num(startup.limit) })}</div>
+          {startup.source === "digest.bot" && startup.state !== "started" && <p>{t(startup.state === "dead" ? "auto:schedule.startupDead" : "auto:schedule.startupRetrying")}</p>}
+        </div>}
+        <div className="whitespace-pre-wrap" data-run-error>{r.error}</div>
+      </div>}
     </li>
   )
 }
