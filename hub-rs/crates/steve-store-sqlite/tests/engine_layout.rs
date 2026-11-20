@@ -92,7 +92,7 @@ fn readonly_attachments_resolve_unqualified_names_in_writer_and_all_pool_connect
     );
     assert_eq!(
         peer_engine.path(),
-        dir.path().join(&layout.domains[&Domain::Stream])
+        engine.data_dir().join(&layout.domains[&Domain::Stream])
     );
     // Peer readers still use core as main and can read across both files.
     assert_eq!(
