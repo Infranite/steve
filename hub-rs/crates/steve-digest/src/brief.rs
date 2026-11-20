@@ -345,95 +345,8 @@ pub fn day_agenda(c: &Connection, ws: &str, user: &str, zone: Zone, now: i64) ->
         ..Default::default()
     };
 
-    type Row = (
-        String,
-        String,
-        Option<i64>,
-        Option<String>,
-        bool,
-        i64,
-        Option<i64>,
-    );
-    let rows: Vec<Row> = c
-        .prepare_cached(
-            "SELECT id, text, due, due_date, star, pri, snooze_until FROM todos
-              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'todo'
-              ORDER BY star DESC, pri DESC, coalesce(due_date, ''), coalesce(due, 0), created",
-        )?
-        .query_map(params![ws, user], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, text, due, due_date, star, pri, snooze) in rows {
-        // a snoozed todo is out of the way until it wakes
-        if snooze.is_some_and(|s| s > now) {
-            continue;
-        }
-        let line = |when: Option<String>| TodoLine {
-            id: id.clone(),
-            text: crate::cut(text.trim(), crate::todo_alarms::LINE_MAX),
-            when,
-            star,
-            pri,
-        };
-        match (due_date.as_deref().and_then(crate::todo::parse_date), due) {
-            (Some(d), _) if d < today => {
-                push_line(&mut a.overdue, line(Some(d.format("%m-%d").to_string())))
-            }
-            (Some(d), _) if d == today => push_line(&mut a.today, line(None)),
-            (None, Some(t)) if t < now => {
-                let shown = if zone.day(t) == day {
-                    "%H:%M"
-                } else {
-                    "%m-%d %H:%M"
-                };
-                push_line(&mut a.overdue, line(Some(zone.format(t, shown))));
-            }
-            (None, Some(t)) if t < end => {
-                push_line(&mut a.today, line(Some(zone.format(t, "%H:%M"))))
-            }
-            _ if star => push_line(&mut a.starred, line(None)),
-            _ => {}
-        }
-    }
-
-    let week_end = today
-        .checked_add_days(Days::new(
-            7 - u64::from(today.weekday().number_from_monday()),
-        ))
-        .unwrap_or(today);
-    let goals: Vec<(String, String, String)> = c
-        .prepare_cached(
-            "SELECT id, text, target_date FROM todos
-              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'goal' AND target_date IS NOT NULL
-              ORDER BY target_date, created",
-        )?
-        .query_map(params![ws, user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, text, target) in goals {
-        if crate::todo::parse_date(&target).is_none_or(|d: NaiveDate| d > week_end)
-            || a.goals.len() >= LIST_MAX
-        {
-            continue;
-        }
-        let p = crate::todo::progress(c, ws, &id)?;
-        let n = |k: &str| p[k].as_i64().unwrap_or(0);
-        a.goals.push(GoalLine {
-            id,
-            text: crate::cut(text.trim(), crate::todo_alarms::LINE_MAX),
-            target,
-            done: n("done"),
-            counted: n("total") - n("dropped"),
-        });
-    }
+    agenda_todos(c, ws, user, zone, today, end, &mut a)?;
+    agenda_goals(c, ws, user, today, &mut a)?;
 
     a.pending = steve_store::attention::pending(c, ws, user, now)?.len();
     a.running = c.query_row(
@@ -469,6 +382,124 @@ pub fn day_agenda(c: &Connection, ws: &str, user: &str, zone: Zone, now: i64) ->
         |r| r.get::<_, i64>(0),
     )? as usize;
     Ok(a)
+}
+
+type AgendaTodoRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    bool,
+    i64,
+    Option<i64>,
+);
+
+fn agenda_todos(
+    c: &Connection,
+    ws: &str,
+    user: &str,
+    zone: Zone,
+    today: NaiveDate,
+    end: i64,
+    a: &mut Agenda,
+) -> Result<()> {
+    let rows: Vec<AgendaTodoRow> = c
+        .prepare_cached(
+            "SELECT id, text, due, due_date, star, pri, snooze_until FROM todos
+              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'todo'
+              ORDER BY star DESC, pri DESC, coalesce(due_date, ''), coalesce(due, 0), created",
+        )?
+        .query_map(params![ws, user], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for row in rows {
+        agenda_todo(row, zone, today, end, a);
+    }
+
+    Ok(())
+}
+
+fn agenda_todo(row: AgendaTodoRow, zone: Zone, today: NaiveDate, end: i64, a: &mut Agenda) {
+    let (id, text, due, due_date, star, pri, snooze) = row;
+    let now = a.at;
+    let day = &a.day;
+    // a snoozed todo is out of the way until it wakes
+    if snooze.is_some_and(|s| s > now) {
+        return;
+    }
+    let line = |when: Option<String>| TodoLine {
+        id: id.clone(),
+        text: crate::cut(text.trim(), crate::todo_alarms::LINE_MAX),
+        when,
+        star,
+        pri,
+    };
+    match (due_date.as_deref().and_then(crate::todo::parse_date), due) {
+        (Some(d), _) if d < today => {
+            push_line(&mut a.overdue, line(Some(d.format("%m-%d").to_string())))
+        }
+        (Some(d), _) if d == today => push_line(&mut a.today, line(None)),
+        (None, Some(t)) if t < now => {
+            let shown = if zone.day(t) == *day {
+                "%H:%M"
+            } else {
+                "%m-%d %H:%M"
+            };
+            push_line(&mut a.overdue, line(Some(zone.format(t, shown))));
+        }
+        (None, Some(t)) if t < end => push_line(&mut a.today, line(Some(zone.format(t, "%H:%M")))),
+        _ if star => push_line(&mut a.starred, line(None)),
+        _ => {}
+    }
+}
+
+fn agenda_goals(
+    c: &Connection,
+    ws: &str,
+    user: &str,
+    today: NaiveDate,
+    a: &mut Agenda,
+) -> Result<()> {
+    let week_end = today
+        .checked_add_days(Days::new(
+            7 - u64::from(today.weekday().number_from_monday()),
+        ))
+        .unwrap_or(today);
+    let goals: Vec<(String, String, String)> = c
+        .prepare_cached(
+            "SELECT id, text, target_date FROM todos
+              WHERE workspace_id = ? AND owner = ? AND state = 'open' AND kind = 'goal' AND target_date IS NOT NULL
+              ORDER BY target_date, created",
+        )?
+        .query_map(params![ws, user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, text, target) in goals {
+        if crate::todo::parse_date(&target).is_none_or(|d: NaiveDate| d > week_end)
+            || a.goals.len() >= LIST_MAX
+        {
+            continue;
+        }
+        let p = crate::todo::progress(c, ws, &id)?;
+        let n = |k: &str| p[k].as_i64().unwrap_or(0);
+        a.goals.push(GoalLine {
+            id,
+            text: crate::cut(text.trim(), crate::todo_alarms::LINE_MAX),
+            target,
+            done: n("done"),
+            counted: n("total") - n("dropped"),
+        });
+    }
+
+    Ok(())
 }
 
 fn section(out: &mut String, head: &str, lines: &[TodoLine]) {
@@ -560,6 +591,25 @@ pub fn render(a: &Agenda) -> String {
         &steve_i18n::t!("digest.brief.starred"),
         &a.starred,
     );
+    render_goals(&mut out, a);
+    render_items(&mut out, a);
+    let mut tail = Vec::new();
+    if a.pending > 0 {
+        tail.push(steve_i18n::t!("digest.brief.pending", n = a.pending));
+    }
+    if a.unread > 0 {
+        tail.push(steve_i18n::t!("digest.brief.unread", n = a.unread));
+    }
+    if !tail.is_empty() {
+        out.push_str(&format!(
+            "\n\n{}",
+            tail.join(&steve_i18n::t!("digest.brief.sep"))
+        ));
+    }
+    out
+}
+
+fn render_goals(out: &mut String, a: &Agenda) {
     if !a.goals.is_empty() {
         out.push_str(&format!("\n\n{}", steve_i18n::t!("digest.brief.goals")));
         for g in a.goals.iter().take(SECTION_MAX) {
@@ -580,6 +630,9 @@ pub fn render(a: &Agenda) -> String {
             ));
         }
     }
+}
+
+fn render_items(out: &mut String, a: &Agenda) {
     if a.running + a.finished + a.stuck.len() > 0 {
         out.push_str(&format!(
             "\n\n{}\n{}",
@@ -605,20 +658,6 @@ pub fn render(a: &Agenda) -> String {
             ));
         }
     }
-    let mut tail = Vec::new();
-    if a.pending > 0 {
-        tail.push(steve_i18n::t!("digest.brief.pending", n = a.pending));
-    }
-    if a.unread > 0 {
-        tail.push(steve_i18n::t!("digest.brief.unread", n = a.unread));
-    }
-    if !tail.is_empty() {
-        out.push_str(&format!(
-            "\n\n{}",
-            tail.join(&steve_i18n::t!("digest.brief.sep"))
-        ));
-    }
-    out
 }
 
 /// When a brief planned for `planned` stops being pushed: [`PUSH_UNTIL_MINUTE`] of its day, or the end

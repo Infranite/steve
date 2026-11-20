@@ -87,9 +87,13 @@ pub struct Outcome {
     pub alerts: i64,
 }
 
-/// Aggregates a window of `conv` into its rollup and picks the anomalies.
-pub fn aggregate(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg]) -> Result<Outcome> {
-    let key = conv.key();
+struct WindowAlerts {
+    cats: BTreeMap<String, Cat>,
+    anomalies: Vec<usize>,
+    alerts: i64,
+}
+
+fn classify_alerts(msgs: &[Msg]) -> WindowAlerts {
     let mut cats: BTreeMap<String, Cat> = BTreeMap::new();
     let mut cat_of: HashMap<&str, String> = HashMap::new();
     let mut thread_cat: HashMap<String, String> = HashMap::new();
@@ -149,6 +153,22 @@ pub fn aggregate(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg]) -> Result<Outc
     }
     anomalies.sort_unstable();
     anomalies.dedup();
+
+    WindowAlerts {
+        cats,
+        anomalies,
+        alerts,
+    }
+}
+
+/// Aggregates a window of `conv` into its rollup and picks the anomalies.
+pub fn aggregate(tx: &Tx, ws: &str, conv: &ConvRef, msgs: &[Msg]) -> Result<Outcome> {
+    let key = conv.key();
+    let WindowAlerts {
+        cats,
+        anomalies,
+        alerts,
+    } = classify_alerts(msgs);
 
     for (k, e) in &cats {
         let old: Option<(i64, i64, String, i64)> = tx

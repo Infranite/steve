@@ -90,12 +90,8 @@ steve-core	crates/steve-core/src/yolo/limits.rs	too_many_lines	255,128,125
 steve-core	crates/steve-core/src/yolo/mod.rs	too_many_lines	124
 steve-core	crates/steve-core/src/yolo/shell.rs	cognitive_complexity	34
 steve-core	crates/steve-core/src/yolo/shell.rs	too_many_lines	203
-steve-digest	crates/steve-digest/src/alerts.rs	too_many_lines	102
-steve-digest	crates/steve-digest/src/brief.rs	cognitive_complexity	28
-steve-digest	crates/steve-digest/src/brief.rs	too_many_lines	140
 steve-digest	crates/steve-digest/src/candidates.rs	too_many_lines	162
 steve-digest	crates/steve-digest/src/changes.rs	too_many_lines	166
-steve-digest	crates/steve-digest/src/conv.rs	too_many_lines	118,102
 steve-digest	crates/steve-digest/src/todo_tools.rs	too_many_lines	162
 steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29
 steve-flow	crates/steve-flow/src/exec.rs	too_many_lines	121
