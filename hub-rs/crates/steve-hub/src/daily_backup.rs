@@ -69,8 +69,12 @@ pub fn status(home: &Path, db: &Path, on: bool, keep_days: u64) -> Value {
         .rev()
         .find(|m| m.reason == Reason::Daily)
         .map(|m| json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes}));
-    let retention = backup::retention_status(&out).unwrap_or_default();
-    json!({"database":db,"dir":out,"daily":on,"keep_days":keep_days,"last":last,"purposes":retention.purposes,"retention":{"bytes":retention.bytes,"max_bytes":retention.max_bytes,"over_limit":retention.over_limit,"rules":backup::RULES}})
+    let retention = backup::retention_status(&out).unwrap_or_else(|_| backup::RetentionStatus {
+        failures: 1,
+        max_bytes: backup::TOTAL_BYTES,
+        ..Default::default()
+    });
+    json!({"database":db,"dir":out,"daily":on,"keep_days":keep_days,"last":last,"purposes":retention.purposes,"retention":{"bytes":retention.bytes,"manual_bytes":retention.manual_bytes,"retiring_bytes":retention.retiring_bytes,"retiring_count":retention.retiring_count,"failures":crate::backup::retention_failures(home),"inventory_failures":retention.failures,"max_bytes":retention.max_bytes,"over_limit":retention.over_limit,"rules":backup::RULES}})
 }
 /// Re-read settings immediately before a scheduled generation; disabling never deletes copies.
 pub fn make_if_enabled(

@@ -174,11 +174,41 @@ async fn owner_http_backup_publishes_manifest_and_updates_purpose_usage() {
     .unwrap();
     assert_eq!(report.removed, 0);
     assert!(manifest.database_path().exists() && second.database_path().exists());
+    let (_, status) = e.call("GET", "/api/system/backup", None).await;
+    assert_eq!(status["retention"]["over_limit"], false);
+    assert_eq!(status["retention"]["bytes"], 0);
     assert!(
-        steve_store_sqlite::backup::retention_status(&steve_hub::backup::root(&e.home))
-            .unwrap()
-            .over_limit
+        status["retention"]["manual_bytes"].as_u64().unwrap()
+            > steve_store_sqlite::backup::TOTAL_BYTES
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backup_status_exposes_sweep_failures_and_clears_them_after_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = start_with_retention(false).await;
+    let old = steve_hub::daily_backup::make(&e.home, e.store.path(), "old").unwrap();
+    let latest = steve_hub::daily_backup::make(&e.home, e.store.path(), "latest").unwrap();
+    let path = old.database.parent().unwrap().join("manifest.json");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = std::fs::read(&path).is_err();
+    let report = steve_hub::backup::retain(&e.store, &e.home, u64::MAX).unwrap();
+    let (_, status) = e.call("GET", "/api/system/backup", None).await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(denied);
+    assert_eq!(report.failures, 1);
+    assert_eq!(status["retention"]["failures"], report.failures);
+    assert_eq!(status["retention"]["inventory_failures"], 1);
+    assert_eq!(
+        steve_hub::backup::retain(&e.store, &e.home, u64::MAX)
+            .unwrap()
+            .removed,
+        1
+    );
+    let (_, status) = e.call("GET", "/api/system/backup", None).await;
+    assert_eq!(status["retention"]["failures"], 0);
+    assert_eq!(status["retention"]["inventory_failures"], 0);
+    assert!(!old.database.exists() && latest.database.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

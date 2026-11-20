@@ -1,5 +1,9 @@
 //! Hub policy for backup locations. Domain modules receive a capability, never infer a home.
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use steve_store_sqlite::backup::{self as storage, BackupPlan, CancelFlag, Reason};
 
 /// All Hub backup purposes share this configured root. Callers retain their existing
@@ -83,12 +87,36 @@ pub fn save_daily_settings(
     store.settings().set(steve_store::WS, &values, author)?;
     Ok(())
 }
+// Last sweep is process-local status, not a user setting or a second persisted policy.
+static RETENTION_FAILURES: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+pub(crate) fn retention_failures(home: &Path) -> usize {
+    RETENTION_FAILURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(home)
+        .copied()
+        .unwrap_or(0)
+}
 /// Every sweep resolves the current setting, including when daily generation is disabled.
 pub fn retain(
     store: &steve_store::Store,
     home: &Path,
     now: u64,
 ) -> anyhow::Result<storage::Pruned> {
-    let settings = daily_settings(store)?;
-    Ok(storage::retain_at(&root(home), now, settings.keep_days)?)
+    let result = (|| {
+        let settings = daily_settings(store)?;
+        Ok(storage::retain_at(&root(home), now, settings.keep_days)?)
+    })();
+    let failures = result.as_ref().map_or(1, |r: &storage::Pruned| r.failures);
+    RETENTION_FAILURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(home.to_owned(), failures);
+    if failures > 0 {
+        tracing::warn!(
+            failures,
+            "backup retention completed with failures; see backup status"
+        );
+    }
+    result
 }

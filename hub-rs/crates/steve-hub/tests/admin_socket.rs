@@ -766,7 +766,9 @@ async fn default_management_backup_is_manual_and_survives_age_and_total_pressure
         0
     );
     assert!(manifests.iter().all(|m| m.database_path().exists()));
-    assert!(backup::retention_status(&root).unwrap().over_limit);
+    let status = backup::retention_status(&root).unwrap();
+    assert!(!status.over_limit);
+    assert!(status.manual_bytes > backup::TOTAL_BYTES);
     hub.stop().await;
 }
 

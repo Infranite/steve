@@ -93,7 +93,7 @@ Fs	steve-modules/src/vault/keystore/file.rs	7
 Fs	steve-node-wire/src/identity.rs	3
 Fs	steve-research/src/attach.rs	4
 Fs	steve-store-sqlite/src/backup/offline.rs	8
-Fs	steve-store-sqlite/src/backup/plan.rs	13
+Fs	steve-store-sqlite/src/backup/plan.rs	16
 Harness	steve-core/src/gateway.rs	6
 Harness	steve-hub/src/wire/mod.rs	1
 Harness	steve-hub/src/wire/research.rs	1

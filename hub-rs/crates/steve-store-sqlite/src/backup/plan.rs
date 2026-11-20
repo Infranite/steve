@@ -419,10 +419,43 @@ pub fn list(root: &Path) -> io::Result<Vec<Manifest>> {
 #[derive(Default)]
 struct Inventory {
     manifests: Vec<Manifest>,
+    retiring: Vec<PathBuf>,
     failures: usize,
 }
 fn directory_failure(path: &Path, error: &io::Error) {
     tracing::warn!(path = %path.display(), %error, "backup retention skipped directory");
+}
+fn read_manifest(path: &Path, id: &str, require_database: bool) -> io::Result<Option<Manifest>> {
+    let meta = path.join("manifest.json");
+    match fs::symlink_metadata(&meta) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
+        return Ok(None);
+    };
+    if m.files.artifacts.iter().any(|a| !single_name(&a.name))
+        || m.format != 1
+        || !m.completed
+        || m.id != id
+        || !id.starts_with(&format!("{}-{}-", m.reason.prefix(), m.created_at))
+        || !single_name(&m.database.name)
+        || m.database.quick_check.as_deref() != Some("ok")
+    {
+        return Ok(None);
+    }
+    if require_database {
+        match fs::symlink_metadata(path.join(&m.database.name)) {
+            Ok(f) if f.is_file() => {}
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    m.directory = path.to_owned();
+    Ok(Some(m))
 }
 fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
     let entries = match fs::read_dir(root) {
@@ -442,38 +475,11 @@ fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
                 return Ok(None);
             }
             let path = entry.path();
-            let read = (|| -> io::Result<Option<Manifest>> {
-                let meta = path.join("manifest.json");
-                match fs::symlink_metadata(&meta) {
-                    Ok(m) if m.is_file() => {}
-                    Ok(_) => return Ok(None),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(e),
-                }
-                let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
-                    return Ok(None);
-                };
-                if m.files.artifacts.iter().any(|a| !single_name(&a.name))
-                    || m.format != 1
-                    || !m.completed
-                    || m.id != name
-                    || !name.starts_with(&format!("{}-{}-", m.reason.prefix(), m.created_at))
-                    || !single_name(&m.database.name)
-                    || m.database.quick_check.as_deref() != Some("ok")
-                {
-                    return Ok(None);
-                }
-                if require_database {
-                    match fs::symlink_metadata(path.join(&m.database.name)) {
-                        Ok(f) if f.is_file() => {}
-                        Ok(_) => return Ok(None),
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                        Err(e) => return Err(e),
-                    }
-                }
-                m.directory = path.clone();
-                Ok(Some(m))
-            })();
+            if name.ends_with(".retiring") {
+                all.retiring.push(path);
+                return Ok(None);
+            }
+            let read = read_manifest(&path, &name, require_database);
             if let Err(ref error) = read {
                 directory_failure(&path, error);
             }
@@ -495,6 +501,7 @@ fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
             .then(a.created_ms.cmp(&b.created_ms))
             .then(a.id.cmp(&b.id))
     });
+    all.retiring.sort();
     Ok(all)
 }
 /// Actual on-disk logical bytes, rather than the historical sizes in the manifest.
@@ -502,34 +509,116 @@ fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
 struct DirectoryState {
     bytes: u64,
     owned: bool,
+    files: Vec<PathBuf>,
 }
 fn directory_state(m: &Manifest) -> io::Result<DirectoryState> {
+    directory_contents(&m.directory, Some(m))
+}
+fn directory_contents(path: &Path, manifest: Option<&Manifest>) -> io::Result<DirectoryState> {
     let mut state = DirectoryState {
         bytes: 0,
         owned: true,
+        files: Vec::new(),
     };
-    let mut expected = vec!["manifest.json".to_owned(), m.database.name.clone()];
-    expected.extend(m.files.artifacts.iter().map(|a| a.name.clone()));
-    for entry in fs::read_dir(&m.directory)? {
+    let mut expected = Vec::new();
+    if let Some(m) = manifest {
+        expected.extend(["manifest.json".to_owned(), m.database.name.clone()]);
+        expected.extend(m.files.artifacts.iter().map(|a| a.name.clone()));
+    }
+    for entry in fs::read_dir(path)? {
         let entry = entry?;
         let file = entry.file_type()?.is_file();
         if file {
             state.bytes = state.bytes.saturating_add(entry.metadata()?.len());
+            state.files.push(entry.path());
         }
         state.owned &= file && expected.contains(&entry.file_name().to_string_lossy().into_owned());
     }
     Ok(state)
 }
+fn retiring_state(path: &Path) -> io::Result<DirectoryState> {
+    let id = path.file_name().unwrap().to_string_lossy();
+    let id = id.strip_suffix(".retiring").unwrap();
+    let manifest = read_manifest(path, id, false)?;
+    let mut state = directory_contents(path, manifest.as_ref())?;
+    state.owned &= match manifest {
+        Some(m) => m.reason.rule().limits.is_some(),
+        // Manifest is unlinked last. A crash after that leaves only an empty directory.
+        None => retired_id(id),
+    };
+    Ok(state)
+}
+fn retired_id(id: &str) -> bool {
+    let Some((head, nonce)) = id.rsplit_once('-') else {
+        return false;
+    };
+    let Some((reason, stamp)) = head.rsplit_once('-') else {
+        return false;
+    };
+    (RULES.iter().any(|r| r.limits.is_some() && r.kind == reason)
+        || reason
+            == Reason::PreDestructive {
+                what: "purge".into(),
+            }
+            .prefix())
+        && nonce.len() == 32
+        && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+        && stamp.len() == 15
+        && stamp.as_bytes()[8] == b'T'
+        && stamp
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 8 || b.is_ascii_digit())
+}
+fn remove_retiring(path: &Path, mut state: DirectoryState) -> io::Result<()> {
+    if !state.owned {
+        return Err(io::Error::other("retiring backup contains unowned entries"));
+    }
+    // Retain ownership metadata until all artifacts are gone; retry never needs to guess
+    // which remaining files belonged to a partially deleted backup.
+    state
+        .files
+        .sort_by_key(|p| p.file_name().is_some_and(|n| n == "manifest.json"));
+    for file in state.files {
+        if file.file_name().is_some_and(|n| n == "manifest.json") {
+            File::open(path)?.sync_all()?;
+        }
+        fs::remove_file(file)?;
+    }
+    fs::remove_dir(path)
+}
 pub fn usage(root: &Path) -> io::Result<BTreeMap<String, Usage>> {
+    Ok(retention_status(root)?.purposes)
+}
+#[derive(Debug, Default, Serialize)]
+pub struct RetentionStatus {
+    pub purposes: BTreeMap<String, Usage>,
+    /// Automatic copies only; manual backups cannot displace bounded purposes.
+    pub bytes: u64,
+    pub manual_bytes: u64,
+    pub retiring_bytes: u64,
+    pub retiring_count: u64,
+    pub failures: usize,
+    pub max_bytes: u64,
+    pub over_limit: bool,
+}
+pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
+    let inventory = inventory(root, false)?;
+    let mut status = RetentionStatus {
+        failures: inventory.failures,
+        max_bytes: TOTAL_BYTES,
+        ..RetentionStatus::default()
+    };
     let mut result: BTreeMap<String, Usage> = RULES
         .iter()
         .map(|r| (r.kind.into(), Usage::default()))
         .collect();
-    for m in inventory(root, false)?.manifests {
+    for m in inventory.manifests {
         let bytes = match directory_state(&m) {
             Ok(state) => state.bytes,
             Err(error) => {
                 directory_failure(&m.directory, &error);
+                status.failures += 1;
                 continue;
             }
         };
@@ -545,27 +634,29 @@ pub fn usage(root: &Path) -> io::Result<BTreeMap<String, Usage>> {
             .limits
             .is_some_and(|l| u.bytes > l.bytes || u.count > l.copies as u64);
     }
-    Ok(result)
-}
-#[derive(Debug, Default, Serialize)]
-pub struct RetentionStatus {
-    pub purposes: BTreeMap<String, Usage>,
-    pub bytes: u64,
-    pub max_bytes: u64,
-    pub over_limit: bool,
-}
-pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
-    let purposes = usage(root)?;
-    let bytes = purposes
-        .values()
-        .fold(0u64, |sum, u| sum.saturating_add(u.bytes));
-    let over_limit = bytes > TOTAL_BYTES || purposes.values().any(|u| u.over_limit);
-    Ok(RetentionStatus {
-        purposes,
-        bytes,
-        max_bytes: TOTAL_BYTES,
-        over_limit,
-    })
+    for path in inventory.retiring {
+        status.retiring_count += 1;
+        match retiring_state(&path) {
+            Ok(state) => {
+                status.retiring_bytes = status.retiring_bytes.saturating_add(state.bytes);
+                status.failures += usize::from(!state.owned);
+            }
+            Err(error) => {
+                directory_failure(&path, &error);
+                status.failures += 1;
+            }
+        }
+    }
+    status.manual_bytes = result["manual"].bytes;
+    status.bytes = RULES
+        .iter()
+        .filter(|r| r.limits.is_some())
+        .fold(status.retiring_bytes, |sum, r| {
+            sum.saturating_add(result[r.kind].bytes)
+        });
+    status.over_limit = status.bytes > TOTAL_BYTES || result.values().any(|u| u.over_limit);
+    status.purposes = result;
+    Ok(status)
 }
 #[derive(Debug, Default)]
 pub struct Pruned {
@@ -586,8 +677,8 @@ pub fn retain_at(root: &Path, now: u64, daily_keep_days: u64) -> io::Result<Prun
     )
 }
 /// Single interpreter: evaluate age/count/byte pressure in publication order, oldest first.
-/// Every purpose's newest copy and all Manual copies survive every rule, even when
-/// those protected copies alone exceed the cap. Status reports that irreducible excess.
+/// Every purpose's newest copy survives every rule. Manual copies are outside the
+/// automatic byte budget and never retired. Status reports any irreducible excess.
 fn prune_impl(
     root: &Path,
     now: u64,
@@ -606,6 +697,35 @@ fn prune_impl(
         ..Pruned::default()
     };
     let mut total = 0u64;
+    let mut changed = false;
+    // Resume retired directories before considering any newly eligible backups. They
+    // remain part of the automatic budget until their remaining files are removed.
+    for path in inventory.retiring {
+        let state = match retiring_state(&path) {
+            Ok(state) => state,
+            Err(error) => {
+                directory_failure(&path, &error);
+                report.failures += 1;
+                continue;
+            }
+        };
+        let bytes = state.bytes;
+        if state.owned && report.removed == limit {
+            report.more = true;
+            total = total.saturating_add(bytes);
+            continue;
+        }
+        changed = true;
+        match remove_retiring(&path, state) {
+            Ok(()) => report.removed += 1,
+            Err(error) => {
+                directory_failure(&path, &error);
+                report.failures += 1;
+                total = total
+                    .saturating_add(directory_contents(&path, None).map_or(bytes, |s| s.bytes));
+            }
+        }
+    }
     for m in &all {
         let bytes = match directory_state(m) {
             Ok(state) => Some(state.bytes),
@@ -616,13 +736,14 @@ fn prune_impl(
             }
         };
         sizes.push(bytes);
-        total = total.saturating_add(bytes.unwrap_or(0));
+        if rules[m.reason.rule_index()].limits.is_some() {
+            total = total.saturating_add(bytes.unwrap_or(0));
+        }
         let state = remaining.entry(m.reason.kind()).or_default();
         state.0 += 1;
         state.1 = state.1.saturating_add(bytes.unwrap_or(0));
         newest.insert(m.reason.kind(), m.id.as_str());
     }
-    let mut changed = false;
     for (m, bytes) in all.iter().zip(sizes) {
         let kind = m.reason.kind();
         let rule = &rules[m.reason.rule_index()];
@@ -653,20 +774,28 @@ fn prune_impl(
             continue;
         }
         // Recheck ownership immediately before retirement; directory errors never stop others.
-        match directory_state(m) {
-            Ok(state) if state.owned => {}
-            Ok(_) => continue,
+        let contents = match directory_state(m) {
+            Ok(state) if state.owned => state,
+            Ok(_) => {
+                directory_failure(
+                    &m.directory,
+                    &io::Error::other("backup contains unowned entries"),
+                );
+                report.failures += 1;
+                continue;
+            }
             Err(error) => {
                 directory_failure(&m.directory, &error);
                 report.failures += 1;
                 continue;
             }
-        }
+        };
         if report.removed == limit {
             report.more = true;
             break;
         }
-        let retired = root.join(format!("{}.partial", m.id));
+        let retired = root.join(format!("{}.retiring", m.id));
+        let mut moved = false;
         let result = (|| -> io::Result<()> {
             if fs::symlink_metadata(&retired).is_ok() {
                 return Err(io::Error::new(
@@ -676,20 +805,39 @@ fn prune_impl(
             }
             rename(&m.directory, &retired)?;
             changed = true;
-            fs::remove_dir_all(&retired)
+            moved = true;
+            File::open(root)?.sync_all()?;
+            remove_retiring(
+                &retired,
+                DirectoryState {
+                    files: contents
+                        .files
+                        .into_iter()
+                        .map(|p| retired.join(p.file_name().unwrap()))
+                        .collect(),
+                    ..contents
+                },
+            )
         })();
+        if moved {
+            state.0 -= 1;
+            state.1 = state.1.saturating_sub(bytes);
+            total = total.saturating_sub(bytes);
+        }
         if let Err(error) = result {
             directory_failure(&m.directory, &error);
             report.failures += 1;
+            if moved {
+                total = total
+                    .saturating_add(directory_contents(&retired, None).map_or(bytes, |s| s.bytes));
+            }
             continue;
         }
         report.removed += 1;
-        state.0 -= 1;
-        state.1 = state.1.saturating_sub(bytes);
-        total = total.saturating_sub(bytes);
     }
-    if changed {
-        File::open(root)?.sync_all()?;
+    if changed && let Err(error) = File::open(root).and_then(|f| f.sync_all()) {
+        directory_failure(root, &error);
+        report.failures += 1;
     }
     if total > max_bytes {
         tracing::warn!(
@@ -706,7 +854,7 @@ mod retention_tests {
     use super::*;
 
     fn copy(root: &Path, reason: Reason, at: u64) -> Manifest {
-        let id = format!("{}-20260101T000000-{at:04}", reason.prefix());
+        let id = format!("{}-20260101T000000-{at:032x}", reason.prefix());
         let directory = root.join(&id);
         fs::create_dir(&directory).unwrap();
         fs::write(directory.join("db.sqlite3"), [0u8; 1024]).unwrap();
@@ -1001,15 +1149,129 @@ mod retention_tests {
         let bad = copy(root.path(), Reason::Daily, 1);
         let good = copy(root.path(), Reason::Daily, 2);
         let latest = copy(root.path(), Reason::Daily, 3);
-        let interrupted = root.path().join(format!("{}.partial", bad.id));
-        fs::create_dir(&interrupted).unwrap();
+        let interrupted = root.path().join(format!("{}.retiring", bad.id));
+        fs::write(&interrupted, "foreign collision").unwrap();
         let report = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS).unwrap();
         assert_eq!(report.failures, 1);
         assert_eq!(report.removed, 1);
         assert!(!report.more);
         assert!(bad.directory.exists() && interrupted.exists() && latest.directory.exists());
         assert!(!good.directory.exists());
-        assert!(!root.path().join(format!("{}.partial", good.id)).exists());
+        assert!(!root.path().join(format!("{}.retiring", good.id)).exists());
+    }
+
+    #[test]
+    fn manual_bytes_cannot_displace_any_automatic_purpose() {
+        let root = tempfile::tempdir().unwrap();
+        let mut automatic = Vec::new();
+        for (i, reason) in purposes().into_iter().enumerate() {
+            automatic.push(copy(root.path(), reason.clone(), (2 * i + 1) as u64));
+            automatic.push(copy(root.path(), reason, (2 * i + 2) as u64));
+        }
+        let manual = copy(root.path(), Reason::Manual, 10);
+        File::options()
+            .write(true)
+            .open(manual.database_path())
+            .unwrap()
+            .set_len(TOTAL_BYTES + 1)
+            .unwrap();
+        let status = retention_status(root.path()).unwrap();
+        assert_eq!(
+            status.bytes,
+            automatic
+                .iter()
+                .map(|m| directory_state(m).unwrap().bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(status.manual_bytes, status.purposes["manual"].bytes);
+        assert!(status.manual_bytes > TOTAL_BYTES);
+        assert!(!status.over_limit);
+        let report = retain_at(root.path(), 10, DEFAULT_DAILY_KEEP_DAYS).unwrap();
+        assert_eq!((report.removed, report.failures), (0, 0));
+        assert!(automatic.iter().all(|m| m.directory.exists()));
+        assert!(manual.directory.exists());
+    }
+
+    #[test]
+    fn failed_retirement_is_accounted_and_retried_before_new_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let old = copy(root.path(), Reason::Daily, 1);
+        let middle = copy(root.path(), Reason::Daily, 2);
+        let latest = copy(root.path(), Reason::Daily, 3);
+        fs::set_permissions(&old.directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let denied = fs::write(old.directory.join("denied"), "denied").is_err();
+        let first = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS);
+        let retired = root.path().join(format!("{}.retiring", old.id));
+        fs::set_permissions(&retired, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(denied, "fixture must deny file removal");
+        let first = first.unwrap();
+        assert_eq!((first.removed, first.failures), (1, 1));
+        assert!(!old.directory.exists() && !middle.directory.exists() && latest.directory.exists());
+        assert!(retired.join("manifest.json").is_file());
+        let status = retention_status(root.path()).unwrap();
+        assert_eq!(status.retiring_count, 1);
+        assert_eq!(
+            status.retiring_bytes,
+            directory_contents(&retired, None).unwrap().bytes
+        );
+        assert_eq!(
+            status.bytes,
+            status.retiring_bytes + status.purposes["daily"].bytes
+        );
+        // Emulate interruption after removing one artifact. Manifest remains readable.
+        fs::remove_file(retired.join("db.sqlite3")).unwrap();
+        let next = retain_at(root.path(), 0, DEFAULT_DAILY_KEEP_DAYS).unwrap();
+        assert_eq!((next.removed, next.failures), (1, 0));
+        assert!(!retired.exists() && latest.directory.exists());
+        let status = retention_status(root.path()).unwrap();
+        assert_eq!((status.retiring_count, status.retiring_bytes), (0, 0));
+    }
+
+    #[test]
+    fn retirement_retries_are_sliced_and_preserve_partial_foreign_and_linked_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let first = copy(root.path(), Reason::Daily, 1);
+        let second = copy(root.path(), Reason::Daily, 2);
+        let partial = copy(root.path(), Reason::Daily, 3);
+        let first_retired = root.path().join(format!("{}.retiring", first.id));
+        let second_retired = root.path().join(format!("{}.retiring", second.id));
+        let writing = root.path().join(format!("{}.partial", partial.id));
+        fs::rename(&first.directory, &first_retired).unwrap();
+        fs::rename(&second.directory, &second_retired).unwrap();
+        fs::rename(&partial.directory, &writing).unwrap();
+        let foreign = root.path().join("foreign.retiring");
+        fs::create_dir(&foreign).unwrap();
+        let linked = root.path().join("linked.retiring");
+        std::os::unix::fs::symlink(&writing, &linked).unwrap();
+        let report = prune_impl(
+            root.path(),
+            0,
+            &RULES,
+            DEFAULT_DAILY_KEEP_DAYS,
+            TOTAL_BYTES,
+            1,
+        )
+        .unwrap();
+        assert_eq!((report.removed, report.failures, report.more), (1, 1, true));
+        assert!(!first_retired.exists() && second_retired.exists());
+        // Crash between unlinking the manifest and removing the empty directory is retryable.
+        fs::remove_file(second_retired.join("db.sqlite3")).unwrap();
+        fs::remove_file(second_retired.join("manifest.json")).unwrap();
+        let report = prune_impl(
+            root.path(),
+            0,
+            &RULES,
+            DEFAULT_DAILY_KEEP_DAYS,
+            TOTAL_BYTES,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            (report.removed, report.failures, report.more),
+            (1, 1, false)
+        );
+        assert!(!second_retired.exists());
+        assert!(writing.exists() && foreign.exists() && linked.is_symlink());
     }
 
     #[test]

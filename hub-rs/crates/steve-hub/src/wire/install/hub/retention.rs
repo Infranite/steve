@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone())));
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone(), cx.cfg.no_resume)));
 }}
 
 struct State {
@@ -142,13 +142,17 @@ where
         error.map_or(Ok(()), Err)
     }
 }
-async fn run(db: steve_store::Store, home: std::path::PathBuf) {
-    let clock = Arc::new(SystemClock);
+fn source(
+    db: steve_store::Store,
+    home: std::path::PathBuf,
+    no_resume: bool,
+    first_due: i64,
+) -> impl DueSource {
     let optimizer = db.clone();
     let backup_store = db.clone();
-    let source = Arc::new(Source::new(
-        clock.now(),
-        move |kind, now, after| {
+    Source::new(
+        first_due,
+        move |kind: Kind, now: i64, after: Option<i64>| {
             let db = db.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -170,7 +174,14 @@ async fn run(db: steve_store::Store, home: std::path::PathBuf) {
             let home = home.clone();
             let store = backup_store.clone();
             async move {
+                // A Hub on a data copy still maintains its database rows, but is not the
+                // installation that owns these backup files. Do not even inventory them.
+                if no_resume {
+                    return Ok(false);
+                }
                 tokio::task::spawn_blocking(move || {
+                    // retain records the whole sweep's failures for /system/backup before
+                    // this adapter returns only the continuation bit to the shared Source.
                     crate::backup::retain(&store, &home, now.max(0) as u64)
                         .map(|report| report.more)
                         .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))
@@ -179,7 +190,11 @@ async fn run(db: steve_store::Store, home: std::path::PathBuf) {
                 .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
             }
         },
-    ));
+    )
+}
+async fn run(db: steve_store::Store, home: std::path::PathBuf, no_resume: bool) {
+    let clock = Arc::new(SystemClock);
+    let source = Arc::new(source(db, home, no_resume, clock.now()));
     due_loop(
         source,
         clock,
@@ -252,6 +267,77 @@ mod tests {
             1,
             "the real installer registers retention in NO_RESUME mode"
         );
+    }
+
+    #[tokio::test]
+    async fn retention_no_resume_cleans_rows_but_never_backup_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let db = steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher)
+            .unwrap();
+        let old = crate::daily_backup::make(home.path(), db.path(), "old").unwrap();
+        let latest = crate::daily_backup::make(home.path(), db.path(), "latest").unwrap();
+        let path = old.database.parent().unwrap().join("manifest.json");
+        let mut manifest: steve_store_sqlite::backup::Manifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.created_ms = 0;
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        // A pending retirement must also remain untouched on a copied installation.
+        let retiring = crate::backup::root(home.path()).join("foreign.retiring");
+        std::fs::create_dir(&retiring).unwrap();
+        let pending = steve_store_sqlite::backup::backup(
+            db.path(),
+            &crate::backup::plan(home.path(), steve_store_sqlite::backup::Reason::Diagnostic),
+            &|_| {},
+            &steve_store_sqlite::backup::CancelFlag::default(),
+        )
+        .unwrap();
+        let pending_path =
+            crate::backup::root(home.path()).join(format!("{}.retiring", pending.id));
+        std::fs::rename(&pending.directory, &pending_path).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO node_vitals(node_id,at,data) VALUES('expired',0,'{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let now = 10 * 86_400_000;
+        source(db.clone(), home.path().to_owned(), true, now)
+            .run_due(now)
+            .await
+            .unwrap();
+        let remaining: i64 = db
+            .reader(|c| {
+                c.query_row("SELECT count(*) FROM node_vitals", [], |r| r.get(0))
+                    .map_err(Into::<steve_store::StoreError>::into)
+            })
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "NO_RESUME must not disable database row policies"
+        );
+        assert!(
+            old.database.exists()
+                && latest.database.exists()
+                && retiring.exists()
+                && pending_path.exists()
+        );
+        assert_eq!(
+            crate::daily_backup::status(home.path(), db.path(), false, 7)["retention"]["failures"],
+            0
+        );
+        source(db, home.path().to_owned(), false, now)
+            .run_due(now)
+            .await
+            .unwrap();
+        assert!(!old.database.exists() && latest.database.exists() && retiring.exists());
+        assert!(
+            !pending_path.exists(),
+            "normal mode retries retired backups too"
+        );
+        // This is produced by the real Source adapter, which previously dropped failures.
+        assert_eq!(crate::backup::retention_failures(home.path()), 1);
     }
 
     #[tokio::test]
