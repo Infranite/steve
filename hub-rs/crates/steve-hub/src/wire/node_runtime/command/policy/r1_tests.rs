@@ -198,22 +198,21 @@ fn configuration_pending_is_only_reported_for_an_otherwise_permitted_retry() {
 }
 
 /// The existing after_attempt_in retry predicate, with classification already supplied.
-fn legacy_retry(f: TurnFacts, service: bool, retryable: bool, ordinal: u32) -> bool {
+fn legacy_retry(f: TurnFacts, service: bool, retryable: bool, ordinal: u32, limit: u32) -> bool {
     let service_gates =
         f.gates.session_open && f.gates.item_in_progress && f.gates.no_pending_decision;
     f.outcome == Outcome::Failed
         && ((service && service_gates) || (!service && retryable && !f.acted))
         && !f.cancelled
         && !f.workflow_blocked
-        && ordinal < 2
+        && ordinal < limit
         && !f.configuration_pending
 }
 
 #[test]
-fn stream_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts() {
+fn service_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts() {
     let intent = intent();
-    for ordinal in 0..=2 {
-        let rows = history(&intent, ordinal);
+    for ordinal in 0..=3 {
         // Each bit independently closes one of the legacy gates, including acted.
         for mask in 0..256 {
             let f = TurnFacts {
@@ -232,35 +231,63 @@ fn stream_and_gateway_decisions_match_the_existing_predicate_for_the_same_facts(
                     no_pending_decision: mask & 128 == 0,
                 },
             };
-            let h = History {
-                intent: &intent,
-                revisions: &rows,
-            };
-            for retry in [Retry::Now, Retry::Later { after_ms: None }] {
-                let stream = TurnInterrupted {
-                    history: h,
-                    facts: f,
-                    now: HubTime(2000),
-                }
-                .decide(retry);
-                let gateway = TurnGatewayTransient {
-                    history: h,
-                    facts: f,
-                    now: HubTime(2000),
-                }
-                .decide(retry);
-                assert_eq!(
-                    matches!(stream, Decision::Schedule { .. }),
-                    legacy_retry(f, true, true, ordinal)
-                );
-                assert_eq!(
-                    matches!(gateway, Decision::Schedule { .. }),
-                    legacy_retry(f, false, true, ordinal)
-                );
-                for decision in [stream, gateway] {
-                    if let Decision::Schedule { at, .. } = decision {
-                        assert_eq!(at.due, HubTime(2000 + [20_000, 60_000][ordinal as usize]));
-                        assert_eq!(at.jitter_ms, 0);
+            let retries = [Retry::Never, Retry::Now, Retry::Later { after_ms: None }];
+            for settled_retry in retries {
+                let mut rows = history(&intent, ordinal);
+                rows.last_mut().unwrap().settled.as_mut().unwrap().retry = settled_retry;
+                let h = History {
+                    intent: &intent,
+                    revisions: &rows,
+                };
+                for retry in retries {
+                    let stream = TurnInterrupted {
+                        history: h,
+                        facts: f,
+                        now: HubTime(2000),
+                    }
+                    .decide(retry);
+                    let gateway = TurnGatewayTransient {
+                        history: h,
+                        facts: f,
+                        now: HubTime(2000),
+                    }
+                    .decide(retry);
+                    let capacity = TurnCapacity {
+                        facts: f,
+                        ..capacity(&intent, &rows)
+                    }
+                    .decide(retry);
+                    assert_eq!(
+                        matches!(stream, Decision::Schedule { .. }),
+                        legacy_retry(f, true, true, ordinal, 2)
+                    );
+                    assert_eq!(
+                        matches!(gateway, Decision::Schedule { .. }),
+                        legacy_retry(
+                            f,
+                            false,
+                            retry != Retry::Never && settled_retry != Retry::Never,
+                            ordinal,
+                            2
+                        )
+                    );
+                    assert_eq!(
+                        matches!(capacity, Decision::Schedule { .. }),
+                        legacy_retry(f, true, true, ordinal, 3)
+                    );
+                    for decision in [stream, gateway] {
+                        if let Decision::Schedule { at, .. } = decision {
+                            assert_eq!(at.due, HubTime(2000 + [20_000, 60_000][ordinal as usize]));
+                            assert_eq!(at.jitter_ms, 0);
+                        }
+                    }
+                    if let Decision::Schedule { at, .. } = capacity {
+                        assert_eq!(
+                            at.due,
+                            HubTime(3000 + [20_000, 60_000, 120_000][ordinal as usize])
+                        );
+                        assert_eq!(at.deadline, Some(HubTime(901_000)));
+                        assert_eq!(at.jitter_ms, 1000);
                     }
                 }
             }

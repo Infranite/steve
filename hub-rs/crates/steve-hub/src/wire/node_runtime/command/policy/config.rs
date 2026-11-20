@@ -22,12 +22,10 @@ impl ConfigStale<'_> {
     }
 
     fn plan(self, retry: Retry) -> Result<super::Schedule, Refusal> {
-        if retry == Retry::Never {
-            return Err(Refusal::Never);
-        }
         if !matches!(self.history.intent, Intent::Configure(_)) {
             return Err(Refusal::WrongIntent);
         }
+        // Selection by stale-config code is sufficient, regardless of the retry category.
         self.history.failed(2, self.now)?;
         let hint = match retry {
             Retry::Later { after_ms } => after_ms,
@@ -56,7 +54,7 @@ mod tests {
                 },
                 settled: Some(Settled {
                     terminal: Terminal::Rejected,
-                    retry: Retry::Now,
+                    retry: Retry::Never,
                     at: HubTime(10),
                 }),
             });
@@ -69,8 +67,7 @@ mod tests {
                 node_view_refreshed: false,
                 source: HintSource::CommandReceipt,
             };
-            assert_eq!(rule.decide(Retry::Never), Decision::Stop(Refusal::Never));
-            for retry in [Retry::Now, Retry::Later { after_ms: None }] {
+            for retry in [Retry::Never, Retry::Now, Retry::Later { after_ms: None }] {
                 if revision == 2 {
                     assert_eq!(rule.decide(retry), Decision::Stop(Refusal::Budget));
                 } else {

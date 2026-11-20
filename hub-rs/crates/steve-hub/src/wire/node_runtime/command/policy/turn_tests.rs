@@ -66,8 +66,8 @@ fn capacity_has_three_retries_and_is_deterministic_across_reconstructed_history(
     for ordinal in 0..=3 {
         let rows = rows(&intent, ordinal);
         let rule = capacity(&intent, &rows);
-        assert_eq!(rule.decide(Retry::Never), Decision::Stop(Refusal::Never));
         for retry in [
+            Retry::Never,
             Retry::Now,
             Retry::Later { after_ms: None },
             Retry::Later {
@@ -185,9 +185,7 @@ fn interrupted_turns_keep_twenty_and_sixty_seconds_even_after_acting() {
                 }
                 .decide(retry)
             );
-            if retry == Retry::Never {
-                assert_eq!(decision, Decision::Stop(Refusal::Never));
-            } else if ordinal == 2 {
+            if ordinal == 2 {
                 assert_eq!(decision, Decision::Stop(Refusal::Budget));
             } else {
                 assert_eq!(

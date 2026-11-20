@@ -60,14 +60,12 @@ impl<'a> History<'a> {
         Ok(self.revisions.last())
     }
 
+    /// Validate failure and budget only; the selected rule owns retry eligibility.
     pub fn failed(self, max_retries: u32, now: HubTime) -> Result<Settled, Refusal> {
         let last = self.last()?.ok_or(Refusal::InvalidHistory)?;
         let end = last.settled.ok_or(Refusal::InvalidHistory)?;
         if end.terminal == Terminal::FinishedOk {
             return Err(Refusal::NotFailed);
-        }
-        if end.retry == Retry::Never {
-            return Err(Refusal::Never);
         }
         if last.key.revision >= max_retries {
             return Err(Refusal::Budget);
@@ -108,7 +106,19 @@ pub fn next_revision(history: History<'_>, why: RevisionWhy) -> Result<IntentKey
         None => 0,
         Some(last) => {
             let end = last.settled.ok_or(Refusal::InvalidHistory)?;
-            if end.retry == Retry::Never && !matches!(why, RevisionWhy::UserAction { .. }) {
+            // Service/stale-config rules ignore Retry; ordinary gateway failures still obey it.
+            if end.retry == Retry::Never
+                && !matches!(
+                    why,
+                    RevisionWhy::UserAction { .. }
+                        | RevisionWhy::Policy {
+                            rule: Rule::TurnCapacity { .. }
+                                | Rule::TurnInterrupted
+                                | Rule::ConfigStale,
+                            ..
+                        }
+                )
+            {
                 return Err(Refusal::Never);
             }
             last.key.revision.checked_add(1).ok_or(Refusal::Budget)?
@@ -229,8 +239,8 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_never_requires_an_explicit_user_decision() {
-        let intent = Intent::Configure(steve_node_api::SessionId::new("s").unwrap());
+    fn a_gateway_terminal_never_requires_an_explicit_user_decision() {
+        let intent = Intent::StartTurn(steve_node_api::TurnId::new("t").unwrap());
         let mut rows = vec![];
         assert_eq!(
             next_revision(
@@ -239,7 +249,7 @@ mod tests {
                     revisions: &rows
                 },
                 RevisionWhy::Policy {
-                    rule: Rule::ConfigStale,
+                    rule: Rule::TurnGatewayTransient,
                     now: HubTime(1)
                 }
             )
@@ -261,7 +271,7 @@ mod tests {
                     revisions: &rows
                 },
                 RevisionWhy::Policy {
-                    rule: Rule::ConfigStale,
+                    rule: Rule::TurnGatewayTransient,
                     now: HubTime(1)
                 }
             ),
@@ -279,7 +289,7 @@ mod tests {
                     revisions: &rows
                 },
                 RevisionWhy::Policy {
-                    rule: Rule::ConfigStale,
+                    rule: Rule::TurnGatewayTransient,
                     now: HubTime(1)
                 }
             ),
@@ -297,6 +307,74 @@ mod tests {
         .unwrap();
         assert_eq!(key.revision, 1);
         assert_eq!(key.intent, intent);
+    }
+
+    #[test]
+    fn service_and_stale_config_never_histories_can_advance_within_the_same_budgets() {
+        let turn = Intent::StartTurn(steve_node_api::TurnId::new("t").unwrap());
+        let config = Intent::Configure(steve_node_api::SessionId::new("s").unwrap());
+        for (intent, rule, limit) in [
+            (
+                &turn,
+                Rule::TurnCapacity {
+                    first_capacity_failure: Some(HubTime(1)),
+                },
+                3,
+            ),
+            (&turn, Rule::TurnInterrupted, 2),
+            (&config, Rule::ConfigStale, 2),
+        ] {
+            for terminal in [
+                Terminal::FinishedFailed,
+                Terminal::Rejected,
+                Terminal::FinishedOk,
+            ] {
+                let mut rows = vec![];
+                for revision in 0..=limit {
+                    rows.push(Revision {
+                        key: IntentKey {
+                            intent: intent.clone(),
+                            revision,
+                        },
+                        settled: Some(Settled {
+                            terminal,
+                            retry: Retry::Never,
+                            at: HubTime(1),
+                        }),
+                    });
+                    let h = History {
+                        intent,
+                        revisions: &rows,
+                    };
+                    let advance = |now| {
+                        next_revision(
+                            h,
+                            RevisionWhy::Policy {
+                                rule,
+                                now: HubTime(now),
+                            },
+                        )
+                    };
+                    let expected = if terminal == Terminal::FinishedOk {
+                        Err(Refusal::NotFailed)
+                    } else if revision == limit {
+                        Err(Refusal::Budget)
+                    } else {
+                        Ok(IntentKey {
+                            intent: intent.clone(),
+                            revision: revision + 1,
+                        })
+                    };
+                    assert_eq!(advance(1), expected);
+                    if terminal != Terminal::FinishedOk && revision < limit {
+                        assert_eq!(advance(0), Err(Refusal::InvalidTime));
+                        if matches!(rule, Rule::TurnCapacity { .. }) {
+                            assert_eq!(advance(900_001), Err(Refusal::Deadline));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

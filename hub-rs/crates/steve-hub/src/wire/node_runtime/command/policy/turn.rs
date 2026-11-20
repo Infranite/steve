@@ -23,10 +23,8 @@ impl TurnCapacity<'_> {
     }
 
     fn plan(self, retry: Retry) -> Result<super::Schedule, Refusal> {
+        // Service classification already selected this rule; Retry::Never is not a veto.
         self.facts.allowed()?;
-        if retry == Retry::Never {
-            return Err(Refusal::Never);
-        }
         if !matches!(self.history.intent, Intent::StartTurn(_)) {
             return Err(Refusal::WrongIntent);
         }
@@ -103,13 +101,16 @@ fn turn_retry(
             return Err(Refusal::MustCheckAfterActing);
         }
     }
-    if retry == Retry::Never {
+    if !service && retry == Retry::Never {
         return Err(Refusal::Never);
     }
     if !matches!(history.intent, Intent::StartTurn(_)) {
         return Err(Refusal::WrongIntent);
     }
-    history.failed(2, now)?;
+    let end = history.failed(2, now)?;
+    if !service && end.retry == Retry::Never {
+        return Err(Refusal::Never);
+    }
     let ordinal = history.last()?.ok_or(Refusal::InvalidHistory)?.key.revision as usize;
     // Current apply.rs always uses 20/60 seconds, including after tools and for Retry::Now.
     let at = schedule(

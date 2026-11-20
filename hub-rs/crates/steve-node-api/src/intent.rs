@@ -100,37 +100,36 @@ mod tests {
     use super::*;
     use crate::{NodeId, WorkspaceId};
 
-    // Exhaustive match: adding an Intent without a golden is a compilation error.
-    fn examples(intent: &Intent) -> &'static str {
-        match intent {
-            Intent::Prepare(_) => "prepare:s_1:r7",
-            Intent::Open(_) => "open:s_1:r7",
-            Intent::Configure(_) => "configure:s_1:r7",
-            Intent::Release(_) => "release:s_1:r7",
-            Intent::StartTurn(_) => "start_turn:t_1:r7",
-            Intent::Cancel(_) => "cancel:a_1:r7",
-            Intent::Abandon(_) => "abandon:a_1:r7",
-            Intent::Recover(_) => "recover:op_1:r7",
-            Intent::Answer(_) => "answer:d_1:r7",
-            Intent::Tidy(_) => "tidy:3:n_1:3:w_1:r7",
-        }
+    // One declaration generates both the exhaustive match and its test samples.
+    // Adding a variant without an arm fails compilation; no parallel list can omit a sample.
+    macro_rules! intent_examples {
+        ($($variant:ident($subject:expr) => $golden:literal),+ $(,)?) => {
+            fn examples(intent: &Intent) -> &'static str {
+                match intent {
+                    $(Intent::$variant(_) => $golden),+
+                }
+            }
+
+            fn intents() -> Vec<Intent> {
+                vec![$(Intent::$variant($subject)),+]
+            }
+        };
     }
 
-    fn intents() -> Vec<Intent> {
-        let s = SessionId::new("s_1").unwrap();
-        let a = AttemptId::new("a_1").unwrap();
-        vec![
-            Intent::Prepare(s.clone()),
-            Intent::Open(s.clone()),
-            Intent::Configure(s.clone()),
-            Intent::Release(s),
-            Intent::StartTurn(TurnId::new("t_1").unwrap()),
-            Intent::Cancel(a.clone()),
-            Intent::Abandon(a),
-            Intent::Recover(OperationId::new("op_1").unwrap()),
-            Intent::Answer("d_1".into()),
-            tidy("n_1", "w_1"),
-        ]
+    intent_examples! {
+        Prepare(SessionId::new("s_1").unwrap()) => "prepare:s_1:r7",
+        Open(SessionId::new("s_1").unwrap()) => "open:s_1:r7",
+        Configure(SessionId::new("s_1").unwrap()) => "configure:s_1:r7",
+        Release(SessionId::new("s_1").unwrap()) => "release:s_1:r7",
+        StartTurn(TurnId::new("t_1").unwrap()) => "start_turn:t_1:r7",
+        Cancel(AttemptId::new("a_1").unwrap()) => "cancel:a_1:r7",
+        Abandon(AttemptId::new("a_1").unwrap()) => "abandon:a_1:r7",
+        Recover(OperationId::new("op_1").unwrap()) => "recover:op_1:r7",
+        Answer("d_1".into()) => "answer:d_1:r7",
+        Tidy(WorkspaceRef {
+            node: NodeId::new("n_1").unwrap(),
+            id: WorkspaceId::new("w_1").unwrap(),
+        }) => "tidy:3:n_1:3:w_1:r7",
     }
 
     fn tidy(node: &str, id: &str) -> Intent {
