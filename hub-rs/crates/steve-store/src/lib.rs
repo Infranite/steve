@@ -315,8 +315,7 @@ impl Store {
             return f(&W { c, store: self });
         }
         let c = self.lock()?;
-        let result = f(&W { c: &c, store: self });
-        result
+        f(&W { c: &c, store: self })
     }
 
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -349,8 +348,7 @@ impl Store {
             return f(c);
         }
         let c = self.lock()?;
-        let result = f(&c);
-        result
+        f(&c)
     }
 }
 

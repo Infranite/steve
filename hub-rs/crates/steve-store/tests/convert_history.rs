@@ -1,3 +1,4 @@
+mod common;
 #[path = "../../steve-store-sqlite/tests/common/history.rs"]
 mod history;
 use rusqlite::Connection;
@@ -128,12 +129,28 @@ fn historical_order_converts_without_rebuild_and_item_session_repositories_read_
             .unwrap(),
         606
     );
+    store
+        .bots()
+        .seed(
+            "fixture",
+            false,
+            &steve_store::NewBot {
+                name: "Fixture".into(),
+                harness: "fixture".into(),
+                ..Default::default()
+            },
+            "w",
+        )
+        .unwrap();
     let created = store
         .items()
         .create(
             "w",
             &steve_store::NewItem {
                 title: "after conversion".into(),
+                goal: "verify current repository writes".into(),
+                bot_id: "fixture".into(),
+                tags: common::task_tags(&store, "w"),
                 ..Default::default()
             },
         )

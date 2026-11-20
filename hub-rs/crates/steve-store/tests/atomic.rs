@@ -379,6 +379,7 @@ fn nested_savepoint_rollback_keeps_outer_writes_and_drops_inner_events() {
 fn separate_store_instances_on_same_thread_do_not_cross_talk() {
     let (_dir_a, store_a, events_a) = open_tracked();
     let (_dir_b, store_b, events_b) = open_tracked();
+    let tags_b = common::task_tags(&store_b, WS);
 
     let res = store_a.atomic(|| -> steve_store::Result<()> {
         store_a.items().create(
@@ -391,24 +392,44 @@ fn separate_store_instances_on_same_thread_do_not_cross_talk() {
                 ..Default::default()
             },
         )?;
-        // `store_b` is NOT in an atomic scope: its write commits & publishes immediately, and stays in B.
-        store_b.items().create(
+        // Another physical writer cannot be entered while A holds its root grant.
+        let refused = store_b.items().create(
             WS,
             &NewItem {
-                tags: common::task_tags(&store_b, WS),
+                tags: tags_b.clone(),
                 bot_id: "steve".into(),
                 title: "in B".into(),
                 goal: "B".into(),
                 ..Default::default()
             },
-        )?;
+        );
+        assert!(matches!(
+            refused,
+            Err(StoreError::Commit(steve_storage_api::CommitError::Fatal(error)))
+                if error.code == steve_types::Code::Invalid
+        ));
         assert!(events_a.lock().unwrap().is_empty());
-        assert_eq!(events_b.lock().unwrap().len(), 1);
+        assert!(events_b.lock().unwrap().is_empty());
         Err(StoreError::Conflict("rollback A only".into()))
     });
     assert!(res.is_err());
     assert!(store_a.items().list(WS, false).unwrap().is_empty());
     assert!(events_a.lock().unwrap().is_empty());
+    assert!(store_b.items().list(WS, false).unwrap().is_empty());
+    // After A's scope ends, B acquires its own grant and publishes normally.
+    store_b
+        .items()
+        .create(
+            WS,
+            &NewItem {
+                tags: tags_b,
+                bot_id: "steve".into(),
+                title: "in B".into(),
+                goal: "B".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(store_b.items().list(WS, false).unwrap().len(), 1);
     assert_eq!(events_b.lock().unwrap().len(), 1);
 }
