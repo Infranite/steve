@@ -116,7 +116,8 @@ mod tests {
     #[tokio::test]
     async fn a_dead_group_leaves_one_failure_notice_in_its_workspace() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store
             .with_conn(|c| {
                 Ok(c.execute(

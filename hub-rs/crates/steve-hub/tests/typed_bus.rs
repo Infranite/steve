@@ -41,7 +41,7 @@ async fn committed_batches_share_rev_and_rollback_does_not_allocate_one() {
     let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
         Default::default(),
     )));
-    let store = Store::open(dir.path().join("store.db"), BusPublisher(bus.clone())).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), BusPublisher(bus.clone())).unwrap();
     let mut rx = bus.subscribe();
     let start = bus.cursor();
     store

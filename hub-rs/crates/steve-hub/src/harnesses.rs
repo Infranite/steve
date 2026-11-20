@@ -709,7 +709,8 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let store =
-            steve_store::Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+            steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
         store.ensure_workspace().unwrap();
         let source = hs.bot_source(store, Some("remote".into()));
         let local = serde_json::json!({"harness":"claude-code","model":"local-model"});

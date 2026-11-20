@@ -137,7 +137,7 @@ fn settled(s: &Store, call: &str, finish: bool) {
 fn finish_and_cancel_progress_with_multiple_failed_batches_and_continuous_arrivals() {
     for finish in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let s = open(&dir.path().join("b.sqlite"));
+        let s = open(&dir.path().join("steve.sqlite3"));
         seed(&s, 385);
         outage(&s, None);
         for i in 0..385 {
@@ -220,7 +220,7 @@ fn finish_and_cancel_progress_with_multiple_failed_batches_and_continuous_arriva
 #[test]
 fn restart_retains_rotation_and_projection_outage_does_not_block_startup() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("b.sqlite");
+    let path = dir.path().join("steve.sqlite3");
     let s = open(&path);
     seed(&s, 257);
     outage(&s, None);
@@ -273,7 +273,7 @@ fn restart_retains_rotation_and_projection_outage_does_not_block_startup() {
 #[test]
 fn projection_rollback_keeps_bill_cube_inbox_and_queue_then_recovers_same_call() {
     let dir = tempfile::tempdir().unwrap();
-    let s = open(&dir.path().join("b.sqlite"));
+    let s = open(&dir.path().join("steve.sqlite3"));
     seed(&s, 1);
     outage(&s, None);
     end(&s, "call-0000", true);
@@ -311,7 +311,7 @@ fn projection_rollback_keeps_bill_cube_inbox_and_queue_then_recovers_same_call()
 #[test]
 fn concurrent_workers_and_producer_cannot_move_new_work_ahead_of_healthy_prefix() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("b.sqlite");
+    let path = dir.path().join("steve.sqlite3");
     let s = open(&path);
     seed(&s, 385);
     outage(&s, None);
@@ -358,7 +358,7 @@ fn concurrent_workers_and_producer_cannot_move_new_work_ahead_of_healthy_prefix(
 #[test]
 fn migration_seeds_old_dirty_calls_and_preserves_fifo_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("b.sqlite");
+    let path = dir.path().join("steve.sqlite3");
     let c = rusqlite::Connection::open(&path).unwrap();
     // Other branches can publish migrations before this one is merged.
     let before = db::MIGRATIONS
@@ -422,7 +422,7 @@ fn migration_seeds_old_dirty_calls_and_preserves_fifo_across_reopen() {
 #[test]
 fn successful_finish_uses_the_same_fair_queue_as_failed_cancel() {
     let dir = tempfile::tempdir().unwrap();
-    let s = open(&dir.path().join("b.sqlite"));
+    let s = open(&dir.path().join("steve.sqlite3"));
     seed(&s, 129);
     outage(&s, None);
     for i in 0..128 {
@@ -473,7 +473,7 @@ fn successful_finish_uses_the_same_fair_queue_as_failed_cancel() {
 #[test]
 fn startup_still_refuses_a_failure_to_persist_orphan_outcomes() {
     let dir = tempfile::tempdir().unwrap();
-    let s = open(&dir.path().join("b.sqlite"));
+    let s = open(&dir.path().join("steve.sqlite3"));
     begin(&s, "orphan");
     sql(
         &s,

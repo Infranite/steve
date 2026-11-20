@@ -325,7 +325,7 @@ mod tests {
             (Some("requester"), true, Principal::Svc(WS.into())),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(dir.path().join("principal.sqlite3"), NoPublisher).unwrap();
+            let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
             store.ensure_workspace().unwrap();
             store
                 .transaction::<_, StoreError>(|tx| {

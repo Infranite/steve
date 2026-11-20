@@ -804,8 +804,7 @@ pub mod retention {
         #[test]
         fn payload_page_uses_one_read_snapshot_for_all_candidates() {
             let dir = tempfile::tempdir().unwrap();
-            let store =
-                Store::open(dir.path().join("retention.sqlite3"), crate::NoPublisher).unwrap();
+            let store = Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
             store.ensure_workspace().unwrap();
             let session = store
                 .sessions()

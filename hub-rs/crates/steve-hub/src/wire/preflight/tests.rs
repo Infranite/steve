@@ -6,7 +6,7 @@ use steve_store::{NewBot, NoPublisher, Store, StoreError, WS};
 
 fn store() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
-    let s = Store::open(d.path().join("pf.sqlite3"), NoPublisher).unwrap();
+    let s = Store::open(d.path().join("steve.sqlite3"), NoPublisher).unwrap();
     s.ensure_workspace().unwrap();
     for (id, harness) in [("coder", "codex"), ("writer", "claude-code")] {
         s.bots()

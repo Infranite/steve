@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Write};
 
 pub(super) fn fixture() -> (tempfile::TempDir, Service, steve_store::Session) {
     let home = tempfile::tempdir().unwrap();
-    let store = Store::open(home.path().join("test.sqlite3"), steve_store::NoPublisher).unwrap();
+    let store = Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
     store.ensure_workspace().unwrap();
     store.transaction(|t| {
         t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-1','default',1,'delivery','run','work',1,1)",[])?;
@@ -116,7 +116,7 @@ async fn local_file_versions_survive_cleanup_and_restart() {
     assert_eq!(bytes(&svc, &new, None), b"second");
     fs::remove_dir_all(&s.cwd).unwrap();
     let reloaded = Service::new(
-        Store::open(home.path().join("test.sqlite3"), steve_store::NoPublisher).unwrap(),
+        Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap(),
         home.path().to_path_buf(),
         svc.base.clone(),
     );
@@ -182,7 +182,7 @@ async fn local_delivery_rejects_links_folders_and_paths_outside_session() {
         Path::new(&s.cwd).join("hard.md"),
     )
     .unwrap();
-    for name in ["link.md", "hard.md", "../test.sqlite3", ".", "missing.md"] {
+    for name in ["link.md", "hard.md", "../steve.sqlite3", ".", "missing.md"] {
         assert!(
             svc.receive(&s, name, None, None, &ws).await.is_err(),
             "{name}"

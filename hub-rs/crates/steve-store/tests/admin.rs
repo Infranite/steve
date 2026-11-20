@@ -23,7 +23,7 @@ fn seed(path: &std::path::Path) {
 #[test]
 fn an_admin_list_does_not_initialize_optimize_record_or_checkpoint_pending_wal() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("db.sqlite3");
+    let path = dir.path().join("steve.sqlite3");
     seed(&path);
     let c = Connection::open(&path).unwrap();
     c.pragma_update(None, "journal_mode", "WAL").unwrap();
@@ -98,7 +98,7 @@ fn an_admin_list_does_not_initialize_optimize_record_or_checkpoint_pending_wal()
 #[test]
 fn opening_and_listing_do_not_acquire_sqlite_write_locks() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("db.sqlite3");
+    let path = dir.path().join("steve.sqlite3");
     seed(&path);
     let other = Connection::open(&path).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -111,7 +111,7 @@ fn opening_and_listing_do_not_acquire_sqlite_write_locks() {
 #[test]
 fn non_head_missing_and_ambiguous_headers_are_refused_without_creating_or_migrating() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("missing.sqlite3");
+    let missing = dir.path().join("missing/steve.sqlite3");
     assert!(Store::open_admin(&missing).is_err());
     assert!(!missing.exists());
     for (n, (version, min_reader)) in [
@@ -123,7 +123,9 @@ fn non_head_missing_and_ambiguous_headers_are_refused_without_creating_or_migrat
     .into_iter()
     .enumerate()
     {
-        let path = dir.path().join(format!("invalid-{n}.sqlite3"));
+        let directory = dir.path().join(format!("invalid-{n}"));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("steve.sqlite3");
         let c = Connection::open(&path).unwrap();
         c.execute_batch(&format!("CREATE TABLE schema_version(v); INSERT INTO schema_version VALUES({version});
             CREATE TABLE schema_compat(min_reader); INSERT INTO schema_compat VALUES({min_reader});")).unwrap();
@@ -143,7 +145,9 @@ fn non_head_missing_and_ambiguous_headers_are_refused_without_creating_or_migrat
             db::SCHEMA_VERSION
         ),
     ] {
-        let path = dir.path().join(steve_store::uid("header"));
+        let directory = dir.path().join(steve_store::uid("header"));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("steve.sqlite3");
         let c = Connection::open(&path).unwrap();
         c.execute_batch(&sql).unwrap();
         drop(c);

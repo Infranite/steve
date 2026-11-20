@@ -70,7 +70,7 @@ impl Env {
             .unwrap(),
         );
         let store = steve_store::Store::open(
-            dir.path().join("test.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(|_| {}),
         )
         .unwrap();

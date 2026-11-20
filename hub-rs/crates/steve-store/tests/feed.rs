@@ -344,7 +344,7 @@ fn migration_imports_only_existing_notifications_and_moves_seen_to_feed_reads() 
     // Build the actual pre-feed schema. Rewinding only schema_version on a current
     // Store would rerun every later migration against tables that already exist.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("feed-upgrade.sqlite3");
+    let path = dir.path().join("steve.sqlite3");
     let c = rusqlite::Connection::open(&path).unwrap();
     c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL);")
         .unwrap();

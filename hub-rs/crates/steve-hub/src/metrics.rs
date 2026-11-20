@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn scrape_requires_an_owner_bearer_credential_without_writing() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path().join("metrics.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(tmp.path().join("steve.sqlite3"), NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let tokens: Vec<_> = ["owner", "member"]
             .iter()
@@ -679,7 +679,7 @@ mod tests {
         use steve_store::instrumentation::{RequestCalls, enable_lock_metrics};
         enable_lock_metrics();
         let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path().join("request-counts.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(tmp.path().join("steve.sqlite3"), NoPublisher).unwrap();
         let first = RequestCalls::default();
         let second = RequestCalls::default();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -754,7 +754,7 @@ mod tests {
         use std::sync::Arc;
         steve_store::instrumentation::enable_lock_metrics();
         let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path().join("router.sqlite3"), NoPublisher).unwrap();
+        let store = Store::open(tmp.path().join("steve.sqlite3"), NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let owner = store
             .users()
@@ -883,7 +883,7 @@ mod tests {
         steve_store::instrumentation::enable_lock_metrics();
         let tmp = tempfile::tempdir().unwrap();
         metrics::with_local_recorder(&recorder, || {
-            let store = Store::open(tmp.path().join("locks.sqlite3"), NoPublisher).unwrap();
+            let store = Store::open(tmp.path().join("steve.sqlite3"), NoPublisher).unwrap();
             let line = line!() + 1;
             store.with_conn(|_| Ok(())).unwrap();
             let text = handle.render();

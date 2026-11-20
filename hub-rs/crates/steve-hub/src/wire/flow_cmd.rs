@@ -340,7 +340,7 @@ mod tests {
     /// [`hub`] in `root`, as it is there (a Hub started again after a crash).
     fn hub_at(root: &std::path::Path) -> T {
         let dir = root;
-        let store = Store::open(dir.join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store = Store::open(dir.join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {

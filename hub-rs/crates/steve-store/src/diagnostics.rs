@@ -921,7 +921,7 @@ mod tests {
     #[test]
     fn a_precommit_snapshot_keeps_pending_and_marks_crossed_loss_transfers() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("diagnostic.sqlite3"), crate::NoPublisher).unwrap();
+        let store = Store::open(dir.path().join("steve.sqlite3"), crate::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .bots()

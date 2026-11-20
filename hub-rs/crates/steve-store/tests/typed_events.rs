@@ -50,7 +50,7 @@ impl Sink {
 fn fixture() -> (tempfile::TempDir, Store, Sink, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let sink = Sink::default();
-    let store = Store::open(dir.path().join("store.sqlite3"), sink.clone()).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), sink.clone()).unwrap();
     store.ensure_workspace().unwrap();
     sink.take();
     let user = store

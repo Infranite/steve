@@ -852,7 +852,8 @@ mod admission_tests {
     #[test]
     fn connection_ready_uses_the_required_transport_instead_of_local_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         let rt = NodeRuntime::new(
             store,
             steve_node_api::testkit::FakeNode::new("local"),
@@ -870,7 +871,8 @@ mod admission_tests {
     #[test]
     fn paused_admission_retains_prompts_and_flush_leads_without_claiming_a_turn() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .devices()
@@ -927,7 +929,8 @@ mod admission_tests {
     #[test]
     fn pause_preserves_reservations_without_a_duplicate_capacity_gate() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .devices()
@@ -955,7 +958,8 @@ mod admission_tests {
     #[test]
     fn manual_pause_does_not_count_unsent_reservations_as_capacity() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let store =
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .devices()

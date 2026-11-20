@@ -3,7 +3,7 @@
 fn current_store_has_no_implicit_digest_membership_writes() {
     let dir = tempfile::tempdir().unwrap();
     let store =
-        steve_store::Store::open(dir.path().join("store.sqlite3"), steve_store::NoPublisher)
+        steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
             .unwrap();
     store
         .with_conn(|c| {

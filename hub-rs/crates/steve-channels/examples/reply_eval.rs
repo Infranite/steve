@@ -246,8 +246,10 @@ fn gateway_for(
     a: &Args,
     scratch: &Path,
 ) -> (Arc<dyn Gateway>, String) {
+    let route_dir = scratch.join("route");
+    std::fs::create_dir_all(&route_dir).unwrap_or_else(|e| fail(&format!("route directory: {e}")));
     let store = steve_store::Store::open(
-        scratch.join("route.sqlite3"),
+        route_dir.join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap_or_else(|e| fail(&format!("route store: {e}")));
@@ -872,8 +874,10 @@ async fn disclose(a: &Args, scratch: &Path) {
     let (gw, described) = gateway_for("disclosure", Tier::Fast, &Route::default(), a, scratch);
     eprintln!("reply_eval: checking on {described}");
     // the names rule reads a store: an empty one (the replay knows no contacts)
+    let names_dir = scratch.join("names");
+    std::fs::create_dir_all(&names_dir).unwrap_or_else(|e| fail(&format!("names directory: {e}")));
     let names = steve_store::Store::open(
-        scratch.join("names.sqlite3"),
+        names_dir.join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap_or_else(|e| fail(&format!("names store: {e}")));

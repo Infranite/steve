@@ -18,7 +18,7 @@ impl Fixture {
         let guard = DATABASE_FIXTURE.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let store =
-            Store::open(dir.path().join("items.sqlite3"), steve_store::NoPublisher).unwrap();
+            Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         store
             .with_conn(|c| {

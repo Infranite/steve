@@ -616,7 +616,7 @@ mod tests {
             sh(&work, &["add", "."]);
             sh(&work, &["commit", "-qm", "b"]);
         }
-        let store = Store::open(root.join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+        let store = Store::open(root.join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
         let node = Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
@@ -794,8 +794,8 @@ mod tests {
         t.node.shutdown().await;
         let header = HeaderValue::of(TOKEN);
         let mut kept = bytes_under(&t.root.join("node"));
-        kept.extend(std::fs::read(t.root.join("hub.sqlite3")).unwrap());
-        kept.extend(std::fs::read(t.root.join("hub.sqlite3-wal")).unwrap_or_default());
+        kept.extend(std::fs::read(t.root.join("steve.sqlite3")).unwrap());
+        kept.extend(std::fs::read(t.root.join("steve.sqlite3-wal")).unwrap_or_default());
         kept.extend(bytes_under(&t.root.join("work/.git")));
         assert!(!contains(&kept, TOKEN.as_bytes()));
         assert!(!contains(&kept, &header.0));

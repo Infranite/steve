@@ -532,7 +532,7 @@ mod tests {
         use steve_store::jobs::*;
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(
-            dir.path().join("hub.sqlite3"),
+            dir.path().join("steve.sqlite3"),
             steve_store::FnPublisher(|_| {}),
         )
         .unwrap();

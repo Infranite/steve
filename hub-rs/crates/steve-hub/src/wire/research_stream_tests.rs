@@ -35,7 +35,8 @@ impl Test {
         let root = dir.path().canonicalize().unwrap();
         let project = root.join("project");
         std::fs::create_dir_all(&project).unwrap();
-        let store = Store::open(root.join("hub.sqlite"), steve_store::FnPublisher(|_| {})).unwrap();
+        let store =
+            Store::open(root.join("steve.sqlite3"), steve_store::FnPublisher(|_| {})).unwrap();
         store.ensure_workspace().unwrap();
         let cfg = NodeConfig {
             ceiling: steve_node::PolicyCeiling::unlimited(),

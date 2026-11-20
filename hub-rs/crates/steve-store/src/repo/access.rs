@@ -423,7 +423,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
-        let s = Store::open(dir.path().join("t.sqlite3"), crate::FnPublisher(|_| {})).unwrap();
+        let s = Store::open(dir.path().join("steve.sqlite3"), crate::FnPublisher(|_| {})).unwrap();
         s.ensure_workspace().unwrap();
         (dir, s)
     }
