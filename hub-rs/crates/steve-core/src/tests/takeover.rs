@@ -291,10 +291,9 @@ fn a_done_when_project_ignores_the_release_choice_of_an_acceptance() {
         let k = kit(2);
         let x = remote(&k, upstream::DONE_MERGE, false);
         k.core.resolve(&x.decision, "pass", text, "me").unwrap();
-        steve_runtime::testkit::eventually_blocking(
-            "The background release probe finishes before the next lifecycle step.",
-            || k.core.tx().st.probing.is_empty(),
-        );
+        steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+            k.core.tx().st.probing.is_empty()
+        });
         assert_eq!(k.phase(&x.item), "closing", "{text}");
         assert_eq!(
             op_states(&k, &x.item),
@@ -543,10 +542,9 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     // merged but no tag: still waiting
     merge_and_tag(&x, None);
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
     assert_eq!(k.phase(&x.item), "closing");
     assert_eq!(
         k.rt.prompts_of(&x.session)
@@ -563,7 +561,7 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     k.core.lifecycle_tick().unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The tagged item reaches closed without waiting for its separate build; {:?}",
             k.status(&x.item)
         )
     });
@@ -610,7 +608,7 @@ fn a_look_begun_before_a_turn_ended_is_not_kept_a_fresh_one_decides() {
     // its answer is not kept: the closing is checked again, with a look of its own (no tick needed)
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The release probe completes and records a successful release operation; {:?}",
+            "The completion probe finishes and the release operation records success; {:?}",
             op_states(&k, &x.item)
         )
     });
@@ -641,7 +639,7 @@ fn stopped_after_merging_and_tagging_it_completes_on_steves_check() {
     );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after Steve checks the reported merge and tag; {:?}",
             k.status(&x.item)
         )
     });
@@ -712,10 +710,9 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
         )
         .unwrap();
     k.core.resolve(&d, "pass", "", "me").unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
     // a rebase onto a newer main is not a new result
     commit(&x.repo, "m.txt", "m\n");
     g(&x.wt, &["rebase", "-q", "main"]);
@@ -724,10 +721,9 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
     // release notes committed after the acceptance are: the agent hears which file
     commit(&x.wt, "notes.md", "n\n");
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
     let i = k.db().item(&x.item).unwrap().unwrap();
     assert_eq!(i.phase, "active");
     let t = k.timeline_texts(&x.item);
@@ -811,7 +807,7 @@ fn a_build_is_followed_once_and_only_a_failure_is_told() {
     merge_and_tag(&x, Some("v2.0.0"));
     stop(&k, &x.session, "合并了，tag 推了。");
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The item reaches closed after merge and tag while build tracking remains separate.",
         || k.phase(&x.item) == "closed",
     );
     let commit = g(&x.repo, &["rev-parse", "main"]);
@@ -956,7 +952,7 @@ fn a_goal_that_asks_for_the_build_to_pass_stays_open_while_it_runs_and_when_it_f
     k.core.lifecycle_tick().unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?} {:?}",
+            "The item reaches closed after the user marks it done despite the failed build; {:?} {:?}",
             k.status(&x.item),
             blockers(&k, &x.item)
         )
@@ -1096,14 +1092,13 @@ fn a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag() {
         assert_eq!(lines.len(), 1, "said once: {t:#?}");
         // you mark it done yourself: that is the evidence
         k.finish(&x.item).unwrap();
-        steve_runtime::testkit::eventually_blocking(
-            "The background release probe finishes before the next lifecycle step.",
-            || k.core.tx().st.probing.is_empty(),
-        );
+        steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+            k.core.tx().st.probing.is_empty()
+        });
         k.core.lifecycle_tick().unwrap();
         let diagnostic = steve_runtime::testkit::on_timeout(|| async {
             format!(
-                "The accepted item closes after its release requirements are satisfied; {:?}",
+                "The item reaches closed after the user confirms completion without changing the installed version; {:?}",
                 k.status(&x.item)
             )
         });
@@ -1128,7 +1123,7 @@ fn another_project_is_not_checked_against_this_instance() {
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The remote-project item reaches closed after merge and tag checks; {:?}",
             k.status(&x.item)
         )
     });
@@ -1351,7 +1346,7 @@ fn a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery() {
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?} {:?}",
+            "The item reaches closed on accepted delivery when the tag build cannot be followed; {:?} {:?}",
             k.status(&x.item),
             blockers(&k, &x.item)
         )
@@ -1482,7 +1477,7 @@ fn accepted_without_a_commit_of_its_own_completes_on_the_acceptance_not_as_merge
         settle_pr(&k);
         let diagnostic = steve_runtime::testkit::on_timeout(|| async {
             format!(
-                "The accepted item closes after its release requirements are satisfied; {rule}: {:?} {:?}",
+                "The item with no own commits reaches closed on acceptance rather than an inferred merge; {rule}: {:?} {:?}",
                 k.status(&x.item),
                 blockers(&k, &x.item)
             )
@@ -1525,7 +1520,7 @@ fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_
     settle_pr(&k);
     // without a merged pull request's word, nothing of its own is there to call merged
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The reset-to-main item reaches closed without claiming its PR was merged.",
         || k.phase(&x.item) == "closed",
     );
     assert!(
@@ -1651,10 +1646,9 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
         &["worktree", "remove", "--force", &x.wt.to_string_lossy()],
     );
     k.finish(&x.item).unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        "The item opens a release failure card for human attention.",
-        || !k.open_fails(&x.item).is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("The item exposes an open failure card.", || {
+        !k.open_fails(&x.item).is_empty()
+    });
     let fails = k.open_fails(&x.item);
     assert_eq!(fails.len(), 1, "{fails:?}");
     assert!(
@@ -1685,7 +1679,7 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
     k.core.resolve(&d.id, "release_live", "", "me").unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after the user confirms that the release is live; {:?}",
             k.status(&x.item)
         )
     });
@@ -1703,7 +1697,7 @@ fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_qu
         .unwrap();
     k.finish(&x.item).unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "The item opens a release failure card for human attention.",
+        "The completion probes have finished and the item exposes an open failure card.",
         || !k.open_fails(&x.item).is_empty() && k.core.tx().st.probing.is_empty(),
     );
     let fails = k.open_fails(&x.item);
@@ -1721,7 +1715,7 @@ fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_qu
     k.core.lifecycle_tick().unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after a new probe observes the merged PR despite the session error; {:?}",
             k.status(&x.item)
         )
     });

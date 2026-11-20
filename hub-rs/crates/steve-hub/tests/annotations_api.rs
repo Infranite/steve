@@ -217,10 +217,9 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    eventually(
-        "The Hub sees the target session running before the test continues.",
-        || async { e.session(&sid).await["busy"] == true },
-    )
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
     .await;
     sid
 }

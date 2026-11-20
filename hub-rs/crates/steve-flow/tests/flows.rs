@@ -582,10 +582,9 @@ async fn r1_real_runs_ignore_and_create_items_linked_from_the_event() {
         .await
         .unwrap();
     let evt = evt.id().unwrap().to_string();
-    eventually_sync(
-        "The connector event records that human input is required.",
-        || event_outcome(&e, &evt).0 == "need",
-    )
+    eventually_sync("The connector event records a need outcome.", || {
+        event_outcome(&e, &evt).0 == "need"
+    })
     .await;
     assert!(open_decision(&e, "flow_step").is_some());
 }
@@ -620,10 +619,9 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
         .id()
         .unwrap()
         .to_string();
-    eventually_sync(
-        "The connector event records that human input is required.",
-        || event_outcome(&e, &evt).0 == "need",
-    )
+    eventually_sync("The connector event records a need outcome.", || {
+        event_outcome(&e, &evt).0 == "need"
+    })
     .await;
     let run: String = q(&e, "SELECT id FROM flow_runs WHERE event_id = ?", [&evt]);
     assert_eq!(run_status(&e, &run), "waiting");
@@ -682,7 +680,7 @@ async fn r6_approve_submit_then_wait_event_wakes_the_run() {
     );
     cb.payload = json!({ "claim": "CL-20261031-0042" });
     e.flow.ingest(WS, None, cb).await.unwrap();
-    eventually_sync("The scheduled flow run completes its item action.", || {
+    eventually_sync("The flow run records a done status.", || {
         run_status(&e, &run) == "done"
     })
     .await;
@@ -720,7 +718,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     .await;
     assert_eq!(st, 200, "{v}");
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The flow run reaches its durable waiting state.", || {
+    eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
@@ -768,7 +766,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     )
     .await;
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The flow run reaches its durable waiting state.", || {
+    eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
@@ -789,7 +787,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
     let id = create_flow(&e, "提交", g).await;
     let (_, v) = api(&e, "POST", &format!("/flows/{id}/run"), None).await;
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The flow run reaches its durable waiting state.", || {
+    eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
@@ -799,7 +797,7 @@ async fn outward_action_without_approval_stops_at_a_decision() {
         params![id, i64::MAX])?)).unwrap();
     let (_, v) = api(&e, "POST", &format!("/flows/{id}/run"), None).await;
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The scheduled flow run completes its item action.", || {
+    eventually_sync("The flow run records a done status.", || {
         run_status(&e, &run) == "done"
     })
     .await;
@@ -956,7 +954,7 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
         "SELECT id FROM flow_runs WHERE event_id = ? AND parent_run IS NULL",
         [&evt],
     );
-    eventually_sync("The flow run reaches its durable waiting state.", || {
+    eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
@@ -973,10 +971,9 @@ async fn notify_to_item_wait_delay_and_sub_flows() {
     assert_eq!(ids, vec![run.clone()]);
     scheduler::drive(&e.flow, &run).await.unwrap();
     assert_eq!(run_status(&e, &run), "done");
-    eventually_sync(
-        "The connector event records that human input is required.",
-        || event_outcome(&e, &evt).0 == "need",
-    )
+    eventually_sync("The connector event records a need outcome.", || {
+        event_outcome(&e, &evt).0 == "need"
+    })
     .await;
     let dec = open_decision(&e, "signal").expect("notify decision");
     assert_eq!(
@@ -1009,7 +1006,7 @@ async fn cancel_and_manual_rules() {
     })).await;
     let (_, v) = api(&e, "POST", &format!("/flows/{w}/run"), None).await;
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The flow run reaches its durable waiting state.", || {
+    eventually_sync("The flow run records a waiting status.", || {
         run_status(&e, &run) == "waiting"
     })
     .await;
@@ -1346,7 +1343,7 @@ async fn branch_and_edge_label_mismatches_are_warned_and_logged() {
     // the run takes 是, which has no edge: it ends there and says so
     let (_, v) = api(&e, "POST", &format!("/flows/{id}/run"), None).await;
     let run = v["run_id"].as_str().unwrap().to_string();
-    eventually_sync("The scheduled flow run completes its item action.", || {
+    eventually_sync("The flow run records a done status.", || {
         run_status(&e, &run) == "done"
     })
     .await;

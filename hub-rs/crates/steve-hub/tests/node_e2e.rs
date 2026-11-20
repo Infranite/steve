@@ -695,9 +695,17 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         h.make_retry_due(&sid);
     }
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
-        let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h.db().prepare(
-        "SELECT a.ordinal,a.state,a.completion,a.updated FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? ORDER BY a.ordinal",
-    ).unwrap().query_map([&sid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_, _>>().unwrap();
+        let sql = "SELECT a.ordinal,a.state,a.completion,a.updated \
+                   FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) \
+                   WHERE t.session_id=? ORDER BY a.ordinal";
+        let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h
+            .db()
+            .prepare(sql)
+            .unwrap()
+            .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         format!(
             "capacity retries reach the service-card ceiling; attempts={observed_attempts:?}; now={}; Hub log:\n{}",
             steve_store::now(),
@@ -765,7 +773,7 @@ async fn a_node_session_end_to_end() {
     let sid = c.item(&h, "节点验收 @say hello-node-7Q").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -778,7 +786,7 @@ async fn a_node_session_end_to_end() {
         1,
         "bound to the local Node"
     );
-    eventually_sync("The Node turn records its finished attempt.", || {
+    eventually_sync("The session has a finished runtime attempt.", || {
         attempts(&h, &sid, "finished") >= 1
     })
     .await;
@@ -796,7 +804,7 @@ async fn a_node_session_end_to_end() {
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node tool request opens its permission card; Hub log:\n{}",
+            "The session has an open tool-call permission card; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -816,7 +824,7 @@ async fn a_node_session_end_to_end() {
     assert_eq!(st, 200, "answer: {v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; Hub log:\n{}",
+            "The session transcript contains the selected permission response; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -831,7 +839,7 @@ async fn a_node_session_end_to_end() {
     c.say(&sid, "取消验收-C4 @sleep 600000").await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || h.got("取消验收-C4") == 1
         )
         .await
@@ -901,7 +909,7 @@ async fn a_node_session_end_to_end() {
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || h.got("崩溃验收-K2") == 1
         )
         .await
@@ -976,7 +984,7 @@ async fn a_permission_nobody_answers_expires() {
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node tool request opens its permission card; Hub log:\n{}",
+            "The session has an open tool-call permission card; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1047,7 +1055,7 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "idle-node-3R") > 0).await;
     assert!(
-        eventually_sync("The Node turn records its finished attempt.", || attempts(
+        eventually_sync("The session has a finished runtime attempt.", || attempts(
             &h, &sid, "finished"
         ) >= 1)
         .await
@@ -1133,7 +1141,7 @@ async fn a_node_session_shows_its_status_and_harness_id() {
     c.say(&sid, "状态验收-运行 @sleep 600000").await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || h.got("状态验收-运行") == 1
         )
         .await
@@ -1205,7 +1213,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "drain-node-3D") > 0).await;
     assert!(
-        eventually_sync("The Node turn records its finished attempt.", || attempts(
+        eventually_sync("The session has a finished runtime attempt.", || attempts(
             &h, &sid, "finished"
         ) >= 1)
         .await
@@ -1215,7 +1223,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     c.say(&sid, "排空验收-运行 @sleep 600000").await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || h.got("排空验收-运行") == 1
         )
         .await
@@ -1257,7 +1265,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node tool request opens its permission card; Hub log:\n{}",
+            "The session has an open tool-call permission card; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1285,7 +1293,7 @@ async fn the_upgrade_drain_waits_for_node_turns() {
     assert_eq!(st, 200, "answer: {v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; Hub log:\n{}",
+            "The session transcript contains the selected permission response; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1331,7 +1339,7 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
     let sid = c.item(&h, "空闲验收 @say idle-release-4A").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node turn records its finished attempt; Hub log:\n{}",
+            "The session has a finished runtime attempt; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1404,7 +1412,7 @@ async fn the_node_is_the_default() {
     let sid = c.item(&h, "默认验收 @say default-node-B6").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1609,7 +1617,7 @@ async fn git_worktree_case(mode: &str) {
     let wt = h.steve().join("worktrees").join(&item);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node turn records its finished attempt; Hub log:\n{}",
+            "The session has a finished runtime attempt; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -1943,7 +1951,7 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
     let sid = c.item(&h, "附件验收 @say ready-A1").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -2143,7 +2151,7 @@ async fn a_service_node_turn_outlives_the_hub() {
     let sid = c.item(&h, "服务验收 @say hello-service-3S").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}",
             hub_log(&h)
         )
     });
@@ -2194,7 +2202,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         .await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || h.got("存活验收-V6") == 1
         )
         .await

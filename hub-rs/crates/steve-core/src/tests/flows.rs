@@ -988,7 +988,7 @@ fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
     assert_ne!(k.phase(&i.id), "closed");
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The dropped item reaches closed after the currently running turn finishes.",
         || k.phase(&i.id) == "closed",
     );
 }

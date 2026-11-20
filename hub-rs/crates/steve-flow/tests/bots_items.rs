@@ -244,7 +244,7 @@ async fn item_done_triggers_a_flow() {
         ("item", "item.done", "ST-1「写周报」完成了")
     );
     let run = runs[0].clone();
-    eventually_sync("The scheduled flow run completes its item action.", || {
+    eventually_sync("The flow run records a done status.", || {
         q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
     })
     .await;
@@ -292,7 +292,7 @@ async fn item_made_by_a_flow_does_not_restart_it() {
         panic!("not stored")
     };
     let run = runs[0].clone();
-    eventually_sync("The scheduled flow run completes its item action.", || {
+    eventually_sync("The flow run records a done status.", || {
         q::<String>(&e, "SELECT status FROM flow_runs WHERE id = ?", [&run]) == "done"
     })
     .await;

@@ -216,13 +216,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    eventually(
-        "The Hub sees the target session running before the test continues.",
-        || async {
-            let s = e.session(&sid).await;
-            s["busy"] == true && s["status"] == "running"
-        },
-    )
+    eventually("The session reports both busy and running.", || async {
+        let s = e.session(&sid).await;
+        s["busy"] == true && s["status"] == "running"
+    })
     .await;
     sid
 }
@@ -357,10 +354,9 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(s, 409, "{m} {p}: {v}");
         assert_eq!(v["error"], "这条消息已经发出，不能再改");
     }
-    eventually(
-        "The target session becomes idle after the turn finishes.",
-        || async { e.session(&sid).await["busy"] == false },
-    )
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&sid).await["busy"] == false
+    })
     .await;
     assert_eq!(e.prompts().len(), 2);
     // the turn ended: the hint is gone (the session change refreshes the state)

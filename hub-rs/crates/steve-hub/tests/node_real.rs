@@ -1078,7 +1078,7 @@ async fn a_cancel_mid_turn_ends_it() {
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node turn records its finished attempt; the cancelled turn is over; log:\n{}",
+            "The cancelled session has at least one recorded turn and no unfinished turns; the cancelled turn is over; log:\n{}",
             hub_log(&r.h)
         )
     });

@@ -559,7 +559,7 @@ async fn a_second_node_runs_a_whole_item() {
     let sid = c.item(&h, "远程验收 @say hello-remote-5R").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}\nnode:\n{}",
             h.log(),
             n.log()
         )
@@ -575,7 +575,7 @@ async fn a_second_node_runs_a_whole_item() {
         "bound to the second Node"
     );
     assert!(
-        eventually_sync("The Node turn records its finished attempt.", || attempts(
+        eventually_sync("The session has a finished runtime attempt.", || attempts(
             &h, &sid, "finished"
         ) >= 1)
         .await
@@ -587,7 +587,7 @@ async fn a_second_node_runs_a_whole_item() {
     let mut card = None;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node tool request opens its permission card; Hub log:\n{}\nnode:\n{}",
+            "The session has an open tool-call permission card; Hub log:\n{}\nnode:\n{}",
             h.log(),
             n.log()
         )
@@ -611,7 +611,7 @@ async fn a_second_node_runs_a_whole_item() {
     assert_eq!(st, 200, "answer: {v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; the Node's agent got the answer; node:\n{}",
+            "The session transcript contains the selected permission response; the Node's agent got the answer; node:\n{}",
             n.log()
         )
     });
@@ -647,7 +647,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
         .await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}\nnode:\n{}",
             h.log(),
             n.log()
         )
@@ -659,7 +659,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     serving(&h).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            "The session stores the expected reply text; Hub log:\n{}\nnode:\n{}",
             h.log(),
             n.log()
         )
@@ -667,7 +667,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     eventually_sync(diagnostic, || said(&h, &sid, "two-8T") > 0).await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The Node turn records its finished attempt; {}\nhub:\n{}\nnode:\n{}",
+            "The session has a finished runtime attempt; {}\nhub:\n{}\nnode:\n{}",
             dump(&h, &sid),
             h.log(),
             n.log()
@@ -699,7 +699,7 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
     assert!(
         eventually_sync(
-            "The fake Node receives the test turn prompt exactly once.",
+            "The fake adapter records the target prompt exactly once.",
             || n.got("断电验收-K7") == 1
         )
         .await

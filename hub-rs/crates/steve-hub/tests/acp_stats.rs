@@ -180,10 +180,9 @@ async fn item_on(e: &Env, goal: &str, bot: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    eventually(
-        "The Hub sees the target session running before the test continues.",
-        || async { e.session(&sid).await["busy"] == true },
-    )
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
     .await;
     sid
 }
@@ -232,10 +231,9 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
     })
     .await;
-    eventually(
-        "The target session becomes idle after the turn finishes.",
-        || async { e.session(&sid).await["busy"] == false },
-    )
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&sid).await["busy"] == false
+    })
     .await;
     let c = e.db();
     let turns: Vec<(Option<String>, Option<i64>, i64, String, i64, String)> = c
@@ -338,10 +336,9 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         },
     )
     .await;
-    eventually(
-        "The target session becomes idle after the turn finishes.",
-        || async { e.session(&streaming).await["busy"] == false },
-    )
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&streaming).await["busy"] == false
+    })
     .await;
     eventually(
         "Every completed output session receives its end sample.",

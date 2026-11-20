@@ -197,10 +197,9 @@ fn accepted_again(k: &Kit, x: &Remote) {
                 })
         },
     );
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
 }
 
 /// [`accepted`] with no fingerprint frozen with the result (`remote_for` gives the item its worktree
@@ -215,10 +214,9 @@ fn accepted_unfrozen(gh: &Gh) -> (Kit, Remote) {
     told_what_is_missing(&k, &x);
     // the agent ends the turn it was told in
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
     (k, x)
 }
 
@@ -398,7 +396,7 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
     );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The reviewed item reaches closed after Steve merges the accepted PR head; {:?}",
             k.status(&x.item)
         )
     });
@@ -507,7 +505,7 @@ fn a_plan_reported_after_the_acceptance_is_only_noted_and_the_result_still_merge
     look(&k);
     assert_eq!(gh.merges().len(), 1);
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The item reaches closed after its PR merge despite the later plan update.",
         || k.phase(&x.item) == "closed",
     );
 }
@@ -614,7 +612,7 @@ fn an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give() {
         )]
     );
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The item reaches closed after the approved PR merge.",
         || k.phase(&x.item) == "closed",
     );
     let m = pr_marks(&k, &x);
@@ -634,7 +632,7 @@ fn an_unreviewed_change_you_merged_yourself_completes_the_item() {
     look(&k);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after the user merges the PR; {:?}",
             k.status(&x.item)
         )
     });
@@ -862,7 +860,7 @@ fn merge_consent_survives_report_redelivery_and_restart_at_the_same_exact_target
         )]
     );
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The reopened Core records the item as closed after checking the approved merge.",
         || k.phase(&x.item) == "closed",
     );
     assert_eq!(all_merge_cards(&k, &x).len(), 1);
@@ -1122,10 +1120,9 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
         "{p}"
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        "The background release probe finishes before the next lifecycle step.",
-        || k.core.tx().st.probing.is_empty(),
-    );
+    steve_runtime::testkit::eventually_blocking("All completion probes have finished.", || {
+        k.core.tx().st.probing.is_empty()
+    });
     // rebased onto main (the same change): a new head, and a failed check on it
     // a new message, not only a new date: an amend within the same second would keep the hash
     g(
@@ -1210,7 +1207,7 @@ fn without_a_commit_of_its_own_only_a_merged_pull_request_makes_it_merged() {
     gh.prs(json!([{"number": 9, "state": "MERGED", "url": "https://github.com/acme/app/pull/9", "headRefOid": h}]));
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The no-commit item reaches closed after the host reports its PR merged.",
         || {
             look(&k);
             k.phase(&x.item) == "closed"
@@ -1232,7 +1229,7 @@ fn without_a_commit_of_its_own_an_open_pull_request_is_not_merged_and_not_auto_m
     gh.prs(open_pr(&head(&x.wt), json!({})));
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The accepted item with no own commits reaches closed while its PR remains open.",
         || {
             look(&k);
             k.phase(&x.item) == "closed"
@@ -1438,7 +1435,7 @@ fn a_pull_request_merged_with_its_branch_deleted_completes_the_item_without_its_
     k.core.tx().lc_try_close(&x.item).unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?} {:?}",
+            "The item reaches closed after finding its merged PR despite the deleted worktree; {:?} {:?}",
             k.status(&x.item),
             k.timeline_texts(&x.item)
         )
@@ -1495,7 +1492,7 @@ fn a_merged_pull_request_seen_before_the_worktree_went_completes_on_any_pass() {
     k.core.lifecycle_tick().unwrap();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after its last turn ends using the saved PR merge evidence; {:?}",
             k.timeline_texts(&x.item)
         )
     });
@@ -1521,7 +1518,7 @@ fn a_worktree_gone_while_its_pull_request_is_still_open_voids_the_result_as_befo
     look(&k);
     // it answered: still open, so the moved result is void
     steve_runtime::testkit::eventually_blocking(
-        "The changed delivery reopens the item and records what changed.",
+        "The item reaches its active phase after the worktree removal check.",
         || {
             k.core.tx().lc_try_close(&x.item).unwrap();
             k.phase(&x.item) == "active"
@@ -1552,7 +1549,7 @@ fn a_branch_github_cannot_rebase_is_squashed_without_trying_the_rebase() {
     );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after the allowed squash merge; {:?}",
             k.status(&x.item)
         )
     });
@@ -1579,7 +1576,7 @@ fn a_rebase_github_refuses_falls_back_to_a_squash_with_one_merge_and_no_card() {
     );
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The accepted item closes after its release requirements are satisfied; {:?}",
+            "The item reaches closed after rebase refusal falls back to squash; {:?}",
             k.status(&x.item)
         )
     });
@@ -1761,7 +1758,7 @@ fn closeout_publishes_only_current_checks_and_deduplicates_conversation_mileston
     gh.prs(open_pr(&h2, json!({})));
     look(&k);
     steve_runtime::testkit::eventually_blocking(
-        "The accepted item closes after its release requirements are satisfied.",
+        "The item reaches closed after consent and checks apply to the current PR head.",
         || k.phase(&x.item) == "closed",
     );
     assert_eq!((read().status, read().next_owner), ("merged", "none"));

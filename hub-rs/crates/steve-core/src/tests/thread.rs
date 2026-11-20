@@ -589,10 +589,9 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
         (next.as_str(), "答好了")
     );
     // the answer is written before its turn lets go of the thread
-    steve_runtime::testkit::eventually_sync(
-        "The main conversation becomes idle after its turn ends.",
-        || !k.core.main_busy(WS).unwrap(),
-    )
+    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+        !k.core.main_busy(WS).unwrap()
+    })
     .await;
 }
 
@@ -613,7 +612,7 @@ async fn stop_takes_an_answer_not_started_yet_off_the_queue() {
     });
     let asked = k.core.say(WS, "慢慢答", &[]).unwrap();
     steve_runtime::testkit::eventually_sync(
-        "The inline answer is ready after conversation routing completes.",
+        "The router has finished and the inline answer is in progress.",
         || k.core.inline_busy(WS) && !k.core.routing(WS),
     )
     .await;
@@ -1017,10 +1016,9 @@ async fn a_routing_that_panics_does_not_take_the_conversation_down() {
     let k = Kit::new();
     k.gw.set(|_, _| panic!("router blew up"));
     k.core.say(WS, "第一件", &[]).unwrap();
-    steve_runtime::testkit::eventually_sync(
-        "The main conversation becomes idle after its turn ends.",
-        || !k.core.main_busy(WS).unwrap(),
-    )
+    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+        !k.core.main_busy(WS).unwrap()
+    })
     .await;
     k.gw.script.clear_poison();
     k.core.say(WS, "/汇报", &[]).unwrap();
@@ -1041,10 +1039,9 @@ async fn an_answer_that_panics_ends_its_turn() {
         }
     });
     k.core.say(WS, "答一下", &[]).unwrap();
-    steve_runtime::testkit::eventually_sync(
-        "The main conversation becomes idle after its turn ends.",
-        || !k.core.main_busy(WS).unwrap(),
-    )
+    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+        !k.core.main_busy(WS).unwrap()
+    })
     .await;
     k.gw.script.clear_poison();
     k.core.say(WS, "/汇报", &[]).unwrap();
@@ -1062,10 +1059,9 @@ async fn idle_lanes_go_and_come_back() {
     router(&k, json!({"kind": "answer", "confidence": 0.9}), "答好了");
     k.core.say(WS, "问一下", &[]).unwrap();
     settle(&k, 2).await;
-    steve_runtime::testkit::eventually_sync(
-        "The main conversation becomes idle after its turn ends.",
-        || !k.core.main_busy(WS).unwrap(),
-    )
+    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+        !k.core.main_busy(WS).unwrap()
+    })
     .await;
     assert_eq!(k.core.lanes_open(), (1, 1));
     steve_runtime::testkit::eventually_sync("Both idle runtime lanes are released.", || {
@@ -1141,10 +1137,9 @@ async fn a_message_to_an_item_passes_the_answer_in_progress() {
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     k.core.say(WS, "慢慢答", &[]).unwrap();
-    steve_runtime::testkit::eventually_sync(
-        "The item message reaches the inline runtime lane.",
-        || k.core.inline_busy(WS),
-    )
+    steve_runtime::testkit::eventually_sync("The inline answer has started executing.", || {
+        k.core.inline_busy(WS)
+    })
     .await;
     let to = k
         .core
@@ -1234,10 +1229,9 @@ async fn a_plain_question_skips_the_router() {
     assert_eq!(log.model, None);
     // the answer is written before its turn lets go of the thread: said before that, the next
     // message is routed once ahead of its turn and once more after the answer (#394)
-    steve_runtime::testkit::eventually_sync(
-        "The main conversation becomes idle after its turn ends.",
-        || !k.core.main_busy(WS).unwrap(),
-    )
+    steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+        !k.core.main_busy(WS).unwrap()
+    })
     .await;
     // asking for work: the router decides
     k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();

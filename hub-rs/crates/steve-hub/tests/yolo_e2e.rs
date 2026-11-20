@@ -165,10 +165,9 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    eventually(
-        "The Hub sees the target session running before the test continues.",
-        || async { e.session(&sid).await["busy"] == true },
-    )
+    eventually("The session reports busy.", || async {
+        e.session(&sid).await["busy"] == true
+    })
     .await;
     sid
 }
@@ -212,7 +211,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let inside = item(&e, "写笔记 @permtool edit notes.txt").await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; the agent got allow_once: {}",
+            "The session transcript contains the selected permission response; the agent got allow_once: {}",
             texts(&e, &inside).await
         )
     });
@@ -502,7 +501,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(s, 200, "{v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; the waiting request was answered: {}",
+            "The session transcript contains the selected permission response; the waiting request was answered: {}",
             texts(&e, &waiting).await
         )
     });
@@ -604,7 +603,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     assert_eq!(s, 200, "{v}");
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
-            "The agent receives the selected permission answer; the waiting request was answered and the turn went on: {}",
+            "The session transcript contains the selected permission response; the waiting request was answered and the turn went on: {}",
             texts(&e, &off_ok).await
         )
     });
@@ -622,10 +621,9 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         texts(&e, &off_ok).await.matches("perm:selected:").count(),
         1
     );
-    eventually(
-        "The target session becomes idle after the turn finishes.",
-        || async { e.session(&off_ok).await["busy"] == false },
-    )
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&off_ok).await["busy"] == false
+    })
     .await;
     eventually("The YOLO permission action saves its outcome.", || async {
         !kill_acts().is_empty()
@@ -669,10 +667,9 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     })
     .await;
     assert_eq!(row().await["wanted_from"], "full_access");
-    eventually(
-        "The target session becomes idle after the turn finishes.",
-        || async { e.session(&nobot).await["busy"] == false },
-    )
+    eventually("The session reports that it is no longer busy.", || async {
+        e.session(&nobot).await["busy"] == false
+    })
     .await;
     let (s, v) = e
         .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))

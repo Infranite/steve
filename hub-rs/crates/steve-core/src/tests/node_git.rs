@@ -291,7 +291,7 @@ fn a_delivery_on_a_node_is_frozen_and_checked_there() {
     let (i, wt) = delivered_on_node(&k, &port);
     /* frozen once the Node's facts came: what the Hub's own git says of the same worktree */
     steve_runtime::testkit::eventually_blocking(
-        "The Node finishes gathering the delivered worktree fingerprint.",
+        "The Node fingerprint request is no longer pending.",
         || !closing(&k, &i).print_pending,
     );
     let frozen = closing(&k, &i).fingerprint.unwrap();
@@ -323,7 +323,7 @@ fn an_unreachable_node_during_the_check_is_unknown_not_changed() {
     let port = OnNode::new(&k);
     let (i, wt) = delivered_on_node(&k, &port);
     steve_runtime::testkit::eventually_blocking(
-        "The Node finishes gathering the delivered worktree fingerprint.",
+        "The Node fingerprint request is no longer pending.",
         || !closing(&k, &i).print_pending,
     );
     port.offline.store(true, Ordering::SeqCst);
@@ -355,7 +355,7 @@ fn a_gathering_slower_than_the_periodic_check_still_decides() {
     let port = OnNode::new(&k);
     let (i, wt) = delivered_on_node(&k, &port);
     steve_runtime::testkit::eventually_blocking(
-        "The Node finishes gathering the delivered worktree fingerprint.",
+        "The Node fingerprint request is no longer pending.",
         || !closing(&k, &i).print_pending,
     );
     /* each read takes longer than the time between two checks */
@@ -385,7 +385,7 @@ fn a_card_that_decides_no_result_is_answered_without_waiting_on_the_node() {
     let port = OnNode::new(&k);
     let (i, _wt) = delivered_on_node(&k, &port);
     steve_runtime::testkit::eventually_blocking(
-        "The Node finishes gathering the delivered worktree fingerprint.",
+        "The Node fingerprint request is no longer pending.",
         || !closing(&k, &i).print_pending,
     );
     let slow = Duration::from_millis(1500);
@@ -585,7 +585,7 @@ fn an_accepted_delivery_on_a_node_in_a_release_project_waits_for_its_release() {
             .any(|o| o.kind == crate::cycle::OP_RELEASE && o.required && o.status == "pending")
     };
     steve_runtime::testkit::eventually_blocking(
-        "The accepted delivery is released successfully.",
+        "The required pending release operation is registered.",
         released,
     );
     for _ in 0..3 {

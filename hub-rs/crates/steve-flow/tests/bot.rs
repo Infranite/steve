@@ -126,10 +126,9 @@ async fn branch_and_reason_reach_the_event() {
         "密钥 sk-live-123456 别外传",
     )
     .await;
-    eventually_sync(
-        "The connector event records that human input is required.",
-        || outcome(&e, &evt) == "need",
-    )
+    eventually_sync("The connector event records a need outcome.", || {
+        outcome(&e, &evt) == "need"
+    })
     .await;
     let (reason, handled_by): (String, String) = e
         .env

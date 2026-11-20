@@ -174,20 +174,22 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
                 &json!({"chan": {"message": "cm_web", "web": true}}),
             )
             .unwrap();
-        steve_runtime::testkit::eventually_sync(
-            "The inline answer is ready after conversation routing completes.",
-            || {
-                if queued {
-                    k.core.inline_busy(WS) && !k.core.routing(WS)
-                } else {
-                    k.gw.calls
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|p| p.starts_with("You are the router"))
-                }
-            },
-        )
+        let description = if queued {
+            "The router has finished and the inline answer is in progress."
+        } else {
+            "The gateway has received the routing request."
+        };
+        steve_runtime::testkit::eventually_sync(description, || {
+            if queued {
+                k.core.inline_busy(WS) && !k.core.routing(WS)
+            } else {
+                k.gw.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.starts_with("You are the router"))
+            }
+        })
         .await;
         if stop_kind == "queued_run" {
             let run = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
@@ -206,10 +208,9 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
             [(crate::thread::MAIN.into(), ms[1].id.clone())]
         );
         k.db().store().maintenance_set(false).unwrap();
-        steve_runtime::testkit::eventually_sync(
-            "The main conversation becomes idle after its turn ends.",
-            || !k.core.main_busy(WS).unwrap(),
-        )
+        steve_runtime::testkit::eventually_sync("The main conversation is no longer busy.", || {
+            !k.core.main_busy(WS).unwrap()
+        })
         .await;
         assert_eq!(k.db().messages(WS).unwrap().len(), 2, "one stop receipt");
     }

@@ -388,7 +388,7 @@ async fn a_failing_router_never_makes_an_item() {
     let before = items(&k);
     for t in ["帮我把 X 改成 Y", "建个事项吧", A1] {
         let mid = k.core.say(WS, t, &[]).unwrap();
-        eventually_sync("The conversation route stores its final reply.", || {
+        eventually_sync("The conversation route is bound to a reply.", || {
             route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
         })
         .await;
@@ -407,7 +407,7 @@ async fn a_failing_router_never_makes_an_item() {
         })
     });
     let mid = k.core.say(WS, "随便", &[]).unwrap();
-    eventually_sync("The conversation route stores its final reply.", || {
+    eventually_sync("The conversation route is bound to a reply.", || {
         route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
     })
     .await;
@@ -483,7 +483,7 @@ async fn while_research_runs_messages_wait_and_can_be_changed_or_withdrawn() {
         items(&k) == before + 1
     })
     .await;
-    eventually_sync("The conversation route stores its final reply.", || {
+    eventually_sync("The conversation route is bound to a reply.", || {
         route_opt(&k, &q2).is_some_and(|l| l.reply_id.is_some())
     })
     .await;
@@ -2193,7 +2193,7 @@ async fn a_research_guard_stop_keeps_one_neutral_note_in_the_saved_reply() {
             |_| json!({"kind":"research","confidence":0.9,"signals":["lookup"],"title":"查询事项"}),
         );
         let mid = k.core.say(WS, "查询 ST-23 的进展", &[]).unwrap();
-        eventually_sync("The conversation route stores its final reply.", || {
+        eventually_sync("The conversation route is bound to a reply.", || {
             route_opt(&k, &mid).is_some_and(|l| l.reply_id.is_some())
         })
         .await;
