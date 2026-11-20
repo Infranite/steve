@@ -29,8 +29,18 @@ use steve_runtime::testkit::process::{Child, Command};
 use serde_json::{Value, json};
 
 mod handed;
+#[path = "support/late_spawn.rs"]
+mod late_spawn;
 
 const VERSION: &str = "0.9.0";
+
+fn log_lines(log: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
 
 struct Home {
     dir: tempfile::TempDir,
@@ -40,7 +50,7 @@ struct Home {
     /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
     /// handing out ports in order is often another test's Hub.
     local: handed::Socket,
-    log: PathBuf,
+    logs: std::sync::Mutex<Vec<PathBuf>>,
     web: PathBuf,
 }
 
@@ -60,7 +70,7 @@ impl Home {
             port: socket.port(),
             socket,
             local: handed::Socket::new(),
-            log: dir.path().join("acp.log"),
+            logs: std::sync::Mutex::new(vec![]),
             web,
             dir,
         }
@@ -71,14 +81,22 @@ impl Home {
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
+    /// An immutable log destination inherited by adapters from exactly one Hub launch.
+    fn adapter_log(&self) -> PathBuf {
+        let mut logs = self.logs.lock().unwrap();
+        let path = self.dir.path().join(format!("acp-{}.log", logs.len()));
+        logs.push(path.clone());
+        path
+    }
     fn lines(&self) -> Vec<Value> {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|p| log_lines(p))
             .collect()
     }
-    /// Prompt texts the fake agent received, in order.
+    /// Prompt texts across all launches, in launch/log order (including late old records).
     fn prompts(&self) -> Vec<String> {
         self.lines()
             .iter()
@@ -137,17 +155,27 @@ impl Home {
     }
 }
 
-/// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Option<Child>);
+/// A running Hub process and the adapter log owned by this launch.
+struct Hub(Option<Child>, PathBuf);
 
 impl Hub {
-    /// SIGKILL the Hub and its agents (each agent runs in its own process group).
+    fn spawns(&self) -> usize {
+        log_lines(&self.1)
+            .iter()
+            .filter(|m| m.get("spawn").is_some())
+            .count()
+    }
+    /// SIGKILL the Hub and observed direct agents, then reap the Hub. Agents in independent
+    /// groups created after enumeration can outlive it; log attribution must not depend on teardown.
     fn kill(&mut self) {
         if let Some(child) = self.0.take() {
             Self::kill_child(child);
         }
     }
-    fn kill_child(mut child: Child) {
+    fn kill_child(child: Child) {
+        Self::kill_child_after_scan(child, |_| {});
+    }
+    fn kill_child_after_scan(mut child: Child, after_scan: impl FnOnce(&[i32])) {
         // A completed child no longer pins its cached PID/group number.
         if !matches!(child.try_wait(), Ok(None)) {
             return;
@@ -163,6 +191,7 @@ impl Hub {
                     .collect()
             })
             .unwrap_or_default();
+        after_scan(&children);
         unsafe {
             libc::killpg(pid, libc::SIGKILL);
             for c in &children {
@@ -187,6 +216,7 @@ fn spawn(h: &Home, node: bool, extra: &[(&str, &str)]) -> Hub {
 
 /// The Hub with `STEVE_NODE_MODE` set to `mode`, or unset (the default since B6) for `None`.
 fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
+    let adapter_log = h.adapter_log();
     let fake = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
@@ -214,7 +244,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .env("STEVE_FORBID_REAL_HOSTS", "1")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
-        .env("FAKE_ACP_LOG", &h.log)
+        .env("FAKE_ACP_LOG", &adapter_log)
         .env("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false")
         .env("STEVE_ADAPTER_CLAUDE", fake)
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
@@ -240,7 +270,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     for (k, v) in extra {
         c.env(k, v);
     }
-    Hub(Some(c.spawn().expect("spawn hub")))
+    Hub(Some(c.spawn().expect("spawn hub")), adapter_log)
 }
 
 /// Up and serving the full app.
@@ -941,8 +971,7 @@ async fn a_node_session_end_to_end() {
     hub.kill();
 
     // ── STEVE_NODE_MODE off: the Node-bound session is parked, never handed to the legacy runner
-    let spawns = h.spawns();
-    let _hub = spawn(&h, false, &[]);
+    let hub = spawn(&h, false, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let r = c.say(&sid, "回滚验收-R5 @say legacy").await;
@@ -957,7 +986,7 @@ async fn a_node_session_end_to_end() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(h.got("回滚验收-R5"), 0, "no runner got it");
     assert_eq!(h.got("崩溃验收-K2"), 1, "still never re-run");
-    assert_eq!(h.spawns(), spawns, "no legacy adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no legacy adapter started for it");
     let n = node_health(&h).await;
     assert_eq!(
         (&n["enabled"], &n["reconciled"], &n["fallbacks"]),
@@ -1443,8 +1472,7 @@ async fn the_node_is_the_default() {
     drop(refused);
 
     // unset: it boots with the Node off, and the bound session is parked
-    let spawns = h.spawns();
-    let _hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
+    let hub = spawn_mode(&h, None, &[("STEVE_NO_RESUME", "1")]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let n = node_health(&h).await;
@@ -1463,7 +1491,7 @@ async fn the_node_is_the_default() {
         .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("副本验收-C6"), 0, "no runner got it");
-    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
 /// B7: a new session the Node path cannot express (its bot's permission mode is one the Node has
@@ -1472,7 +1500,7 @@ async fn the_node_is_the_default() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_session_no_node_takes_is_refused_visibly() {
     let h = Home::new();
-    let _hub = spawn(&h, true, &[]);
+    let hub = spawn(&h, true, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     let before = wait_node_health(&h, |n| n["reconciled"] == true).await;
@@ -1484,7 +1512,6 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
         [],
     )
     .expect("dontAsk");
-    let spawns = h.spawns();
     let sid = c.item(&h, "回退验收 @say fallback-legacy-3F").await;
     let n = wait_node_health(&h, |n| n["fallbacks"] == 1).await;
     assert_eq!(n["fallbacks"], 1, "{n}");
@@ -1519,7 +1546,7 @@ async fn a_new_session_no_node_takes_is_refused_visibly() {
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(h.got("fallback-legacy-3F"), 0, "nothing ran it");
-    assert_eq!(h.spawns(), spawns, "no adapter started for it");
+    assert_eq!(hub.spawns(), 0, "no adapter started for it");
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
