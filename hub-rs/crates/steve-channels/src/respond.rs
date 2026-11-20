@@ -10,6 +10,10 @@
 //! - `create_item`: handed to you as a handoff (options include “to_item”), so nothing is lost;
 //! - trigger words: recorded, nothing sent.
 
+mod execution;
+
+use std::ops::ControlFlow;
+
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, params};
 use steve_store::base::{self, DecisionKind};
@@ -360,89 +364,46 @@ impl Channels {
                 .store()
                 .reader(|c| spaces::can_send_as_you(c, &plan.connection_id))?
         {
-            r.act = Act::Record;
-            r.label = NO_SEND_AS_YOU.into();
-            if let Some(i) = &plan.trigger {
-                self.react_ack(&plan.message_id).await;
-                match self.converse_web(plan, i).await {
-                    Ok(_) => r.label = NO_SEND_AS_YOU_COMMAND.into(),
-                    Err(e) => {
-                        tracing::warn!(
-                            space = plan.space_id,
-                            "command to the web conversation: {e}"
-                        );
-                        self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
-                            .await;
-                        self.conv_failed(plan, &not_answered(&format!("{NO_SEND_AS_YOU}（{e}）")));
-                    }
-                }
-            }
-            return Ok(r);
+            return self.respond_without_grant(plan, r).await;
         }
-        // you are there yourself, or the sender's later message took this one into its turn: nothing
-        // is drafted or asked in your name (crate::presence, gate 1)
-        if let Some(e) = self.owner_stop(plan)? {
-            tracing::info!(
-                space = plan.space_id,
-                reason = e.reason(),
-                "not drafted in your name"
-            );
-            r.act = Act::Record;
-            r.label = e.label().into();
-            return Ok(r);
-        }
-        // nothing to answer, or a nudge onto the card still open (crate::decide, G4 and G5)
-        if let Some(g) = self.owner_gate(plan)? {
-            r.act = Act::Record;
-            match g {
-                crate::decide::Gate::NoContent => r.label = crate::decide::LABEL_NO_CONTENT.into(),
-                crate::decide::Gate::Nudge { decision } => {
-                    self.store()
-                        .transaction(|tx| crate::decide::nudge(tx, &decision, &plan.text))?;
-                    r.label = crate::decide::LABEL_NUDGE.into();
-                    r.decision_id = Some(decision);
-                }
-            }
+        if self.apply_owner_gates(plan, &mut r)?.is_break() {
             return Ok(r);
         }
         let now = self.now();
         if plan.act == Act::Handoff {
-            let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
-            r.decision_id = Some(d);
-            if !plan.muted {
-                let owner = self
-                    .store()
-                    .reader(|c| personas::owner_name_for_space(c, &plan.ws, &plan.space_id))?;
-                let text = crate::rules::handoff_ack(&owner);
-                match self.responder().acknowledge(self, plan, &text).await {
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(space = plan.space_id, "handoff ack not sent: {e}"),
-                }
-            }
-            return Ok(r);
+            return self.respond_handoff(plan, r).await;
         }
         // Steve responds: “收到” first, before anything is generated (best-effort, bounded)
         self.react_ack(&plan.message_id).await;
         let command = plan.trigger.is_some();
         // why a trigger word got no answer, in the words of what failed
         let mut failed: Vec<String> = vec![];
-        if matches!(plan.act, Act::Reply | Act::Draft) {
-            match self.converse(plan, command).await {
-                Ok(Some(_)) => {
-                    r.label = if command {
-                        "你的指令，交给对话回答".into()
-                    } else {
-                        "交给对话回答".into()
-                    };
-                    return Ok(r);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(space = plan.space_id, "conversation hand-off failed: {e}");
-                    failed.push(e.to_string());
-                }
-            }
+        if self
+            .route_conversation(plan, command, &mut r, &mut failed)
+            .await
+            .is_break()
+        {
+            return Ok(r);
         }
+        if self
+            .apply_responder(plan, &mut r, &mut failed)
+            .await?
+            .is_break()
+        {
+            return Ok(r);
+        }
+        if plan.trigger.is_some() {
+            return self.respond_failed_trigger(plan, r, failed).await;
+        }
+        self.respond_fallback(plan, r, now).await
+    }
+
+    async fn apply_responder(
+        &self,
+        plan: &Plan,
+        r: &mut Response,
+        failed: &mut Vec<String>,
+    ) -> ChannelResult<ControlFlow<()>> {
         match self.responder().act(self, plan).await {
             Ok(Some(a)) => {
                 if !a.label.is_empty() {
@@ -468,7 +429,7 @@ impl Channels {
                 r.out_message_id = a.out_message_id;
                 r.item_id = a.item_id;
                 r.composer_skip = a.composer_skip;
-                return Ok(r);
+                return Ok(ControlFlow::Break(()));
             }
             Ok(None) => {}
             Err(e) => {
@@ -477,64 +438,7 @@ impl Channels {
                 failed.push(e.to_string());
             }
         }
-        if plan.trigger.is_some() {
-            r.label = "触发语未接入，只记录".into();
-            r.act = Act::Record;
-            self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
-                .await;
-            let why = if !failed.is_empty() {
-                failed.join("；")
-            } else if self.thread().is_none() {
-                "渠道模块没有接上 Steve 的对话".to_string()
-            } else {
-                "渠道的回复器没有接手这条触发词".to_string()
-            };
-            let said = self.conv_failed(plan, &not_answered(&why));
-            // said in its thread too, as you, like any failed trigger word answered as you
-            if plan.mode == Mode::Own
-                && let Some(m) = said
-                && let Some(out) = self.responder().outbound()
-            {
-                let op = crate::conversations::conv_operation(
-                    &m,
-                    m.meta["origin"].as_str().unwrap_or_default(),
-                    crate::conversations::OP_TRIGGER_FAILED,
-                );
-                match self.trigger_failed_note(&plan.ws, plan, out, op).await {
-                    Ok(d) => {
-                        if let Err(e) = self.mark_out(&m, &d) {
-                            tracing::warn!(space = plan.space_id, "failure note not marked: {e}");
-                        }
-                    }
-                    Err(e) => tracing::warn!(space = plan.space_id, "failure note not sent: {e}"),
-                }
-            }
-            return Ok(r);
-        }
-        match plan.act {
-            Act::Reply | Act::Draft => {
-                let (m, d) = self.store().transaction(|tx| {
-                    let (m, d) = open_draft(tx, plan, "", now)?;
-                    // the reply you write and approve answers the message
-                    crate::reactions::expect_answer(tx, &plan.message_id, &m)?;
-                    Ok::<_, crate::ChannelError>((m, d))
-                })?;
-                r.act = Act::Draft;
-                r.label = "等你确认回复".into();
-                r.out_message_id = Some(m);
-                r.decision_id = Some(d);
-            }
-            Act::CreateItem(_) => {
-                let d = self.store().transaction(|tx| open_handoff(tx, plan))?;
-                r.act = Act::Handoff;
-                r.label = "转给你，可以转成事项".into();
-                r.decision_id = Some(d);
-                self.react_finish(&plan.message_id, crate::reactions::Finish::Clear)
-                    .await;
-            }
-            Act::Record | Act::Handoff => {}
-        }
-        Ok(r)
+        Ok(ControlFlow::Continue(()))
     }
 }
 

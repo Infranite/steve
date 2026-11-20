@@ -18,6 +18,8 @@
 //! retry gets the answer out; `cleared → done | failed` when a discarded draft is taken back (undo)
 //! and then goes out or fails. `answer_id` is the outbound row whose sending completes it.
 
+mod finish;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -406,82 +408,16 @@ impl Channels {
         let (Some(t), Some(row)) = (t, row) else {
             return Ok(());
         };
-        let allowed = match (row.state.as_str(), how) {
-            (s, h) if s == h.state() => false,
-            ("ack", _) => true,
-            ("failed", Finish::Done) => true,
-            // a discarded draft taken back and sent after all (or failing then): the asker still
-            // learns how it ended
-            ("cleared", Finish::Done | Finish::Failed) => true,
-            _ => false,
-        };
-        if !allowed {
+        if !finish::allowed(&row.state, how) {
             return Ok(());
         }
-        // Clearing an acknowledgement that the provider never accepted performs no successful
-        // provider action. Retain its refusal instead of erasing the only persisted evidence.
-        let mut err = if how == Finish::Clear && row.reaction_id.is_none() {
-            row.error.clone()
-        } else {
-            None
-        };
-        // the space's connections were removed: nothing can be put on or taken off at the
-        // provider any more, the state ends here only
-        let kind = match how {
-            Finish::Done => Some(ReactionKind::Done),
-            Finish::Failed => Some(ReactionKind::Failed),
-            Finish::Clear => None,
-        };
-        let added = match &t.via {
-            Some((conn, msg)) => {
-                if let Some(rid) = &row.reaction_id
-                    && let Err(e) =
-                        timed(
-                            self.reactor()
-                                .remove(self, &t.ws, conn, msg, rid, row.as_user),
-                        )
-                        .await
-                {
-                    tracing::info!(message = message_id, "reaction not removed: {e}");
-                    err = Some(e);
-                }
-                match kind {
-                    Some(k) => Some(timed(self.reactor().add(self, &t.ws, conn, msg, k)).await),
-                    None => None,
-                }
-            }
-            None => {
-                tracing::debug!(
-                    message = message_id,
-                    "{} reaction recorded only: the space has no connection",
-                    how.state()
-                );
-                None
-            }
-        };
-        let (id, emoji, as_user) = match &added {
-            Some(Ok(a)) => (
-                Some(a.reaction_id.clone()),
-                Some(a.emoji.clone()),
-                a.as_user,
-            ),
-            Some(Err(e)) => {
-                tracing::info!(
-                    message = message_id,
-                    "{} reaction not added: {e}",
-                    how.state()
-                );
-                err = Some(e.clone());
-                (None, None, row.as_user)
-            }
-            None => (None, None, row.as_user),
-        };
+        let finished = self.finish_provider(message_id, how, &t, &row).await;
         let now = self.now();
         self.store().transaction(|tx| -> ChannelResult<()> {
             tx.execute(
                 "UPDATE chan_reactions SET state = ?, reaction_id = ?, emoji = ?, as_user = ?, error = ?, updated = ?
                   WHERE message_id = ?",
-                params![how.state(), id, emoji, as_user as i64, err, now, message_id],
+                params![how.state(), finished.id, finished.emoji, finished.as_user as i64, finished.error, now, message_id],
             )?;
             messages::event(tx, &t.ws, &t.space, message_id);
             Ok(())
