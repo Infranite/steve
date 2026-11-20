@@ -1,7 +1,7 @@
 //! In-place layout-1 to layout-2 conversion. The caller owns the storage lock;
 //! this module opens no files, selects no journal mode and starts no workers.
 use crate::{
-    compat::{LEGACY_INPUT, StorageCapabilities, StorageState},
+    compat::{LEGACY_MAX, LEGACY_MIN, StorageCapabilities, StorageState},
     layout::{CORE_FILE, Layout},
     legacy, migrate,
     open::{db_error, incompatible},
@@ -35,7 +35,7 @@ pub enum Outcome {
 /// Blocking API for the sole storage owner, before engines/pools start. Requires
 /// autocommit and the caller's exclusive storage lock. Replay, validation, contract
 /// installation and credential cleanup commit together through the sole legacy
-/// runner. A crash cannot strand legacy 114 when only 113 is an accepted input.
+/// runner. Both the released 113 input and the frozen 114 head are accepted.
 pub fn convert(conn: &mut Connection) -> Result<Outcome, Error> {
     convert_on(conn, None)
 }
@@ -189,8 +189,8 @@ fn migration_error(error: MigrationError) -> Error {
 fn legacy_input(conn: &Connection) -> Result<i64, Error> {
     let version = legacy::version(conn)
         .map_err(|e| incompatible(&format!("legacy version rejected: {e}")))?;
-    if version != LEGACY_INPUT {
-        return Err(crate::compat::legacy_refusal(version, LEGACY_INPUT));
+    if !(LEGACY_MIN..=LEGACY_MAX).contains(&version) {
+        return Err(crate::compat::legacy_refusal(version, LEGACY_MAX));
     }
     require_owner(conn)?;
     Ok(version)

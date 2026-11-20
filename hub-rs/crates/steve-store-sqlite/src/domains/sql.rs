@@ -191,41 +191,10 @@ pub(super) fn delete_where(
                 })
                 .collect::<Result<_, CommitError>>()?);
             let key = values(&row, &fields);
-            let accept = |bound: &KeyBound, start: bool| match bound {
-                KeyBound::Unbounded => true,
-                KeyBound::Included(b) => {
-                    let n = key_cmp(&key[..b.len()], b);
-                    if start { !n.is_lt() } else { !n.is_gt() }
-                }
-                KeyBound::Excluded(b) => {
-                    let n = key_cmp(&key[..b.len()], b);
-                    if start { n.is_gt() } else { n.is_lt() }
-                }
-            };
-            if !accept(&range.start, true) || !accept(&range.end, false) {
+            if !accept_bound(&key, &range.start, true) || !accept_bound(&key, &range.end, false) {
                 continue;
             }
-            let matches = filter.iter().all(|p| {
-                let test = |field: &str, v: &Cell, ok: fn(std::cmp::Ordering) -> bool| {
-                    value(&row, field).is_some_and(|old| {
-                        *old != Cell::Null && *v != Cell::Null && ok(cmp(old, v))
-                    })
-                };
-                match p {
-                    Pred::Eq { field, value } => test(field, value, |o| o.is_eq()),
-                    Pred::Ne { field, value } => test(field, value, |o| !o.is_eq()),
-                    Pred::Lt { field, value } => test(field, value, |o| o.is_lt()),
-                    Pred::Le { field, value } => test(field, value, |o| !o.is_gt()),
-                    Pred::Gt { field, value } => test(field, value, |o| o.is_gt()),
-                    Pred::Ge { field, value } => test(field, value, |o| !o.is_lt()),
-                    Pred::In { field, values } => {
-                        values.iter().any(|v| test(field, v, |o| o.is_eq()))
-                    }
-                    Pred::IsNull { field, is_null } => {
-                        value(&row, field).is_some_and(|v| (*v == Cell::Null) == *is_null)
-                    }
-                }
-            });
+            let matches = matches_filter(&row, filter);
             if matches {
                 keys.push(values(&row, &e.desc.key));
                 if keys.len() == limit as usize {
@@ -239,4 +208,39 @@ pub(super) fn delete_where(
         e.delete(c, &key)?;
     }
     Ok(())
+}
+
+fn matches_filter(row: &Row, filter: &[Pred]) -> bool {
+    filter.iter().all(|p| {
+        let test = |field: &str, v: &Cell, ok: fn(std::cmp::Ordering) -> bool| {
+            value(row, field)
+                .is_some_and(|old| *old != Cell::Null && *v != Cell::Null && ok(cmp(old, v)))
+        };
+        match p {
+            Pred::Eq { field, value } => test(field, value, |o| o.is_eq()),
+            Pred::Ne { field, value } => test(field, value, |o| !o.is_eq()),
+            Pred::Lt { field, value } => test(field, value, |o| o.is_lt()),
+            Pred::Le { field, value } => test(field, value, |o| !o.is_gt()),
+            Pred::Gt { field, value } => test(field, value, |o| o.is_gt()),
+            Pred::Ge { field, value } => test(field, value, |o| !o.is_lt()),
+            Pred::In { field, values } => values.iter().any(|v| test(field, v, |o| o.is_eq())),
+            Pred::IsNull { field, is_null } => {
+                value(row, field).is_some_and(|v| (*v == Cell::Null) == *is_null)
+            }
+        }
+    })
+}
+
+fn accept_bound(key: &[Cell], bound: &KeyBound, start: bool) -> bool {
+    match bound {
+        KeyBound::Unbounded => true,
+        KeyBound::Included(b) => {
+            let n = key_cmp(&key[..b.len()], b);
+            if start { !n.is_lt() } else { !n.is_gt() }
+        }
+        KeyBound::Excluded(b) => {
+            let n = key_cmp(&key[..b.len()], b);
+            if start { n.is_gt() } else { n.is_lt() }
+        }
+    }
 }

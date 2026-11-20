@@ -545,79 +545,7 @@ pub fn import_with(
                 replayed: true,
             });
         }
-        let mut previous: Option<Vec<rusqlite::types::Value>> = None;
-        for (row, rev) in &batch.rows {
-            if row.0.len() != e.fields.len()
-                || row.0.iter().map(|(n, _)| n).collect::<BTreeSet<_>>().len() != e.fields.len()
-            {
-                return Err(invalid("invalid import row fields"));
-            }
-            if rev.0 > batch.session.rev.0 {
-                return Err(invalid("import revision exceeds snapshot"));
-            }
-            let mut b = Bindings::default();
-            let key = scan::values(row, &e.key);
-            let check = b.compare(e, &e.key, &key, ">=", false)?;
-            if let Some(last) = &previous {
-                // Let SQLite perform the same byte/numeric comparison used by export.
-                let projection = e
-                    .key
-                    .iter()
-                    .zip(last)
-                    .enumerate()
-                    .map(|(i, (name, _))| {
-                        format!("?{} AS {}", b.0.len() + i + 1, scan::ident(name))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let mut bindings = b.0.clone();
-                bindings.extend(last.clone());
-                let backwards: bool = conn
-                    .query_row(
-                        &format!("SELECT {check} FROM (SELECT {projection})"),
-                        params_from_iter(&bindings),
-                        |r| r.get(0),
-                    )
-                    .map_err(db_error)?;
-                if backwards {
-                    return Err(invalid("import rows not in primary key order"));
-                }
-                // Equal keys are also rejected by the destination PK, atomically.
-            }
-            previous = Some(
-                e.key
-                    .iter()
-                    .zip(&key)
-                    .map(|(n, v)| scan::bind_cell(scan::field(e, n)?, v))
-                    .collect::<Result<_, _>>()?,
-            );
-            let mut bound = Vec::new();
-            for f in &e.fields {
-                let v = row
-                    .0
-                    .iter()
-                    .find(|(n, _)| *n == f.name)
-                    .ok_or_else(|| invalid("missing import field"))?;
-                bound.push(scan::bind_cell(f, &v.1)?);
-            }
-            bound.push(rusqlite::types::Value::Integer(
-                i64::try_from(rev.0).map_err(|_| invalid("revision overflow"))?,
-            ));
-            let sql = format!(
-                "INSERT INTO {}({}) VALUES({})",
-                scan::ident(&e.name),
-                scan::columns(e),
-                vec!["?"; bound.len()].join(",")
-            );
-            conn.execute(&sql, params_from_iter(&bound))
-                .map_err(|err| {
-                    if err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
-                        invalid("import key or constraint conflict")
-                    } else {
-                        db_error(err)
-                    }
-                })?;
-        }
+        import_rows(conn, e, &batch)?;
         restore(conn, e.domain, &state)?;
         crate::layout::put_meta(
             conn,
@@ -631,4 +559,79 @@ pub fn import_with(
             replayed: false,
         })
     })
+}
+
+fn import_rows(conn: &Connection, e: &EntityDesc, batch: &ExportBatch) -> Result<(), Error> {
+    let mut previous: Option<Vec<rusqlite::types::Value>> = None;
+    for (row, rev) in &batch.rows {
+        if row.0.len() != e.fields.len()
+            || row.0.iter().map(|(n, _)| n).collect::<BTreeSet<_>>().len() != e.fields.len()
+        {
+            return Err(invalid("invalid import row fields"));
+        }
+        if rev.0 > batch.session.rev.0 {
+            return Err(invalid("import revision exceeds snapshot"));
+        }
+        let mut b = Bindings::default();
+        let key = scan::values(row, &e.key);
+        let check = b.compare(e, &e.key, &key, ">=", false)?;
+        if let Some(last) = &previous {
+            // Let SQLite perform the same byte/numeric comparison used by export.
+            let projection = e
+                .key
+                .iter()
+                .zip(last)
+                .enumerate()
+                .map(|(i, (name, _))| format!("?{} AS {}", b.0.len() + i + 1, scan::ident(name)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut bindings = b.0.clone();
+            bindings.extend(last.clone());
+            let backwards: bool = conn
+                .query_row(
+                    &format!("SELECT {check} FROM (SELECT {projection})"),
+                    params_from_iter(&bindings),
+                    |r| r.get(0),
+                )
+                .map_err(db_error)?;
+            if backwards {
+                return Err(invalid("import rows not in primary key order"));
+            }
+            // Equal keys are also rejected by the destination PK, atomically.
+        }
+        previous = Some(
+            e.key
+                .iter()
+                .zip(&key)
+                .map(|(n, v)| scan::bind_cell(scan::field(e, n)?, v))
+                .collect::<Result<_, _>>()?,
+        );
+        let mut bound = Vec::new();
+        for f in &e.fields {
+            let v = row
+                .0
+                .iter()
+                .find(|(n, _)| *n == f.name)
+                .ok_or_else(|| invalid("missing import field"))?;
+            bound.push(scan::bind_cell(f, &v.1)?);
+        }
+        bound.push(rusqlite::types::Value::Integer(
+            i64::try_from(rev.0).map_err(|_| invalid("revision overflow"))?,
+        ));
+        let sql = format!(
+            "INSERT INTO {}({}) VALUES({})",
+            scan::ident(&e.name),
+            scan::columns(e),
+            vec!["?"; bound.len()].join(",")
+        );
+        conn.execute(&sql, params_from_iter(&bound))
+            .map_err(|err| {
+                if err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                    invalid("import key or constraint conflict")
+                } else {
+                    db_error(err)
+                }
+            })?;
+    }
+    Ok(())
 }
