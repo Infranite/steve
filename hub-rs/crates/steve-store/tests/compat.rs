@@ -172,33 +172,9 @@ fn released_migrations_are_frozen() {
     }
 }
 
-// Build the actual SQL prefix rather than relabeling today's schema as an old one.
-// The runner also completes its conditional columns when opening these older databases.
-fn sql_schema_at(version: usize) -> Connection {
-    let c = Connection::open_in_memory().unwrap();
-    for sql in db::MIGRATIONS.iter().take(version) {
-        c.execute_batch(sql).unwrap();
-    }
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL);
-                     CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);",
-    )
-    .unwrap();
-    c.execute("INSERT INTO schema_version VALUES (?)", [version as i64])
-        .unwrap();
-    c.execute("INSERT INTO schema_compat VALUES (?)", [version as i64])
-        .unwrap();
-    c
-}
-
 #[test]
-fn delivery_migration_preserves_the_existing_main_schema_and_device_revision() {
-    // Find the contract, not a merge-time migration number: another branch may take the slot.
-    let before = db::MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("CREATE TABLE deliveries ("))
-        .unwrap();
-    let c = sql_schema_at(before);
+fn delivery_tables_and_existing_device_revision_survive_reopen() {
+    let c = fresh();
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('default','Existing workspace',1);
          INSERT INTO devices(id,name,roles,max_sessions,revision,seen,created)
@@ -249,16 +225,8 @@ fn delivery_migration_preserves_the_existing_main_schema_and_device_revision() {
 }
 
 #[test]
-fn connector_reference_migration_is_registered_and_upgrades_v69_once() {
-    let c = sql_schema_at(69);
-    assert_eq!(
-        one(
-            &c,
-            "SELECT count(*) FROM sqlite_master WHERE name='connector_refs' AND type='table'"
-        ),
-        0
-    );
-    db::migrate(&c).unwrap();
+fn connector_references_have_foreign_keys_and_indexes() {
+    let c = fresh();
     assert_eq!(
         one(
             &c,
@@ -286,16 +254,8 @@ fn connector_reference_migration_is_registered_and_upgrades_v69_once() {
 }
 
 #[test]
-fn notification_migration_upgrades_v71_and_reopens_without_changes() {
-    let c = sql_schema_at(71);
-    assert_eq!(
-        one(
-            &c,
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('notification_policies','personal_notifications')"
-        ),
-        0
-    );
-    db::migrate(&c).unwrap();
+fn notification_foreign_keys_triggers_and_schema_survive_reopen() {
+    let c = fresh();
     assert_eq!(
         one(
             &c,

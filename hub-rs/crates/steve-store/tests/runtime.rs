@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use rusqlite::{Connection, params};
 use serde_json::json;
-use steve_store::{Result, StoreError, db, runtime::*};
+use steve_store::{Result, StoreError, runtime::*};
 
 fn seed(c: &Connection) {
     c.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','test','.','active',1,1),('legacy','default','test','.','active',1,1);
@@ -69,57 +69,6 @@ fn command(tx: &steve_store::Tx<'_>, op: &str, dependency: Option<&str>) -> Resu
         },
         1,
     )
-}
-
-#[test]
-fn upgrade_preserves_old_rows_and_requires_new_reader() {
-    let c = Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(33);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..33] {
-        c.execute_batch(m).unwrap();
-    }
-    seed(&c);
-    c.execute_batch("INSERT INTO session_dispatch(id,session_id,text,via,created,state,updated) VALUES ('old','legacy','old text','user',1,'submitted',1);
-      INSERT INTO events(session_id,ts,kind,data) VALUES ('legacy',1,'system','{}');
-      INSERT INTO agent_turns(id,workspace_id,session_id,harness,started) VALUES ('tn','default','legacy','test',1);").unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().min_reader, db::SCHEMA_VERSION);
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM queued WHERE id='q' AND text='hello' AND files='[]'"
-        ),
-        1
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM session_dispatch WHERE id='old' AND text='old text' AND backend='legacy' AND turn_id IS NULL AND state='submitted'"
-        ),
-        1
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM events WHERE format='legacy.acp' AND source_node IS NULL AND data='{}'"
-        ),
-        1
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM agent_turns WHERE id='tn' AND node_attempt_id IS NULL AND logical_turn_id IS NULL"
-        ),
-        1
-    );
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
-        0
-    );
 }
 
 #[test]

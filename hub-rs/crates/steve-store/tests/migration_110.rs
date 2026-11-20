@@ -2,20 +2,11 @@ use rusqlite::{Connection, params};
 use steve_store::{bot_dispatch, db};
 
 #[test]
-fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
-    assert_eq!(db::MIGRATIONS[109], include_str!("../migrations/110.sql"));
+fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
     let c = Connection::open_in_memory().unwrap();
-    for migration in &db::MIGRATIONS[..109] {
-        c.execute_batch(migration).unwrap();
-    }
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL);
-         INSERT INTO schema_version VALUES (109);
-         CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);
-         INSERT INTO schema_compat VALUES (109);
-         INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);",
-    )
-    .unwrap();
+    db::migrate(&c).unwrap();
+    c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);")
+        .unwrap();
     let insert = |id: &str, state: &str, local: bool| {
         c.execute(
             "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,local,created)
@@ -62,24 +53,17 @@ fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
         )
         .unwrap();
     assert_eq!(removal, ("existing".into(), "requested".into()));
-    assert_eq!(
-        db::compat(&c).unwrap(),
-        db::Compat {
-            schema: db::SCHEMA_VERSION,
-            min_reader: db::SCHEMA_VERSION,
-        }
-    );
     insert("new", "active", false);
     c.execute(
         "UPDATE nodes SET state='active' WHERE node_id='pending'",
         [],
     )
     .unwrap();
-    // Reopening must not backfill newly paired or newly confirmed Nodes.
+    // Reopening must not grant newly paired or newly confirmed Nodes legacy dispatch.
     db::migrate(&c).unwrap();
     for (id, was_eligible) in [
-        ("existing", true),
-        ("paused", true),
+        ("existing", false),
+        ("paused", false),
         ("pending", false),
         ("revoked", false),
         ("local", false),

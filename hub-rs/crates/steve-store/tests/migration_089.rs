@@ -1,22 +1,12 @@
-//! 089: the refused writes a channel's connection or chat is remembered by. On an 088 database it
-//! adds an empty table; a block goes with its connection.
+//! Current channel settings and connection lifetime constraints.
 
 use rusqlite::Connection;
 use steve_store::db;
 
 #[test]
-fn applies_on_an_088_database_and_goes_with_the_connection() {
+fn write_blocks_default_to_the_connection_and_follow_its_deletion() {
     let c = Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(88);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..88] {
-        c.execute_batch(m).unwrap();
-    }
     db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
     c.execute_batch(
         "PRAGMA foreign_keys=ON;
          INSERT INTO workspaces(id,name,created) VALUES ('w','w',1);

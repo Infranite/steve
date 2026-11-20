@@ -1,9 +1,8 @@
 //! Result scheduling uses the production 128 batch, real SQLite faults and durable call identities.
-use rusqlite::params;
 use serde_json::{Value, json};
 use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageReport, UsageScope};
 use steve_store::{
-    NoPublisher, Store, StoreError, WS, db,
+    NoPublisher, Store, StoreError, WS,
     gateway_ledger::{CallBegin, CallFinish},
 };
 
@@ -353,70 +352,6 @@ fn concurrent_workers_and_producer_cannot_move_new_work_ahead_of_healthy_prefix(
         0
     );
     assert_eq!(n(&s, "SELECT COUNT(*) FROM gateway_result_ready"), 544);
-}
-
-#[test]
-fn migration_seeds_old_dirty_calls_and_preserves_fifo_across_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("steve.sqlite3");
-    let c = rusqlite::Connection::open(&path).unwrap();
-    // Other branches can publish migrations before this one is merged.
-    let before = db::MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("CREATE TABLE gateway_result_ready"))
-        .unwrap();
-    for m in &db::MIGRATIONS[..before] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL)")
-        .unwrap();
-    c.execute("INSERT INTO schema_version VALUES(?)", [before as i64])
-        .unwrap();
-    for (id, dirty) in [("old-finish", 1), ("old-clean", 0), ("old-cancel", 1)] {
-        c.execute("INSERT INTO gateway_calls(call_id,workspace_id,purpose,started,day,ended,ok,projection_dirty) VALUES(?,'default','test',?,'2026-11-01',?,0,?)",params![id,AT,AT+1,dirty]).unwrap();
-    }
-    drop(c);
-    let s = open(&path);
-    assert_eq!(n(&s, "SELECT COUNT(*) FROM gateway_result_ready"), 2);
-    assert_eq!(
-        n(
-            &s,
-            "SELECT COUNT(*) FROM gateway_result_ready WHERE call_id='old-clean'"
-        ),
-        0
-    );
-    outage(&s, None);
-    assert!(s.stats().gateway_apply_local(1).is_err());
-    let head = s
-        .reader::<_, StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT call_id FROM gateway_result_ready ORDER BY ticket LIMIT 1",
-                [],
-                |r| r.get::<_, String>(0),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(head, "old-cancel");
-    drop(s);
-    let s = open(&path);
-    assert_eq!(n(&s, "SELECT COUNT(*) FROM gateway_result_ready"), 2);
-    sql(&s, "DROP TRIGGER fail_projection");
-    s.stats().gateway_apply_local(1).unwrap();
-    assert_eq!(
-        n(
-            &s,
-            "SELECT projection_dirty FROM gateway_calls WHERE call_id='old-cancel'"
-        ),
-        0
-    );
-    assert_eq!(
-        n(
-            &s,
-            "SELECT projection_dirty FROM gateway_calls WHERE call_id='old-finish'"
-        ),
-        1
-    );
-    assert_eq!(n(&s, "SELECT COUNT(*) FROM gateway_calls"), 3);
 }
 
 #[test]

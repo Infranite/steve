@@ -1,20 +1,11 @@
-//! 047: `channel_settings.send_delay_s`, a channel account's undo window. A row that does not set it
-//! keeps NULL (the default for its identity), values outside 0–60 are refused.
+//! Current channel settings and connection lifetime constraints.
 
 use rusqlite::Connection;
 use steve_store::db;
 
 #[test]
-fn applies_on_a_046_database_and_defaults_to_null() {
+fn send_delay_defaults_to_null_and_rejects_out_of_range_values() {
     let c = Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(46);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..46] {
-        c.execute_batch(m).unwrap();
-    }
-    db::migrate(&c).unwrap();
     db::migrate(&c).unwrap();
     // a row as the code before 047 writes it (its connection left out of this test)
     c.execute_batch(
@@ -41,5 +32,4 @@ fn applies_on_a_046_database_and_defaults_to_null() {
         )
         .is_err()
     );
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
 }

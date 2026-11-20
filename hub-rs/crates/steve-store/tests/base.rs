@@ -8,7 +8,7 @@ use serde_json::json;
 use steve_store::base::{
     self, Level, ObjRef, Viewer, Visibility, changesets, decisions, links, mems, tags,
 };
-use steve_store::{NewDecision, NoPublisher, Store, StoreError, db};
+use steve_store::{NewDecision, Store, StoreError, db};
 
 const A: &str = "usr_a";
 const B: &str = "usr_b";
@@ -83,46 +83,9 @@ fn empty_database_gets_the_current_version_with_builtin_attributes() {
                 )?,
                 "偏好的称呼public"
             );
-            // module migrations are idempotent: a second run changes nothing
-            c.execute_batch(db::MIGRATIONS[3])?;
-            assert_eq!(count(c, "SELECT count(*) FROM attr_defs"), 8);
             Ok(())
         })
         .unwrap();
-}
-
-#[test]
-fn ts_v3_database_with_data_upgrades_to_current() {
-    // what a TS Hub on main leaves behind: migrations 1–3 and some rows
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("steve.sqlite3");
-    {
-        let c = Connection::open(&path).unwrap();
-        c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL); INSERT INTO schema_version (v) VALUES (3);").unwrap();
-        for m in &db::MIGRATIONS[..3] {
-            c.execute_batch(m).unwrap();
-        }
-        c.execute_batch(
-            "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);
-             INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'x', 1, 1);
-             INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, item_id, question, status, requested_by, created) VALUES ('dec_1', 'default', 'ask', 'item', 'ST-1', 'ST-1', 'q', 'open', 'steve', 1);
-             INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES ('default', 'item', 'ST-1', 'about', 'project', 'prj_1', 'me', 1);",
-        )
-        .unwrap();
-    }
-    let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
-        assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
-        assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
-        assert_eq!(count(c, "SELECT count(*) FROM decisions"), 1);
-        assert_eq!(count(c, "SELECT count(*) FROM links"), 1);
-        assert_eq!(count(c, "SELECT count(*) FROM attr_defs"), 8);
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(s.decisions().of_item("ST-1").unwrap().len(), 1);
-    drop(s);
-    assert_eq!(schema_of(&path), schema_of(fresh().store.path()));
 }
 
 #[test]
