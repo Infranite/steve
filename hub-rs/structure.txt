@@ -106,10 +106,6 @@ steve-node	crates/steve-node/src/lib.rs	cognitive_complexity	52
 steve-node	crates/steve-node/src/lib.rs	too_many_lines	171,153,140,139,134,126,121,118,117,114,105
 steve-node	crates/steve-node/src/research.rs	too_many_lines	135,103
 steve-node	crates/steve-node/src/research_acp.rs	too_many_lines	251
-steve-node	crates/steve-node/src/scan.rs	cognitive_complexity	31
-steve-node	crates/steve-node/src/scan.rs	too_many_lines	130
-steve-node	crates/steve-node/src/toolchain.rs	cognitive_complexity	35
-steve-node	crates/steve-node/src/workspace.rs	too_many_lines	157
 steve-node-wire	crates/steve-node-wire/src/conn.rs	too_many_lines	108
 steve-stats	crates/steve-stats/src/metrics.rs	too_many_lines	347,107
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
