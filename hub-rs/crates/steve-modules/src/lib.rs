@@ -274,9 +274,7 @@ impl Modules {
         f: impl FnOnce(&Modules) -> ApiResult<R> + Send + 'static,
     ) -> ApiResult<R> {
         let m = self.clone();
-        tokio::task::spawn_blocking(steve_i18n::carry(move || f(&m)))
-            .await
-            .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
+        steve_store::blocking(move || f(&m)).await
     }
 
     /// Single-user read visibility needs no team/space providers or database reads.

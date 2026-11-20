@@ -456,9 +456,7 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return f(c);
         }
-        let c = self.inner.readers.get().map_err(StoreError::from)?;
-        crate::instrumentation::store_acquired();
-        f(&c)
+        self.read_or_active(f)
     }
 }
 

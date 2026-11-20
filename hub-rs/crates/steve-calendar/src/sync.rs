@@ -494,24 +494,13 @@ impl Calendar {
             Ok(r) => r,
             Err(e) => {
                 let msg = source_text(&e);
-                self.0.m.store.transaction(|tx| {
-                    for c in repo::of_connection(tx, conn)? {
-                        repo::set_failed(tx, &c.id, &msg, now)?;
-                        tx.publish(steve_types::DomainEvent::from(
-                            steve_types::AutomationEvent::Calendar {
-                                id: c.id.into(),
-                                ws: ws.into(),
-                            },
-                        ));
-                    }
-                    Ok::<_, ApiError>(())
-                })?;
+                self.record_sync_failure(ws, conn, None, msg.clone(), now).await?;
                 cx.report(health(&e)).await;
                 report.errors.push((String::new(), msg));
                 return Ok(report);
             }
         };
-        let calendars = self.upsert_calendars(ws, conn, &remotes)?;
+        let calendars = self.blocking_sync(ws, conn, move |s, ws, conn| s.upsert_calendars(ws, conn, &remotes)).await?;
         report.calendars = calendars.len();
         let w = self.window();
         let mut worst: Option<SourceError> = None;
@@ -543,23 +532,15 @@ impl Calendar {
             };
             match pulled {
                 Ok(p) => {
-                    let (changed, deleted) = self.apply(cal, busy, p, w)?;
+                    let pulled_cal = cal.clone();
+                    let (changed, deleted) = self.blocking_sync(ws, conn, move |s, _, _| s.apply(&pulled_cal, busy, p, w)).await?;
                     report.changed += changed;
                     report.deleted += deleted;
                     touched.push(cal.id.clone());
                 }
                 Err(e) => {
                     let msg = source_text(&e);
-                    self.0.m.store.transaction(|tx| {
-                        repo::set_failed(tx, &cal.id, &msg, self.now())?;
-                        tx.publish(steve_types::DomainEvent::from(
-                            steve_types::AutomationEvent::Calendar {
-                                id: cal.id.clone().into(),
-                                ws: ws.into(),
-                            },
-                        ));
-                        Ok::<_, ApiError>(())
-                    })?;
+                    self.record_sync_failure(ws, conn, Some(cal.id.clone()), msg.clone(), self.now()).await?;
                     report.errors.push((cal.name.clone(), msg));
                     worst = Some(match (worst, e) {
                         (Some(SourceError::Auth(a)), _) | (_, SourceError::Auth(a)) => {
@@ -571,14 +552,43 @@ impl Calendar {
             }
         }
         if let Some(owner) = calendars.first().map(|c| c.owner_user.clone()) {
-            self.rematch(ws, &owner)?;
+            self.blocking_sync(ws, conn, move |s, ws, _| s.rematch(ws, &owner)).await?;
         }
         cx.report(worst.as_ref().map(health).unwrap_or(Health::Ok))
             .await;
-        if let Err(e) = self.connections().touch_sync(ws, conn) {
+        if let Err(e) = self.blocking_sync(ws, conn, |s, ws, conn| s.connections().touch_sync(ws, conn).map_err(api)).await {
             tracing::debug!(connection = conn, "last sync not recorded: {e}");
         }
         Ok(report)
+    }
+
+    // Only synchronous cache work enters this helper; provider awaits stay above.
+    async fn blocking_sync<T: Send + 'static>(
+        &self, ws: &str, conn: &str,
+        run: impl FnOnce(&Self, &str, &str) -> ApiResult<T> + Send + 'static,
+    ) -> ApiResult<T> {
+        let (cal, ws, conn) = (self.clone(), ws.to_owned(), conn.to_owned());
+        steve_store::blocking(move || run(&cal, &ws, &conn)).await
+    }
+
+    async fn record_sync_failure(
+        &self, ws: &str, conn: &str, calendar: Option<String>, msg: String, now: i64,
+    ) -> ApiResult<()> {
+        self.blocking_sync(ws, conn, move |s, ws, conn| {
+            s.modules().store.transaction(|tx| {
+                let ids = match calendar {
+                    Some(id) => vec![id],
+                    None => repo::of_connection(tx, conn)?.into_iter().map(|c| c.id).collect(),
+                };
+                for id in ids {
+                    repo::set_failed(tx, &id, &msg, now)?;
+                    tx.publish(steve_types::DomainEvent::from(
+                        steve_types::AutomationEvent::Calendar { id: id.into(), ws: ws.into() },
+                    ));
+                }
+                Ok(())
+            })
+        }).await
     }
 
     /// Writes the calendars a source lists; those it no longer lists are marked gone (their events go).

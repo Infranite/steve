@@ -35,6 +35,7 @@ fn persona_json(ch: &Channels, v: &Viewer, id: &str) -> ApiResult<Value> {
 }
 
 async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let v = ch.modules().viewer(&who)?;
     let now = ch.now();
     let out = ch
@@ -47,6 +48,8 @@ async fn list(Extension(ch): Cx, who: Caller) -> ApiResult<Json<Value>> {
                 .collect()
         })?;
     Ok(Json(serde_json::to_value(out)?))
+    }).await
+
 }
 
 async fn detail(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -59,6 +62,7 @@ async fn create(
     who: Caller,
     Body(mut n): Body<NewPersona>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let v = ch.modules().viewer(&who)?;
     n.intro = personas::sent(n.intro, "intro");
     n.soul = personas::sent(n.soul, "soul");
@@ -67,6 +71,8 @@ async fn create(
         .store()
         .transaction(|tx| personas::create(tx, &v, &n, now))?;
     Ok(Json(persona_json(&ch, &v, &p.id)?))
+    }).await
+
 }
 
 async fn patch(
@@ -75,6 +81,7 @@ async fn patch(
     Path(id): Path<String>,
     Body(mut p): Body<PersonaPatch>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let v = ch.modules().viewer(&who)?;
     p.intro = personas::sent(p.intro, "intro");
     p.soul = personas::sent(p.soul, "soul");
@@ -82,13 +89,18 @@ async fn patch(
     ch.store()
         .transaction(|tx| personas::patch(tx, &v, &id, &p, now))?;
     Ok(Json(persona_json(&ch, &v, &id)?))
+    }).await
+
 }
 
 async fn delete(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let v = ch.modules().viewer(&who)?;
     let now = ch.now();
     let moved = ch
         .store()
         .transaction(|tx| personas::delete(tx, &v, &id, now))?;
     Ok(Json(json!({"ok": true, "moved": moved})))
+    }).await
+
 }

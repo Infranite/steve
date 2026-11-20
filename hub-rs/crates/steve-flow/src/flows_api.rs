@@ -98,6 +98,7 @@ async fn allow_private_put(
     who: Caller,
     Body(b): Body<AllowPrivateBody>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let mut hosts: Vec<String> = Vec::new();
     for h in &b.hosts {
         let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -141,6 +142,8 @@ async fn allow_private_put(
         Ok(())
     })?;
     Ok(Json(json!({ "hosts": hosts })))
+    }).await
+
 }
 
 /// [`flows::own`] for the caller: a schedule they may not see (another member's morning brief) is not found.
@@ -274,6 +277,7 @@ async fn create(
     who: Caller,
     Body(b): Body<CreateBody>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     check_meta(Some(&b.name), b.description.as_deref())?;
     let origin = b.origin.unwrap_or_else(|| "me".into());
     let ok_origin = origin == "me"
@@ -310,6 +314,8 @@ async fn create(
         )
     })?;
     view(&cx, &who, &id)
+    }).await
+
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -346,6 +352,7 @@ async fn save(
     Path(id): Path<String>,
     Body(b): Body<SaveBody>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let mut c = Check::new();
     c.opt_len("note", b.note.as_deref(), 0, 200);
     c.done()?;
@@ -366,6 +373,8 @@ async fn save(
     })?;
     cx.wake();
     view(&cx, &who, &id)
+    }).await
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +393,7 @@ async fn patch(
     Path(id): Path<String>,
     Body(b): Body<PatchBody>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     check_meta(b.name.as_deref(), b.description.as_deref())?;
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
@@ -405,9 +415,12 @@ async fn patch(
     })?;
     cx.wake();
     view(&cx, &who, &id)
+    }).await
+
 }
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
@@ -415,6 +428,8 @@ async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
         flows::delete(tx, &f, &who.me, now)
     })?;
     Ok(Json(json!({ "ok": true })))
+    }).await
+
 }
 
 async fn duplicate(
@@ -422,6 +437,7 @@ async fn duplicate(
     who: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let now = cx.now();
     let new_id = cx.store().transaction(|tx| -> ApiResult<String> {
         let f = own(tx, &who, &id)?;
@@ -455,6 +471,8 @@ async fn duplicate(
         )
     })?;
     view(&cx, &who, &new_id)
+    }).await
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,6 +486,7 @@ async fn rollback(
     Path(id): Path<String>,
     Body(b): Body<RollbackBody>,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
         let f = own(tx, &who, &id)?;
@@ -480,6 +499,8 @@ async fn rollback(
     })?;
     cx.wake();
     view(&cx, &who, &id)
+    }).await
+
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -600,6 +621,7 @@ async fn run_now(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let b: RunBody = optional(&body)?;
     let f = cx.store().reader(|c| -> ApiResult<_> {
         let f = own(c, &who, &id)?;
@@ -637,6 +659,8 @@ async fn run_now(
     })?;
     crate::scheduler::spawn_drive(cx.clone(), run.clone());
     Ok(Json(json!({ "run_id": run })))
+    }).await
+
 }
 
 #[derive(Debug, Deserialize)]
@@ -706,6 +730,7 @@ async fn run_detail(
 }
 
 async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let now = cx.now();
     let evt = cx.store().transaction(|tx| -> ApiResult<Option<String>> {
         let r = own_run(tx, &who, &id)?;
@@ -719,4 +744,6 @@ async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
         cx.signals.signal(cx.store(), &who.ws, &e);
     }
     run_json(&cx, &who, &id)
+    }).await
+
 }

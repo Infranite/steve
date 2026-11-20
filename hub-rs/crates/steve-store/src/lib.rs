@@ -210,7 +210,7 @@ impl Store {
             Arc::default(),
             Arc::new(steve_store_sqlite::uow::SystemWallClock),
             Arc::new(EnginePublisher),
-            || false,
+            steve_store_sqlite::exec::outside_blocking_scope,
         )?;
         let (maintenance, diagnostic_until) = {
             let c = engine.engine(Domain::Core).read_conn()?;
@@ -287,12 +287,17 @@ impl Store {
         self.read(|c| Ok(steve_store_sqlite::open::inspect(c)?))
     }
 
+    /// Domain API over this facade's exact Engine and executor identity.
+    pub fn domain_store(&self) -> &SqliteStore<()> {
+        &self.inner.engine
+    }
+
     pub fn path(&self) -> &Path {
         &self.inner.path
     }
 
     pub(crate) fn inner_id(&self) -> usize {
-        Arc::as_ptr(&self.inner) as usize
+        Arc::as_ptr(self.inner.engine.engine(Domain::Core)) as usize
     }
 
     /// Publishes an event that is not tied to a store write (`steve.thinking`, imports finishing).
@@ -327,9 +332,19 @@ impl Store {
         if let Some(c) = self.active_conn() {
             return f(c);
         }
-        let c = self.inner.readers.get()?;
+        self.read_or_active(f)
+    }
+
+    fn read_or_active<T, E: From<StoreError>>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+        let mut run = Some(f);
+        if let Some(value) = self.inner.engine.with_active_root(Domain::Core, |c| {
+            run.take().expect("reader called once")(c)
+        }) {
+            return value;
+        }
+        let c = self.inner.readers.get().map_err(StoreError::from)?;
         instrumentation::store_acquired();
-        f(&c)
+        run.take().expect("reader called once")(&c)
     }
 
     /// Explicit bounded planner maintenance, scheduled through the same root authority.
@@ -355,6 +370,34 @@ impl Store {
         let c = self.lock()?;
         f(&c)
     }
+}
+
+/// Recognized blocking-pool entry for synchronous storage work. Captures the
+/// existing i18n and request counters before leaving the caller's task.
+pub async fn blocking<T, E>(run: impl FnOnce() -> Result<T, E> + Send + 'static) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<StoreError> + Send + 'static,
+{
+    spawn_blocking(run)
+        .await
+        .map_err(|e| StoreError::Conflict(format!("storage blocking task failed: {e}")))?
+}
+
+/// Recognized entry when a caller needs Tokio's original JoinHandle/result shape.
+/// Context is captured here and the scope is entered inside the blocking job.
+pub fn spawn_blocking<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> tokio::task::JoinHandle<T> {
+    tokio::task::spawn_blocking(for_block_in_place(run))
+}
+
+/// Adapter for a host's `tokio::task::block_in_place`. The host must pass the
+/// returned closure directly to block_in_place (never call it on a worker).
+/// Keeping that host call outside this crate avoids requiring a multithread
+/// runtime for ordinary synchronous Store consumers. Also used by `blocking`.
+pub fn for_block_in_place<T>(run: impl FnOnce() -> T) -> impl FnOnce() -> T {
+    steve_i18n::carry(instrumentation::carry(move || {
+        steve_store_sqlite::exec::blocking_scope(run)
+    }))
 }
 
 /// Runs a multi-statement read under a single snapshot. When `c` is already inside an active

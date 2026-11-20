@@ -205,6 +205,7 @@ async fn create(
     };
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
+    steve_store::blocking(move || {
     let mode = b.mode.unwrap_or(Mode::ItemAuto);
     if mode == Mode::Brief {
         return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_mode")));
@@ -249,6 +250,8 @@ async fn create(
     })?;
     cx.wake();
     view(&cx, &who.ws, &id)
+    }).await
+
 }
 
 /// The new spec of a patched schedule (`None` fields keep their value).
@@ -325,6 +328,7 @@ async fn patch(
             .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?;
     }
     let spec = patched_spec(&cx, &old.spec, &b).await?;
+    steve_store::blocking(move || {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<_> {
         // Re-read: the row may have changed while the model was thinking.
@@ -364,6 +368,8 @@ async fn patch(
     cx.wake();
     cx.wake_alarms();
     view(&cx, &who.ws, &id)
+    }).await
+
 }
 
 /// A brief's patch changes only its name, time and switch.
@@ -393,6 +399,7 @@ async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 }
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<_> {
         let s = schedules::own_for(tx, &who.ws, &id, &who.me)?;
@@ -401,9 +408,12 @@ async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
     cx.wake();
     cx.wake_alarms();
     Ok(Json(json!({ "ok": true })))
+    }).await
+
 }
 
 async fn run_now(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    steve_store::blocking(move || {
     let s = cx
         .store()
         .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
@@ -415,6 +425,8 @@ async fn run_now(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiR
         scheduler::spawn_drive(cx.clone(), run_id.clone());
     }
     Ok(Json(json!({ "run_id": run_id })))
+    }).await
+
 }
 
 #[derive(Debug, Deserialize)]

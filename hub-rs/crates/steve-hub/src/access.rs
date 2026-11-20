@@ -125,11 +125,29 @@ pub fn seen(store: &Store, c: &Client, route: &str, ip: Option<String>) {
         m.insert(c.id.clone(), (Instant::now(), route.to_string()));
     }
     let (s, id, route) = (store.clone(), c.id.clone(), route.to_string());
-    tokio::task::spawn_blocking(move || {
+    steve_store::spawn_blocking(move || {
         if let Err(e) = s.access().client_seen(&id, &route, ip.as_deref()) {
             tracing::warn!("client seen: {e}");
         }
     });
+}
+
+// Authentication already left its blocking job when the async handler reaches
+// this tail. Keep the audit and last-seen scheduling behind the same recognized entry.
+async fn audit_sign_in(store: &Store, user: &str, client: &Client, route: &str, ip: Option<String>, pair: Option<&str>) {
+    let (store, user, client, route) = (store.clone(), user.to_owned(), client.clone(), route.to_owned());
+    let mut detail = json!({"kind": client.kind, "name": client.name, "route": route});
+    let action = if let Some(pair) = pair {
+        detail["pair_id"] = json!(pair);
+        "client.pair"
+    } else {
+        "client.sign_in"
+    };
+    let _ = steve_store::blocking(move || {
+        seen(&store, &client, &route, ip);
+        store.audit(&user, action, &client.id, &detail, steve_store::WS).ok();
+        Ok::<_, steve_store::StoreError>(())
+    }).await;
 }
 
 /// Failed sign-ins per address: after [`TRIES`] within [`TRIES_WINDOW`], 429 until it passes.
@@ -299,7 +317,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
     };
     let (platform, version) = (cut(&b.client.platform, 80), cut(&b.client.version, 40));
     let s2 = store.clone();
-    let done = tokio::task::spawn_blocking(move || {
+    let done = steve_store::blocking(move || {
         s2.access().sign_in(
             &b.user,
             &b.token,
@@ -314,17 +332,8 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
     })
     .await;
     match done {
-        Ok(Ok(Some((u, c, secret)))) => {
-            seen(&store, &c, &route, ip);
-            store
-                .audit(
-                    &u.id,
-                    "client.sign_in",
-                    &c.id,
-                    &json!({"kind": c.kind, "name": c.name, "route": route}),
-                    steve_store::WS,
-                )
-                .ok();
+        Ok(Some((u, c, secret))) => {
+            audit_sign_in(&store, &u.id, &c, &route, ip, None).await;
             let cred = credential(&c.id, &secret);
             let mut res = reply(
                 StatusCode::OK,
@@ -357,20 +366,13 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
             }
             res
         }
-        Ok(Ok(None)) => {
+        Ok(None) => {
             if !key.is_empty() {
                 failed(&key);
             }
             reply(
                 StatusCode::UNAUTHORIZED,
                 json!({"error": steve_i18n::t!("hub.access.wrong")}),
-            )
-        }
-        Ok(Err(e)) => {
-            tracing::error!("sign in: {e}");
-            reply(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": "internal"}),
             )
         }
         Err(e) => {
@@ -391,7 +393,7 @@ async fn retire_replaced(st: &AppState, store: &Store, headers: &HeaderMap, new_
         return;
     };
     let (store, new_client) = (store.clone(), new_client.to_string());
-    let retired = tokio::task::spawn_blocking(move || {
+    let retired = steve_store::spawn_blocking(move || {
         let (_, c) = store.access().client_user(&old).ok().flatten()?;
         if c.id == new_client {
             return None;
@@ -415,7 +417,7 @@ async fn retire_replaced(st: &AppState, store: &Store, headers: &HeaderMap, new_
 async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::response::Response {
     if let (Some(cred), Some(m)) = (credential_of(&headers), st.modules.as_ref()) {
         let store = m.store.clone();
-        let revoked_client = tokio::task::spawn_blocking(move || {
+        let revoked_client = steve_store::spawn_blocking(move || {
             if let Ok(Some((_, c))) = store.access().client_user(&cred) {
                 store.access().client_revoke(&c.id).ok();
                 return Some((c.user_id, c.id));
@@ -436,7 +438,7 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         st.modules.is_some(),
     ) {
         let b = st.backend.clone();
-        let uid = tokio::task::spawn_blocking(move || {
+        let uid = steve_store::spawn_blocking(move || {
             b.reader()
                 .ok()
                 .and_then(|r| r.user_by_session(&tok).ok().flatten())
@@ -1059,7 +1061,7 @@ async fn origin_allowed(st: &AppState, origin: &str) -> bool {
     let o = origin.to_string();
     *st.origins
         .get_or_load(o.clone(), || async move {
-            tokio::task::spawn_blocking(move || {
+            steve_store::spawn_blocking(move || {
                 store
                     .access()
                     .origin_signed_in(&o)
@@ -1214,7 +1216,7 @@ pub async fn overview(
     let store = store_of(&st)?;
     let me = c.me.clone();
     let all = q.all.as_deref() == Some("1") && is_owner(&c);
-    let (tokens, clients, users) = tokio::task::spawn_blocking(move || {
+    let (tokens, clients, users) = steve_store::spawn_blocking(move || {
         let tokens = store.access().tokens(Some(&me))?;
         let clients = store.access().clients(if all { None } else { Some(&me) })?;
         let mut users = serde_json::Map::new();
@@ -1289,7 +1291,7 @@ pub async fn token_create(
     }
     let expires = b.days.map(|d| steve_store::now() + d * 86_400_000);
     let me = c.me.clone();
-    let (t, token) = tokio::task::spawn_blocking(move || {
+    let (t, token) = steve_store::spawn_blocking(move || {
         let r = store.access().token_create(&me, &name, expires)?;
         store.audit(
             &me,
@@ -1315,7 +1317,7 @@ pub async fn token_revoke(
     let store = store_of(&st)?;
     let me = c.me.clone();
     let tid = id.clone();
-    let done = tokio::task::spawn_blocking(move || {
+    let done = steve_store::spawn_blocking(move || {
         let Some(t) = store.access().token(&tid)?.filter(|t| t.user_id == me) else {
             return Ok::<_, steve_store::StoreError>(None);
         };
@@ -1359,7 +1361,7 @@ pub async fn client_revoke(
     let me = c.me.clone();
     let owner = is_owner(&c);
     let cid = id.clone();
-    let done = tokio::task::spawn_blocking(move || {
+    let done = steve_store::spawn_blocking(move || {
         let Some(cl) = store
             .access()
             .client(&cid)?
@@ -1798,7 +1800,7 @@ pub async fn pair_create(
     let creator_client_id = c.client.as_ref().map(|x| x.id.clone());
     let creator_token_id = if let Some(cid) = creator_client_id.clone() {
         let s_tok = store.clone();
-        tokio::task::spawn_blocking(move || {
+        steve_store::spawn_blocking(move || {
             Ok::<_, steve_store::StoreError>(
                 s_tok.access().client(&cid)?.and_then(|cl| cl.token_id),
             )
@@ -1856,7 +1858,7 @@ pub async fn pair_create(
     }
     let me = c.me.clone();
     let pid = id.clone();
-    tokio::task::spawn_blocking(move || {
+    steve_store::spawn_blocking(move || {
         store
             .audit(&me, "pair.create", &pid, &json!({}), steve_store::WS)
             .ok();
@@ -2001,7 +2003,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
     let (platform, version) = (cut(&b.client.platform, 80), cut(&b.client.version, 40));
     let s2 = store.clone();
     let uid_copy = user_id.clone();
-    let done = tokio::task::spawn_blocking(move || {
+    let done = steve_store::blocking(move || {
         if let Some(cid) = &creator_client_id {
             let Some(cl) = s2.access().client(cid)? else {
                 return Ok(None);
@@ -2032,7 +2034,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
     })
     .await;
     match done {
-        Ok(Ok(Some((u, c, secret)))) => {
+        Ok(Some((u, c, secret))) => {
             {
                 let mut m = PAIRINGS.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(p) = m.get_mut(&pair_id) {
@@ -2045,16 +2047,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
                     }));
                 }
             }
-            seen(&store, &c, &route, ip);
-            store
-                .audit(
-                    &u.id,
-                    "client.pair",
-                    &c.id,
-                    &json!({"kind": c.kind, "name": c.name, "route": route, "pair_id": pair_id}),
-                    steve_store::WS,
-                )
-                .ok();
+            audit_sign_in(&store, &u.id, &c, &route, ip, Some(&pair_id)).await;
             let cred = credential(&c.id, &secret);
             let mut res = reply(
                 StatusCode::OK,
@@ -2085,7 +2078,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
             }
             res
         }
-        Ok(Ok(None)) => {
+        Ok(None) => {
             PAIRINGS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2093,20 +2086,6 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
             reply(
                 StatusCode::UNAUTHORIZED,
                 json!({"error": steve_i18n::t!("hub.access.pair_expired")}),
-            )
-        }
-        Ok(Err(e)) => {
-            if let Some(p) = PAIRINGS
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .get_mut(&pair_id)
-            {
-                p.claimed_at = None;
-            }
-            tracing::error!("pair sign in: {e}");
-            reply(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": "internal"}),
             )
         }
         Err(e) => {
@@ -2295,7 +2274,7 @@ pub async fn oidc_put(
     let store = store_of(&st)?;
     let home = st.cfg.home.clone();
     let (st2, me) = (st.clone(), c.me.clone());
-    let view = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+    let view = steve_store::spawn_blocking(move || -> Result<Value, String> {
         if let Some(s) = b.secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             write_secret(&home, s).map_err(|e| e.to_string())?;
         }
@@ -2348,7 +2327,7 @@ pub async fn oidc_delete(
     let store = store_of(&st)?;
     let home = st.cfg.home.clone();
     let (st2, me) = (st.clone(), c.me.clone());
-    let view = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+    let view = steve_store::spawn_blocking(move || -> Result<Value, String> {
         let mut m = serde_json::Map::new();
         m.insert(OIDC_KEY.into(), Value::Null);
         store
@@ -2378,7 +2357,7 @@ pub fn note_via(st: &AppState, decision: &str, c: &crate::api::Ctx) {
         return;
     };
     let (id, me) = (decision.to_string(), c.me.clone());
-    tokio::task::spawn_blocking(move || {
+    steve_store::spawn_blocking(move || {
         let via = json!({"client": client.id, "kind": client.kind, "name": client.name, "route": client.route});
         let r = store.with_conn(|db| {
             db.execute(

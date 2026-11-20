@@ -6,6 +6,8 @@
 pub mod access_log;
 #[cfg(test)]
 mod maintenance_tests;
+mod blocking;
+pub use blocking::{blocking_scope, in_blocking_scope, outside_blocking_scope};
 mod schedule;
 #[cfg(test)]
 mod shutdown_tests;
@@ -255,8 +257,8 @@ impl<C, R: BatchRunner<C>> Shared<C, R> {
     }
 }
 impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
-    /// `runtime_probe` identifies blocking calls made in a runtime's worker context. The Hub
-    /// installs its adapter; synchronous hosts pass `|| false`. No Tokio runtime is required.
+    /// Runtime hosts inject `outside_blocking_scope`; a runtime-free synchronous host
+    /// may pass `|| false`. This contract does not inspect private scheduler state.
     pub fn new(
         file: impl Into<String>,
         connection: C,
@@ -315,12 +317,10 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
     pub fn grant(&self, lane: Lane) -> Result<RootGrant<C, R>, GrantError> {
         let shared = self.shared();
         let site = Location::caller();
-        // The host supplies the runtime-context probe: this crate only enables Tokio sync,
-        // and must not require a runtime to perform blocking grants or run the writer.
+        // Hosts inject the explicit blocking-scope contract. Count every violation;
+        // keep granting until Node migration (6b3) permits enabling rejection.
         if (shared.runtime_probe)() {
-            metrics::counter!("steve_store_tokio_grant_total", "site"=>site.to_string())
-                .increment(1);
-            shared.warn("tokio_grant", site);
+            blocking::record_violation(site);
         }
         let active = ACTIVE.with(|v| v.borrow().clone());
         if let Some((outer, weak)) = active {

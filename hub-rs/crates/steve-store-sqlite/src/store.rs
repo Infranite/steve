@@ -3,14 +3,17 @@
 use crate::{
     domains::Registry,
     engine::Engine,
-    exec::{BatchRunner, Executor, Lane, RootGrant, SystemClock},
+    exec::{BatchRunner, Executor, Lane, SystemClock},
     publish::{Attached, Publisher},
     uow::{RootRevision, SqliteBatchRunner, WallClock},
 };
 #[path = "domains/services.rs"]
 mod services;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+    rc::{Rc, Weak},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -441,12 +444,29 @@ impl<E: Send + 'static> SqliteStore<E> {
     ) -> Result<T, CommitError> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
-        let rev = w.runner.reserve_root(&c)?;
+        let rev = c.state.revision.clone();
+        let owns_transaction = !c.nested || c.is_autocommit();
+        // A nested bridge isolates its failure without rolling back its caller.
+        let savepoint = if c.nested && !c.is_autocommit() {
+            Some(NestedSavepoint::begin(&c)?)
+        } else {
+            None
+        };
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&c, &w.runner, &rev)));
-        let leaked = !c.is_autocommit();
+        let outcome = match outcome {
+            Ok(Ok(value)) => match savepoint.map(NestedSavepoint::commit).transpose() {
+                Ok(_) => Ok(Ok(value)),
+                Err(error) => Ok(Err(error)),
+            },
+            other => {
+                drop(savepoint);
+                other
+            }
+        };
+        let leaked = owns_transaction && !c.is_autocommit();
         let cleanup = if leaked {
-            c.engine.rollback_root(&c)
+            c.state.engine.rollback_root(&c)
         } else {
             Ok(())
         };
@@ -467,8 +487,8 @@ impl<E: Send + 'static> SqliteStore<E> {
     }
     /// Thread-bound root authorization for the legacy facade. This is the guard
     /// extended by lane/carry integration, not a second synchronous executor.
-    /// Same-thread nested facade acquisitions reject before locking the mutex;
-    /// nested business scopes must carry the existing guard/connection.
+    /// Same-Engine acquisitions share connection ownership on this thread, including
+    /// non-LIFO guard drops. A different Engine still rejects before waiting.
     #[track_caller]
     pub fn root_guard(&self, domain: Domain, lane: Lane) -> Result<RootGuard<'_, E>, CommitError> {
         let w = &self.writers[&domain];
@@ -476,25 +496,60 @@ impl<E: Send + 'static> SqliteStore<E> {
             .executor
             .grant(lane)
             .map_err(|_| crate::domains::invalid("cannot acquire root grant"))?;
-        if grant.is_nested() {
-            return Err(crate::domains::invalid(
-                "nested root acquisition must reuse the existing guard",
-            ));
-        }
-        let connection = w.engine.writer_conn().map_err(CommitError::Fatal)?;
-        // SAFETY: this points into the Connection in Engine's mutex, not into the
-        // movable MutexGuard. RootGuard retains an Arc<Engine> (also if forgotten),
-        // is thread-bound, and finishes/drops Capture before releasing the mutex.
-        // Extending this borrow avoids a self-reference to the guard's own fields.
-        let captured_connection = unsafe { &*std::ptr::from_ref(&*connection) };
-        let capture = crate::exec::watch::Capture::begin(captured_connection, &w.runner.watches)
-            .map_err(crate::domains::sql_error)?;
-        Ok(RootGuard {
-            connection,
-            capture: Some(capture),
-            _grant: grant,
-            engine: w.engine.clone(),
-        })
+        let nested = grant.is_nested();
+        let active = self.active_root(domain);
+        let state = match active {
+            Some(state) => state,
+            None if nested => {
+                return Err(crate::domains::invalid("root connection is not available in this executor callback"));
+            }
+            None => {
+                let engine = w.engine.clone();
+                let connection = engine.writer_conn().map_err(CommitError::Fatal)?;
+                // Reserve before any facade can open BEGIN; nested DomainStore bridges
+                // must reuse this authority even when the outer entry was a raw guard.
+                let revision = Rc::new(w.runner.reserve_root(&connection)?);
+                // SAFETY: Engine lives at a stable Arc allocation owned by RootConnection.
+                // The private guard is dropped before that Arc and before the executor lease.
+                // Rc/MutexGuard keep the whole state thread-bound; no mutable connection
+                // reference escapes. Forgetting a guard leaks its Arc as well, so cannot
+                // leave a dangling mutex. TLS stores only Weak ownership.
+                let connection = unsafe {
+                    std::mem::transmute::<
+                        std::sync::MutexGuard<'_, rusqlite::Connection>,
+                        std::sync::MutexGuard<'static, rusqlite::Connection>,
+                    >(connection)
+                };
+                // SAFETY: both pointees live in stable Arc allocations. The shared
+                // state retains Engine and runner, and drops Capture before either.
+                let (captured_connection, captured_watches) = unsafe {
+                    (&*std::ptr::from_ref(&*connection), &*std::ptr::from_ref(&w.runner.watches))
+                };
+                let capture = crate::exec::watch::Capture::begin(captured_connection, captured_watches)
+                    .map_err(crate::domains::sql_error)?;
+                let state = Rc::new(RootConnection {
+                    capture: Some(capture),
+                    connection,
+                    revision,
+                    _grant: Box::new(grant),
+                    _runner: Box::new(w.runner.clone()),
+                    engine,
+                });
+                ACTIVE_ROOT.with(|v| *v.borrow_mut() = Rc::downgrade(&state));
+                return Ok(RootGuard { state, nested, _store: PhantomData });
+            }
+        };
+        Ok(RootGuard { state, nested, _store: PhantomData })
+    }
+    fn active_root(&self, domain: Domain) -> Option<Rc<RootConnection>> {
+        ACTIVE_ROOT.with(|v| v.borrow().upgrade())
+            .filter(|state| Arc::ptr_eq(&state.engine, self.engine(domain)))
+    }
+    /// Borrow the authorized connection only inside a synchronous closure. Keeping
+    /// the state alive also keeps its executor lease alive if outer guards drop.
+    pub fn with_active_root<T>(&self, domain: Domain, run: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+        let state = self.active_root(domain)?;
+        Some(run(&state.connection))
     }
     /// Explicit verification/bootstrap only. Existing production tables must already have their
     /// declared schema; registering descriptors never silently adds columns to legacy tables.
@@ -507,22 +562,42 @@ impl<E: Send + 'static> SqliteStore<E> {
         Ok(())
     }
 }
-/// Opaque root writer authorization. Only the executor can create it; borrowing
-/// the connection never escapes its authorization lifetime. Drop rolls back a
-/// leaked transaction, publishes confirmed table hints through Capture's single
-/// exit, releases the mutex, then returns the executor's lease.
-/// Kept thread-bound by RootGrant, and must never be held across await.
-pub struct RootGuard<'a, E: Send + 'static = ()> {
-    // Capture drops before the mutex guard even if cleanup unwinds.
-    capture: Option<crate::exec::watch::Capture<'a>>,
-    connection: std::sync::MutexGuard<'a, rusqlite::Connection>,
-    _grant: RootGrant<Arc<Engine>, EngineRunner<E>>,
+thread_local! {
+    static ACTIVE_ROOT: RefCell<Weak<RootConnection>> = const { RefCell::new(Weak::new()) };
+}
+// Field order releases the physical mutex before the executor lease and Engine Arc.
+struct RootConnection {
+    capture: Option<crate::exec::watch::Capture<'static>>,
+    connection: std::sync::MutexGuard<'static, rusqlite::Connection>,
+    revision: Rc<RootRevision>,
+    _grant: Box<dyn std::any::Any>,
+    _runner: Box<dyn std::any::Any>,
     engine: Arc<Engine>,
+}
+impl Drop for RootConnection {
+    fn drop(&mut self) {
+        if !self.connection.is_autocommit() {
+            let _ = self.engine.rollback_root(&self.connection);
+        }
+        if let Some(capture) = self.capture.take() {
+            capture.finish();
+        }
+    }
+}
+/// Thread-bound root authorization. The last same-Engine guard rolls back any
+/// leaked transaction, publishes confirmed hints once, releases the mutex, then
+/// returns the executor lease.
+/// Borrowed connections cannot outlive their guard. Never hold one across await.
+pub struct RootGuard<'a, E: Send + 'static = ()> {
+    state: Rc<RootConnection>,
+    nested: bool,
+    _store: PhantomData<&'a SqliteStore<E>>,
 }
 impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
-        &self.connection
+        &self.state.connection
     }
+
 }
 impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
     type Target = rusqlite::Connection;
@@ -530,13 +605,28 @@ impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
         self.connection()
     }
 }
-impl<E: Send + 'static> Drop for RootGuard<'_, E> {
+struct NestedSavepoint<'a> {
+    connection: &'a rusqlite::Connection,
+    name: String,
+    committed: bool,
+}
+impl<'a> NestedSavepoint<'a> {
+    fn begin(connection: &'a rusqlite::Connection) -> Result<Self, CommitError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = format!("steve_root_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        connection.execute_batch(&format!("SAVEPOINT {name}")).map_err(crate::domains::sql_error)?;
+        Ok(Self { connection, name, committed: false })
+    }
+    fn commit(mut self) -> Result<(), CommitError> {
+        self.connection.execute_batch(&format!("RELEASE {}", self.name)).map_err(crate::domains::sql_error)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+impl Drop for NestedSavepoint<'_> {
     fn drop(&mut self) {
-        if !self.connection.is_autocommit() {
-            let _ = self.engine.rollback_root(&self.connection);
-        }
-        if let Some(capture) = self.capture.take() {
-            capture.finish();
+        if !self.committed {
+            let _ = self.connection.execute_batch(&format!("ROLLBACK TO {0}; RELEASE {0}", self.name));
         }
     }
 }

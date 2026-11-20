@@ -290,6 +290,18 @@ pub struct LocalAcp {
     pub cwd: PathBuf,
 }
 
+// Usage bookkeeping is synchronous SQL; model and transport awaits stay with
+// their caller, outside these bounded blocking jobs.
+async fn begin_attempt(call: crate::stats::CallAccount, harness: &str, model: &str) -> steve_store::Result<crate::stats::AttemptAccount> {
+    let (harness, model) = (harness.to_owned(), model.to_owned());
+    steve_store::blocking(move || call.attempt(&harness, &model)).await
+}
+async fn finish_attempt(account: crate::stats::AttemptAccount, success: bool, error: Option<String>) -> steve_store::Result<()> {
+    steve_store::blocking(move || account.call.store.stats().gateway_attempt_end(
+        &account.id, success, error.as_deref(), steve_store::now(),
+    )).await
+}
+
 // The worker owns the adapter until bounded sampler settlement, even if the caller times out or
 // drops its future. Only its registered process group is signalled; no global process search.
 struct LocalWaiting {
@@ -377,13 +389,7 @@ impl OneModel for LocalAcp {
                 .await;
             *worker_pid.lock().unwrap() = None;
             if let Some(a) = account {
-                let error = result.reply.as_ref().err().map(ToString::to_string);
-                if let Err(e) = a.call.store.stats().gateway_attempt_end(
-                    &a.id,
-                    result.reply.is_ok(),
-                    error.as_deref(),
-                    steve_store::now(),
-                ) {
+                if let Err(e) = finish_attempt(a, result.reply.is_ok(), result.reply.as_ref().err().map(ToString::to_string)).await {
                     tracing::warn!("stats: local completion: {e}");
                 }
             }
@@ -740,7 +746,7 @@ impl<M: OneModel> Fallback<M> {
         };
         for m in models {
             let account = match crate::stats::current_call() {
-                Some(c) => match c.attempt(&choice.harness, m) {
+                Some(c) => match begin_attempt(c, &choice.harness, m).await {
                     Ok(a) => Some(a),
                     Err(e) => {
                         a.result = Err(msg(format!("usage ownership: {e}")));
@@ -755,13 +761,7 @@ impl<M: OneModel> Fallback<M> {
                 None => run.await,
             };
             if let Some(account) = account {
-                let error = r.reply.as_ref().err().map(ToString::to_string);
-                if let Err(e) = account.call.store.stats().gateway_attempt_end(
-                    &account.id,
-                    r.reply.is_ok(),
-                    error.as_deref(),
-                    steve_store::now(),
-                ) {
+                if let Err(e) = finish_attempt(account, r.reply.is_ok(), r.reply.as_ref().err().map(ToString::to_string)).await {
                     tracing::warn!("stats: attempt end: {e}");
                 }
             }
