@@ -658,21 +658,21 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     fake.connect(Arc::new(RemoteSink(first.link.clone())));
     h.session("s_pending");
     let rt = h.bind(&node, "s_pending");
-    until("session reconciled and ready", 15, || {
+    eventually_sync("session reconciled and ready", || {
         phase(&h, "s_pending") == "ready"
     })
     .await;
     first
         .conn
         .close(None, steve_node_wire::close::GOODBYE, "replacing release");
-    until("first link detached", 5, || {
+    eventually_sync("first link detached", || {
         h.svc.registry.current(node.as_str()).is_none()
     })
     .await;
     rt.prompt("s_pending", "queued across upgrade", "user", &[])
         .unwrap();
     let start_sql = "SELECT operation_id FROM node_commands WHERE method='start_turn'";
-    until("ordinary call deferred offline", 5, || h.q::<i64>(
+    eventually_sync("ordinary call deferred offline", || h.q::<i64>(
         "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND state='pending' AND json_extract(receipt,'$.last_error.code')='offline'"
     ) == 1).await;
     let operation: String = h.q(start_sql);
@@ -689,11 +689,11 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     )
     .await
     .unwrap();
-    until("upgrade link attached", 5, || {
+    eventually_sync("upgrade link attached", || {
         h.fleet.remote(&node).is_upgrade()
     })
     .await;
-    until("send loop retried on upgrade link", 5, || {
+    eventually_sync("send loop retried on upgrade link", || {
         h.q::<i64>(&format!(
             "SELECT COUNT(*) FROM node_commands WHERE method='start_turn' AND lease_generation>{generation} AND lease_owner IS NULL AND json_extract(receipt,'$.last_error.code')='offline' AND json_extract(receipt,'$.last_error.safe_detail') LIKE '%while upgrading%'"
         )) == 1
@@ -711,19 +711,19 @@ async fn pending_commands_survive_an_upgrade_mode_reconnect_and_resume_on_the_sa
     incompatible
         .conn
         .close(None, steve_node_wire::close::GOODBYE, "upgraded");
-    until("upgrade link detached", 5, || {
+    eventually_sync("upgrade link detached", || {
         h.svc.registry.current(node.as_str()).is_none()
     })
     .await;
     let restored = dial(&h, &identity, &node, fake.clone(), 1).await.unwrap();
     fake.connect(Arc::new(RemoteSink(restored.link.clone())));
-    until("same queued operation delivered", 10, || {
+    eventually_sync("same queued operation delivered", || {
         fake.log()
             .iter()
             .any(|(method, op)| *method == "start_turn" && op.as_str() == operation)
     })
     .await;
-    until("receipt accepted", 5, || {
+    eventually_sync("receipt accepted", || {
         h.q::<String>("SELECT state FROM node_commands WHERE method='start_turn'") != "pending"
     })
     .await;
@@ -764,7 +764,7 @@ async fn a_first_upgrade_link_preserves_unknown_incarnation_until_ordinary_intro
     )
     .await
     .unwrap();
-    until("upgrade link installed", 5, || {
+    eventually_sync("upgrade link installed", || {
         h.svc.registry.current(node.as_str()).is_some()
     })
     .await;
@@ -778,12 +778,12 @@ async fn a_first_upgrade_link_preserves_unknown_incarnation_until_ordinary_intro
         steve_node_wire::close::GOODBYE,
         "compatible release ready",
     );
-    until("upgrade link detached", 5, || {
+    eventually_sync("upgrade link detached", || {
         h.svc.registry.current(node.as_str()).is_none()
     })
     .await;
     let normal = dial(&h, &identity, &node, fake, 123).await.unwrap();
-    until("ordinary link ready", 5, || {
+    eventually_sync("ordinary link ready", || {
         h.svc.fleet.remote(&node).ready_generation() == Some(normal.generation)
     })
     .await;
