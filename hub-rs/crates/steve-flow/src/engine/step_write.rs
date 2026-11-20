@@ -87,12 +87,7 @@ impl StepWrite {
     fn apply(&self, tx: &Tx, r: &mut RunRow, ours: bool) -> FlowResult<()> {
         let now = self.now;
         match &self.step {
-            Step::Advance {
-                output,
-                branch,
-                to,
-                status,
-            } => self.advance(tx, r, ours, (output, branch.as_deref(), to, *status))?,
+            Step::Advance { .. } => self.advance(tx, r, ours, &self.step)?,
             Step::Wait(w) => self.wait(tx, r, ours, w)?,
             Step::Retry(e) => {
                 self.add(tx, r, "failed", &Value::Null, None, Some(e))?;
@@ -138,43 +133,45 @@ impl StepWrite {
         }
         Ok(())
     }
-    fn advance(
-        &self,
-        tx: &Tx,
-        r: &mut RunRow,
-        ours: bool,
-        next: (&Value, Option<&str>, &Option<String>, &str),
-    ) -> FlowResult<()> {
-        let (output, branch, to, status) = next;
-        let cursor = &self.cursor;
-        let effects = &self.effects;
-        let unrouted = &self.unrouted;
-        let node_name = &self.node_name;
-        let now = self.now;
-        let err = output["error"].as_str().filter(|_| status == "failed");
-        self.add(tx, r, status, output, branch, err)?;
-        if let Some(b) = &unrouted
-            && r.outcome_label.is_empty()
-            && effects.label.is_none()
+    fn advance(&self, tx: &Tx, r: &mut RunRow, ours: bool, step: &Step) -> FlowResult<()> {
+        if let Step::Advance {
+            output,
+            branch,
+            to,
+            status,
+        } = step
         {
-            r.outcome_label =
-                label_with_prefix(&r, &format!("分支「{b}」没有连线，到「{node_name}」为止"));
-        }
-        r.context["steps"][cursor] = output.clone();
-        r.context["input"] = output.clone();
-        if ours {
-            r.cursor = to.clone();
-            r.attempts = 0;
-            r.retry_at = None;
-            if to.is_none() {
-                r.status = "done".into();
-                r.ended = Some(now);
-                r.error = None;
+            let cursor = &self.cursor;
+            let effects = &self.effects;
+            let unrouted = &self.unrouted;
+            let node_name = &self.node_name;
+            let now = self.now;
+            let err = output["error"].as_str().filter(|_| *status == "failed");
+            self.add(tx, r, status, output, branch.as_deref(), err)?;
+            if let Some(b) = &unrouted
+                && r.outcome_label.is_empty()
+                && effects.label.is_none()
+            {
+                r.outcome_label =
+                    label_with_prefix(&r, &format!("分支「{b}」没有连线，到「{node_name}」为止"));
+            }
+            r.context["steps"][cursor] = output.clone();
+            r.context["input"] = output.clone();
+            if ours {
+                r.cursor = to.clone();
+                r.attempts = 0;
+                r.retry_at = None;
+                if to.is_none() {
+                    r.status = "done".into();
+                    r.ended = Some(now);
+                    r.error = None;
+                }
             }
         }
         Ok(())
     }
     fn wait(&self, tx: &Tx, r: &mut RunRow, ours: bool, w: &WaitSpec) -> FlowResult<()> {
+        // a run that ended while the node ran gets the step, not a decision or a wait
         if !ours {
             self.add(tx, r, "waiting", &w.output, None, None)?;
             return Ok(());

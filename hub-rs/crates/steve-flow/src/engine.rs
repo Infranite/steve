@@ -34,6 +34,9 @@ use crate::nodes::{DRY_EFFECT, NodeOutcome, RunCx, WaitSpec, flow::MAX_DEPTH, sk
 use crate::runs::{self, NewRun, NewStep, RunRow};
 use crate::{FlowCx, FlowError, FlowResult, flows, signals};
 
+mod execution;
+mod step_write;
+
 /// The executor for every flow, schedules included.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GraphEngine;
@@ -409,9 +412,6 @@ fn step_of(g: &Graph, node: &crate::graph::Node, o: NodeOutcome) -> Step {
         },
     }
 }
-
-mod execution;
-mod step_write;
 
 async fn drive_inner(cx: &FlowCx, run_id: &str) -> FlowResult<RunStatus> {
     // the graph and the sender are fixed for a run (its version is pinned, a dry run's graph and
