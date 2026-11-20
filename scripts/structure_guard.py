@@ -6,6 +6,7 @@ fails. Shrinking fails too until hub-rs/structure.txt is rewritten with --bless,
 growth (allowing growth means editing the file by hand, in review). STEVE_GUARD_BLESS=1 is the
 environment equivalent of --bless. Each run checks all workspace targets before measuring production
 lib/bin targets. --json replays a production-only Cargo JSON stream.
+Missing inventories require STEVE_GUARD_INIT=1, which cannot overwrite an existing file.
 """
 import argparse
 import json
@@ -99,18 +100,30 @@ def compare(listed, current):
     return growth, shrink
 
 
-def write(path, current):
-    head = [line for line in (path.read_text(encoding="utf-8") if path.exists() else HEADER).splitlines()
+def write(path, current, init=False):
+    head = [line for line in (HEADER if init else path.read_text(encoding="utf-8")).splitlines()
             if line.startswith("#")]
     body = [f"{c}\t{f}\t{l}\t{','.join(map(str, v))}" for (c, f, l), v in sorted(current.items())]
-    path.write_text("\n".join(head + body) + "\n", encoding="utf-8")
+    # x cannot overwrite an existing baseline; r+ cannot recreate a deleted one.
+    with path.open("x" if init else "r+", encoding="utf-8") as out:
+        out.write("\n".join(head + body) + "\n")
+        out.truncate()
 
 
-def check(path, current, bless=False):
-    if not path.exists():
-        if not bless:
-            raise ValueError(f"missing inventory {path}; initialize explicitly with STEVE_GUARD_BLESS=1")
-        write(path, current)
+def ensure_mode(path, bless, init):
+    if bless and init:
+        raise ValueError("choose STEVE_GUARD_BLESS or STEVE_GUARD_INIT, not both")
+    if init:
+        if path.exists():
+            raise ValueError(f"inventory already exists: {path}; INIT cannot overwrite it")
+    elif not path.exists():
+        raise ValueError(f"missing inventory {path}; initialize explicitly with STEVE_GUARD_INIT=1")
+
+
+def check(path, current, bless=False, init=False):
+    ensure_mode(path, bless, init)
+    if init:
+        write(path, current, init=True)
         return []
     growth, shrink = compare(read(path), current)
     if bless and not growth:
@@ -124,6 +137,9 @@ def main():
     parser.add_argument("--bless", action="store_true")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
+    bless = args.bless or os.environ.get("STEVE_GUARD_BLESS") == "1"
+    init = os.environ.get("STEVE_GUARD_INIT") == "1"
+    ensure_mode(LIST, bless, init)
     meta = json.loads(subprocess.run(["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1"],
                                      cwd=WORKSPACE, check=True, capture_output=True, text=True).stdout)
     packages = {p["id"]: p["name"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
@@ -146,7 +162,7 @@ def main():
     for lint in VALUE:
         values = [v for (_, _, l), vs in current.items() if l == lint for v in vs]
         print(f"{lint}: {len(values)} functions over the limit")
-    problems = check(LIST, current, args.bless or os.environ.get("STEVE_GUARD_BLESS") == "1")
+    problems = check(LIST, current, bless, init)
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0

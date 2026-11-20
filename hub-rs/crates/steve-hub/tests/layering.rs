@@ -136,12 +136,12 @@ fn target_and_debt_are_disjoint_and_only_debt_can_be_blessed_down() {
     let debt = ratchet::Counts::from([(debt_key.clone(), 1)]);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debt.txt");
-    ratchet::check_at(debt.clone(), &file, 3, "", "fix", true);
+    ratchet::check_at(debt.clone(), &file, 3, "", "fix", ratchet::Mode::Init);
     let (actual_target, shrunk_debt) =
         partition(BTreeSet::from(["edge app contract".into()]), &target, &debt);
     assert_eq!(actual_target, target);
     assert!(shrunk_debt.is_empty());
-    ratchet::check_at(shrunk_debt, &file, 3, "", "fix", true);
+    ratchet::check_at(shrunk_debt, &file, 3, "", "fix", ratchet::Mode::Bless);
     assert!(ratchet::read(&file, 3).is_empty());
     let (gone_target, new_debt) =
         partition(BTreeSet::from(["edge app new".into()]), &target, &debt);

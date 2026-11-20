@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("guard", Path(__file__).with_name("structure_guard.py"))
 guard = importlib.util.module_from_spec(spec)
@@ -108,8 +109,45 @@ class Compare(unittest.TestCase):
             with self.assertRaises(ValueError):
                 guard.check(path, {self.K: [101]})
             self.assertFalse(path.exists())
-            self.assertFalse(guard.check(path, {self.K: [101]}, bless=True))
+            with self.assertRaisesRegex(ValueError, "missing inventory"):
+                guard.check(path, {self.K: [999]}, bless=True)
+            self.assertFalse(path.exists())
+            self.assertFalse(guard.check(path, {self.K: [101]}, init=True))
             self.assertEqual(guard.read(path), {self.K: [101]})
+            before = path.read_text()
+            with self.assertRaisesRegex(ValueError, "INIT cannot overwrite"):
+                guard.check(path, {self.K: [999]}, init=True)
+            self.assertEqual(path.read_text(), before)
+            path.unlink()
+            with self.assertRaisesRegex(ValueError, "missing inventory"):
+                guard.check(path, {self.K: [999]}, bless=True)
+            self.assertFalse(path.exists())
+
+    def test_init_and_bless_cannot_be_combined(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, "structure.txt")
+            with self.assertRaisesRegex(ValueError, "not both"):
+                guard.check(path, {self.K: [101]}, bless=True, init=True)
+            self.assertFalse(path.exists())
+
+    def test_invalid_cli_modes_fail_before_starting_cargo(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, "structure.txt")
+            for bless, init, existing, problem in [("1", "0", False, "missing inventory"),
+                                                    ("0", "1", True, "INIT cannot overwrite"),
+                                                    ("1", "1", False, "not both"),
+                                                    ("yes", "0", False, "missing inventory")]:
+                if existing:
+                    path.write_text("# fixture\n")
+                elif path.exists():
+                    path.unlink()
+                with patch.object(guard, "LIST", path), patch.object(guard.sys, "argv", ["guard"]), \
+                        patch.dict(guard.os.environ, {"STEVE_GUARD_BLESS": bless, "STEVE_GUARD_INIT": init}), \
+                        patch.object(guard.subprocess, "run") as cargo:
+                    with self.assertRaisesRegex(ValueError, problem):
+                        guard.main()
+                    cargo.assert_not_called()
+                self.assertEqual(path.exists(), existing)
 
     def test_bad_baseline_cannot_be_blessed_away(self):
         with tempfile.TemporaryDirectory() as d:
