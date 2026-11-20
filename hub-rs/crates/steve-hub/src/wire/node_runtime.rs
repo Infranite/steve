@@ -675,7 +675,7 @@ impl NodeRuntime {
                         me.release_idle();
                     }
                     if !applied && prune {
-                        me.prune_inbox(now());
+                        me.prune_inbox(me.clock.now());
                     }
                     applied
                 })
