@@ -35,7 +35,7 @@ mod ratchet;
 #[path = "node_boundary/scan.rs"]
 mod scan;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use scan::{Site, Source};
@@ -424,7 +424,24 @@ fn inventory(found: &BTreeMap<(Rule, String), Vec<Site>>) -> ratchet::Counts {
 
 // The fixtures use the same count comparison as the on-disk inventory.
 fn check(found: &BTreeMap<(Rule, String), Vec<Site>>, allowed: &ratchet::Counts) -> Vec<String> {
-    ratchet::differences(&inventory(found), allowed, "go through the Node")
+    let locations: BTreeMap<_, _> = found
+        .iter()
+        .map(|((rule, file), sites)| {
+            let lines: BTreeSet<_> = sites.iter().map(|site| site.line).collect();
+            let lines = lines
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            (
+                vec![format!("{rule:?}"), file.clone()],
+                format!("{rule:?} {file}:{lines}"),
+            )
+        })
+        .collect();
+    ratchet::differences_with(&inventory(found), allowed, "go through the Node", |key| {
+        locations.get(key).cloned().unwrap_or_else(|| key.join(" "))
+    })
 }
 
 fn found_in(krate: &str, src: &[Source], found: &mut BTreeMap<(Rule, String), Vec<Site>>) {
@@ -443,13 +460,37 @@ fn nothing_outside_the_node_starts_a_harness_or_walks_a_project_unlisted() {
     for (krate, src) in sources() {
         found_in(&krate, &src, &mut found);
     }
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_boundary.txt");
+    if file.exists() {
+        let listed = ratchet::read(&file, 2);
+        let problems = check(&found, &listed);
+        if !problems.is_empty() {
+            eprintln!("Node boundary source locations:\n{}", problems.join("\n"));
+        }
+    }
     ratchet::check(
         inventory(&found),
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_boundary.txt"),
+        &file,
         2,
         "# Existing Node boundary sites; only shrinks.\n# rule<TAB>file under hub-rs/crates<TAB>count. Reasons stay in node_boundary.rs.\n# STEVE_GUARD_BLESS=1 rewrites after removals.\n",
         "go through the Node; a reviewed new entry needs a reason in RATIONALE",
     );
+}
+
+fn rationale_problems(listed: &ratchet::Counts, reasons: &[Entry]) -> Vec<String> {
+    let keys: BTreeSet<_> = listed.keys().cloned().collect();
+    let rationale: BTreeSet<_> = reasons
+        .iter()
+        .map(|entry| vec![format!("{:?}", entry.rule), entry.file.to_owned()])
+        .collect();
+    keys.difference(&rationale)
+        .map(|key| format!("missing reason: {}", key.join(" ")))
+        .chain(
+            rationale
+                .difference(&keys)
+                .map(|key| format!("stale rationale: {}; remove it", key.join(" "))),
+        )
+        .collect()
 }
 
 /// Each entry says why and names a file that is there, outside the Node.
@@ -459,14 +500,12 @@ fn every_allowed_entry_has_a_reason_and_a_file() {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_boundary.txt"),
         2,
     );
-    for key in listed.keys() {
-        assert!(
-            RATIONALE
-                .iter()
-                .any(|a| format!("{:?}", a.rule) == key[0] && a.file == key[1]),
-            "missing reason: {key:?}"
-        );
-    }
+    let problems = rationale_problems(&listed, RATIONALE);
+    assert!(
+        problems.is_empty(),
+        "Node boundary rationale:\n{}",
+        problems.join("\n")
+    );
     for a in RATIONALE {
         assert!(!a.why.trim().is_empty(), "{}: no reason", a.file);
         assert!(
@@ -556,7 +595,7 @@ fn not_test() { let _ = std::fs::read_dir("/"); }
     assert_eq!(p.len(), 3, "{p:?}");
     assert!(
         p.iter()
-            .any(|l| l.starts_with("Spawn steve-x/src/lib.rs: found 1, listed 0")),
+            .any(|l| l.starts_with("Spawn steve-x/src/lib.rs:6: found 1, listed 0")),
         "{p:?}"
     );
     // listed: passes
@@ -574,7 +613,7 @@ fn not_test() { let _ = std::fs::read_dir("/"); }
     assert_eq!(p.len(), 2, "{p:?}");
     assert!(
         p.iter()
-            .any(|l| l.starts_with("Dir steve-x/src/lib.rs: found 2, listed 1"))
+            .any(|l| l.starts_with("Dir steve-x/src/lib.rs:8,19: found 2, listed 1"))
     );
     assert!(
         p.iter()
@@ -678,4 +717,21 @@ fn production(state: &State, project: &Path, worktree: &Path) {
     let mut found = BTreeMap::new();
     found_in("steve-x", &s, &mut found);
     assert_eq!(check(&found, &ratchet::Counts::new()).len(), 3);
+}
+
+#[test]
+fn rationale_and_inventory_must_match_in_both_directions() {
+    let listed = ratchet::Counts::from([(vec!["Spawn".into(), "fixture.rs".into()], 1)]);
+    let reasons = [e(Spawn, "fixture.rs", Hub, "fixture")];
+    assert!(rationale_problems(&listed, &reasons).is_empty());
+    assert_eq!(
+        rationale_problems(&listed, &[]),
+        ["missing reason: Spawn fixture.rs"]
+    );
+    assert_eq!(
+        rationale_problems(&ratchet::Counts::new(), &reasons),
+        ["stale rationale: Spawn fixture.rs; remove it"]
+    );
+    let wrong_rule = [e(Fs, "fixture.rs", Hub, "different rule")];
+    assert_eq!(rationale_problems(&listed, &wrong_rule).len(), 2);
 }
