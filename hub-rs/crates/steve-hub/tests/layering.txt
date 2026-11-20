@@ -29,9 +29,11 @@ edge steve-hub steve-i18n	1
 edge steve-hub steve-knowledge	1
 edge steve-hub steve-node-api	1
 edge steve-hub steve-runtime	1
+edge steve-hub steve-store-sqlite	1
 edge steve-hub steve-types	1
 edge steve-hub steve-vault	1
 edge steve-install steve-i18n	1
+edge steve-install steve-store-sqlite	1
 edge steve-knowledge steve-runtime	1
 edge steve-knowledge steve-types	1
 edge steve-mail steve-runtime	1
