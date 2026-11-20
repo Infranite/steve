@@ -1,46 +1,48 @@
-//! Upgrade preserves 112's initial lookback; 114 moves subsequent effects to explicit calls.
+//! Current explicit intake preserves an existing lookback and receipt boundary.
+#[path = "../../steve-store-sqlite/tests/support/digest.rs"]
+mod fixture;
 use rusqlite::Connection;
 use steve_store_sqlite::digest::{self, Source};
-const MIGRATION: &str = include_str!("../../steve-store/migrations/112.sql");
 #[test]
-fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
+fn explicit_intake_keeps_existing_membership_and_receipts() {
     let c = Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE connections(id TEXT PRIMARY KEY);
-        CREATE TABLE chan_messages(id TEXT PRIMARY KEY,workspace_id TEXT,space_id TEXT,status TEXT,created INTEGER);
-        CREATE TABLE mail_messages(id TEXT PRIMARY KEY,workspace_id TEXT,thread_id TEXT,status TEXT,date INTEGER);
-        CREATE TABLE digest_cursors(workspace_id TEXT,conv TEXT,since INTEGER);
-        CREATE TABLE digest_receipts(workspace_id TEXT,conv TEXT,message_id TEXT);
-        INSERT INTO digest_cursors VALUES('ws','space:s',10);
-        INSERT INTO chan_messages VALUES('old','ws','s','received',1),('done','ws','s','received',10),('waiting','ws','s','received',11),('out','ws','s','pending',12);
-        INSERT INTO digest_receipts VALUES('ws','space:s','done');
-        INSERT INTO mail_messages VALUES('mail','ws','t','received',1);").unwrap();
-    c.execute_batch(MIGRATION).unwrap();
-    assert_eq!(
-        c.query_row(
-            "SELECT messages,oldest,newest FROM digest_pending_convs WHERE conv='space:s'",
-            [],
-            |r| Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?
-            ))
+    fixture::install(&c).unwrap();
+    c.execute("INSERT INTO digest_cursors(workspace_id,conv,at,since,updated) VALUES('ws','space:s',10,10,0)", []).unwrap();
+    for (id, status, at) in [
+        ("old", "received", 1),
+        ("done", "received", 10),
+        ("waiting", "received", 11),
+        ("out", "pending", 12),
+    ] {
+        fixture::put(
+            &c,
+            Source::ChanMessage,
+            id,
+            "ws",
+            "space:s",
+            status,
+            at,
+            true,
         )
-        .unwrap(),
-        (1, 11, 11)
-    );
-    c.execute_batch(include_str!("../../steve-store/migrations/113.sql"))
         .unwrap();
-    c.execute_batch(include_str!("../../steve-store/migrations/114.sql"))
-        .unwrap();
-    assert_eq!(
-        c.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name='chan_ext_ws_dead_letters'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap(),
-        1
-    );
+    }
+    fixture::receipt(&c, "ws", "space:s", "done").unwrap();
+    fixture::put(
+        &c,
+        Source::MailMessage,
+        "mail",
+        "ws",
+        "mail_thread:t",
+        "received",
+        1,
+        true,
+    )
+    .unwrap();
+    // Represent existing current membership directly; historical 112 replay is no longer supported.
+    let tx = c.unchecked_transaction().unwrap();
+    digest::sync_message(&tx, Source::ChanMessage, "waiting", None).unwrap();
+    digest::sync_message(&tx, Source::MailMessage, "mail", None).unwrap();
+    tx.commit().unwrap();
     assert_eq!(
         c.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type='trigger'",
@@ -51,9 +53,15 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         0
     );
     let tx = c.unchecked_transaction().unwrap();
-    tx.execute(
-        "INSERT OR IGNORE INTO chan_messages VALUES('late','ws','s','received',0)",
-        [],
+    fixture::put(
+        &tx,
+        Source::ChanMessage,
+        "late",
+        "ws",
+        "space:s",
+        "received",
+        0,
+        true,
     )
     .unwrap();
     digest::sync_message(&tx, Source::ChanMessage, "late", None).unwrap();
@@ -70,11 +78,7 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
         .unwrap(),
         3
     );
-    tx.execute(
-        "INSERT INTO digest_receipts VALUES('ws','space:s','late')",
-        [],
-    )
-    .unwrap();
+    fixture::receipt(&tx, "ws", "space:s", "late").unwrap();
     digest::dequeue_on_receipt(&tx, "ws", "space:s", ["late"]).unwrap();
     let old = Source::MailMessage.scope(&tx, "mail").unwrap();
     tx.execute(
@@ -90,9 +94,15 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
     )
     .unwrap();
     digest::sync_message(&tx, Source::MailMessage, "mail", old.as_ref()).unwrap();
-    tx.execute(
-        "INSERT INTO mail_messages VALUES('mail-late','ws','t','received',-2)",
-        [],
+    fixture::put(
+        &tx,
+        Source::MailMessage,
+        "mail-late",
+        "ws",
+        "mail_thread:t",
+        "received",
+        -2,
+        true,
     )
     .unwrap();
     digest::sync_message(&tx, Source::MailMessage, "mail-late", None).unwrap();
@@ -109,11 +119,7 @@ fn upgrade_seeds_only_unconsumed_messages_and_keeps_the_old_lookback_once() {
     tx.execute("DELETE FROM mail_messages WHERE id='mail'", [])
         .unwrap();
     digest::remove_message(&tx, [(old, "mail".into())]).unwrap();
-    tx.execute(
-        "INSERT INTO digest_receipts VALUES('ws','mail_thread:t','mail-late')",
-        [],
-    )
-    .unwrap();
+    fixture::receipt(&tx, "ws", "mail_thread:t", "mail-late").unwrap();
     digest::dequeue_on_receipt(&tx, "ws", "mail_thread:t", ["mail-late"]).unwrap();
     assert_eq!(
         tx.query_row(

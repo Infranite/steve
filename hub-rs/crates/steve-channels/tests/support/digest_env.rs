@@ -1,5 +1,5 @@
 //! Shared integration fixture: every normal teardown audits the source/queue/projection contract.
-#[path = "../../../steve-store-sqlite/tests/digest_audit.rs"]
+#[path = "../../../steve-store/tests/support/digest_audit.rs"]
 mod digest_audit;
 
 pub struct TestEnv(steve_modules::testkit::TestEnv);

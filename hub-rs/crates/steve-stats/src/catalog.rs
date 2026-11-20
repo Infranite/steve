@@ -438,9 +438,12 @@ mod tests {
     fn real_catalog() {
         let path = std::env::var("STEVE_MODELS_DEV_JSON").expect("STEVE_MODELS_DEV_JSON");
         let e = parse(&std::fs::read(path).unwrap()).unwrap();
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(include_str!("../../steve-store/migrations/032.sql"))
-            .unwrap();
+        let mut c = Connection::open_in_memory().unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut c,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
         save(&c, &e, 1).unwrap();
         println!("{} priced models", e.len());
         let book = crate::PriceBook::new(vec![]).with_catalog(&c, None);
@@ -479,9 +482,12 @@ mod tests {
 
     #[test]
     fn save_keeps_versions_and_state() {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(include_str!("../../steve-store/migrations/032.sql"))
-            .unwrap();
+        let mut c = Connection::open_in_memory().unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut c,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
         let mut e = parse(SAMPLE.as_bytes()).unwrap();
         assert_eq!(save(&c, &e, 1_000).unwrap(), 3);
         assert_eq!(

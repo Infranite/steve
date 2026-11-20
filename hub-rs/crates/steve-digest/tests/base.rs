@@ -635,7 +635,7 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
             .len(),
         1
     );
-    #[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+    #[path = "../../steve-store/tests/support/digest_audit.rs"]
     mod reopened_audit;
     let reopened = steve_store::Store::open(
         e.dir.path().join("steve.sqlite3"),

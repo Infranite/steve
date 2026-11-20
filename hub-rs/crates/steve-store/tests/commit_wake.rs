@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 
 fn setup() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let store = Store::open(dir.path().join("commit.sqlite3"), NoPublisher).unwrap();
+    let store = Store::open(dir.path().join("steve.sqlite3"), NoPublisher).unwrap();
     store.with_conn(|c| {
         c.execute_batch("CREATE TABLE wake_source(id INTEGER PRIMARY KEY);
             CREATE TABLE wake_sink(id INTEGER PRIMARY KEY);

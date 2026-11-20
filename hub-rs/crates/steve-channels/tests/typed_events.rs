@@ -1,5 +1,5 @@
 //! Producer regression: nudge has no workspace argument; scope must come from the written row.
-#[path = "../../steve-store-sqlite/tests/digest_audit.rs"]
+#[path = "../../steve-store/tests/support/digest_audit.rs"]
 mod digest_audit;
 use std::sync::{Arc, Mutex};
 use steve_channels::decide;
