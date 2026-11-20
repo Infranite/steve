@@ -233,6 +233,8 @@ Conversion is one-way. Older releases cannot open the converted database, and re
 
 The database permanently retains a reader fence (`schema_compat` with `min_reader = 1000`) to make old programs refuse it. Any legacy fields temporarily retained in a release manifest serve the upgrade tooling only; removing that manifest compatibility wrapper does not remove the reader fence or make downgrades possible.
 
+Returning to the old storage layout requires restoring a backup taken before conversion. Older programs refuse a converted database without running migrations or writing business data. This refusal does not guarantee that database files remain byte-for-byte unchanged: SQLite may create or touch the `-wal` and `-shm` sidecar files.
+
 ## Backups
 
 A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. Daily retention defaults to 7 days and can be configured from 1 to 365 days. Only manually requested backups are kept permanently. The directory and files are readable by the owner only:

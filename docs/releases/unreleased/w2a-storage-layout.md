@@ -5,3 +5,5 @@ Keep the completed pre-upgrade backup. On its first start, the Hub automatically
 Conversion deletes non-owner users' access tokens, registered clients and authentication sessions, together with dependent authentication data. Independent records are retained.
 
 Reinstalling an older release does not undo this conversion. If startup fails, install the release that introduced this layout change, restore the pre-upgrade backup, then start the Hub to convert it again. The database permanently retains its old-reader fence; any temporary compatibility wrapper in the release manifest does not permit downgrades.
+
+Returning to the old storage layout requires restoring a backup taken before conversion. Older programs refuse a converted database without running migrations or writing business data. This refusal does not guarantee that database files remain byte-for-byte unchanged: SQLite may create or touch the `-wal` and `-shm` sidecar files.
