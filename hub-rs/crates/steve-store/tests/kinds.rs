@@ -408,6 +408,115 @@ mod delivery_seeds {
     }
 
     #[test]
+    fn default_workspace_and_its_seeds_roll_back_together_on_seed_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = super::common::Events::default();
+        let sink = events.clone();
+        let s = Store::open(
+            dir.path().join("steve.sqlite3"),
+            FnPublisher(move |event| sink.0.lock().unwrap().push(event)),
+        )
+        .unwrap();
+        s.with_conn(|c| {
+            c.execute_batch("CREATE TRIGGER fail_last_delivery BEFORE INSERT ON tags WHEN NEW.cat='交付' AND NEW.name='操作' BEGIN SELECT RAISE(ABORT,'injected delivery seed failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        events.take();
+        let error = s.ensure_workspace().unwrap_err();
+        assert!(
+            error.to_string().contains("injected delivery seed failure"),
+            "{error}"
+        );
+        assert!(s.workspaces().all().unwrap().is_empty());
+        assert!(s.tags().list(WS).unwrap().is_empty());
+        assert!(
+            events.take().is_empty(),
+            "rolled-back seeds must not publish"
+        );
+        s.with_conn(|c| {
+            c.execute_batch("DROP TRIGGER fail_last_delivery")?;
+            Ok(())
+        })
+        .unwrap();
+        // Also exercise re-entry into the public transaction scope used by callers.
+        s.atomic(|| s.ensure_workspace()).unwrap();
+        assert_eq!(s.workspaces().all().unwrap().len(), 1);
+        assert_eq!(
+            s.tags()
+                .list(WS)
+                .unwrap()
+                .iter()
+                .filter(|t| t.cat == DELIVERY_CAT)
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn new_workspace_members_and_seeds_roll_back_together_on_seed_failure() {
+        let t = fresh();
+        let s = &t.store;
+        let me = s
+            .users()
+            .create("atomic-workspace-owner", "Owner", None, "owner")
+            .unwrap();
+        let before = serde_json::to_value(s.workspaces().all().unwrap()).unwrap();
+        let counts = || {
+            s.with_conn(|c| {
+                Ok((
+                    count(c, "SELECT COUNT(*) FROM workspace_members"),
+                    count(c, "SELECT COUNT(*) FROM tags"),
+                ))
+            })
+            .unwrap()
+        };
+        let rows = counts();
+        s.with_conn(|c| {
+            c.execute_batch("CREATE TRIGGER fail_last_delivery BEFORE INSERT ON tags WHEN NEW.cat='交付' AND NEW.name='操作' BEGIN SELECT RAISE(ABORT,'injected delivery seed failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        t.events.take();
+        let p = NewWorkspace {
+            name: "atomic workspace".into(),
+            ..Default::default()
+        };
+        let error = s.workspaces().create(&p, &me).unwrap_err();
+        assert!(
+            error.to_string().contains("injected delivery seed failure"),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(s.workspaces().all().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            counts(),
+            rows,
+            "neither owner membership nor partial seeds remain"
+        );
+        assert!(
+            t.events.take().is_empty(),
+            "rolled-back creation must not publish"
+        );
+        s.with_conn(|c| {
+            c.execute_batch("DROP TRIGGER fail_last_delivery")?;
+            Ok(())
+        })
+        .unwrap();
+        let made = s.atomic(|| s.workspaces().create(&p, &me)).unwrap();
+        assert_eq!(
+            s.tags()
+                .list(&made.id)
+                .unwrap()
+                .iter()
+                .filter(|t| t.cat == DELIVERY_CAT)
+                .count(),
+            6
+        );
+        assert_eq!(counts(), (rows.0 + 1, rows.1 + 12));
+    }
+
+    #[test]
     fn every_new_workspace_has_delivery_seeds_and_repeated_ensure_writes_nothing() {
         let t = fresh();
         let s = &t.store;

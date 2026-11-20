@@ -139,11 +139,11 @@ impl Store {
     /// `ensureWorkspace`: creates `default` (个人), renames the old default name, and carries the old
     /// per-workspace item counter over to the global `item:ST` once.
     pub fn ensure_workspace(&self) -> Result<()> {
-        self.write(|w| {
+        self.atomic(|| self.write(|w| {
             let c = w.c;
             let name = crate::seeded::text(crate::seeded::WORKSPACE_NAME);
             let created = c.execute("INSERT OR IGNORE INTO workspaces (id, name, created) VALUES (?, ?, ?)", params![WS, name, now()])? == 1;
-            // T47: move this dead-checkpoint cleanup into new-layout migration 115, then remove it.
+            // T47: move this cleanup into the next new-layout migration, then remove it.
             c.run("DELETE FROM settings WHERE key = '__delivery_tags_backfilled_v1'", [])?;
             c.run("UPDATE workspaces SET name = ? WHERE id = ? AND name = '默认工作空间'", params![name, WS])?;
             let old: Option<i64> =
@@ -160,7 +160,7 @@ impl Store {
                 super::kinds::seed_deliveries(w, WS)?;
             }
             Ok(())
-        })
+        }))
     }
 
     pub fn workspaces(&self) -> Workspaces<'_> {
@@ -239,7 +239,7 @@ impl Workspaces<'_> {
 
     /// New workspace at the end of the sort order, `owner_id` as its owner.
     pub fn create(&self, p: &NewWorkspace, owner_id: &str) -> Result<Workspace> {
-        self.0.write(|w| {
+        self.0.atomic(|| self.0.write(|w| {
             let (id, t) = (uid("ws"), now());
             w.c.run(
                 "INSERT INTO workspaces (id, name, description, item_prefix, sort, created) VALUES (?, ?, ?, ?, (SELECT coalesce(max(sort), 0) + 1 FROM workspaces), ?)",
@@ -258,7 +258,7 @@ impl Workspaces<'_> {
                 },
             ));
             must(one(w.c, "SELECT * FROM workspaces WHERE id = ?", [&id], Workspace::from_row)?)
-        })
+        }))
     }
 
     pub fn patch(&self, id: &str, p: &WorkspacePatch) -> Result<Option<Workspace>> {
