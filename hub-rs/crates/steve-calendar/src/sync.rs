@@ -571,30 +571,32 @@ impl Calendar {
         busy: bool,
         now: i64,
     ) -> Result<Pulled, SourceError> {
-        let src = self.source(cx.adapter()).expect("is_source checked the adapter");
-if busy && features.has(feature::FREEBUSY) {
-                src.freebusy(cx, &cal.ext_id, w)
-                    .await
-                    .map(|b| Pulled::Full(b.iter().map(busy_event).collect(), None))
-            } else if features.has(feature::CHANGES) {
-                // a cursor only brings what changed, so what newly enters the window never comes
-                // by it: the whole window is pulled again once it is a day old
-                let cursor = cal.sync_cursor.as_deref().filter(|_| {
-                    cal.full_at
-                        .is_some_and(|t| now - t < self.settings().full_every_ms)
-                });
-                src.changes(cx, &cal.ext_id, cursor, w).await.map(|c| {
-                    if c.full || cursor.is_none() {
-                        Pulled::Full(c.events, c.cursor)
-                    } else {
-                        Pulled::Delta(c)
-                    }
-                })
-            } else {
-                src.list(cx, &cal.ext_id, w)
-                    .await
-                    .map(|e| Pulled::Full(e, None))
-            }
+        let src = self
+            .source(cx.adapter())
+            .expect("is_source checked the adapter");
+        if busy && features.has(feature::FREEBUSY) {
+            src.freebusy(cx, &cal.ext_id, w)
+                .await
+                .map(|b| Pulled::Full(b.iter().map(busy_event).collect(), None))
+        } else if features.has(feature::CHANGES) {
+            // a cursor only brings what changed, so what newly enters the window never comes
+            // by it: the whole window is pulled again once it is a day old
+            let cursor = cal.sync_cursor.as_deref().filter(|_| {
+                cal.full_at
+                    .is_some_and(|t| now - t < self.settings().full_every_ms)
+            });
+            src.changes(cx, &cal.ext_id, cursor, w).await.map(|c| {
+                if c.full || cursor.is_none() {
+                    Pulled::Full(c.events, c.cursor)
+                } else {
+                    Pulled::Delta(c)
+                }
+            })
+        } else {
+            src.list(cx, &cal.ext_id, w)
+                .await
+                .map(|e| Pulled::Full(e, None))
+        }
     }
 
     // Only synchronous cache work enters this helper; provider awaits stay above.

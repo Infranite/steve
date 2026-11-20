@@ -415,7 +415,13 @@ impl OneModel for LocalAcp {
                 )
                 .await;
             *worker_pid.lock().unwrap() = None;
-            record_attempt_end(account, result.reply.is_ok(), result.reply.as_ref().err().map(ToString::to_string), "local completion").await;
+            record_attempt_end(
+                account,
+                result.reply.is_ok(),
+                result.reply.as_ref().err().map(ToString::to_string),
+                "local completion",
+            )
+            .await;
             result
         });
         let timer = tokio::time::sleep(timeout);
@@ -783,7 +789,13 @@ impl<M: OneModel> Fallback<M> {
                 Some(a) => a.scope(run).await,
                 None => run.await,
             };
-            record_attempt_end(account, r.reply.is_ok(), r.reply.as_ref().err().map(ToString::to_string), "attempt end").await;
+            record_attempt_end(
+                account,
+                r.reply.is_ok(),
+                r.reply.as_ref().err().map(ToString::to_string),
+                "attempt end",
+            )
+            .await;
             a.attempts += 1;
             // the model asked for: the call is booked under it (who answered is `reported_model`)
             a.model = m.clone();

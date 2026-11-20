@@ -126,20 +126,52 @@ fn active_connection_closure_keeps_authorization_after_dropping_outer_guard() {
 }
 
 #[test]
-fn raw_guard_reserves_revision_before_nested_bridge_opens_in_transaction() {
+fn raw_authorization_and_nested_borrow_do_not_write_revision_metadata() {
+    use rusqlite::OptionalExtension;
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
+    let reserved = || {
+        s.engine(Domain::Core)
+            .read_conn()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE domain='core' AND key='rev_reserved'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    let before = reserved();
     let outer = s.root_guard(Domain::Core, Lane::Interactive).unwrap();
-    outer
-        .execute_batch("CREATE TABLE root_raw(x); BEGIN IMMEDIATE")
+    assert!(outer.is_autocommit());
+    drop(s.root_guard(Domain::Stream, Lane::Admin).unwrap());
+    drop(outer);
+    assert_eq!(
+        reserved(),
+        before,
+        "authorization alone must remain read-only"
+    );
+}
+
+#[test]
+fn independent_typed_bridges_under_one_authorization_get_distinct_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let _outer = s.root_guard(Domain::Core, Lane::Interactive).unwrap();
+    let first = s
+        .with_root(Domain::Core, Lane::Admin, |c, _, revision| {
+            assert!(c.is_autocommit());
+            Ok(revision.rev())
+        })
         .unwrap();
-    s.with_root(Domain::Stream, Lane::Admin, |c, _, _| {
-        c.execute_batch("INSERT INTO root_raw VALUES(1)").unwrap();
-        Ok(())
-    })
-    .unwrap();
-    assert!(!outer.is_autocommit());
-    outer.execute_batch("COMMIT").unwrap();
+    let second = s
+        .with_root(Domain::Stream, Lane::Admin, |c, _, revision| {
+            assert!(c.is_autocommit());
+            Ok(revision.rev())
+        })
+        .unwrap();
+    assert!(second > first);
 }
 
 #[derive(Default)]

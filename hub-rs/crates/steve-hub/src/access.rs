@@ -15,7 +15,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};

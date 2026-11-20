@@ -445,7 +445,7 @@ impl<E: Send + 'static> SqliteStore<E> {
     ) -> Result<T, CommitError> {
         let w = &self.writers[&domain];
         let c = self.root_guard(domain, lane)?;
-        let rev = c.state.revision.clone();
+        let (rev, revision_scope) = c.revision(&w.runner)?;
         let owns_transaction = !c.nested || c.is_autocommit();
         // A nested bridge isolates its failure without rolling back its caller.
         let savepoint = if c.nested && !c.is_autocommit() {
@@ -474,6 +474,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         // RootGuard publishes confirmed commits once, after rollback cleanup.
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
+        drop(revision_scope);
         drop(c);
         if outcome.is_ok() {
             cleanup.map_err(CommitError::Fatal)?;
@@ -531,13 +532,10 @@ impl<E: Send + 'static> SqliteStore<E> {
                 let capture =
                     crate::exec::watch::Capture::begin(captured_connection, captured_watches)
                         .map_err(crate::domains::sql_error)?;
-                // Reserve before any facade can open BEGIN; retain the same revision
-                // for nested bridges, and capture metadata commits as well.
-                let revision = Rc::new(w.runner.reserve_root(&connection)?);
                 let state = Rc::new(RootConnection {
                     capture: Some(capture),
                     connection,
-                    revision,
+                    revision: RefCell::new(None),
                     _grant: Box::new(grant),
                     _runner: Box::new(w.runner.clone()),
                     engine,
@@ -589,7 +587,7 @@ thread_local! {
 struct RootConnection {
     capture: Option<crate::exec::watch::Capture<'static>>,
     connection: std::sync::MutexGuard<'static, rusqlite::Connection>,
-    revision: Rc<RootRevision>,
+    revision: RefCell<Option<Rc<RootRevision>>>,
     _grant: Box<dyn std::any::Any>,
     _runner: Box<dyn std::any::Any>,
     engine: Arc<Engine>,
@@ -616,6 +614,29 @@ pub struct RootGuard<'a, E: Send + 'static = ()> {
 impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
         &self.state.connection
+    }
+    fn revision(
+        &self,
+        runner: &SqliteBatchRunner<E>,
+    ) -> Result<(Rc<RootRevision>, RootRevisionScope), CommitError> {
+        if let Some(revision) = self.state.revision.borrow().clone() {
+            return Ok((revision, RootRevisionScope(None)));
+        }
+        // A plain authorization may only read. Reserve durable metadata only at
+        // an explicit typed bridge, before its callback can open BEGIN.
+        let revision = Rc::new(runner.reserve_root(self)?);
+        *self.state.revision.borrow_mut() = Some(revision.clone());
+        Ok((revision, RootRevisionScope(Some(self.state.clone()))))
+    }
+}
+struct RootRevisionScope(Option<Rc<RootConnection>>);
+impl Drop for RootRevisionScope {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.take() {
+            // Nested bridges reuse their outer revision; independent bridge calls
+            // under one raw authorization must receive different revisions.
+            let _ = state.revision.borrow_mut().take();
+        }
     }
 }
 impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
