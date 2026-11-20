@@ -302,16 +302,14 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     let (status, result) = act(&e, dep, "finish").await;
     assert_eq!(status, 200, "{result}");
-    assert!(
-        eventually("item_actions condition", || async {
+    eventually("creation_blocks_before_opening_a_session_and_completion_starts_it_once: waiting for || async { let (_, ss) = e.call(\"GET\", \"/api/sessions\", None).await; ss.as_array() .unwrap() .iter() .any(|s| s[\"item_id\"] == id && s[\"busy\"] == true && s[\"status\"] == \"running\") }", || async {
             let (_, ss) = e.call("GET", "/api/sessions", None).await;
             ss.as_array()
                 .unwrap()
                 .iter()
                 .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
         })
-        .await
-    );
+        .await;
     let (_, ss) = e.call("GET", "/api/sessions", None).await;
     assert_eq!(
         ss.as_array()
@@ -322,15 +320,14 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
         1
     );
     // the fake adapter records a prompt after its session is already running: wait for it
-    assert!(
-        eventually("item_actions condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "creation_blocks_before_opening_a_session_and_completion_starts_it_once: waiting for || async { e.prompts() .iter() .any(|p| p.contains(\"无需为核对进度读取其他事项或请求扩大读取范围\")) }", format!(
+        "the dependent's prompt says it need not read other items"
+    )) }), || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
         })
-        .await,
-        "the dependent's prompt says it need not read other items"
-    );
+        .await;
     let (status, result) = act(&e, id, "drop").await;
     assert_eq!(status, 200, "{result}");
 }
@@ -427,23 +424,21 @@ async fn pause_finish_drop_and_new_cycles() {
     // lock, and the close commits once it stopped
     let (s, v) = act(&e, &iid, "finish").await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        eventually("item_actions condition", || async {
-            e.session(&sid).await["busy"] == false
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { e.session(&sid).await[\"busy\"] == false }", format!(
         "the running turn is cancelled: {} {}",
         e.session(&sid).await,
         lifecycle(&e, &iid).await
-    );
-    assert!(
-        eventually("item_actions condition", || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
+    )) }), || async {
+            e.session(&sid).await["busy"] == false
         })
-        .await,
+        .await;
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"closed\" }", format!(
         "closed once the turn stopped: {}",
         lifecycle(&e, &iid).await
-    );
+    )) }), || async {
+            lifecycle(&e, &iid).await["phase"] == "closed"
+        })
+        .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (
@@ -562,14 +557,13 @@ async fn pause_finish_drop_and_new_cycles() {
         "{v}"
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
-    assert!(
-        eventually("item_actions condition", || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"closed\" }", format!(
         "{}",
         lifecycle(&e, &iid).await
-    );
+    )) }), || async {
+            lifecycle(&e, &iid).await["phase"] == "closed"
+        })
+        .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (l["phase"].as_str(), l["outcome"].as_str()),
@@ -587,21 +581,19 @@ async fn pause_finish_drop_and_new_cycles() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        eventually("item_actions condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { e.prompts().iter().any(|p| p.contains(\"再做一次\")) }", format!(
+        "a new cycle with a goal starts the work"
+    )) }), || async {
             e.prompts().iter().any(|p| p.contains("再做一次"))
         })
-        .await,
-        "a new cycle with a goal starts the work"
-    );
-    assert!(
-        eventually("item_actions condition", || async {
-            lifecycle(&e, &iid).await["phase"] == "active"
-        })
-        .await,
+        .await;
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"active\" }", format!(
         "{}",
         lifecycle(&e, &iid).await
-    );
+    )) }), || async {
+            lifecycle(&e, &iid).await["phase"] == "active"
+        })
+        .await;
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     let cycles: Vec<(i64, &str)> = v["cycles"]
         .as_array()

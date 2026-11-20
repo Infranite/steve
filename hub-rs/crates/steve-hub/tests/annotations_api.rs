@@ -217,13 +217,17 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        eventually("annotations_api condition", || async {
-            e.session(&sid).await["busy"] == true
-        })
-        .await,
-        "the first turn runs"
-    );
+    eventually(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "item: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
+                format!("the first turn runs")
+            )
+        }),
+        || async { e.session(&sid).await["busy"] == true },
+    )
+    .await;
     sid
 }
 
@@ -357,16 +361,15 @@ async fn drafts_one_send_and_the_item_line() {
         (s, v["again"].as_bool(), v["pending"].as_bool()),
         (200, Some(true), Some(false))
     );
-    assert!(
-        eventually("annotations_api condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "drafts_one_send_and_the_item_line: waiting for || async { e.prompts() .iter() .any(|p| p.contains(\"对产出的批注（2 条）\")) }", format!(
+        "the agent hears the notes: {:?}",
+        e.prompts()
+    )) }), || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("对产出的批注（2 条）"))
         })
-        .await,
-        "the agent hears the notes: {:?}",
-        e.prompts()
-    );
+        .await;
     assert_eq!(
         e.prompts()
             .iter()

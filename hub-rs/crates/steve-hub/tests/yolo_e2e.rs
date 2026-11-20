@@ -165,13 +165,17 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        eventually("yolo_e2e condition", || async {
-            e.session(&sid).await["busy"] == true
-        })
-        .await,
-        "the first turn runs"
-    );
+    eventually(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "item: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
+                format!("the first turn runs")
+            )
+        }),
+        || async { e.session(&sid).await["busy"] == true },
+    )
+    .await;
     sid
 }
 
@@ -212,14 +216,13 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
 
     // inside: answered at once with the allow_once option
     let inside = item(&e, "写笔记 @permtool edit notes.txt").await;
-    assert!(
-        eventually("yolo_e2e condition", || async {
-            texts(&e, &inside).await.contains("perm:selected:once")
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { texts(&e, &inside).await.contains(\"perm:selected:once\") }", format!(
         "the agent got allow_once: {}",
         texts(&e, &inside).await
-    );
+    )) }), || async {
+            texts(&e, &inside).await.contains("perm:selected:once")
+        })
+        .await;
     let r = rows(
         &e.db,
         "SELECT d.status, d.result, a.outcome, a.rule, a.choice FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -250,8 +253,9 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
 
     // outside: a delete stays with you, the reason recorded once
     let outside = item(&e, "清理 @permtool delete ../../../outside.txt").await;
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { !rows( &e.db, \"SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id WHERE d.subject_type = 'tool_call' AND d.session_id = ?\", &[&outside], ) .is_empty() }", format!(
+        "YOLO looked at it"
+    )) }), || async {
             !rows(
                 &e.db,
                 "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -260,9 +264,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
             )
             .is_empty()
         })
-        .await,
-        "YOLO looked at it"
-    );
+        .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -324,20 +326,18 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         (json!("full"), json!(true))
     );
     // running sessions switch in place
-    assert!(
-        eventually("yolo_e2e condition", || async { bypass_modes() > 0 }).await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { bypass_modes() > 0 }", format!(
         "a live session got bypassPermissions"
-    );
+    )) }), || async { bypass_modes() > 0 }).await;
     // a new session starts in bypass mode: the harness asks nothing, so no card and no YOLO row
     let free = item(&e, "清理 @permtool delete ../../../outside2.txt").await;
-    assert!(
-        eventually("yolo_e2e condition", || async {
-            texts(&e, &free).await.contains("perm:bypassed:")
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { texts(&e, &free).await.contains(\"perm:bypassed:\") }", format!(
         "the agent ran without asking: {}",
         texts(&e, &free).await
-    );
+    )) }), || async {
+            texts(&e, &free).await.contains("perm:bypassed:")
+        })
+        .await;
     let r = rows(
         &e.db,
         "SELECT id FROM decisions WHERE subject_type = 'tool_call' AND session_id = ?",
@@ -364,13 +364,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["full"], false);
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { set_modes() > modes_before }", format!(
+        "switched back in place"
+    )) }), || async {
             set_modes() > modes_before
         })
-        .await,
-        "switched back in place"
-    );
+        .await;
     let last_free_mode = std::fs::read_to_string(&e.log)
         .unwrap_or_default()
         .lines()
@@ -396,28 +395,26 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     let cancels_before = cancels();
     let ssh = "ssh -o BatchMode=yes macbook '/bin/launchctl print gui/501'";
     let unasked = item(&e, &format!("看看 @run {ssh} @say after")).await;
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { let t = texts(&e, &unasked).await; t.contains(\"ran:ssh -o BatchMode=yes macbook\") && t.contains(\"after\") }", format!(
+        "the command ran and the turn went on: {}",
+        texts(&e, &unasked).await
+    )) }), || async {
             let t = texts(&e, &unasked).await;
             t.contains("ran:ssh -o BatchMode=yes macbook") && t.contains("after")
         })
-        .await,
-        "the command ran and the turn went on: {}",
-        texts(&e, &unasked).await
-    );
+        .await;
     // `busy` describes the current turn: takeover may already have started another one
     // by the time we poll. Check the durable completion of the turn exercised here.
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { texts(&e, &unasked) .await .contains(\"\\\"stopReason\\\":\\\"end_turn\\\"\") }", format!(
+        "the turn completed normally; session: {}; events: {}",
+        e.session(&unasked).await,
+        texts(&e, &unasked).await
+    )) }), || async {
             texts(&e, &unasked)
                 .await
                 .contains("\"stopReason\":\"end_turn\"")
         })
-        .await,
-        "the turn completed normally; session: {}; events: {}",
-        e.session(&unasked).await,
-        texts(&e, &unasked).await
-    );
+        .await;
     let t = texts(&e, &unasked).await;
     assert!(!t.contains("\"stopReason\":\"cancelled\""), "{t}");
     assert!(!t.contains("停下了这一轮"), "{t}");
@@ -426,8 +423,9 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     // what the harness does ask about is still answered by YOLO, and a push is not approved:
     // it stays with the user as a card
     let push = item(&e, "推送 @permexec git push origin main").await;
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { !rows( &e.db, \"SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id WHERE d.subject_type = 'tool_call' AND d.session_id = ?\", &[&push], ) .is_empty() }", format!(
+        "YOLO looked at it"
+    )) }), || async {
             !rows(
                 &e.db,
                 "SELECT a.outcome FROM decisions d JOIN yolo_actions a ON a.decision_id = d.id
@@ -436,9 +434,7 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
             )
             .is_empty()
         })
-        .await,
-        "YOLO looked at it"
-    );
+        .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let r = rows(
         &e.db,
@@ -472,13 +468,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         }
     };
     let waiting_acts = acts(waiting.clone());
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { !waiting_acts().is_empty() }", format!(
+        "YOLO looked at it"
+    )) }), || async {
             !waiting_acts().is_empty()
         })
-        .await,
-        "YOLO looked at it"
-    );
+        .await;
     assert_eq!(
         waiting_acts()[0][1],
         json!("declined"),
@@ -503,14 +498,13 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        eventually("yolo_e2e condition", || async {
-            texts(&e, &waiting).await.contains("perm:selected:")
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { texts(&e, &waiting).await.contains(\"perm:selected:\") }", format!(
         "the waiting request was answered: {}",
         texts(&e, &waiting).await
-    );
+    )) }), || async {
+            texts(&e, &waiting).await.contains("perm:selected:")
+        })
+        .await;
     let r = waiting_acts();
     assert_eq!(r.len(), 2, "{r:?}");
     assert_eq!(
@@ -537,15 +531,14 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
     );
     assert_eq!(row["status"], "after_turn", "{v}");
     assert_eq!(row["residual"], true, "{v}");
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { let v = state().await; v[\"sessions\"][0][\"status\"] == \"applied\" && v[\"sessions\"][0][\"applied\"] == \"full_access\" }", format!(
+        "confirmed by the Node after the turn: {}",
+        state().await
+    )) }), || async {
             let v = state().await;
             v["sessions"][0]["status"] == "applied" && v["sessions"][0]["applied"] == "full_access"
         })
-        .await,
-        "confirmed by the Node after the turn: {}",
-        state().await
-    );
+        .await;
     let t = texts(&e, &waiting).await;
     assert_eq!(
         t.matches("perm:selected:").count(),
@@ -582,13 +575,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         }
     };
     let (ok_open, kill_open) = (open_cards(off_ok.clone()), open_cards(off_kill.clone()));
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { ok_open().len() == 1 && kill_open().len() == 1 }", format!(
+        "both requests wait for you"
+    )) }), || async {
             ok_open().len() == 1 && kill_open().len() == 1
         })
-        .await,
-        "both requests wait for you"
-    );
+        .await;
     let (ok_acts, kill_acts) = (acts(off_ok.clone()), acts(off_kill.clone()));
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -603,14 +595,13 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert!(
-        eventually("yolo_e2e condition", || async {
-            texts(&e, &off_ok).await.contains("perm:selected:")
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { texts(&e, &off_ok).await.contains(\"perm:selected:\") }", format!(
         "the waiting request was answered and the turn went on: {}",
         texts(&e, &off_ok).await
-    );
+    )) }), || async {
+            texts(&e, &off_ok).await.contains("perm:selected:")
+        })
+        .await;
     let r = ok_acts();
     assert_eq!(r.len(), 1, "{r:?}");
     assert_eq!(
@@ -621,17 +612,15 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         texts(&e, &off_ok).await.matches("perm:selected:").count(),
         1
     );
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { e.session(&off_ok).await[\"busy\"] == false }", format!(
+        "the turn went on to its end"
+    )) }), || async {
             e.session(&off_ok).await["busy"] == false
         })
-        .await,
-        "the turn went on to its end"
-    );
-    assert!(
-        eventually("yolo_e2e condition", || async { !kill_acts().is_empty() }).await,
+        .await;
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { !kill_acts().is_empty() }", format!(
         "YOLO looked at the other one"
-    );
+    )) }), || async { !kill_acts().is_empty() }).await;
     let r = kill_acts();
     assert_eq!(
         (r[0][0].clone(), r[0][1].clone(), r[0][2].clone()),
@@ -658,23 +647,21 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         assert_eq!(s, 200, "{v}");
         v["sessions"][0].clone()
     };
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { let r = row().await; r[\"status\"] == \"applied\" && r[\"applied\"] == \"full_access\" }", format!(
+        "opened under full access: {}",
+        row().await
+    )) }), || async {
             let r = row().await;
             r["status"] == "applied" && r["applied"] == "full_access"
         })
-        .await,
-        "opened under full access: {}",
-        row().await
-    );
+        .await;
     assert_eq!(row().await["wanted_from"], "full_access");
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { e.session(&nobot).await[\"busy\"] == false }", format!(
+        "its turn ended"
+    )) }), || async {
             e.session(&nobot).await["busy"] == false
         })
-        .await,
-        "its turn ended"
-    );
+        .await;
     let (s, v) = e
         .call("PUT", "/api/yolo", Some(json!({"mode": "off"})))
         .await;
@@ -686,13 +673,12 @@ async fn yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest() {
         !(r["status"] == "applied" && r["applied"] == "full_access"),
         "not applied while the harness still runs full access: {r}"
     );
-    assert!(
-        eventually("yolo_e2e condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "yolo_answers_tool_calls_inside_the_worktree_and_leaves_the_rest: waiting for || async { let r = row().await; r[\"status\"] == \"applied\" && r[\"applied\"] == \"ask\" }", format!(
+        "the Node confirmed ask: {}",
+        row().await
+    )) }), || async {
             let r = row().await;
             r["status"] == "applied" && r["applied"] == "ask"
         })
-        .await,
-        "the Node confirmed ask: {}",
-        row().await
-    );
+        .await;
 }

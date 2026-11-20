@@ -113,7 +113,7 @@ async fn created_and_dropped_reach_every_hook_in_registration_order() {
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
     // the cancel stops the running turn; the close (and the hooks) follow its end
     let sid = k.db().sessions_of_item(&i.id).unwrap()[0].id.clone();
-    assert!(k.wait(|| k.rt.st().cancelled.contains(&sid)));
+    steve_runtime::testkit::eventually_sync("created_and_dropped_reach_every_hook_in_registration_order: waiting for || k.rt.st().cancelled.contains(&sid)", || k.rt.st().cancelled.contains(&sid)).await;
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
     assert_eq!(
         wait_log(&log, 4).await[2..],

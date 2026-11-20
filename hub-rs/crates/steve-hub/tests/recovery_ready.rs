@@ -286,13 +286,17 @@ async fn item(h: &Home, c: &Client, goal: &str) -> String {
     assert_eq!(st, 200, "{i}");
     let item = i["id"].as_str().expect("item").to_string();
     let needle = goal.split(' ').next().unwrap_or(goal).to_string();
-    assert!(
-        eventually("recovery_ready condition", || async {
-            h.prompts().iter().any(|p| p.contains(&needle))
-        })
-        .await,
-        "the agent got the first turn"
-    );
+    eventually(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "item: waiting for || async { h.prompts().iter().any(|p| p.contains(&needle)) }",
+                format!("the agent got the first turn")
+            )
+        }),
+        || async { h.prompts().iter().any(|p| p.contains(&needle)) },
+    )
+    .await;
     one(h, "SELECT id FROM sessions WHERE item_id=?", &item).expect("session")
 }
 
@@ -326,8 +330,9 @@ async fn idle_session(h: &Home) -> String {
     serving(h).await;
     let c = Client::login(h).await;
     let sid = item(h, &c, "空闲验证-I4 @say done").await;
-    assert!(
-        eventually("recovery_ready condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "idle_session: waiting for || async { count( h, \"SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'\", &sid, ) >= 1 && count( h, \"SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state<>'finished'\", &sid, ) == 0 }", format!(
+        "its turn ended"
+    )) }), || async {
             count(
                 h,
                 "SELECT COUNT(*) FROM runtime_turns WHERE session_id=? AND state='finished'",
@@ -339,9 +344,7 @@ async fn idle_session(h: &Home) -> String {
                     &sid,
                 ) == 0
         })
-        .await,
-        "its turn ended"
-    );
+        .await;
     hub.kill();
     sid
 }
@@ -380,14 +383,13 @@ async fn a_turn_cut_by_a_crash_is_never_sent_again() {
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // B6: the restart cut it; the Hub gives it up (the Node confirms its process is gone)
-    assert!(
-        eventually("recovery_ready condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_turn_cut_by_a_crash_is_never_sent_again: waiting for || async { count(&h, \"SELECT COUNT(*) FROM node_commands WHERE method=?\", \"abandon\") == 1 && count(&h, \"SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'\", &sid) == 0 }", format!(
+        "the cut attempt is given up, not left unknown"
+    )) }), || async {
             count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
                 && count(&h, "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='unknown'", &sid) == 0
         })
-        .await,
-        "the cut attempt is given up, not left unknown"
-    );
+        .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(plain(&h), 1, "never sent again: {:?}", h.prompts());
     assert!(resumed(&h).is_empty(), "no resume: {:?}", h.prompts());
@@ -412,17 +414,16 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     // the Node's recovery is not held back by the other one
     health_until(&h, 30, |v| v["node"]["reconciled"] == true).await;
     // and it gave up the turn the kill cut (B6)
-    assert!(
-        eventually("recovery_ready condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_failing_recovery_is_reported_and_the_hub_still_serves: waiting for || async { count( &h, \"SELECT COUNT(*) FROM node_commands WHERE method=?\", \"abandon\", ) == 1 }", format!(
+        "the cut turn is given up"
+    )) }), || async {
             count(
                 &h,
                 "SELECT COUNT(*) FROM node_commands WHERE method=?",
                 "abandon",
             ) == 1
         })
-        .await,
-        "the cut turn is given up"
-    );
+        .await;
 }
 
 fn atomic(p: &Path, v: &Value) {
@@ -470,14 +471,13 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
     atomic(&op_path, &op("committed"));
     let v = serving(&h).await;
     assert_eq!(v["recovery"]["state"], "ok", "{v}");
-    assert!(
-        eventually("recovery_ready condition", || async {
-            h.prompts().iter().any(|p| p.contains(held))
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_committed: waiting for || async { h.prompts().iter().any(|p| p.contains(held)) }", format!(
         "{:?}",
         h.prompts()
-    );
+    )) }), || async {
+            h.prompts().iter().any(|p| p.contains(held))
+        })
+        .await;
     assert!(resumed(&h).is_empty());
 }
 
@@ -547,13 +547,12 @@ async fn a_hub_stopped_in_maintenance_sends_nothing_until_maintenance_is_lifted(
     // lifted: what waited goes
     let d = drain(&h, "DELETE", &token).await;
     assert_eq!(d["maintenance"], false, "{d}");
-    assert!(
-        eventually("recovery_ready condition", || async {
-            h.prompts().iter().any(|p| p.contains(held))
-        })
-        .await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_hub_stopped_in_maintenance_sends_nothing_until_maintenance_is_lifted: waiting for || async { h.prompts().iter().any(|p| p.contains(held)) }", format!(
         "{:?}",
         h.prompts()
-    );
+    )) }), || async {
+            h.prompts().iter().any(|p| p.contains(held))
+        })
+        .await;
     assert!(resumed(&h).is_empty());
 }

@@ -216,15 +216,13 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        // on the Node: its turn is under way (not only the session opening)
-        eventually("queued condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "item: waiting for || async { let s = e.session(&sid).await; s[\"busy\"] == true && s[\"status\"] == \"running\" }", format!(
+        "the first turn runs"
+    )) }), || async {
             let s = e.session(&sid).await;
             s["busy"] == true && s["status"] == "running"
         })
-        .await,
-        "the first turn runs"
-    );
+        .await;
     sid
 }
 
@@ -331,11 +329,10 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         )
         .await;
     assert_eq!((s, v["result"].as_str()), (200, Some("interrupted")), "{v}");
-    assert!(
-        eventually("queued condition", || async { e.prompts().len() == 2 }).await,
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.prompts().len() == 2 }", format!(
         "the next turn starts: {:?}",
         e.prompts()
-    );
+    )) }), || async { e.prompts().len() == 2 }).await;
     assert_eq!(e.prompts()[1], "三\n\n二（改过）");
     assert!(e.queued(&sid).await.is_empty());
 
@@ -356,25 +353,22 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(s, 409, "{m} {p}: {v}");
         assert_eq!(v["error"], "这条消息已经发出，不能再改");
     }
-    assert!(
-        eventually("queued condition", || async {
+    eventually("edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.session(&sid).await[\"busy\"] == false }", || async {
             e.session(&sid).await["busy"] == false
         })
-        .await
-    );
+        .await;
     assert_eq!(e.prompts().len(), 2);
     // the turn ended: the hint is gone (the session change refreshes the state)
-    assert!(
-        eventually("queued condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.open_decision(\"dec_midturn\") .await .get(\"agent_busy\") .is_none() }", format!(
+        "{}",
+        e.open_decision("dec_midturn").await
+    )) }), || async {
             e.open_decision("dec_midturn")
                 .await
                 .get("agent_busy")
                 .is_none()
         })
-        .await,
-        "{}",
-        e.open_decision("dec_midturn").await
-    );
+        .await;
     let k = e.kinds(&sid).await;
     for x in [
         "queued",

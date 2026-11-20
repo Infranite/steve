@@ -174,7 +174,7 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
                 &json!({"chan": {"message": "cm_web", "web": true}}),
             )
             .unwrap();
-        assert!(k.wait(|| if queued {
+        steve_runtime::testkit::eventually_sync("stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_origin: waiting for || if queued { k.core.inline_busy(WS) && !k.core.routing(WS) } else { k.gw.calls .lock() .unwrap() .iter() .any(|p| p.starts_with(\"You are the router\")) }", || if queued {
             k.core.inline_busy(WS) && !k.core.routing(WS)
         } else {
             k.gw.calls
@@ -182,7 +182,7 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
                 .unwrap()
                 .iter()
                 .any(|p| p.starts_with("You are the router"))
-        }));
+        }).await;
         if stop_kind == "queued_run" {
             let run = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
                 .id
@@ -200,7 +200,7 @@ async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_ori
             [(crate::thread::MAIN.into(), ms[1].id.clone())]
         );
         k.db().store().maintenance_set(false).unwrap();
-        assert!(k.wait(|| !k.core.main_busy(WS).unwrap()));
+        steve_runtime::testkit::eventually_sync("stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_origin: waiting for || !k.core.main_busy(WS).unwrap()", || !k.core.main_busy(WS).unwrap()).await;
         assert_eq!(k.db().messages(WS).unwrap().len(), 2, "one stop receipt");
     }
 }

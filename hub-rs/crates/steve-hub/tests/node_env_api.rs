@@ -217,13 +217,17 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    assert!(
-        eventually("node_env_api condition", || async {
-            e.session(&sid).await["busy"] == true
-        })
-        .await,
-        "the first turn runs"
-    );
+    eventually(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "item: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
+                format!("the first turn runs")
+            )
+        }),
+        || async { e.session(&sid).await["busy"] == true },
+    )
+    .await;
     sid
 }
 
@@ -277,15 +281,14 @@ async fn ones_own_variables_reach_the_items_harness() {
 
     // an item asked for over the API runs with the asker's variables
     item(&e, "环境变量 @say ok").await;
-    assert!(
-        eventually("node_env_api condition", || async {
+    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "ones_own_variables_reach_the_items_harness: waiting for || async { std::fs::read_to_string(&e.log) .unwrap_or_default() .contains(\"\\\"spawn\\\"\") }", format!(
+        "the adapter started"
+    )) }), || async {
             std::fs::read_to_string(&e.log)
                 .unwrap_or_default()
                 .contains("\"spawn\"")
         })
-        .await,
-        "the adapter started"
-    );
+        .await;
     let env = std::fs::read_to_string(&e.log)
         .unwrap_or_default()
         .lines()

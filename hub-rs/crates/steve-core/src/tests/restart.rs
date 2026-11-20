@@ -138,25 +138,39 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     );
     k.rt.end_turn(&k.core, &busy, "end_turn", None);
     assert_eq!(k.core.drain(&token, false).unwrap().unwrap().running, 0);
-    assert!(
-        k.wait(|| holds()
-            .last()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|h| h["running"] == 0)),
-        "the running count is published as it drops"
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || holds() .last() .unwrap() .as_ref() .is_some_and(|h| h[\"running\"] == 0)",
+                format!("the running count is published as it drops")
+            )
+        }),
+        || {
+            holds()
+                .last()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|h| h["running"] == 0)
+        },
     );
 
     /* the script exits without restarting us (it failed): the hold lifts and held prompts go */
     std::fs::write(k.home().join("go"), "").unwrap();
-    assert!(k.wait(|| !k.rt.is_holding()));
+    steve_runtime::testkit::eventually_blocking(
+        "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || !k.rt.is_holding()",
+        || !k.rt.is_holding(),
+    );
     assert_eq!(k.core.hold_status(), None);
     assert_eq!(
         holds().last().unwrap(),
         &None,
         "the end of the hold is published"
     );
-    assert!(k.wait(|| k.rt.prompts_of(&idle) == vec!["排队的"]));
+    steve_runtime::testkit::eventually_blocking(
+        "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || k.rt.prompts_of(&idle) == vec![\"排队的\"]",
+        || k.rt.prompts_of(&idle) == vec!["排队的"],
+    );
     let args = std::fs::read_to_string(k.home().join("args")).unwrap();
     assert_eq!(args.trim(), format!("steve/x {i} 8440 32"));
     assert_eq!(k.core.drain(&token, false).unwrap(), None);

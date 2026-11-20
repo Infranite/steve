@@ -16,28 +16,47 @@ const HEADER: &str = "# Existing test sleep calls; only shrinks.\n# file under h
 // including select!/assert! arguments, without mistaking a quoted counterexample for a sleep.
 // A method call `.sleep(` is the injected `Clock::sleep` (virtual in tests, the rule product code
 // follows too), so only free-function sleeps (std::thread, tokio::time, `use … sleep`) count.
+fn sleep_names() -> BTreeSet<String> {
+    BTreeSet::from(["sleep".into(), "sleep_until".into()])
+}
+fn aliases(tree: &syn::UseTree, names: &mut BTreeSet<String>) {
+    match tree {
+        syn::UseTree::Path(p) => aliases(&p.tree, names),
+        syn::UseTree::Group(g) => {
+            for t in &g.items {
+                aliases(t, names);
+            }
+        }
+        syn::UseTree::Rename(r) if r.ident == "sleep" || r.ident == "sleep_until" => {
+            names.insert(r.rename.to_string());
+        }
+        _ => {}
+    }
+}
 fn tokens(input: ParseStream<'_>) -> syn::Result<usize> {
+    tokens_named(input, &sleep_names())
+}
+fn tokens_named(input: ParseStream<'_>, names: &BTreeSet<String>) -> syn::Result<usize> {
     let mut n = 0;
     let mut after_dot = false;
     while !input.is_empty() {
         if input.peek(syn::Ident) {
             let name: syn::Ident = input.parse()?;
-            if name == "sleep" && input.peek(syn::token::Paren) && !after_dot {
+            if names.contains(&name.to_string()) && input.peek(syn::token::Paren) && !after_dot {
                 n += 1;
             }
-            after_dot = false;
         } else if input.peek(syn::token::Brace) {
             let inner;
             syn::braced!(inner in input);
-            n += tokens(&inner)?;
+            n += tokens_named(&inner, names)?;
         } else if input.peek(syn::token::Paren) {
             let inner;
             syn::parenthesized!(inner in input);
-            n += tokens(&inner)?;
+            n += tokens_named(&inner, names)?;
         } else if input.peek(syn::token::Bracket) {
             let inner;
             syn::bracketed!(inner in input);
-            n += tokens(&inner)?;
+            n += tokens_named(&inner, names)?;
         } else {
             after_dot = input.peek(syn::Token![.]);
             input.step(|c| {
@@ -63,6 +82,7 @@ struct Scan {
     dir: PathBuf,
     path_dir: PathBuf,
     external: BTreeSet<PathBuf>,
+    sleeps: BTreeSet<String>,
 }
 impl<'ast> Visit<'ast> for Scan {
     fn visit_item(&mut self, item: &'ast syn::Item) {
@@ -119,7 +139,7 @@ impl<'ast> Visit<'ast> for Scan {
     }
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if self.test
-            && matches!(&*call.func,syn::Expr::Path(p) if p.path.segments.last().is_some_and(|s|s.ident=="sleep"))
+            && matches!(&*call.func,syn::Expr::Path(p) if p.path.segments.last().is_some_and(|s|self.sleeps.contains(&s.ident.to_string())))
         {
             self.count += 1;
         }
@@ -127,7 +147,9 @@ impl<'ast> Visit<'ast> for Scan {
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
         if self.test {
-            self.count += tokens.parse2(m.tokens.clone()).expect("macro tokens");
+            self.count += (|input: ParseStream<'_>| tokens_named(input, &self.sleeps))
+                .parse2(m.tokens.clone())
+                .expect("macro tokens");
         }
     }
 }
@@ -156,7 +178,15 @@ fn scan(file: &Path, ast: &syn::File, test: bool) -> Scan {
         dir,
         path_dir: file.parent().unwrap().to_path_buf(),
         external: BTreeSet::new(),
+        sleeps: sleep_names(),
     };
+    struct Imports<'a>(&'a mut BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Imports<'_> {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            aliases(&item.tree, self.0);
+        }
+    }
+    Imports(&mut scan.sleeps).visit_file(ast);
     scan.visit_file(ast);
     scan
 }
@@ -304,4 +334,30 @@ fn added_sleep_fails_but_comments_and_quoted_examples_do_not_count() {
         "removal requires shortening the inventory"
     );
     assert!(ratchet::differences(&old, &old, HELP).is_empty());
+}
+
+#[test]
+fn aliases_and_sleep_until_count_but_virtual_clock_methods_do_not() {
+    let ast = syn::parse_file(
+        r#"
+        use tokio::time::{sleep as nap, sleep_until as deadline};
+        fn waits() {
+            nap(d);
+            deadline(at);
+            tokio::time::sleep_until(at);
+            tokio::select! { _ = nap(d) => {}, _ = deadline(at) => {} }
+            clock.sleep(d);
+            clock.sleep_until(at);
+            tokio::join!(clock.sleep(d), clock.sleep_until(at));
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(scan(Path::new("integration.rs"), &ast, true).count, 5);
+    assert_eq!(
+        tokens
+            .parse_str("tokio::select! { _ = tokio::time::sleep_until(at) => {} }")
+            .unwrap(),
+        1
+    );
 }

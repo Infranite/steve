@@ -596,17 +596,6 @@ impl Kit {
     pub fn home(&self) -> &std::path::Path {
         self.dir.path()
     }
-    /// Wait (≤15 s) until `f` holds. Returns as soon as it does; the bound only matters on a loaded
-    /// machine (CI runs the whole workspace on a few cores), and no test waits for something not to happen.
-    pub fn wait(&self, f: impl Fn() -> bool) -> bool {
-        for _ in 0..1500 {
-            if f() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
-    }
     /// Deliveries wait for your acceptance (the default before 2026-11-09), for tests of that path.
     pub fn manual_acceptance(&self) {
         self.db()

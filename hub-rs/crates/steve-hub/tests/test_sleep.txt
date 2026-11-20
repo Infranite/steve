@@ -29,7 +29,7 @@ steve-channels/tests/media.rs	2
 steve-channels/tests/owner_decisions.rs	4
 steve-channels/tests/owner_presence.rs	1
 steve-channels/tests/personal_triggers.rs	1
-steve-core/src/testkit.rs	4
+steve-core/src/testkit.rs	3
 steve-core/src/tests/conversations.rs	6
 steve-core/src/tests/dependencies.rs	1
 steve-core/src/tests/inbox.rs	2

@@ -180,21 +180,27 @@ fn accepted_again(k: &Kit, x: &Remote) {
         k.core.resolve(&a.id, "pass", "", "me").unwrap();
     }
     // the new result's release asked for what is missing (or followed the pull request on)
-    assert!(k.wait(|| {
-        let i = k.db().item(&x.item).unwrap().unwrap();
-        k.db()
-            .store()
-            .items()
-            .operations(&x.item, i.cycle)
-            .unwrap()
-            .iter()
-            .any(|o| {
-                o.kind == OP_RELEASE
-                    && o.revision == i.revision
-                    && o.evidence.get("asked").is_some()
-            })
-    }));
-    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+    steve_runtime::testkit::eventually_blocking(
+        "accepted_again: waiting for || { let i = k.db().item(&x.item).unwrap().unwrap(); k.db() .store() .items() .operations(&x.item, i.cycle) .unwrap() .iter() .any(|o| { o.kind == OP_RELEASE && o.revision == i.revision && o.evidence.get(\"asked\").is_some() }) }",
+        || {
+            let i = k.db().item(&x.item).unwrap().unwrap();
+            k.db()
+                .store()
+                .items()
+                .operations(&x.item, i.cycle)
+                .unwrap()
+                .iter()
+                .any(|o| {
+                    o.kind == OP_RELEASE
+                        && o.revision == i.revision
+                        && o.evidence.get("asked").is_some()
+                })
+        },
+    );
+    steve_runtime::testkit::eventually_blocking(
+        "accepted_again: waiting for || k.core.tx().st.probing.is_empty()",
+        || k.core.tx().st.probing.is_empty(),
+    );
 }
 
 /// [`accepted`] with no fingerprint frozen with the result (`remote_for` gives the item its worktree
@@ -209,7 +215,10 @@ fn accepted_unfrozen(gh: &Gh) -> (Kit, Remote) {
     told_what_is_missing(&k, &x);
     // the agent ends the turn it was told in
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+    steve_runtime::testkit::eventually_blocking(
+        "accepted_unfrozen: waiting for || k.core.tx().st.probing.is_empty()",
+        || k.core.tx().st.probing.is_empty(),
+    );
     (k, x)
 }
 
@@ -387,10 +396,15 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
         gh.calls("api"),
         ["api repos/acme/app", "api repos/acme/app/pulls/7"]
     );
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?}",
-        k.status(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_passed: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?}", k.status(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     let t = k.timeline_texts(&x.item);
     assert!(
@@ -495,7 +509,10 @@ fn a_plan_reported_after_the_acceptance_is_only_noted_and_the_result_still_merge
     gh.prs(open_pr(&h, json!({})));
     look(&k);
     assert_eq!(gh.merges().len(), 1);
-    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    steve_runtime::testkit::eventually_blocking(
+        "a_plan_reported_after_the_acceptance_is_only_noted_and_the_result_still_merges: waiting for || k.phase(&x.item) == \"closed\"",
+        || k.phase(&x.item) == "closed",
+    );
 }
 
 #[test]
@@ -527,7 +544,10 @@ fn your_delivered_choice_accepts_the_result_but_still_waits_for_merge_approval()
     assert!(closing.decision.is_none());
     assert!(closing.evidence.iter().any(|e| e.contains(note)));
     assert_eq!(i.phase, "closing", "the project's merge rule still applies");
-    assert!(k.wait(|| release_op(&k, &x).evidence["pr_slug"] == "acme/app"));
+    steve_runtime::testkit::eventually_blocking(
+        "your_delivered_choice_accepts_the_result_but_still_waits_for_merge_approval: waiting for || release_op(&k, &x).evidence[\"pr_slug\"] == \"acme/app\"",
+        || release_op(&k, &x).evidence["pr_slug"] == "acme/app",
+    );
     look(&k);
     assert_eq!(merge_cards(&k, &x).len(), 1);
     assert!(gh.merges().is_empty(), "acceptance is not consent to merge");
@@ -596,7 +616,10 @@ fn an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give() {
             "pr merge 7 --repo acme/app --rebase --match-head-commit {h}"
         )]
     );
-    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    steve_runtime::testkit::eventually_blocking(
+        "an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give: waiting for || k.phase(&x.item) == \"closed\"",
+        || k.phase(&x.item) == "closed",
+    );
     let m = pr_marks(&k, &x);
     assert_eq!(m.last().unwrap().1["review"], "you", "{m:?}");
 }
@@ -612,10 +635,15 @@ fn an_unreviewed_change_you_merged_yourself_completes_the_item() {
     merge_and_tag(&x, None);
     gh.prs(json!([{"number": 7, "state": "MERGED", "url": "https://github.com/acme/app/pull/7", "headRefOid": h}]));
     look(&k);
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?}",
-        k.status(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "an_unreviewed_change_you_merged_yourself_completes_the_item: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?}", k.status(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     assert!(gh.merges().is_empty());
     assert!(
@@ -757,11 +785,14 @@ fn a_new_result_of_a_followed_pull_request_does_not_wake_the_agent_again() {
     assert_eq!(told, 1);
     // the result is void and delivered again (the same change), and accepted again
     accepted_again(&k, &x);
-    assert!(k.wait(|| {
-        k.timeline_texts(&x.item)
-            .iter()
-            .any(|l| l.contains("Steve 继续跟踪 PR #7"))
-    }));
+    steve_runtime::testkit::eventually_blocking(
+        "a_new_result_of_a_followed_pull_request_does_not_wake_the_agent_again: waiting for || { k.timeline_texts(&x.item) .iter() .any(|l| l.contains(\"Steve 继续跟踪 PR #7\")) }",
+        || {
+            k.timeline_texts(&x.item)
+                .iter()
+                .any(|l| l.contains("Steve 继续跟踪 PR #7"))
+        },
+    );
     assert_eq!(
         prompts_with(&k, &x, "按这个项目的约定"),
         told,
@@ -836,7 +867,10 @@ fn merge_consent_survives_report_redelivery_and_restart_at_the_same_exact_target
             "pr merge 7 --repo acme/app --rebase --match-head-commit {h}"
         )]
     );
-    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    steve_runtime::testkit::eventually_blocking(
+        "merge_consent_survives_report_redelivery_and_restart_at_the_same_exact_target: waiting for || k.phase(&x.item) == \"closed\"",
+        || k.phase(&x.item) == "closed",
+    );
     assert_eq!(all_merge_cards(&k, &x).len(), 1);
 }
 
@@ -1054,7 +1088,10 @@ fn merge_consent_is_rechecked_after_host_methods_and_before_the_merge_call() {
     std::fs::write(gh.dir.join("repo.wait"), "").unwrap();
     let core = k.core.clone();
     let checking = std::thread::spawn(move || core.check_prs());
-    let paused = k.wait(|| gh.dir.join("repo.entered").exists());
+    let paused = steve_runtime::testkit::eventually_blocking(
+        "the host methods query is reached after the first consent check; repo.entered exists",
+        || gh.dir.join("repo.entered").exists(),
+    );
     k.db()
         .store()
         .with_conn(|c| {
@@ -1095,7 +1132,10 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
         "{p}"
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
+    steve_runtime::testkit::eventually_blocking(
+        "a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head: waiting for || k.core.tx().st.probing.is_empty()",
+        || k.core.tx().st.probing.is_empty(),
+    );
     // rebased onto main (the same change): a new head, and a failed check on it
     // a new message, not only a new date: an amend within the same second would keep the hash
     g(
@@ -1179,10 +1219,13 @@ fn without_a_commit_of_its_own_only_a_merged_pull_request_makes_it_merged() {
     let h = head(&x.wt);
     gh.prs(json!([{"number": 9, "state": "MERGED", "url": "https://github.com/acme/app/pull/9", "headRefOid": h}]));
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert!(k.wait(|| {
-        look(&k);
-        k.phase(&x.item) == "closed"
-    }));
+    steve_runtime::testkit::eventually_blocking(
+        "without_a_commit_of_its_own_only_a_merged_pull_request_makes_it_merged: waiting for || { look(&k); k.phase(&x.item) == \"closed\" }",
+        || {
+            look(&k);
+            k.phase(&x.item) == "closed"
+        },
+    );
     let t = k.timeline_texts(&x.item);
     assert!(
         t.iter()
@@ -1198,10 +1241,13 @@ fn without_a_commit_of_its_own_an_open_pull_request_is_not_merged_and_not_auto_m
     let (k, x) = without_commits(&gh);
     gh.prs(open_pr(&head(&x.wt), json!({})));
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
-    assert!(k.wait(|| {
-        look(&k);
-        k.phase(&x.item) == "closed"
-    }));
+    steve_runtime::testkit::eventually_blocking(
+        "without_a_commit_of_its_own_an_open_pull_request_is_not_merged_and_not_auto_merged: waiting for || { look(&k); k.phase(&x.item) == \"closed\" }",
+        || {
+            look(&k);
+            k.phase(&x.item) == "closed"
+        },
+    );
     let t = k.timeline_texts(&x.item);
     assert!(
         t.iter().any(|l| l.starts_with("事项分支上没有自己的提交")),
@@ -1400,11 +1446,15 @@ fn a_pull_request_merged_with_its_branch_deleted_completes_the_item_without_its_
     remove_worktree(&x);
     // the next closing pass sees the worktree gone: the host is asked first, and the merge decides
     k.core.tx().lc_try_close(&x.item).unwrap();
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?} {:?}",
-        k.status(&x.item),
-        k.timeline_texts(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "a_pull_request_merged_with_its_branch_deleted_completes_the_item_without_its_worktree: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?} {:?}", k.status(&x.item), k.timeline_texts(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     let i = k.db().item(&x.item).unwrap().unwrap();
     assert_eq!(i.outcome.as_deref(), Some("completed"));
@@ -1455,10 +1505,15 @@ fn a_merged_pull_request_seen_before_the_worktree_went_completes_on_any_pass() {
         .session_patch(&s.id, crate::patch![status: "idle"])
         .unwrap();
     k.core.lifecycle_tick().unwrap();
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?}",
-        k.timeline_texts(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "a_merged_pull_request_seen_before_the_worktree_went_completes_on_any_pass: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?}", k.timeline_texts(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     assert!(
         !k.timeline_texts(&x.item)
@@ -1480,10 +1535,13 @@ fn a_worktree_gone_while_its_pull_request_is_still_open_voids_the_result_as_befo
     assert_eq!(k.phase(&x.item), "closing", "the host is asked first");
     look(&k);
     // it answered: still open, so the moved result is void
-    assert!(k.wait(|| {
-        k.core.tx().lc_try_close(&x.item).unwrap();
-        k.phase(&x.item) == "active"
-    }));
+    steve_runtime::testkit::eventually_blocking(
+        "a_worktree_gone_while_its_pull_request_is_still_open_voids_the_result_as_before: waiting for || { k.core.tx().lc_try_close(&x.item).unwrap(); k.phase(&x.item) == \"active\" }",
+        || {
+            k.core.tx().lc_try_close(&x.item).unwrap();
+            k.phase(&x.item) == "active"
+        },
+    );
     let t = k.timeline_texts(&x.item);
     assert!(
         t.iter()
@@ -1507,10 +1565,15 @@ fn a_branch_github_cannot_rebase_is_squashed_without_trying_the_rebase() {
             "pr merge 7 --repo acme/app --squash --match-head-commit {h}"
         )]
     );
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?}",
-        k.status(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "a_branch_github_cannot_rebase_is_squashed_without_trying_the_rebase: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?}", k.status(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     assert!(k.open_fails(&x.item).is_empty());
 }
@@ -1532,10 +1595,15 @@ fn a_rebase_github_refuses_falls_back_to_a_squash_with_one_merge_and_no_card() {
             format!("pr merge 7 --repo acme/app --squash --match-head-commit {h}"),
         ]
     );
-    assert!(
-        k.wait(|| k.phase(&x.item) == "closed"),
-        "{:?}",
-        k.status(&x.item)
+    steve_runtime::testkit::eventually_blocking(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "a_rebase_github_refuses_falls_back_to_a_squash_with_one_merge_and_no_card: waiting for || k.phase(&x.item) == \"closed\"",
+                format!("{:?}", k.status(&x.item))
+            )
+        }),
+        || k.phase(&x.item) == "closed",
     );
     assert!(k.open_fails(&x.item).is_empty());
     let o = release_op(&k, &x);
@@ -1713,7 +1781,10 @@ fn closeout_publishes_only_current_checks_and_deduplicates_conversation_mileston
 
     gh.prs(open_pr(&h2, json!({})));
     look(&k);
-    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    steve_runtime::testkit::eventually_blocking(
+        "closeout_publishes_only_current_checks_and_deduplicates_conversation_milestones: waiting for || k.phase(&x.item) == \"closed\"",
+        || k.phase(&x.item) == "closed",
+    );
     assert_eq!((read().status, read().next_owner), ("merged", "none"));
     assert_eq!(read().pr.unwrap().state, "MERGED");
     assert_eq!(visible_card().meta["card"]["pr_event"]["kind"], "pr_merged");

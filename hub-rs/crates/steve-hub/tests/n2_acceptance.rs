@@ -196,17 +196,22 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
 }
 
 async fn serving(h: &Home) {
-    let ok = eventually("n2_acceptance condition", || async {
-        let Ok(r) = reqwest::Client::new()
-            .get(format!("{}/healthz", h.base()))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        else {
-            return false;
-        };
-        r.json::<Value>().await.is_ok_and(|v| v["ok"] == true)
-    })
+    let ok = eventually(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!("the Hub serves; log:\n{}", h.log())
+        }),
+        || async {
+            let Ok(r) = reqwest::Client::new()
+                .get(format!("{}/healthz", h.base()))
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            else {
+                return false;
+            };
+            r.json::<Value>().await.is_ok_and(|v| v["ok"] == true)
+        },
+    )
     .await;
     assert!(ok, "the Hub serves; log:\n{}", h.log());
 }
@@ -536,15 +541,17 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     let hub = spawn_hub(&h, Some(&node));
     serving(&h).await;
     let p = n.run();
-    assert!(
-        eventually_sync("n2_acceptance state", || {
-            h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
-        })
-        .await,
-        "the Node linked; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("the Node linked; hub:\n{}\nnode:\n{}", h.log(), n.log())
+            )
+        }),
+        || h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0,
+    )
+    .await;
     (h, hub, n, p, node)
 }
 
@@ -553,14 +560,21 @@ async fn a_second_node_runs_a_whole_item() {
     let (h, _hub, n, mut p, node) = setup().await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "远程验收 @say hello-remote-5R").await;
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, &sid, "hello-remote-5R")
-            > 0)
-        .await,
-        "the agent's reply came back over the link; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!(
+                    "the agent's reply came back over the link; hub:\n{}\nnode:\n{}",
+                    h.log(),
+                    n.log()
+                )
+            )
+        }),
+        || said(&h, &sid, "hello-remote-5R") > 0,
+    )
+    .await;
     assert_eq!(
         h.one(
             "SELECT node_id FROM runtime_sessions WHERE session_id=?",
@@ -580,19 +594,18 @@ async fn a_second_node_runs_a_whole_item() {
     // a permission request becomes a card on the Hub; its answer reaches the Node's agent
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
-    assert!(
-        eventually_sync("n2_acceptance state", || {
+    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "n2_acceptance state", format!(
+        "a permission card; hub:\n{}\nnode:\n{}",
+        h.log(),
+        n.log()
+    )) }), || {
             card = h.one(
                 "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
                 &sid,
             );
             card.is_some()
         })
-        .await,
-        "a permission card; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    );
+        .await;
     let card = card.expect("card");
     let (st, v) = c
         .call(
@@ -602,13 +615,17 @@ async fn a_second_node_runs_a_whole_item() {
         )
         .await;
     assert_eq!(st, 200, "answer: {v}");
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, &sid, "perm:selected:")
-            > 0)
-        .await,
-        "the Node's agent got the answer; node:\n{}",
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("the Node's agent got the answer; node:\n{}", n.log())
+            )
+        }),
+        || said(&h, &sid, "perm:selected:") > 0,
+    )
+    .await;
 
     // The default local model-job host may exist, but this item's turns and transcript belong
     // only to the remote Node.
@@ -638,32 +655,51 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     let sid = c
         .item(&h, "重启验收 @say one-8T @sleep 6000 @say two-8T")
         .await;
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, &sid, "one-8T") > 0).await,
-        "the turn started on the Node; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!(
+                    "the turn started on the Node; hub:\n{}\nnode:\n{}",
+                    h.log(),
+                    n.log()
+                )
+            )
+        }),
+        || said(&h, &sid, "one-8T") > 0,
+    )
+    .await;
     // the Hub goes away mid-turn; the Node keeps running the turn and comes back to the new Hub
     hub.kill();
     let _hub = spawn_hub(&h, Some(&node));
     serving(&h).await;
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, &sid, "two-8T") > 0).await,
-        "the rest of the turn reached the restarted Hub; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    );
-    assert!(
-        // the turn, and Steve's own follow-ups after it (the agent delivered nothing)
-        eventually_sync("n2_acceptance state", || attempts(&h, &sid, "finished")
-            >= 1)
-        .await,
-        "{}\nhub:\n{}\nnode:\n{}",
-        dump(&h, &sid),
-        h.log(),
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!(
+                    "the rest of the turn reached the restarted Hub; hub:\n{}\nnode:\n{}",
+                    h.log(),
+                    n.log()
+                )
+            )
+        }),
+        || said(&h, &sid, "two-8T") > 0,
+    )
+    .await;
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("{}\nhub:\n{}\nnode:\n{}", dump(&h, &sid), h.log(), n.log())
+            )
+        }),
+        || attempts(&h, &sid, "finished") >= 1,
+    )
+    .await;
     assert!(p.alive(), "the Node kept running");
     assert_eq!(n.got("one-8T"), 1, "never sent again");
     assert_eq!(
@@ -690,19 +726,18 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     assert!(eventually_sync("n2_acceptance state", || n.got("断电验收-K7") == 1).await);
     p.kill();
     let _p = n.run();
-    assert!(
-        eventually_sync("n2_acceptance state", || {
+    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "n2_acceptance state", format!(
+        "the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
+        dump(&h, &sid),
+        h.log(),
+        n.log()
+    )) }), || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
                 &sid,
             ) == 1
         })
-        .await,
-        "the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
-        dump(&h, &sid),
-        h.log(),
-        n.log()
-    );
+        .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(n.got("断电验收-K7"), 1, "never re-run");
 }
@@ -730,17 +765,29 @@ async fn another_nodes_session_is_refused() {
     let (h, mut hub, n, _p, node) = setup().await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
-    assert!(
-        eventually_sync("n2_acceptance state", || n.got("iso-3M") == 1).await,
-        "node:\n{}",
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("node:\n{}", n.log())
+            )
+        }),
+        || n.got("iso-3M") == 1,
+    )
+    .await;
     // what the harness said is in before the count below is taken
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, &sid, "iso-3M") >= 1).await,
-        "node:\n{}",
-        n.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("node:\n{}", n.log())
+            )
+        }),
+        || said(&h, &sid, "iso-3M") >= 1,
+    )
+    .await;
     let exec: ExecutionRef = serde_json::from_str(
         &h.one(
             "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
@@ -1200,27 +1247,45 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(run["dispatch"]["team"]["id"], team_a.as_str());
     assert_eq!(run["dispatch"]["team"]["source"], "default");
     assert_eq!(run["dispatch"]["placement"]["node"], id_a);
-    assert!(
-        eventually_sync("n2_acceptance state", || a.got("never-moved") == 1).await,
-        "A received work: {}",
-        a.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("A received work: {}", a.log())
+            )
+        }),
+        || a.got("never-moved") == 1,
+    )
+    .await;
     default_team(&c, team_b).await;
     let second = make(&c, bot, None, "@say default-to-B").await;
     assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
-    assert!(
-        eventually_sync("n2_acceptance state", || b.got("default-to-B") == 1).await,
-        "B received work: {}",
-        b.log()
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("B received work: {}", b.log())
+            )
+        }),
+        || b.got("default-to-B") == 1,
+    )
+    .await;
     let explicit = make(&c, bot, Some(team_a), "@say team-override").await;
     assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
     assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
-    assert!(
-        eventually_sync("n2_acceptance state", || said(&h, sid, "never-moved") > 0).await,
-        "old session completed: {}",
-        dump(&h, sid)
-    );
+    eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{}; {}",
+                "n2_acceptance state",
+                format!("old session completed: {}", dump(&h, sid))
+            )
+        }),
+        || said(&h, sid, "never-moved") > 0,
+    )
+    .await;
     assert_eq!(b.got("never-moved"), 0);
     let (_, again) = c.call("GET", &format!("/api/items/{rid}"), None).await;
     assert_eq!(again["dispatch"]["placement"]["session"], sid);
@@ -1228,16 +1293,14 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(again["dispatch"]["team"]["id"], team_a.as_str());
 
     proc_b.kill();
-    assert!(
-        eventually("n2_acceptance condition", || async {
+    eventually("make: waiting for || async { let (_, v) = c.call(\"GET\", &path, None).await; v[\"candidates\"].as_array().is_some_and(|ns| { ns.iter() .any(|n| n[\"id\"] == id_b && n[\"reason\"] == \"offline\") }) }", || async {
             let (_, v) = c.call("GET", &path, None).await;
             v["candidates"].as_array().is_some_and(|ns| {
                 ns.iter()
                     .any(|n| n["id"] == id_b && n["reason"] == "offline")
             })
         })
-        .await
-    );
+        .await;
     let blocked = make(&c, bot, None, "@say must-not-cross").await;
     assert_eq!(
         blocked["dispatch"]["placement"]["reason"], "offline",

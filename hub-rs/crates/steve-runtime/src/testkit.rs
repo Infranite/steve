@@ -6,9 +6,58 @@ use tokio::{sync::Notify, time::Instant};
 pub const EVENTUALLY: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(10);
 
+/// A timeout description. Expensive state dumps are rendered only after waiting fails.
+pub trait Description {
+    fn describe(self) -> impl Future<Output = String> + Send;
+}
+impl Description for &str {
+    async fn describe(self) -> String {
+        self.to_owned()
+    }
+}
+impl Description for String {
+    async fn describe(self) -> String {
+        self
+    }
+}
+impl Description for &String {
+    async fn describe(self) -> String {
+        self.clone()
+    }
+}
+
+/// Lazy diagnostics may read asynchronous state as well as format synchronous snapshots.
+pub struct OnTimeout<F>(F);
+pub fn on_timeout<F, Fut>(description: F) -> OnTimeout<F>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: Future<Output = String> + Send,
+{
+    OnTimeout(description)
+}
+impl<F, Fut> Description for OnTimeout<F>
+where
+    F: FnOnce() -> Fut + Send,
+    Fut: Future<Output = String> + Send,
+{
+    async fn describe(self) -> String {
+        (self.0)().await
+    }
+}
+
+/// Blocking adapter for synchronous tests; it drives the same eventual-condition loop.
+/// Call async adapters inside a Tokio runtime instead of nesting a blocking runtime.
+pub fn eventually_blocking<D: Description, F: FnMut() -> bool>(what: D, condition: F) -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("condition-wait runtime")
+        .block_on(eventually_sync(what, condition))
+}
+
 /// Returns true once `condition` holds; panics with `what` at the shared deadline.
 /// The boolean preserves assertions at call sites; a false result is never silently ignored.
-pub async fn eventually<F, Fut>(what: &str, condition: F) -> bool
+pub async fn eventually<F, Fut>(what: impl Description, condition: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
@@ -17,7 +66,7 @@ where
 }
 
 /// Synchronous condition adapter; the deadline and polling implementation are shared.
-pub async fn eventually_sync<F>(what: &str, mut condition: F) -> bool
+pub async fn eventually_sync<F>(what: impl Description, mut condition: F) -> bool
 where
     F: FnMut() -> bool,
 {
@@ -26,7 +75,11 @@ where
 
 /// Event-driven version of [`eventually`]. Register before checking, so notifications during an
 /// asynchronous state read are retained. A notification only requests another condition check.
-pub async fn eventually_notified<F, Fut>(what: &str, wake: &Notify, condition: F) -> bool
+pub async fn eventually_notified<F, Fut>(
+    what: impl Description,
+    wake: &Notify,
+    condition: F,
+) -> bool
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
@@ -34,7 +87,7 @@ where
     wait(what, Some(wake), condition).await
 }
 
-async fn wait<F, Fut>(what: &str, wake: Option<&Notify>, mut condition: F) -> bool
+async fn wait<F, Fut>(what: impl Description, wake: Option<&Notify>, mut condition: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
@@ -53,14 +106,12 @@ where
         if matches!(ready, Ok(true)) {
             return true;
         }
-        assert!(
-            ready.is_ok() && Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        assert!(
-            tokio::time::timeout_at(deadline, next).await.is_ok(),
-            "timed out waiting for {what}"
-        );
+        if ready.is_err() || Instant::now() >= deadline {
+            panic!("timed out waiting for {}", what.describe().await);
+        }
+        if tokio::time::timeout_at(deadline, next).await.is_err() {
+            panic!("timed out waiting for {}", what.describe().await);
+        }
     }
 }
 
@@ -71,6 +122,37 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[test]
+    fn blocking_adapter_uses_the_same_ready_condition() {
+        assert!(eventually_blocking("ready from a synchronous test", || {
+            true
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_waits_do_not_render_diagnostics() {
+        assert!(
+            eventually(
+                on_timeout(|| async { panic!("unused state dump") }),
+                || async { true }
+            )
+            .await
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[should_panic(expected = "timed out waiting for state dump: last status=waiting")]
+    async fn timeout_renders_an_asynchronous_state_dump() {
+        eventually(
+            on_timeout(|| async {
+                tokio::task::yield_now().await;
+                format!("state dump: last status={}", "waiting")
+            }),
+            || async { false },
+        )
+        .await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn ready_conditions_return_without_advancing_time() {
