@@ -794,3 +794,63 @@ async fn sg10_mcp_secret_transport_and_failed_update_table() {
         );
     }
 }
+
+#[tokio::test]
+async fn sg11_a2a_argument_permission_and_task_request_table() {
+    let h = setup();
+    let (base, seen) = fake_agent().await;
+    let (status,agent)=req(&h,"POST","/capabilities/a2a-agents",Some(json!({"card_url":base,"auth":{"scheme":"header","header":"X-Api-Key"},"secret":"agent-KEY","bot":"dev"}))).await;
+    assert_eq!(status, 200, "{agent}");
+    for (session, name, args, needle) in [
+        (
+            "s_doc",
+            "steve_a2a_trip_planner",
+            json!({"message":"hello"}),
+            "Tool steve_a2a_trip_planner not found",
+        ),
+        (
+            "s_dev",
+            "wrong_prefix",
+            json!({"message":"hello"}),
+            "Tool wrong_prefix not found",
+        ),
+        (
+            "s_dev",
+            "steve_a2a_trip_planner",
+            json!({"message":"hello","extra":true}),
+            "unexpected property",
+        ),
+        (
+            "s_dev",
+            "steve_a2a_trip_planner",
+            json!({"message":"  "}),
+            "message is required",
+        ),
+        (
+            "s_dev",
+            "steve_a2a_trip_planner",
+            json!({"message":3,"task_id":false}),
+            "message is required",
+        ),
+    ] {
+        let before = seen.lock().unwrap().len();
+        let error = h.svc.a2a_call(session, name, &args).await.unwrap_err();
+        assert!(error.contains(needle), "{args}: {error}");
+        assert_eq!(seen.lock().unwrap().len(), before, "refused before RPC");
+    }
+    let out = h
+        .svc
+        .a2a_call(
+            "s_dev",
+            "steve_a2a_trip_planner",
+            &json!({"task_id":" t1 ","context_id":" c1 "}),
+        )
+        .await
+        .unwrap();
+    assert!(out.contains("completed"));
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["key"], "agent-KEY");
+    assert_eq!(calls[0]["body"]["method"], "tasks/get");
+    assert_eq!(calls[0]["body"]["params"], json!({"id":"t1"}));
+}
