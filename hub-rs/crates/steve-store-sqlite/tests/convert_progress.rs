@@ -27,17 +27,13 @@ fn assert_events(events: &[Progress], complete: bool) {
     assert!(events[..events.len() - 1].iter().all(|p| !p.complete));
     assert_eq!(events.last().unwrap().complete, complete);
 }
+#[path = "common/legacy_input.rs"]
+mod legacy_input;
 fn prefix(c: &Connection) {
-    c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);").unwrap();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("legacy/migrations");
-    for n in 1..=113 {
-        c.execute_batch(&std::fs::read_to_string(root.join(format!("{n:03}.sql"))).unwrap())
-            .unwrap();
-    }
-    c.execute_batch("INSERT INTO schema_version(v) VALUES(113); INSERT INTO schema_compat(min_reader) VALUES(113);").unwrap();
-    legacy::migrate_to_head(c).unwrap();
+    legacy_input::at(c, 113);
     owner(c);
 }
+
 #[test]
 fn phases_and_cumulative_vm_work_end_only_after_contract_commit() {
     let mut c = Connection::open_in_memory().unwrap();

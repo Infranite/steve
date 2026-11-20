@@ -423,118 +423,7 @@ pub fn query_with_codec(
                 )
             }
         }
-        "scan" | "count" => {
-            let w: Window = q.body.decode()?;
-            if w.index.entity != e.name {
-                return Err(invalid("query entity mismatch"));
-            }
-            let limit = w.limit.unwrap_or(500);
-            if w.budget.0 == 0 || !(1..=500).contains(&limit) {
-                return Err(invalid("invalid scan limit or budget"));
-            }
-            let fields = index_fields(e, &w.index.name)?;
-            let order = w.order.unwrap_or(Order::Asc);
-            let mut b = Bindings::default();
-            let mut clause = b.range(e, &fields, &w.range)?;
-            if let Some(resume) = &w.resume {
-                clause.push_str(" AND ");
-                clause.push_str(&b.compare(
-                    e,
-                    &fields,
-                    &resume.key,
-                    if order == Order::Asc { ">" } else { "<" },
-                    false,
-                )?);
-            }
-            let sort = ordering(e, &fields, order)?;
-            let mut ordinal_name = String::from("__storage_scan_ordinal");
-            while e.fields.iter().any(|f| f.name == ordinal_name) {
-                ordinal_name.push('_');
-            }
-            let ordinal_name = ident(&ordinal_name);
-            let window = format!(
-                "SELECT {},ROW_NUMBER() OVER (ORDER BY {sort}) AS {ordinal_name} FROM {} WHERE {clause} ORDER BY {sort} LIMIT {}",
-                columns(e),
-                ident(&e.name),
-                w.budget.0
-            );
-            let window_params = b.0.clone();
-            let filter = b.predicates(e, &w.filter)?;
-            if q.name == "count" {
-                let count: i64 = conn
-                    .query_row(
-                        &format!("SELECT COUNT(*) FROM ({window}) w WHERE {filter}"),
-                        params_from_iter(&b.0),
-                        |r| r.get(0),
-                    )
-                    .map_err(db_error)?;
-                let endpoint = endpoint(
-                    conn,
-                    e,
-                    &window,
-                    &window_params,
-                    &fields,
-                    order,
-                    &ordinal_name,
-                )?;
-                let more = if let Some(((r, _), _)) = endpoint {
-                    has_more(conn, e, &fields, &w.range, order, &values(&r, &fields))?
-                } else {
-                    false
-                };
-                encode(&if more {
-                    CountResult::AtLeast(count as u64)
-                } else {
-                    CountResult::Exact(count as u64)
-                })
-            } else {
-                let sql = format!(
-                    "SELECT {},{ordinal_name} FROM ({window}) w WHERE {filter} LIMIT {limit}",
-                    columns(e)
-                );
-                let mut stmt = conn.prepare_cached(&sql).map_err(db_error)?;
-                let mut rows = stmt.query(params_from_iter(&b.0)).map_err(db_error)?;
-                let mut found = Vec::new();
-                while let Some(row) = rows.next().map_err(db_error)? {
-                    found.push((
-                        read_row(row, e)?,
-                        row.get::<_, i64>(e.fields.len() + 1).map_err(db_error)?,
-                    ));
-                }
-                let endpoint = if found.len() == limit as usize {
-                    found.last().cloned()
-                } else {
-                    endpoint(
-                        conn,
-                        e,
-                        &window,
-                        &window_params,
-                        &fields,
-                        order,
-                        &ordinal_name,
-                    )?
-                };
-                let mut resume = None;
-                let mut exhausted_budget = false;
-                if let Some(((r, _), inspected)) = endpoint {
-                    let key = values(&r, &fields);
-                    if has_more(conn, e, &fields, &w.range, order, &key)? {
-                        // Do not traverse the rest of the window to count the ordinal
-                        // after limit has stopped us; ROW_NUMBER travels with the row.
-                        exhausted_budget = inspected == i64::from(w.budget.0);
-                        resume = Some(ResumeToken { key });
-                    }
-                }
-                encode(&Page {
-                    rows: found
-                        .into_iter()
-                        .map(|((r, v), _)| Ok((codec(r)?, v)))
-                        .collect::<Result<Vec<_>, Error>>()?,
-                    resume,
-                    exhausted_budget,
-                })
-            }
-        }
+        "scan" | "count" => window_query(conn, e, &q, codec),
         _ => Err(error(Code::Unsupported, "unknown generic query")),
     })?;
     Ok(AnyOutput {
@@ -608,4 +497,156 @@ pub(crate) fn has_more(
     .optional()
     .map(|v| v.unwrap_or(false))
     .map_err(db_error)
+}
+
+struct WindowSql {
+    fields: Vec<String>,
+    order: Order,
+    ordinal_name: String,
+    window: String,
+    window_params: Vec<Value>,
+    b: Bindings,
+    filter: String,
+    limit: u32,
+}
+impl WindowSql {
+    fn new(e: &EntityDesc, w: &Window) -> Result<Self, Error> {
+        if w.index.entity != e.name {
+            return Err(invalid("query entity mismatch"));
+        }
+        let limit = w.limit.unwrap_or(500);
+        if w.budget.0 == 0 || !(1..=500).contains(&limit) {
+            return Err(invalid("invalid scan limit or budget"));
+        }
+        let fields = index_fields(e, &w.index.name)?;
+        let order = w.order.unwrap_or(Order::Asc);
+        let mut b = Bindings::default();
+        let mut clause = b.range(e, &fields, &w.range)?;
+        if let Some(resume) = &w.resume {
+            clause.push_str(" AND ");
+            clause.push_str(&b.compare(
+                e,
+                &fields,
+                &resume.key,
+                if order == Order::Asc { ">" } else { "<" },
+                false,
+            )?);
+        }
+        let sort = ordering(e, &fields, order)?;
+        let mut ordinal_name = String::from("__storage_scan_ordinal");
+        while e.fields.iter().any(|f| f.name == ordinal_name) {
+            ordinal_name.push('_');
+        }
+        let ordinal_name = ident(&ordinal_name);
+        let window = format!(
+            "SELECT {},ROW_NUMBER() OVER (ORDER BY {sort}) AS {ordinal_name} FROM {} WHERE {clause} ORDER BY {sort} LIMIT {}",
+            columns(e),
+            ident(&e.name),
+            w.budget.0
+        );
+        let window_params = b.0.clone();
+        let filter = b.predicates(e, &w.filter)?;
+        Ok(Self {
+            fields,
+            order,
+            ordinal_name,
+            window,
+            window_params,
+            b,
+            filter,
+            limit,
+        })
+    }
+}
+fn window_query(
+    conn: &Connection,
+    e: &EntityDesc,
+    q: &AnyQuery,
+    codec: impl Fn(Row) -> Result<RawJson, Error>,
+) -> Result<RawJson, Error> {
+    let w: Window = q.body.decode()?;
+    let WindowSql {
+        fields,
+        order,
+        ordinal_name,
+        window,
+        window_params,
+        b,
+        filter,
+        limit,
+    } = WindowSql::new(e, &w)?;
+    if q.name == "count" {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({window}) w WHERE {filter}"),
+                params_from_iter(&b.0),
+                |r| r.get(0),
+            )
+            .map_err(db_error)?;
+        let endpoint = endpoint(
+            conn,
+            e,
+            &window,
+            &window_params,
+            &fields,
+            order,
+            &ordinal_name,
+        )?;
+        let more = if let Some(((r, _), _)) = endpoint {
+            has_more(conn, e, &fields, &w.range, order, &values(&r, &fields))?
+        } else {
+            false
+        };
+        encode(&if more {
+            CountResult::AtLeast(count as u64)
+        } else {
+            CountResult::Exact(count as u64)
+        })
+    } else {
+        let sql = format!(
+            "SELECT {},{ordinal_name} FROM ({window}) w WHERE {filter} LIMIT {limit}",
+            columns(e)
+        );
+        let mut stmt = conn.prepare_cached(&sql).map_err(db_error)?;
+        let mut rows = stmt.query(params_from_iter(&b.0)).map_err(db_error)?;
+        let mut found = Vec::new();
+        while let Some(row) = rows.next().map_err(db_error)? {
+            found.push((
+                read_row(row, e)?,
+                row.get::<_, i64>(e.fields.len() + 1).map_err(db_error)?,
+            ));
+        }
+        let endpoint = if found.len() == limit as usize {
+            found.last().cloned()
+        } else {
+            endpoint(
+                conn,
+                e,
+                &window,
+                &window_params,
+                &fields,
+                order,
+                &ordinal_name,
+            )?
+        };
+        let mut resume = None;
+        let mut exhausted_budget = false;
+        if let Some(((r, _), inspected)) = endpoint {
+            let key = values(&r, &fields);
+            if has_more(conn, e, &fields, &w.range, order, &key)? {
+                // Do not traverse the rest of the window to count the ordinal
+                // after limit has stopped us; ROW_NUMBER travels with the row.
+                exhausted_budget = inspected == i64::from(w.budget.0);
+                resume = Some(ResumeToken { key });
+            }
+        }
+        encode(&Page {
+            rows: found
+                .into_iter()
+                .map(|((r, v), _)| Ok((codec(r)?, v)))
+                .collect::<Result<Vec<_>, Error>>()?,
+            resume,
+            exhausted_budget,
+        })
+    }
 }
