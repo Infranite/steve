@@ -57,3 +57,44 @@ pub use extension::{Assembly, Extension, run};
 pub fn build_identity() -> Option<(&'static str, &'static str)> {
     option_env!("STEVE_BUILD_VERSION").zip(option_env!("STEVE_BUILD_COMMIT"))
 }
+
+/// One build-info payload for the executable and extension entry points. Storage
+/// ranges come solely from the embedded catalogs; the integer is an old-parser shell.
+pub fn build_info() -> anyhow::Result<serde_json::Value> {
+    let storage = steve_store_sqlite::compat::StorageCapabilities::compiled();
+    let legacy = storage
+        .legacy
+        .ok_or_else(|| anyhow::anyhow!("compiled legacy capability missing"))?;
+    Ok(serde_json::json!({
+        "version": option_env!("STEVE_BUILD_VERSION"),
+        "commit": option_env!("STEVE_BUILD_COMMIT"),
+        "target": env!("STEVE_BUILD_TARGET"),
+        "schema": legacy.target,
+        "storage": storage.encode_build_info_draft()?,
+        "check_config": true,
+        "upgrade_runner": {"journal": 1, "kinds": ["release_bundle", "local_release"], "native": true},
+        "native_install": 1
+    }))
+}
+
+#[cfg(test)]
+mod build_info_tests {
+    #[test]
+    fn storage_and_legacy_shell_share_the_compiled_catalog() {
+        let info = super::build_info().unwrap();
+        let caps = steve_store_sqlite::compat::StorageCapabilities::compiled();
+        assert_eq!(info["storage"], serde_json::to_value(&caps).unwrap());
+        assert_eq!(info["schema"], caps.legacy.unwrap().target);
+        assert_eq!(info["native_install"], 1);
+        assert_eq!(info["upgrade_runner"]["native"], true);
+        assert_eq!(info["target"], env!("STEVE_BUILD_TARGET"));
+        assert_eq!(
+            info["version"],
+            serde_json::json!(option_env!("STEVE_BUILD_VERSION"))
+        );
+        assert_eq!(
+            info["commit"],
+            serde_json::json!(option_env!("STEVE_BUILD_COMMIT"))
+        );
+    }
+}

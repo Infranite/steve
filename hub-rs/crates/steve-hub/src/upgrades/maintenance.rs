@@ -136,4 +136,61 @@ mod tests {
         }
         assert_eq!(dispatch(&[]).unwrap().0, 0);
     }
+    #[test]
+    fn schema_commands_forward_current_and_legacy_states_readonly() {
+        let data: Value = serde_json::from_str(include_str!(
+            "../../../steve-install/tests/storage_matrix.json"
+        ))
+        .unwrap();
+        for (kind, sql, expected) in [
+            (
+                "current",
+                data["current_sql"].as_str().unwrap().to_owned(),
+                json!({"kind":"current","layout":2,"min_reader":2,"contract":1,"core":1,"stream":1,"comms":1}),
+            ),
+            (
+                "legacy113",
+                data["legacy_sql"].as_str().unwrap().to_owned(),
+                json!({"kind":"legacy","schema_version":113}),
+            ),
+            (
+                "legacy114",
+                data["legacy_sql"]
+                    .as_str()
+                    .unwrap()
+                    .replace("VALUES(113)", "VALUES(114)"),
+                json!({"kind":"legacy","schema_version":114}),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = temp.path().join("steve.sqlite3");
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute_batch(&sql)
+                .unwrap();
+            fs::write(
+                temp.path().join("release.json"),
+                data["manifest"].to_string(),
+            )
+            .unwrap();
+            let before = fs::read(&db).unwrap();
+            let path = db.to_string_lossy().into_owned();
+            assert_eq!(
+                dispatch(&["schema-state".into(), path.clone()]).unwrap(),
+                (0, expected),
+                "{kind}"
+            );
+            assert_eq!(
+                dispatch(&[
+                    "schema-check".into(),
+                    path,
+                    temp.path().to_string_lossy().into_owned()
+                ])
+                .unwrap(),
+                (0, json!({"compatible":true})),
+                "{kind}"
+            );
+            assert_eq!(fs::read(&db).unwrap(), before, "{kind}");
+        }
+    }
 }

@@ -32,12 +32,6 @@ pub struct Asset {
     pub size: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Schema {
-    pub min_read: u32,
-    pub max_read: u32,
-    pub target: u32,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub format_version: u32,
     pub version: String,
@@ -45,8 +39,21 @@ pub struct Manifest {
     pub hub_version: String,
     pub web_version: String,
     pub api_protocol: u32,
-    pub schema: Schema,
+    #[serde(deserialize_with = "deserialize_storage")]
+    pub storage: steve_store_sqlite::compat::StorageCapabilities,
     pub assets: Vec<Asset>,
+}
+// Use the installer's strict boundary too: serde Option alone would treat an
+// explicit legacy:null as omission, while the flat protocol forbids null entries.
+fn deserialize_storage<'de, D>(
+    deserializer: D,
+) -> std::result::Result<steve_store_sqlite::compat::StorageCapabilities, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let storage = Value::deserialize(deserializer)?;
+    steve_install::release::storage_capabilities(&json!({"storage":storage}))
+        .map_err(serde::de::Error::custom)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Check {

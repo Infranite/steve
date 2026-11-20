@@ -362,9 +362,8 @@ pub(super) fn validate_manifest(m: &Manifest, version: &str) -> Result<()> {
     if m.commit.len() != 40 || !m.commit.bytes().all(|c| c.is_ascii_hexdigit()) {
         bail!("invalid release commit")
     }
-    if m.schema.min_read > m.schema.target || m.schema.max_read < m.schema.target {
-        bail!("invalid schema compatibility")
-    }
+    m.storage
+        .can_open(&steve_store_sqlite::compat::StorageState::Empty, false)?;
     for a in &m.assets {
         if a.size == 0
             || a.size > 512 * 1024 * 1024
@@ -419,8 +418,8 @@ pub(super) fn unpack(bytes: &[u8], dest: &Path, manifest: &Manifest) -> Result<(
     }
     let embedded: Manifest = read(&dest.join("release.json"))?;
     validate_manifest(&embedded, &manifest.version)?;
-    if embedded.commit != manifest.commit {
-        bail!("bundle commit mismatch")
+    if embedded.commit != manifest.commit || embedded.storage != manifest.storage {
+        bail!("bundle commit or storage mismatch")
     }
     let web: Value = read(&dest.join("web/dist/release.json"))?;
     if web["version"].as_str() != Some(&manifest.version)
