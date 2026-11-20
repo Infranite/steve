@@ -84,48 +84,11 @@ impl Meter {
         report: &UsageReport,
         before: impl FnOnce() -> Result<Option<f64>, StoreError>,
     ) -> Result<Option<f64>, StoreError> {
-        if report.scope == UsageScope::Background {
-            return Ok(None);
-        }
-        let Some(m) = &report.cost else {
-            return Ok(None);
-        };
-        if !m.currency.trim().eq_ignore_ascii_case("USD") {
-            tracing::warn!(
-                report = report.report_id,
-                currency = m.currency.chars().take(16).collect::<String>(),
-                "node usage: cost refused, currency is not USD"
-            );
-            return Ok(None);
-        }
-        let Some(c) = money(&m.decimal) else {
-            tracing::warn!(
-                report = report.report_id,
-                cost = m.decimal.chars().take(48).collect::<String>(),
-                "node usage: cost refused, not a non-negative decimal"
-            );
+        let Some(c) = Self::report_cost(report) else {
             return Ok(None);
         };
         let delta = if report.measurement == Measurement::Cumulative {
-            let epoch = report.meter_epoch.to_string();
-            let before = match self.high.get(&epoch) {
-                Some(b) => Some(*b),
-                None => before()?,
-            };
-            self.high.insert(epoch, before.map_or(c, |b| b.max(c)));
-            match before {
-                Some(b) if c < b => {
-                    tracing::warn!(
-                        report = report.report_id,
-                        before = b,
-                        now = c,
-                        "node usage: a running total went down; nothing added"
-                    );
-                    0.0
-                }
-                Some(b) => c - b,
-                None => c,
-            }
+            self.cumulative_delta(report, c, before)?
         } else {
             c
         };
@@ -150,6 +113,61 @@ impl Meter {
         }
         self.added += delta;
         Ok(Some(delta))
+    }
+
+    /// Validate the report's scope, currency and plain decimal before touching the meter.
+    fn report_cost(report: &UsageReport) -> Option<f64> {
+        if report.scope == UsageScope::Background {
+            return None;
+        }
+        let Some(m) = &report.cost else {
+            return None;
+        };
+        if !m.currency.trim().eq_ignore_ascii_case("USD") {
+            tracing::warn!(
+                report = report.report_id,
+                currency = m.currency.chars().take(16).collect::<String>(),
+                "node usage: cost refused, currency is not USD"
+            );
+            return None;
+        }
+        let Some(c) = money(&m.decimal) else {
+            tracing::warn!(
+                report = report.report_id,
+                cost = m.decimal.chars().take(48).collect::<String>(),
+                "node usage: cost refused, not a non-negative decimal"
+            );
+            return None;
+        };
+        Some(c)
+    }
+
+    /// Advance an epoch's high water even if its increment is subsequently refused by a cap.
+    fn cumulative_delta(
+        &mut self,
+        report: &UsageReport,
+        c: f64,
+        before: impl FnOnce() -> Result<Option<f64>, StoreError>,
+    ) -> Result<f64, StoreError> {
+        let epoch = report.meter_epoch.to_string();
+        let before = match self.high.get(&epoch) {
+            Some(b) => Some(*b),
+            None => before()?,
+        };
+        self.high.insert(epoch, before.map_or(c, |b| b.max(c)));
+        Ok(match before {
+            Some(b) if c < b => {
+                tracing::warn!(
+                    report = report.report_id,
+                    before = b,
+                    now = c,
+                    "node usage: a running total went down; nothing added"
+                );
+                0.0
+            }
+            Some(b) => c - b,
+            None => c,
+        })
     }
 }
 

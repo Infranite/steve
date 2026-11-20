@@ -321,99 +321,10 @@ impl NodeRuntime {
         let what = what(&method);
         match method.as_str() {
             "open_session" | "release_session" | "configure_session" => {
-                let held = match method.as_str() {
-                    "open_session" => "opening",
-                    "release_session" => "releasing",
-                    _ => "configuring",
-                };
-                if phase_in(tx, &session)?.is_none_or(|(p, a)| p != held || a.is_some()) {
-                    return Ok(());
-                }
-                if method == "release_session"
-                    && self.release_for_successor_in(tx, &session, &target)?
-                {
-                    return Ok(());
-                }
-                let rev = session_revision(tx, &session)?;
-                rt::session_cas_in(
-                    tx,
-                    &session,
-                    rev,
-                    &rt::SessionUpdate {
-                        phase: "released",
-                        active_attempt: None,
-                        release_pending: false,
-                    },
-                    now(),
-                )?;
-                system_in(
-                    tx,
-                    &session,
-                    &steve_i18n::stored(|| {
-                        steve_i18n::t!("hub.node.recovered_released", what = what)
-                    }),
-                )?;
-                // what waits for the session (queued, or a turn that waited for an open) opens it
-                let waiting: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM queued WHERE session_id=?1) OR EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=?1 AND state<>'finished' AND active_attempt IS NULL)",
-                    [&session],
-                    |r| r.get(0),
-                )?;
-                if waiting && !self.is_holding() {
-                    self.reopen_after_in(tx, &session, None)?;
-                }
+                self.retired_session_control_in(tx, &session, &target, &method, &what)?;
             }
             "prepare_workspace" => {
-                // the open that waited on it never goes: it waits on a new prepare instead
-                let opens: Vec<String> = {
-                    let mut st = tx.prepare(
-                        "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
-                    )?;
-                    st.query_map([&target], |r| r.get::<_, String>(0))?
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                for o in &opens {
-                    rt::merge_receipt_in(
-                        tx,
-                        o,
-                        ReceiptState::Rejected,
-                        false,
-                        &json!({ "reason": "its prepare was retired: it waits on a new one" }),
-                        now(),
-                    )?;
-                }
-                system_in(
-                    tx,
-                    &session,
-                    &steve_i18n::stored(|| {
-                        steve_i18n::t!("hub.node.recovered_prepare", what = what)
-                    }),
-                )?;
-                if !opens.is_empty() {
-                    let req: String = tx.query_row(
-                        "SELECT request FROM node_commands WHERE operation_id=?",
-                        [&target],
-                        |r| r.get(0),
-                    )?;
-                    let body = serde_json::from_str::<Command<Prepare>>(&req)?.body;
-                    let prep = uid(&format!("op_prep_{session}"));
-                    let (req, digest) = command(&prep, body)?;
-                    rt::insert_command_in(
-                        tx,
-                        &rt::NewCommand {
-                            operation: &prep,
-                            node: self.node_id.as_str(),
-                            method: "prepare_workspace",
-                            request: &req,
-                            digest: &digest,
-                            target_attempt: None,
-                            dependency: None,
-                        },
-                        self.clock.now(),
-                    )?;
-                    self.reopen_after_in(tx, &session, Some(&prep))?;
-                    self.wake_send.notify_one();
-                }
+                self.retired_prepare_in(tx, &session, &target, &what)?;
             }
             "abandon" => system_in(
                 tx,
@@ -437,6 +348,114 @@ impl NodeRuntime {
                 )?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Release the session held by a retired control, or preserve its successor's release fence.
+    fn retired_session_control_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        target: &str,
+        method: &str,
+        what: &str,
+    ) -> Result<(), StoreError> {
+        let held = match method {
+            "open_session" => "opening",
+            "release_session" => "releasing",
+            _ => "configuring",
+        };
+        if phase_in(tx, session)?.is_none_or(|(p, a)| p != held || a.is_some()) {
+            return Ok(());
+        }
+        if method == "release_session" && self.release_for_successor_in(tx, session, target)? {
+            return Ok(());
+        }
+        let rev = session_revision(tx, session)?;
+        rt::session_cas_in(
+            tx,
+            session,
+            rev,
+            &rt::SessionUpdate {
+                phase: "released",
+                active_attempt: None,
+                release_pending: false,
+            },
+            now(),
+        )?;
+        system_in(
+            tx,
+            session,
+            &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_released", what = what)),
+        )?;
+        // what waits for the session (queued, or a turn that waited for an open) opens it
+        let waiting: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queued WHERE session_id=?1) OR EXISTS(SELECT 1 FROM runtime_turns WHERE session_id=?1 AND state<>'finished' AND active_attempt IS NULL)",
+            [session],
+            |r| r.get(0),
+        )?;
+        if waiting && !self.is_holding() {
+            self.reopen_after_in(tx, session, None)?;
+        }
+        Ok(())
+    }
+
+    /// Reject opens tied to the retired prepare and give their replacement a new dependency.
+    fn retired_prepare_in(
+        &self,
+        tx: &Tx,
+        session: &str,
+        target: &str,
+        what: &str,
+    ) -> Result<(), StoreError> {
+        // the open that waited on it never goes: it waits on a new prepare instead
+        let opens: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT operation_id FROM node_commands WHERE dependency_operation=? AND state='pending'",
+            )?;
+            st.query_map([target], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for o in &opens {
+            rt::merge_receipt_in(
+                tx,
+                o,
+                ReceiptState::Rejected,
+                false,
+                &json!({ "reason": "its prepare was retired: it waits on a new one" }),
+                now(),
+            )?;
+        }
+        system_in(
+            tx,
+            session,
+            &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_prepare", what = what)),
+        )?;
+        if !opens.is_empty() {
+            let req: String = tx.query_row(
+                "SELECT request FROM node_commands WHERE operation_id=?",
+                [target],
+                |r| r.get(0),
+            )?;
+            let body = serde_json::from_str::<Command<Prepare>>(&req)?.body;
+            let prep = uid(&format!("op_prep_{session}"));
+            let (req, digest) = command(&prep, body)?;
+            rt::insert_command_in(
+                tx,
+                &rt::NewCommand {
+                    operation: &prep,
+                    node: self.node_id.as_str(),
+                    method: "prepare_workspace",
+                    request: &req,
+                    digest: &digest,
+                    target_attempt: None,
+                    dependency: None,
+                },
+                self.clock.now(),
+            )?;
+            self.reopen_after_in(tx, session, Some(&prep))?;
+            self.wake_send.notify_one();
         }
         Ok(())
     }

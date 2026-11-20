@@ -150,148 +150,10 @@ impl NodeRuntime {
         let changed = self
             .tx(|tx| {
                 let mut changed = 0;
-                // 1. commands: what the Node says of each one in flight
-                let cmds: Vec<(String, String, String, String)> = {
-                    let mut st = tx.prepare(
-                        "SELECT operation_id, state, method, request FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
-                    )?;
-                    st.query_map([self.node_id.as_str()], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?
-                };
-                for (op, state, method, request) in cmds {
-                    // the Node keeps the command's content hash as it computes it (method and
-                    // business fields, not the id), not the Hub's hash of the stored envelope
-                    let digest = serde_json::from_str::<Command<Value>>(&request)
-                        .map_err(conflict)?
-                        .digest(&method)
-                        .map_err(conflict)?;
-                    let unknown = |reason: &str| -> Result<Receipt, StoreError> {
-                        Ok(Receipt {
-                            operation: idv(op.clone())?,
-                            state: Observed::Unknown {
-                                reason: reason.into(),
-                            },
-                        })
-                    };
-                    let receipt = match entries.get(&op) {
-                        Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
-                        Some(_) => unknown("the Node holds another command under this id")?,
-                        // never got there: the sender sends the very same command
-                        None if state == "pending" => continue,
-                        None => unknown("the Node has no record of it")?,
-                    };
-                    let before: String = tx.query_row(
-                        "SELECT state FROM node_commands WHERE operation_id=?",
-                        [&op],
-                        |r| r.get(0),
-                    )?;
-                    if let Some(end) = self.receipt_in(tx, &receipt)? {
-                        ends.push(end);
-                    }
-                    let after: String = tx.query_row(
-                        "SELECT state FROM node_commands WHERE operation_id=?",
-                        [&op],
-                        |r| r.get(0),
-                    )?;
-                    if before != after {
-                        changed += 1;
-                    }
-                }
-                // 2. sessions the Node let go (a restart lets every one go, silently)
-                for (s, view) in &views {
-                    let gone = view
-                        .as_ref()
-                        .is_none_or(|v| v.phase == SessionPhase::Released);
-                    if gone
-                        && phase_in(tx, s)?.is_some_and(|(p, a)| p == "ready" && a.is_none())
-                    {
-                        let rev = session_revision(tx, s)?;
-                        rt::session_cas_in(
-                            tx,
-                            s,
-                            rev,
-                            &rt::SessionUpdate {
-                                phase: "released",
-                                active_attempt: None,
-                                release_pending: false,
-                            },
-                            now(),
-                        )?;
-                        changed += 1;
-                    }
-                }
-                // 3. cards nobody waits for any more
-                let cards: Vec<(String, String)> = {
-                    let mut st = tx.prepare(
-                        "SELECT d.id, d.subject_id FROM decisions d JOIN runtime_sessions s ON s.session_id=d.session_id WHERE s.node_id=? AND d.subject_type='tool_call' AND d.status='open'",
-                    )?;
-                    st.query_map([self.node_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
-                        .collect::<Result<Vec<_>, _>>()?
-                };
-                for (d, perm) in cards {
-                    if waiting.contains(&perm) {
-                        continue;
-                    }
-                    // a card with its row closes through it (an answer on its way was never applied)
-                    if let Some(row) = rt::permission_of_decision_in(tx, &d)? {
-                        if matches!(row.state.as_str(), "waiting" | "answering") {
-                            self.close_in(tx, &row, "Node 已不再等待这个授权")?;
-                            changed += 1;
-                        }
-                    } else if steve_store::decision_resolve_in(
-                        tx,
-                        &d,
-                        &json!({"superseded": "Node 已不再等待这个授权"}),
-                        "expired",
-                    )? {
-                        changed += 1;
-                    }
-                }
-                // 4. Node work the Hub has no record of (its database went back, say): counted
-                // and logged, its session held with a note; never given up on its own (D7)
-                let was = self.held.lock().unwrap().clone();
-                let mut held = HashSet::new();
-                let mut strangers = 0;
-                for (op, e) in &entries {
-                    if e.receipt.state.is_finished() {
-                        continue;
-                    }
-                    let known: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?)",
-                        rusqlite::params![op, self.node_id.as_str()],
-                        |r| r.get(0),
-                    )?;
-                    if known {
-                        continue;
-                    }
-                    strangers += 1;
-                    let session = e.execution.as_ref().and_then(exec_session);
-                    tracing::warn!(
-                        "node {}: {} {op} ({:?}) is not the Hub's; held",
-                        self.node_id,
-                        e.method,
-                        e.receipt.state.tag()
-                    );
-                    let Some(session) = session else { continue };
-                    let ours: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
-                        rusqlite::params![session, self.node_id.as_str()],
-                        |r| r.get(0),
-                    )?;
-                    if ours && held.insert(session.clone()) && !was.contains(&session) {
-                        system_in(tx, &session, &steve_i18n::stored(|| steve_i18n::t!("hub.node.stranger")))?;
-                        changed += 1;
-                    }
-                }
-                if strangers > 0 {
-                    tracing::warn!(
-                        "node {}: {strangers} operations the Hub has no record of, {} sessions held",
-                        self.node_id,
-                        held.len()
-                    );
-                }
+                self.reconcile_commands_in(tx, &entries, &mut ends, &mut changed)?;
+                self.reconcile_sessions_in(tx, &views, &mut changed)?;
+                self.reconcile_permissions_in(tx, &waiting, &mut changed)?;
+                let held = self.hold_stranger_work_in(tx, &entries, &mut changed)?;
                 Ok((changed, held))
             })
             .map_err(internal)?;
@@ -302,6 +164,187 @@ impl NodeRuntime {
         }
         self.wake_apply.notify_one();
         Ok(changed)
+    }
+
+    fn reconcile_commands_in(
+        &self,
+        tx: &Tx,
+        entries: &HashMap<String, SnapshotEntry>,
+        ends: &mut Vec<End>,
+        changed: &mut usize,
+    ) -> Result<(), StoreError> {
+        // 1. commands: what the Node says of each one in flight
+        let cmds: Vec<(String, String, String, String)> = {
+            let mut st = tx.prepare(
+                "SELECT operation_id, state, method, request FROM node_commands WHERE node_id=? AND state IN ('pending','accepted','active','unknown') ORDER BY created, rowid",
+            )?;
+            st.query_map([self.node_id.as_str()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        for (op, state, method, request) in cmds {
+            // the Node keeps the command's content hash as it computes it (method and
+            // business fields, not the id), not the Hub's hash of the stored envelope
+            let digest = serde_json::from_str::<Command<Value>>(&request)
+                .map_err(conflict)?
+                .digest(&method)
+                .map_err(conflict)?;
+            let unknown = |reason: &str| -> Result<Receipt, StoreError> {
+                Ok(Receipt {
+                    operation: idv(op.clone())?,
+                    state: Observed::Unknown {
+                        reason: reason.into(),
+                    },
+                })
+            };
+            let receipt = match entries.get(&op) {
+                Some(e) if e.digest == digest && e.method == method => e.receipt.clone(),
+                Some(_) => unknown("the Node holds another command under this id")?,
+                // never got there: the sender sends the very same command
+                None if state == "pending" => continue,
+                None => unknown("the Node has no record of it")?,
+            };
+            let before: String = tx.query_row(
+                "SELECT state FROM node_commands WHERE operation_id=?",
+                [&op],
+                |r| r.get(0),
+            )?;
+            if let Some(end) = self.receipt_in(tx, &receipt)? {
+                ends.push(end);
+            }
+            let after: String = tx.query_row(
+                "SELECT state FROM node_commands WHERE operation_id=?",
+                [&op],
+                |r| r.get(0),
+            )?;
+            if before != after {
+                *changed += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_sessions_in(
+        &self,
+        tx: &Tx,
+        views: &[(String, Option<SessionView>)],
+        changed: &mut usize,
+    ) -> Result<(), StoreError> {
+        // 2. sessions the Node let go (a restart lets every one go, silently)
+        for (s, view) in views {
+            let gone = view
+                .as_ref()
+                .is_none_or(|v| v.phase == SessionPhase::Released);
+            if gone && phase_in(tx, s)?.is_some_and(|(p, a)| p == "ready" && a.is_none()) {
+                let rev = session_revision(tx, s)?;
+                rt::session_cas_in(
+                    tx,
+                    s,
+                    rev,
+                    &rt::SessionUpdate {
+                        phase: "released",
+                        active_attempt: None,
+                        release_pending: false,
+                    },
+                    now(),
+                )?;
+                *changed += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_permissions_in(
+        &self,
+        tx: &Tx,
+        waiting: &HashSet<String>,
+        changed: &mut usize,
+    ) -> Result<(), StoreError> {
+        // 3. cards nobody waits for any more
+        let cards: Vec<(String, String)> = {
+            let mut st = tx.prepare(
+                "SELECT d.id, d.subject_id FROM decisions d JOIN runtime_sessions s ON s.session_id=d.session_id WHERE s.node_id=? AND d.subject_type='tool_call' AND d.status='open'",
+            )?;
+            st.query_map([self.node_id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (d, perm) in cards {
+            if waiting.contains(&perm) {
+                continue;
+            }
+            // a card with its row closes through it (an answer on its way was never applied)
+            if let Some(row) = rt::permission_of_decision_in(tx, &d)? {
+                if matches!(row.state.as_str(), "waiting" | "answering") {
+                    self.close_in(tx, &row, "Node 已不再等待这个授权")?;
+                    *changed += 1;
+                }
+            } else if steve_store::decision_resolve_in(
+                tx,
+                &d,
+                &json!({"superseded": "Node 已不再等待这个授权"}),
+                "expired",
+            )? {
+                *changed += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn hold_stranger_work_in(
+        &self,
+        tx: &Tx,
+        entries: &HashMap<String, SnapshotEntry>,
+        changed: &mut usize,
+    ) -> Result<HashSet<String>, StoreError> {
+        // 4. Node work the Hub has no record of (its database went back, say): counted
+        // and logged, its session held with a note; never given up on its own (D7)
+        let was = self.held.lock().unwrap().clone();
+        let mut held = HashSet::new();
+        let mut strangers = 0;
+        for (op, e) in entries {
+            if e.receipt.state.is_finished() {
+                continue;
+            }
+            let known: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM node_commands WHERE operation_id=? AND node_id=?)",
+                rusqlite::params![op, self.node_id.as_str()],
+                |r| r.get(0),
+            )?;
+            if known {
+                continue;
+            }
+            strangers += 1;
+            let session = e.execution.as_ref().and_then(exec_session);
+            tracing::warn!(
+                "node {}: {} {op} ({:?}) is not the Hub's; held",
+                self.node_id,
+                e.method,
+                e.receipt.state.tag()
+            );
+            let Some(session) = session else { continue };
+            let ours: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=? AND node_id=?)",
+                rusqlite::params![session, self.node_id.as_str()],
+                |r| r.get(0),
+            )?;
+            if ours && held.insert(session.clone()) && !was.contains(&session) {
+                system_in(
+                    tx,
+                    &session,
+                    &steve_i18n::stored(|| steve_i18n::t!("hub.node.stranger")),
+                )?;
+                *changed += 1;
+            }
+        }
+        if strangers > 0 {
+            tracing::warn!(
+                "node {}: {strangers} operations the Hub has no record of, {} sessions held",
+                self.node_id,
+                held.len()
+            );
+        }
+        Ok(held)
     }
 
     /// A `Released` view from before the Hub's last open of the session (that open's own view

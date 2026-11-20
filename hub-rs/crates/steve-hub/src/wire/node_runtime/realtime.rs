@@ -3,6 +3,12 @@
 
 use super::*;
 
+struct OutputSample {
+    kind: &'static str,
+    units: i64,
+    bad_clock: bool,
+}
+
 impl NodeRuntime {
     pub(super) fn realtime_in(&self, tx: &Tx, ev: &NodeEvent) -> Result<(), StoreError> {
         let Subject::Execution(ExecutionRef::Turn {
@@ -16,6 +22,46 @@ impl NodeRuntime {
             rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64],
             |r| r.get(0),
         )?;
+        let Some(started) = self.realtime_attempt_in(tx, ev, session, attempt, received)? else {
+            return Ok(());
+        };
+        let last: Option<i64> = tx.query_row(
+            "SELECT MAX(at) FROM realtime_output_samples WHERE attempt_id=?",
+            [attempt.as_str()],
+            |r| r.get(0),
+        )?;
+        // A bad clock cannot put output into the future or reverse a block's time. Retain the
+        // source timestamp for audit, but only an unknown marker (zero units) uses arrival time.
+        let bad_clock = ev.at.0 < started
+            || ev.at.0 <= 0
+            || ev.at.0 > received + 1_000
+            || last.is_some_and(|last| ev.at.0 < last);
+        // In particular, a corrupt AttemptEnded cannot cut off already collected output or its
+        // own gap. A valid late stop keeps source time; an invalid one uses this receipt boundary.
+        let effective_at = if bad_clock {
+            received.max(started).max(last.unwrap_or(started))
+        } else {
+            ev.at.0
+        };
+        let sample = self.realtime_body_in(tx, ev, attempt, bad_clock, effective_at)?;
+        tx.execute(
+            "INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
+                ev.id.as_str(),attempt.as_str(),effective_at,ev.at.0,received,sample.kind,sample.units],
+        )?;
+        Ok(())
+    }
+
+    /// Establish the attempt baseline and admit only a live, previously unseen sample.
+    fn realtime_attempt_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        session: &SessionId,
+        attempt: &AttemptId,
+        received: i64,
+    ) -> Result<Option<i64>, StoreError> {
         // Even without a start baseline (an upgrade mid-attempt), persist Node stop evidence.
         // Seeing more events or a Hub-side settle must never manufacture a complete baseline.
         let started_here = matches!(ev.body, EventBody::AttemptStarted);
@@ -47,10 +93,10 @@ impl NodeRuntime {
             [attempt.as_str(),session.as_str(),self.node_id.as_str()], |r| Ok((r.get(0)?,r.get(1)?)),
         ).optional()?;
         let Some((started, ended)) = baseline else {
-            return Ok(());
+            return Ok(None);
         };
         if ended.is_some() {
-            return Ok(()); // a new position after a confirmed end is not a new output interval
+            return Ok(None); // a new position after a confirmed end is not a new output interval
         }
         let seen: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM realtime_output_samples WHERE node_id=? AND (event_id=? OR (stream=? AND epoch=? AND seq=?)))",
@@ -58,28 +104,25 @@ impl NodeRuntime {
             |r| r.get(0),
         )?;
         if seen {
-            return Ok(());
+            return Ok(None);
         }
-        let last: Option<i64> = tx.query_row(
-            "SELECT MAX(at) FROM realtime_output_samples WHERE attempt_id=?",
-            [attempt.as_str()],
-            |r| r.get(0),
-        )?;
-        // A bad clock cannot put output into the future or reverse a block's time. Retain the
-        // source timestamp for audit, but only an unknown marker (zero units) uses arrival time.
-        let bad_clock = ev.at.0 < started
-            || ev.at.0 <= 0
-            || ev.at.0 > received + 1_000
-            || last.is_some_and(|last| ev.at.0 < last);
-        // In particular, a corrupt AttemptEnded cannot cut off already collected output or its
-        // own gap. A valid late stop keeps source time; an invalid one uses this receipt boundary.
-        let effective_at = if bad_clock {
-            received.max(started).max(last.unwrap_or(started))
-        } else {
-            ev.at.0
+        Ok(Some(started))
+    }
+
+    /// Classify the event's output evidence without treating final accounting as streamed text.
+    fn realtime_body_in(
+        &self,
+        tx: &Tx,
+        ev: &NodeEvent,
+        attempt: &AttemptId,
+        bad_clock: bool,
+        effective_at: i64,
+    ) -> Result<OutputSample, StoreError> {
+        let mut sample = OutputSample {
+            kind: if bad_clock { "gap" } else { "activity" },
+            units: 0,
+            bad_clock,
         };
-        let mut kind = if bad_clock { "gap" } else { "activity" };
-        let mut units = 0;
         match &ev.body {
             EventBody::MessageStarted {
                 message,
@@ -102,40 +145,19 @@ impl NodeRuntime {
                 utf8_offset,
                 text,
             } => {
-                let checkpoint: Option<(String,i64)> = tx.query_row(
-                    "SELECT role,utf8_end FROM realtime_output_blocks WHERE attempt_id=? AND message=? AND block=?",
-                    [attempt.as_str(),message,block], |r| Ok((r.get(0)?,r.get(1)?)),
-                ).optional()?;
-                if let Some((role, end)) = checkpoint {
-                    let offset = i64::try_from(*utf8_offset).ok();
-                    let next = offset.and_then(|o| o.checked_add(text.len() as i64));
-                    if let (Some(offset), Some(next)) = (offset, next) {
-                        if offset > end {
-                            kind = "gap"; // missing prefix: never pretend this is a complete rate
-                        } else if next > end && (role == "assistant" || role == "thought") {
-                            if let Some(suffix) = text.get((end - offset) as usize..) {
-                                if !bad_clock {
-                                    units = steve_stats::realtime::text_units(suffix);
-                                    kind = "text";
-                                }
-                            } else {
-                                kind = "gap";
-                            } // overlapping UTF-8 code point
-                        }
-                        tx.execute(
-                            "UPDATE realtime_output_blocks SET utf8_end=MAX(utf8_end,?) WHERE attempt_id=? AND message=? AND block=?",
-                            rusqlite::params![next,attempt.as_str(),message,block],
-                        )?;
-                    } else {
-                        kind = "gap";
-                    }
-                } else {
-                    kind = "gap"; // no message/role baseline, including an upgrade mid-message
-                }
+                Self::realtime_text_in(
+                    tx,
+                    attempt,
+                    message,
+                    block,
+                    *utf8_offset,
+                    text,
+                    &mut sample,
+                )?;
             }
             EventBody::AttemptEnded { .. } => {
                 if !bad_clock {
-                    kind = "end";
+                    sample.kind = "end";
                 }
                 tx.execute(
                     "UPDATE realtime_output_attempts SET ended=COALESCE(ended,?) WHERE attempt_id=?",
@@ -148,7 +170,7 @@ impl NodeRuntime {
                     "event_too_large" | "adapter_exited" | "reader_failed"
                 ) =>
             {
-                kind = "gap";
+                sample.kind = "gap";
             }
             EventBody::Usage { report }
                 if report.measurement == Measurement::Final
@@ -160,19 +182,56 @@ impl NodeRuntime {
                     [attempt.as_str()], |r| r.get(0),
                 )?;
                 if !observed {
-                    kind = "gap";
+                    sample.kind = "gap";
                 } // final accounting proves output existed, but no text was collected
             }
             // In particular Usage::Final is merely activity with zero units. A context meter is
             // not an output meter, even when the protocol names its measurement cumulative.
             _ => {}
         }
-        tx.execute(
-            "INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            rusqlite::params![self.node_id.as_str(),ev.cursor.stream.as_str(),ev.cursor.epoch.as_str(),ev.cursor.seq as i64,
-                ev.id.as_str(),attempt.as_str(),effective_at,ev.at.0,received,kind,units],
-        )?;
+        Ok(sample)
+    }
+
+    /// Advance the block's byte checkpoint while counting only valid new assistant/thought text.
+    fn realtime_text_in(
+        tx: &Tx,
+        attempt: &AttemptId,
+        message: &str,
+        block: &str,
+        utf8_offset: u64,
+        text: &str,
+        sample: &mut OutputSample,
+    ) -> Result<(), StoreError> {
+        let checkpoint: Option<(String,i64)> = tx.query_row(
+            "SELECT role,utf8_end FROM realtime_output_blocks WHERE attempt_id=? AND message=? AND block=?",
+            [attempt.as_str(),message,block], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        if let Some((role, end)) = checkpoint {
+            let offset = i64::try_from(utf8_offset).ok();
+            let next = offset.and_then(|o| o.checked_add(text.len() as i64));
+            if let (Some(offset), Some(next)) = (offset, next) {
+                if offset > end {
+                    sample.kind = "gap"; // missing prefix: never pretend this is a complete rate
+                } else if next > end && (role == "assistant" || role == "thought") {
+                    if let Some(suffix) = text.get((end - offset) as usize..) {
+                        if !sample.bad_clock {
+                            sample.units = steve_stats::realtime::text_units(suffix);
+                            sample.kind = "text";
+                        }
+                    } else {
+                        sample.kind = "gap";
+                    } // overlapping UTF-8 code point
+                }
+                tx.execute(
+                    "UPDATE realtime_output_blocks SET utf8_end=MAX(utf8_end,?) WHERE attempt_id=? AND message=? AND block=?",
+                    rusqlite::params![next,attempt.as_str(),message,block],
+                )?;
+            } else {
+                sample.kind = "gap";
+            }
+        } else {
+            sample.kind = "gap"; // no message/role baseline, including an upgrade mid-message
+        }
         Ok(())
     }
 }
