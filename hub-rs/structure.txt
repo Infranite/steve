@@ -101,7 +101,6 @@ steve-github	crates/steve-github/src/poll.rs	too_many_lines	117
 steve-github	crates/steve-github/src/repos.rs	cognitive_complexity	38
 steve-github	crates/steve-github/src/repos.rs	too_many_lines	103
 steve-github	crates/steve-github/src/sync.rs	too_many_lines	185,119,117,109
-steve-hub	crates/steve-hub/src/a2a_server.rs	too_many_lines	154
 steve-hub	crates/steve-hub/src/access.rs	cognitive_complexity	31,27
 steve-hub	crates/steve-hub/src/access.rs	too_many_lines	205,132
 steve-hub	crates/steve-hub/src/api/harness_updates.rs	too_many_lines	155,103
@@ -151,7 +150,6 @@ steve-hub	crates/steve-hub/src/wire/node_runtime/send.rs	cognitive_complexity	29
 steve-hub	crates/steve-hub/src/wire/node_runtime/send.rs	too_many_lines	152,136,117
 steve-hub	crates/steve-hub/src/wire/node_tools.rs	too_many_lines	207
 steve-hub	crates/steve-hub/src/wire/outbox.rs	cognitive_complexity	31
-steve-hub	crates/steve-hub/src/wire/outside_mcp.rs	too_many_lines	138
 steve-hub	crates/steve-hub/src/wire/research.rs	too_many_lines	147,113
 steve-hub	crates/steve-hub/src/wire/tool_service.rs	cognitive_complexity	33
 steve-install	crates/steve-install/src/release.rs	too_many_lines	149

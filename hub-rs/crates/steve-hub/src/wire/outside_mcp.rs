@@ -285,94 +285,12 @@ pub async fn call(x: &Extra, o: &Outside, name: &str, args: &Value) -> Result<St
 }
 
 async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> {
-    let obj = args.as_object().cloned().unwrap_or_default();
-    if obj
-        .keys()
-        .any(|k| !["goal", "title", "bot", "team", "deps"].contains(&k.as_str()))
-    {
-        return Err("Invalid arguments: unexpected property.".into());
-    }
-    let goal = text_arg(args, "goal")
-        .ok_or("Invalid arguments: goal must be a non-empty string.")?
-        .to_string();
-    let deps: Vec<String> = match args.get("deps") {
-        None => vec![],
-        Some(v) => serde_json::from_value(v.clone())
-            .map_err(|_| "Invalid arguments: deps must be an array of item IDs.")?,
-    };
-    if deps.len() > 200 || deps.iter().any(|d| d.is_empty() || d.len() > 80) {
-        return Err("Invalid arguments: invalid prerequisite item IDs.".into());
-    }
-    if deps.iter().collect::<std::collections::HashSet<_>>().len() != deps.len() {
-        return Err("Invalid arguments: duplicate prerequisite item IDs.".into());
-    }
-    for dep in &deps {
-        x.store
-            .items()
-            .get(dep)
-            .map_err(|e| e.to_string())?
-            .filter(|i| i.workspace_id == o.ws && i.kind == "task")
-            .ok_or("Prerequisite item not found in this workspace.")?;
-    }
+    let goal = validate_create_goal(args)?;
+    let deps = validate_prerequisites(&x.store, &o.ws, args)?;
     let title = text_arg(args, "title").map(str::to_string);
-    let team = match args.get("team") {
-        None => None,
-        Some(_) => {
-            let wanted = text_arg(args, "team")
-                .ok_or("Invalid arguments: team must be a non-empty string.")?;
-            let teams = x
-                .store
-                .reader(|c| steve_store::bot_dispatch::teams(c, &o.ws))
-                .map_err(|e| e.to_string())?;
-            if wanted == steve_store::bot_dispatch::LEGACY || teams.iter().any(|t| t.id == wanted) {
-                Some(wanted.to_string())
-            } else {
-                let mut matches = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(wanted));
-                match (matches.next(), matches.next()) {
-                    (Some(t), None) => Some(t.id.clone()),
-                    _ => {
-                        return Err(
-                            "No unambiguous Bot Team by that id or name in this workspace.".into(),
-                        );
-                    }
-                }
-            }
-        }
-    };
+    let team = resolve_team(&x.store, &o.ws, args)?;
     let core = x.tools.core.clone();
-    // a Bot named by id or name, of this workspace
-    let bot = match text_arg(args, "bot") {
-        None => None,
-        Some(b) => {
-            let (store, ws, b) = (x.store.clone(), o.ws.clone(), b.to_string());
-            let found = tokio::task::spawn_blocking(move || {
-                store.reader(|c| {
-                    let mut st = c.prepare(
-                        "SELECT b.id, b.name FROM bots b WHERE b.deleted = 0 AND b.enabled = 1 AND (b.workspace_id = ?1
-                           OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1)) ORDER BY b.name",
-                    )?;
-                    let v = st
-                        .query_map([&ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok::<_, steve_store::StoreError>(v)
-                })
-            })
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-            match found
-                .iter()
-                .find(|(id, name)| id == &b || name.eq_ignore_ascii_case(&b))
-            {
-                Some((id, _)) => Some(id.clone()),
-                None => {
-                    let names: Vec<String> =
-                        found.iter().map(|(id, n)| format!("{n} ({id})")).collect();
-                    return Err(format!("No Bot {b} here. The Bots: {}.", names.join(", ")));
-                }
-            }
-        }
-    };
+    let bot = resolve_bot(&x.store, &o.ws, args).await?;
     let routed = if bot.is_none() || title.is_none() {
         Some(
             core.route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
@@ -422,6 +340,108 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
         item.bot_id.as_deref().unwrap_or("Steve"),
         item.status
     ))
+}
+
+/// Validate the public create shape and normalize the required goal.
+fn validate_create_goal(args: &Value) -> Result<String, String> {
+    let obj = args.as_object().cloned().unwrap_or_default();
+    if obj
+        .keys()
+        .any(|k| !["goal", "title", "bot", "team", "deps"].contains(&k.as_str()))
+    {
+        return Err("Invalid arguments: unexpected property.".into());
+    }
+    Ok(text_arg(args, "goal")
+        .ok_or("Invalid arguments: goal must be a non-empty string.")?
+        .to_string())
+}
+
+/// Validate every dependency before resolving dispatch or creating any rows.
+fn validate_prerequisites(store: &Store, ws: &str, args: &Value) -> Result<Vec<String>, String> {
+    let deps: Vec<String> = match args.get("deps") {
+        None => vec![],
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|_| "Invalid arguments: deps must be an array of item IDs.")?,
+    };
+    if deps.len() > 200 || deps.iter().any(|d| d.is_empty() || d.len() > 80) {
+        return Err("Invalid arguments: invalid prerequisite item IDs.".into());
+    }
+    if deps.iter().collect::<std::collections::HashSet<_>>().len() != deps.len() {
+        return Err("Invalid arguments: duplicate prerequisite item IDs.".into());
+    }
+    for dep in &deps {
+        store
+            .items()
+            .get(dep)
+            .map_err(|e| e.to_string())?
+            .filter(|i| i.workspace_id == ws && i.kind == "task")
+            .ok_or("Prerequisite item not found in this workspace.")?;
+    }
+    Ok(deps)
+}
+
+/// Resolve an explicit team by id first, otherwise by an unambiguous name.
+fn resolve_team(store: &Store, ws: &str, args: &Value) -> Result<Option<String>, String> {
+    Ok(match args.get("team") {
+        None => None,
+        Some(_) => {
+            let wanted = text_arg(args, "team")
+                .ok_or("Invalid arguments: team must be a non-empty string.")?;
+            let teams = store
+                .reader(|c| steve_store::bot_dispatch::teams(c, ws))
+                .map_err(|e| e.to_string())?;
+            if wanted == steve_store::bot_dispatch::LEGACY || teams.iter().any(|t| t.id == wanted) {
+                Some(wanted.to_string())
+            } else {
+                let mut matches = teams.iter().filter(|t| t.name.eq_ignore_ascii_case(wanted));
+                match (matches.next(), matches.next()) {
+                    (Some(t), None) => Some(t.id.clone()),
+                    _ => {
+                        return Err(
+                            "No unambiguous Bot Team by that id or name in this workspace.".into(),
+                        );
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Resolve an enabled, live Bot visible in this workspace, in the original name order.
+async fn resolve_bot(store: &Store, ws: &str, args: &Value) -> Result<Option<String>, String> {
+    // a Bot named by id or name, of this workspace
+    Ok(match text_arg(args, "bot") {
+        None => None,
+        Some(b) => {
+            let (store, ws, b) = (store.clone(), ws.to_string(), b.to_string());
+            let found = tokio::task::spawn_blocking(move || {
+                store.reader(|c| {
+                    let mut st = c.prepare(
+                        "SELECT b.id, b.name FROM bots b WHERE b.deleted = 0 AND b.enabled = 1 AND (b.workspace_id = ?1
+                           OR EXISTS (SELECT 1 FROM bot_workspaces w WHERE w.bot_id = b.id AND w.workspace_id = ?1)) ORDER BY b.name",
+                    )?;
+                    let v = st
+                        .query_map([&ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, steve_store::StoreError>(v)
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+            match found
+                .iter()
+                .find(|(id, name)| id == &b || name.eq_ignore_ascii_case(&b))
+            {
+                Some((id, _)) => Some(id.clone()),
+                None => {
+                    let names: Vec<String> =
+                        found.iter().map(|(id, n)| format!("{n} ({id})")).collect();
+                    return Err(format!("No Bot {b} here. The Bots: {}.", names.join(", ")));
+                }
+            }
+        }
+    })
 }
 
 fn rpc(id: &Value, result: Value) -> Response {
