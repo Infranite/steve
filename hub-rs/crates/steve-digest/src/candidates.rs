@@ -131,10 +131,23 @@ pub fn find(
     let mut acc = Acc {
         out: BTreeMap::new(),
     };
-    let key = conv.key();
     let in_window: Vec<&crate::facts::Line> = b.lines.iter().filter(|l| l.pos > 0).collect();
     let first_at = in_window.first().map(|l| l.at).unwrap_or(0);
+    add_thread_candidates(c, ws, conv, b, &mut acc)?;
+    add_referenced_candidates(c, ws, b, &mut acc)?;
+    add_people_candidates(c, ws, b, first_at, &mut acc)?;
+    add_fulltext_candidates(c, ws, &in_window, now, &mut acc)?;
+    Ok(rank_candidates(acc))
+}
 
+fn add_thread_candidates(
+    c: &Connection,
+    ws: &str,
+    conv: &ConvRef,
+    b: &Built,
+    acc: &mut Acc,
+) -> Result<()> {
+    let key = conv.key();
     // same reply chain or topic: segments of this conversation sharing a chain
     if !b.chains.is_empty() {
         let mut st = c.prepare_cached(
@@ -182,7 +195,10 @@ pub fn find(
             }
         }
     }
+    Ok(())
+}
 
+fn add_referenced_candidates(c: &Connection, ws: &str, b: &Built, acc: &mut Acc) -> Result<()> {
     // referenced items and the matters linked to them
     for no in &b.items {
         let title: String = c
@@ -202,7 +218,16 @@ pub fn find(
             }
         }
     }
+    Ok(())
+}
 
+fn add_people_candidates(
+    c: &Connection,
+    ws: &str,
+    b: &Built,
+    first_at: i64,
+    acc: &mut Acc,
+) -> Result<()> {
     // the same people, close in time (bots and you do not count)
     let people: Vec<&str> = b
         .parties
@@ -252,7 +277,16 @@ pub fn find(
             }
         }
     }
+    Ok(())
+}
 
+fn add_fulltext_candidates(
+    c: &Connection,
+    ws: &str,
+    in_window: &[&crate::facts::Line],
+    now: i64,
+    acc: &mut Acc,
+) -> Result<()> {
     // full text: matters and memories
     let text: String = in_window
         .iter()
@@ -280,9 +314,12 @@ pub fn find(
                 );
             }
         }
-        add_memory_candidates(c, ws, expr, now, &mut acc)?;
+        add_memory_candidates(c, ws, expr, now, acc)?;
     }
+    Ok(())
+}
 
+fn rank_candidates(acc: Acc) -> Vec<Candidate> {
     let mut all: Vec<Candidate> = acc.out.into_values().collect();
     all.sort_by(|a, b| {
         b.score
@@ -299,7 +336,7 @@ pub fn find(
     for x in &mut all {
         x.score = (x.score * 100.0).round() / 100.0;
     }
-    Ok(all)
+    all
 }
 
 fn add_memory_candidates(
