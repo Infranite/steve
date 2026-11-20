@@ -541,25 +541,7 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
         }
         o
     } else {
-        let n = name.clone().unwrap_or_else(|| match &t.seen_in {
-            Some(w) if !w.trim().is_empty() => {
-                format!("{EXTERNAL_ORG}（{} 里的成员）", clip(w, 40))
-            }
-            _ => EXTERNAL_ORG.to_string(),
-        });
-        let mut p = NewParty::new("org", &n, actor);
-        p.source = "sync".into();
-        p.source_ref = Some(key.to_string());
-        let o = people::insert(tx, ws, &p)?;
-        steve_store::base::audit(
-            tx,
-            ws,
-            actor,
-            "party.create",
-            &o.id,
-            &json!({ "type": "org", "tenant": key }),
-        )?;
-        o
+        new_external_tenant(tx, ws, actor, key, t, &name)?
     };
     let viewer = Viewer::load(tx, ws, actor)?;
     svc::record_tx(
@@ -590,6 +572,35 @@ pub fn tenant_org(tx: &Tx, ws: &str, actor: &str, t: &TenantHint) -> ApiResult<S
 /// workspace — and never one a person set, whatever it says ([`crate::contacts::profile::org_name`]).
 fn placeholder(c: &rusqlite::Connection, ws: &str, p: &Party) -> ApiResult<bool> {
     crate::contacts::profile::org_name_replaceable(c, ws, p)
+}
+
+fn new_external_tenant(
+    tx: &Tx,
+    ws: &str,
+    actor: &str,
+    key: &str,
+    t: &TenantHint,
+    name: &Option<String>,
+) -> ApiResult<Party> {
+    let n = name.clone().unwrap_or_else(|| match &t.seen_in {
+        Some(w) if !w.trim().is_empty() => {
+            format!("{EXTERNAL_ORG}（{} 里的成员）", clip(w, 40))
+        }
+        _ => EXTERNAL_ORG.to_string(),
+    });
+    let mut p = NewParty::new("org", &n, actor);
+    p.source = "sync".into();
+    p.source_ref = Some(key.to_string());
+    let o = people::insert(tx, ws, &p)?;
+    steve_store::base::audit(
+        tx,
+        ws,
+        actor,
+        "party.create",
+        &o.id,
+        &json!({ "type": "org", "tenant": key }),
+    )?;
+    Ok(o)
 }
 
 #[cfg(test)]

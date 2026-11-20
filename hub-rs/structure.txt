@@ -132,11 +132,8 @@ steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	34,28
 steve-install	crates/steve-install/src/setup.rs	too_many_lines	143,114
 steve-install	crates/steve-install/src/signing.rs	too_many_lines	154
 steve-mail	crates/steve-mail/src/store.rs	too_many_lines	149
-steve-modules	crates/steve-modules/src/accounts/connections/integration.rs	too_many_lines	108
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive_complexity	26
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	101
-steve-modules	crates/steve-modules/src/accounts/enrich.rs	too_many_lines	105
-steve-modules	crates/steve-modules/src/vault/inject.rs	too_many_lines	126
 steve-node	crates/steve-node/src/actor.rs	cognitive_complexity	44,40,35
 steve-node	crates/steve-node/src/actor.rs	too_many_lines	413,204,171,114,106
 steve-node	crates/steve-node/src/adapter_updates.rs	cognitive_complexity	35
