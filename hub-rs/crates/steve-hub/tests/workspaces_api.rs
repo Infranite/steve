@@ -177,6 +177,6 @@ async fn the_owner_reads_where_the_database_and_its_copies_are() {
             .join("backups")
     );
     assert_eq!(v["daily"], false, "{v}");
-    assert_eq!(v["keep_days"], 14, "{v}");
+    assert_eq!(v["keep_days"], 7, "{v}");
     assert_eq!(v["last"], Value::Null, "{v}");
 }
