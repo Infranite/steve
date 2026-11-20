@@ -32,8 +32,11 @@ pub struct History<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
-    TurnCapacity,
+    TurnCapacity {
+        first_capacity_failure: Option<HubTime>,
+    },
     TurnInterrupted,
+    TurnGatewayTransient,
     TurnInterruptedAfterActing,
     ConfigStale,
 }
@@ -78,17 +81,6 @@ impl<'a> History<'a> {
         }
         Ok(end)
     }
-
-    pub fn first_failure(self) -> Result<HubTime, Refusal> {
-        self.last()?;
-        self.revisions
-            .iter()
-            .filter_map(|r| r.settled)
-            .filter(|s| s.terminal != Terminal::FinishedOk)
-            .map(|s| s.at)
-            .min()
-            .ok_or(Refusal::InvalidHistory)
-    }
 }
 
 /// Only this function advances the ordinal; it rechecks a policy's revision/time budget.
@@ -96,23 +88,19 @@ impl<'a> History<'a> {
 pub fn next_revision(history: History<'_>, why: RevisionWhy) -> Result<IntentKey, Refusal> {
     if let RevisionWhy::Policy { rule, now } = why {
         let limit = match (rule, history.intent) {
-            (Rule::TurnCapacity, Intent::StartTurn(_)) => 3,
-            (Rule::TurnInterrupted, Intent::StartTurn(_)) => 2,
+            (Rule::TurnCapacity { .. }, Intent::StartTurn(_)) => 3,
+            (Rule::TurnInterrupted | Rule::TurnGatewayTransient, Intent::StartTurn(_)) => 2,
             (Rule::ConfigStale, Intent::Configure(_)) => 2,
             (Rule::TurnInterruptedAfterActing, _) => return Err(Refusal::MustCheckAfterActing),
             _ => return Err(Refusal::WrongIntent),
         };
         if !history.revisions.is_empty() {
             history.failed(limit, now)?;
-            if rule == Rule::TurnCapacity {
-                let deadline = history
-                    .first_failure()?
-                    .0
-                    .checked_add(super::turn::CAPACITY_WINDOW_MS)
-                    .ok_or(Refusal::InvalidTime)?;
-                if now.0 >= deadline {
-                    return Err(Refusal::Deadline);
-                }
+            if let Rule::TurnCapacity {
+                first_capacity_failure,
+            } = rule
+            {
+                super::time::capacity_deadline(now, first_capacity_failure)?;
             }
         }
     }
@@ -167,7 +155,12 @@ mod tests {
                     intent: &intent,
                     revisions: &rows
                 },
-                policy(Rule::TurnCapacity, 2000)
+                policy(
+                    Rule::TurnCapacity {
+                        first_capacity_failure: Some(HubTime(1000))
+                    },
+                    2000
+                )
             ),
             Err(Refusal::Budget)
         );
@@ -178,7 +171,12 @@ mod tests {
                     intent: &intent,
                     revisions: &rows
                 },
-                policy(Rule::TurnCapacity, 901_000)
+                policy(
+                    Rule::TurnCapacity {
+                        first_capacity_failure: Some(HubTime(1000))
+                    },
+                    901_000
+                )
             ),
             Err(Refusal::Deadline)
         );
@@ -208,7 +206,12 @@ mod tests {
                     intent: &intent,
                     revisions: &rows
                 },
-                policy(Rule::TurnCapacity, 900_999)
+                policy(
+                    Rule::TurnCapacity {
+                        first_capacity_failure: Some(HubTime(1000))
+                    },
+                    900_999
+                )
             )
             .unwrap()
             .revision,

@@ -29,14 +29,17 @@ pub fn effects(from: State, on: Input, to: State) -> Vec<Effect> {
     if from == to {
         return vec![];
     }
-    let mut effects = vec![Effect::PersistState, Effect::ReleaseLease];
+    let mut effects = vec![Effect::PersistState];
+    if from == State::Sending {
+        effects.push(Effect::ReleaseLease);
+    }
     if to == State::WaitingRetry {
         effects.push(Effect::ArmDue);
     }
     if to == State::Unknown {
         effects.push(Effect::Reconcile);
     }
-    if TABLE.terminal.contains(&to) {
+    if TABLE.terminal.iter().any(|state| *state == to) {
         effects.push(Effect::NotifySettled);
     }
     effects
@@ -45,6 +48,24 @@ pub fn effects(from: State, on: Input, to: State) -> Vec<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_sending_state_can_release_a_lease() {
+        for row in TABLE.rows {
+            let got = effects(row.from, row.on, row.to);
+            if got.contains(&Effect::ReleaseLease) {
+                assert_eq!(row.from, State::Sending);
+            }
+        }
+        assert_eq!(
+            effects(State::Unknown, Input::RecoveredOk, State::FinishedOk),
+            vec![Effect::PersistState, Effect::NotifySettled]
+        );
+        assert_eq!(
+            effects(State::Sending, Input::Later, State::WaitingRetry),
+            vec![Effect::PersistState, Effect::ReleaseLease, Effect::ArmDue]
+        );
+    }
 
     #[test]
     fn a_lost_receipt_reconciles_and_a_late_terminal_observation_has_no_effects() {
@@ -59,11 +80,7 @@ mod tests {
         assert!(effects(State::Unknown, Input::RetryDue, State::Sending).is_empty());
         assert_eq!(
             effects(State::Active, Input::Succeeded, State::FinishedOk),
-            vec![
-                Effect::PersistState,
-                Effect::ReleaseLease,
-                Effect::NotifySettled,
-            ]
+            vec![Effect::PersistState, Effect::NotifySettled,]
         );
         assert!(effects(State::FinishedOk, Input::Failed, State::FinishedOk).is_empty());
     }

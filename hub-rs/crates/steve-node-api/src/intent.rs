@@ -1,5 +1,5 @@
 //! Stable local command identities. These types do not change any wire message.
-use crate::{AttemptId, OperationId, SessionId, TurnId, WorkspaceRef, derived_id};
+use crate::{AttemptId, Digest, OperationId, SessionId, TurnId, WorkspaceRef};
 use steve_types::DecisionId;
 
 /// Each purpose owns its subject type; invalid subject/purpose pairs cannot be constructed.
@@ -61,20 +61,37 @@ pub struct IntentKey {
 }
 
 impl IntentKey {
-    /// Permanent format: <purpose>:<subject>:r<revision>, at most 120 bytes.
-    /// The reserved <purpose>:: namespace uses derived_id's 128-bit SHA-256 prefix.
-    /// Hash input is ":<subject>:r<revision>" (the leading colon forces hashed form).
+    /// Permanent plain format: <purpose>:<subject>:r<revision>, at most 120 bytes.
+    /// Reserved long/escaped format: <purpose>::<24 readable chars>...<128-bit digest>:r<n>.
+    /// Hash the full UTF-8 subject; keep the revision visible and reserve the double colon.
     pub fn op(&self) -> OperationId {
         let subject = self.intent.subject();
-        let suffix = format!("{subject}:r{}", self.revision);
-        let plain = format!("{}:{suffix}", self.intent.purpose());
-        if plain.len() <= 120 && !subject.starts_with(':') {
-            if let Ok(id) = OperationId::new(plain) {
-                return id;
-            }
+        let plain = format!("{}:{subject}:r{}", self.intent.purpose(), self.revision);
+        if plain.len() <= 120
+            && !subject.starts_with(':')
+            && let Ok(id) = OperationId::new(plain)
+        {
+            return id;
         }
-        OperationId::new(derived_id(self.intent.purpose(), &format!(":{suffix}")))
-            .expect("closed purpose and derived_id produce a bounded ASCII identifier")
+        let readable: String = subject
+            .chars()
+            .take(24)
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let digest = Digest::sha256(subject.as_bytes());
+        OperationId::new(format!(
+            "{}::{readable}...{}:r{}",
+            self.intent.purpose(),
+            &digest.as_str()[7..39],
+            self.revision
+        ))
+        .expect("closed purpose, ASCII prefix and digest produce a bounded identifier")
     }
 }
 
@@ -83,26 +100,36 @@ mod tests {
     use super::*;
     use crate::{NodeId, WorkspaceId};
 
-    fn examples() -> Vec<(Intent, &'static str)> {
+    // Exhaustive match: adding an Intent without a golden is a compilation error.
+    fn examples(intent: &Intent) -> &'static str {
+        match intent {
+            Intent::Prepare(_) => "prepare:s_1:r7",
+            Intent::Open(_) => "open:s_1:r7",
+            Intent::Configure(_) => "configure:s_1:r7",
+            Intent::Release(_) => "release:s_1:r7",
+            Intent::StartTurn(_) => "start_turn:t_1:r7",
+            Intent::Cancel(_) => "cancel:a_1:r7",
+            Intent::Abandon(_) => "abandon:a_1:r7",
+            Intent::Recover(_) => "recover:op_1:r7",
+            Intent::Answer(_) => "answer:d_1:r7",
+            Intent::Tidy(_) => "tidy:3:n_1:3:w_1:r7",
+        }
+    }
+
+    fn intents() -> Vec<Intent> {
         let s = SessionId::new("s_1").unwrap();
         let a = AttemptId::new("a_1").unwrap();
         vec![
-            (Intent::Prepare(s.clone()), "prepare:s_1:r7"),
-            (Intent::Open(s.clone()), "open:s_1:r7"),
-            (Intent::Configure(s.clone()), "configure:s_1:r7"),
-            (Intent::Release(s), "release:s_1:r7"),
-            (
-                Intent::StartTurn(TurnId::new("t_1").unwrap()),
-                "start_turn:t_1:r7",
-            ),
-            (Intent::Cancel(a.clone()), "cancel:a_1:r7"),
-            (Intent::Abandon(a), "abandon:a_1:r7"),
-            (
-                Intent::Recover(OperationId::new("op_1").unwrap()),
-                "recover:op_1:r7",
-            ),
-            (Intent::Answer("d_1".into()), "answer:d_1:r7"),
-            (tidy("n_1", "w_1"), "tidy:3:n_1:3:w_1:r7"),
+            Intent::Prepare(s.clone()),
+            Intent::Open(s.clone()),
+            Intent::Configure(s.clone()),
+            Intent::Release(s),
+            Intent::StartTurn(TurnId::new("t_1").unwrap()),
+            Intent::Cancel(a.clone()),
+            Intent::Abandon(a),
+            Intent::Recover(OperationId::new("op_1").unwrap()),
+            Intent::Answer("d_1".into()),
+            tidy("n_1", "w_1"),
         ]
     }
 
@@ -115,14 +142,15 @@ mod tests {
 
     #[test]
     fn every_purpose_has_a_byte_exact_golden_and_a_unique_name() {
-        let cases = examples();
-        for (i, (intent, golden)) in cases.iter().enumerate() {
+        let cases = intents();
+        for (i, intent) in cases.iter().enumerate() {
+            let golden = examples(intent);
             let key = IntentKey {
                 intent: intent.clone(),
                 revision: 7,
             };
             assert_eq!(key.op().as_str().as_bytes(), golden.as_bytes());
-            for (other, _) in &cases[..i] {
+            for other in &cases[..i] {
                 assert_ne!(intent.purpose(), other.purpose());
             }
             assert_ne!(
@@ -162,7 +190,7 @@ mod tests {
         // open: + 113-byte subject + :r0 = 121 bytes.
         assert_eq!(
             key("x".repeat(113)).op().as_str(),
-            "open::038c9209ef410492448d6eca3b077be2"
+            "open::xxxxxxxxxxxxxxxxxxxxxxxx...b8983b329f09f5296bc9951e1ec7ad91:r0"
         );
         let forged = key("x".repeat(113))
             .op()
@@ -171,7 +199,13 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_ne!(key(forged).op(), key("x".repeat(113)).op());
-        assert!(key("x".repeat(128)).op().as_str().starts_with("open::"));
+        let long = key("x".repeat(128)).op();
+        assert!(
+            long.as_str()
+                .starts_with("open::xxxxxxxxxxxxxxxxxxxxxxxx...")
+        );
+        assert!(long.as_str().ends_with(":r0"));
+        assert!(long.as_str().len() <= 120);
     }
 
     #[test]

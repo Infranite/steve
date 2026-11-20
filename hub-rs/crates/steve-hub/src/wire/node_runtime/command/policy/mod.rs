@@ -2,6 +2,8 @@
 pub mod config;
 pub mod history;
 pub mod link;
+#[cfg(test)]
+mod r1_tests;
 pub mod retry;
 pub mod time;
 pub mod turn;
@@ -22,7 +24,7 @@ pub enum Refusal {
     ConfigurationPending,
     InvalidHistory,
     InvalidTime,
-    MissingEventAnchor,
+    InvalidJitter,
     WrongIntent,
     NotActed,
     MustCheckAfterActing,
@@ -65,20 +67,32 @@ pub struct TurnFacts {
 }
 
 impl TurnFacts {
-    pub fn allowed(self) -> Result<(), Refusal> {
+    pub fn execution_allowed(self) -> Result<(), Refusal> {
         if self.cancelled {
             return Err(Refusal::Cancelled);
         }
         if self.outcome != Outcome::Failed {
             return Err(Refusal::NotFailed);
         }
+        if self.workflow_blocked {
+            return Err(Refusal::Ineligible);
+        }
+        Ok(())
+    }
+
+    pub fn allowed(self) -> Result<(), Refusal> {
+        self.execution_allowed()?;
         if !self.gates.session_open
             || !self.gates.item_in_progress
             || !self.gates.no_pending_decision
-            || self.workflow_blocked
         {
             return Err(Refusal::Ineligible);
         }
+        Ok(())
+    }
+
+    /// Only consulted once a retry has otherwise been permitted, including budget and deadline.
+    pub fn configuration_allows(self) -> Result<(), Refusal> {
         if self.configuration_pending {
             return Err(Refusal::ConfigurationPending);
         }

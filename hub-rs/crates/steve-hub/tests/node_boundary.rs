@@ -801,7 +801,53 @@ fn command_problems(code: &str, depth: usize) -> Vec<String> {
             problems.push(format!("token {token}"));
         }
     }
+    problems.extend(command_text_problems(code));
     problems
+}
+
+fn command_string_literal(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Lit(lit) => matches!(lit.lit, syn::Lit::Str(_) | syn::Lit::ByteStr(_)),
+        syn::Expr::Paren(p) => command_string_literal(&p.expr),
+        syn::Expr::Group(g) => command_string_literal(&g.expr),
+        syn::Expr::Reference(r) => command_string_literal(&r.expr),
+        _ => false,
+    }
+}
+
+fn command_text_problems(code: &str) -> Vec<String> {
+    use syn::visit::Visit;
+    struct Text(Vec<String>);
+    impl<'ast> Visit<'ast> for Text {
+        fn visit_expr_binary(&mut self, expr: &'ast syn::ExprBinary) {
+            if matches!(expr.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+                && (command_string_literal(&expr.left) || command_string_literal(&expr.right))
+            {
+                self.0.push("string literal comparison".into());
+            }
+            syn::visit::visit_expr_binary(self, expr);
+        }
+    }
+    let mut found = Text(vec![]);
+    match syn::parse_file(code) {
+        Ok(file) => found.visit_file(&file),
+        Err(error) => found
+            .0
+            .push(format!("cannot inspect command syntax: {error}")),
+    }
+    // Also inspect macro token trees, which a normal AST visitor does not descend into.
+    let methods =
+        regex::Regex::new(r"\.\s*(contains|starts_with|ends_with|find)\s*(?:::<[^;]*?>)?\s*\(")
+            .unwrap();
+    if methods.is_match(code) {
+        found.0.push("text recognition method".into());
+    }
+    let comparisons =
+        regex::Regex::new(r###"(?:==|!=)\s*(?:&\s*)?(?:b?r#*|b)?"|"#*\s*(?:==|!=)"###).unwrap();
+    if comparisons.is_match(code) {
+        found.0.push("macro string literal comparison".into());
+    }
+    found.0
 }
 
 #[test]
@@ -842,4 +888,24 @@ fn the_command_boundary_sees_renames_globs_parent_escapes_and_qualified_calls() 
     }
     let source = "use steve_types::Retry; use super::machine::State; fn f(now: i64) -> i128 { i128::from(now) } #[cfg(test)] mod tests { use std::time::Instant; }";
     assert!(command_problems(&scan::production(source).unwrap(), 1).is_empty());
+}
+
+#[test]
+fn command_text_recognition_and_literal_comparisons_are_rejected() {
+    for body in [
+        "s.contains(\"busy\")",
+        "s.starts_with(\"busy\")",
+        "s.ends_with(\"busy\")",
+        "s.find(\"busy\").is_some()",
+        "s == \"busy\"",
+        "\"busy\" != s",
+        "s == (\"busy\")",
+        "s != &r#\"busy\"#",
+    ] {
+        let raw = format!("fn f(s: &str) -> bool {{ {body} }}");
+        let code = scan::production(&raw).unwrap();
+        assert!(!command_problems(&code, 1).is_empty(), "missed {body}");
+    }
+    let raw = "macro_rules! text { ($s:expr) => { $s == \"busy\" }; }";
+    assert!(!command_problems(&scan::production(raw).unwrap(), 1).is_empty());
 }

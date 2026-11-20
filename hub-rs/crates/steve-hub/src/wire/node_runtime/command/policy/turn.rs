@@ -1,9 +1,8 @@
-use super::time::{HintSource, schedule};
+use super::time::{HintSource, Jitter, capacity_deadline, schedule};
 use super::{Action, Decision, History, HubTime, Refusal, TurnFacts, scheduled};
 use steve_node_api::Intent;
 use steve_types::Retry;
 
-pub const CAPACITY_WINDOW_MS: i64 = 15 * 60_000;
 const CAPACITY_DELAYS_MS: [u64; 3] = [20_000, 60_000, 120_000];
 const INTERRUPTED_DELAYS_MS: [u64; 2] = [20_000, 60_000];
 
@@ -12,8 +11,10 @@ pub struct TurnCapacity<'a> {
     pub history: History<'a>,
     pub facts: TurnFacts,
     pub now: HubTime,
-    pub jitter_ms: u64,
+    pub jitter: Jitter,
     pub source: HintSource,
+    /// Hub's first capacity failure for this turn, not the first failure of any kind.
+    pub first_capacity_failure: Option<HubTime>,
 }
 
 impl TurnCapacity<'_> {
@@ -30,31 +31,27 @@ impl TurnCapacity<'_> {
             return Err(Refusal::WrongIntent);
         }
         self.history.failed(3, self.now)?;
-        let deadline = HubTime(
-            self.history
-                .first_failure()?
-                .0
-                .checked_add(CAPACITY_WINDOW_MS)
-                .ok_or(Refusal::InvalidTime)?,
-        );
+        let deadline = capacity_deadline(self.now, self.first_capacity_failure)?;
         let ordinal = self
             .history
             .last()?
             .ok_or(Refusal::InvalidHistory)?
             .key
             .revision as usize;
-        match retry {
-            Retry::Now => schedule(self.now, self.source, None, 0, 0, Some(deadline)),
-            Retry::Later { after_ms } => schedule(
-                self.now,
-                self.source,
-                after_ms,
-                CAPACITY_DELAYS_MS[ordinal],
-                self.jitter_ms,
-                Some(deadline),
-            ),
-            Retry::Never => Err(Refusal::Never),
-        }
+        let hint = match retry {
+            Retry::Later { after_ms } => after_ms,
+            _ => None,
+        };
+        let at = schedule(
+            self.now,
+            self.source,
+            hint,
+            CAPACITY_DELAYS_MS[ordinal],
+            Some(self.jitter),
+            Some(deadline),
+        )?;
+        self.facts.configuration_allows()?;
+        Ok(at)
     }
 }
 
@@ -63,48 +60,72 @@ pub struct TurnInterrupted<'a> {
     pub history: History<'a>,
     pub facts: TurnFacts,
     pub now: HubTime,
-    pub jitter_ms: u64,
-    pub source: HintSource,
 }
 
 impl TurnInterrupted<'_> {
     pub fn decide(self, retry: Retry) -> Decision {
-        scheduled(Action::NextRevision, self.plan(retry))
-    }
-
-    fn plan(self, retry: Retry) -> Result<super::Schedule, Refusal> {
-        self.facts.allowed()?;
-        if retry == Retry::Never {
-            return Err(Refusal::Never);
-        }
-        if self.facts.acted {
-            return Err(Refusal::MustCheckAfterActing);
-        }
-        if !matches!(self.history.intent, Intent::StartTurn(_)) {
-            return Err(Refusal::WrongIntent);
-        }
-        self.history.failed(2, self.now)?;
-        let ordinal = self
-            .history
-            .last()?
-            .ok_or(Refusal::InvalidHistory)?
-            .key
-            .revision as usize;
-        match retry {
-            Retry::Now => schedule(self.now, self.source, None, 0, 0, None),
-            Retry::Later { after_ms } => schedule(
-                self.now,
-                self.source,
-                after_ms,
-                INTERRUPTED_DELAYS_MS[ordinal],
-                self.jitter_ms,
-                None,
-            ),
-            Retry::Never => Err(Refusal::Never),
-        }
+        scheduled(
+            Action::NextRevision,
+            turn_retry(self.history, self.facts, self.now, retry, true),
+        )
     }
 }
 
+/// Non-service transient failures retry only before tools ran, without the three service gates.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnGatewayTransient<'a> {
+    pub history: History<'a>,
+    pub facts: TurnFacts,
+    pub now: HubTime,
+}
+
+impl TurnGatewayTransient<'_> {
+    pub fn decide(self, retry: Retry) -> Decision {
+        scheduled(
+            Action::NextRevision,
+            turn_retry(self.history, self.facts, self.now, retry, false),
+        )
+    }
+}
+
+fn turn_retry(
+    history: History<'_>,
+    facts: TurnFacts,
+    now: HubTime,
+    retry: Retry,
+    service: bool,
+) -> Result<super::Schedule, Refusal> {
+    if service {
+        facts.allowed()?;
+    } else {
+        facts.execution_allowed()?;
+        if facts.acted {
+            return Err(Refusal::MustCheckAfterActing);
+        }
+    }
+    if retry == Retry::Never {
+        return Err(Refusal::Never);
+    }
+    if !matches!(history.intent, Intent::StartTurn(_)) {
+        return Err(Refusal::WrongIntent);
+    }
+    history.failed(2, now)?;
+    let ordinal = history.last()?.ok_or(Refusal::InvalidHistory)?.key.revision as usize;
+    // Current apply.rs always uses 20/60 seconds, including after tools and for Retry::Now.
+    let at = schedule(
+        now,
+        HintSource::CompletionCopy,
+        None,
+        INTERRUPTED_DELAYS_MS[ordinal],
+        None,
+        None,
+    )?;
+    facts.configuration_allows()?;
+    Ok(at)
+}
+
+/// UNAPPROVED behavior change from design v2.2 section 2.4. W3.3s MUST NOT wire this rule.
+/// Current stream/service failures still retry after acting via TurnInterrupted.
 #[derive(Debug, Clone, Copy)]
 pub struct TurnInterruptedAfterActing {
     pub facts: TurnFacts,
@@ -118,7 +139,6 @@ impl TurnInterruptedAfterActing {
         if !self.facts.acted {
             return Decision::Stop(Refusal::NotActed);
         }
-        // Checking existing effects is a user decision, never an automatic retry (even for Now).
         Decision::CheckBeforeContinuing
     }
 }

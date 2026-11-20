@@ -30,6 +30,10 @@ pub enum Input {
     LinkLost,
     NodeForgot,
     WindowExpired,
+    ReconciledAbsent,
+    RecoveredOk,
+    RecoveredFailed,
+    Abandoned,
 }
 
 // Named rows also exercise the actual runtime Table::step API, one test per transition.
@@ -143,6 +147,42 @@ rows! {
     rejected_link_lost: Rejected + LinkLost => Rejected, "terminal outcomes are monotonic; late observations cannot resurrect them";
     rejected_node_forgot: Rejected + NodeForgot => Rejected, "terminal outcomes are monotonic; late observations cannot resurrect them";
     rejected_window_expired: Rejected + WindowExpired => Rejected, "terminal outcomes are monotonic; late observations cannot resurrect them";
+    planned_reconciled_absent: Planned + ReconciledAbsent => Planned, "late or unrelated recovery facts cannot regress this command";
+    planned_recovered_ok: Planned + RecoveredOk => Planned, "late or unrelated recovery facts cannot regress this command";
+    planned_recovered_failed: Planned + RecoveredFailed => Planned, "late or unrelated recovery facts cannot regress this command";
+    planned_abandoned: Planned + Abandoned => Planned, "late or unrelated recovery facts cannot regress this command";
+    sending_reconciled_absent: Sending + ReconciledAbsent => Sending, "late or unrelated recovery facts cannot regress this command";
+    sending_recovered_ok: Sending + RecoveredOk => Sending, "late or unrelated recovery facts cannot regress this command";
+    sending_recovered_failed: Sending + RecoveredFailed => Sending, "late or unrelated recovery facts cannot regress this command";
+    sending_abandoned: Sending + Abandoned => Sending, "late or unrelated recovery facts cannot regress this command";
+    accepted_reconciled_absent: Accepted + ReconciledAbsent => Accepted, "late or unrelated recovery facts cannot regress this command";
+    accepted_recovered_ok: Accepted + RecoveredOk => Accepted, "late or unrelated recovery facts cannot regress this command";
+    accepted_recovered_failed: Accepted + RecoveredFailed => Accepted, "late or unrelated recovery facts cannot regress this command";
+    accepted_abandoned: Accepted + Abandoned => Accepted, "late or unrelated recovery facts cannot regress this command";
+    active_reconciled_absent: Active + ReconciledAbsent => Active, "late or unrelated recovery facts cannot regress this command";
+    active_recovered_ok: Active + RecoveredOk => Active, "late or unrelated recovery facts cannot regress this command";
+    active_recovered_failed: Active + RecoveredFailed => Active, "late or unrelated recovery facts cannot regress this command";
+    active_abandoned: Active + Abandoned => Active, "late or unrelated recovery facts cannot regress this command";
+    waiting_retry_reconciled_absent: WaitingRetry + ReconciledAbsent => WaitingRetry, "late or unrelated recovery facts cannot regress this command";
+    waiting_retry_recovered_ok: WaitingRetry + RecoveredOk => WaitingRetry, "late or unrelated recovery facts cannot regress this command";
+    waiting_retry_recovered_failed: WaitingRetry + RecoveredFailed => WaitingRetry, "late or unrelated recovery facts cannot regress this command";
+    waiting_retry_abandoned: WaitingRetry + Abandoned => WaitingRetry, "late or unrelated recovery facts cannot regress this command";
+    unknown_reconciled_absent: Unknown + ReconciledAbsent => FinishedFailed, "";
+    unknown_recovered_ok: Unknown + RecoveredOk => FinishedOk, "";
+    unknown_recovered_failed: Unknown + RecoveredFailed => FinishedFailed, "";
+    unknown_abandoned: Unknown + Abandoned => FinishedFailed, "";
+    finished_ok_reconciled_absent: FinishedOk + ReconciledAbsent => FinishedOk, "late or unrelated recovery facts cannot regress this command";
+    finished_ok_recovered_ok: FinishedOk + RecoveredOk => FinishedOk, "late or unrelated recovery facts cannot regress this command";
+    finished_ok_recovered_failed: FinishedOk + RecoveredFailed => FinishedOk, "late or unrelated recovery facts cannot regress this command";
+    finished_ok_abandoned: FinishedOk + Abandoned => FinishedOk, "late or unrelated recovery facts cannot regress this command";
+    finished_failed_reconciled_absent: FinishedFailed + ReconciledAbsent => FinishedFailed, "late or unrelated recovery facts cannot regress this command";
+    finished_failed_recovered_ok: FinishedFailed + RecoveredOk => FinishedFailed, "late or unrelated recovery facts cannot regress this command";
+    finished_failed_recovered_failed: FinishedFailed + RecoveredFailed => FinishedFailed, "late or unrelated recovery facts cannot regress this command";
+    finished_failed_abandoned: FinishedFailed + Abandoned => FinishedFailed, "late or unrelated recovery facts cannot regress this command";
+    rejected_reconciled_absent: Rejected + ReconciledAbsent => Rejected, "late or unrelated recovery facts cannot regress this command";
+    rejected_recovered_ok: Rejected + RecoveredOk => Rejected, "late or unrelated recovery facts cannot regress this command";
+    rejected_recovered_failed: Rejected + RecoveredFailed => Rejected, "late or unrelated recovery facts cannot regress this command";
+    rejected_abandoned: Rejected + Abandoned => Rejected, "late or unrelated recovery facts cannot regress this command";
 }
 
 pub const TABLE: Table<State, Input> = Table {
@@ -168,11 +208,15 @@ pub const TABLE: Table<State, Input> = Table {
         (Input::Succeeded, Class::Observation),
         (Input::Failed, Class::Disruption),
         (Input::Never, Class::Disruption),
-        (Input::Later, Class::Observation),
+        (Input::Later, Class::Disruption),
         (Input::OutcomeUnknown, Class::Disruption),
         (Input::LinkLost, Class::Disruption),
         (Input::NodeForgot, Class::Disruption),
         (Input::WindowExpired, Class::Disruption),
+        (Input::ReconciledAbsent, Class::Disruption),
+        (Input::RecoveredOk, Class::Observation),
+        (Input::RecoveredFailed, Class::Disruption),
+        (Input::Abandoned, Class::Disruption),
     ],
     initial: &[State::Planned],
     transient: &[
@@ -199,9 +243,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconciliation_and_recover_or_abandon_settle_unknown_without_resending() {
+        for (input, expected) in [
+            (Input::ReconciledAbsent, State::FinishedFailed),
+            (Input::RecoveredOk, State::FinishedOk),
+            (Input::RecoveredFailed, State::FinishedFailed),
+            (Input::Abandoned, State::FinishedFailed),
+        ] {
+            let unknown = next(
+                next(State::Planned, Input::Dispatch).unwrap(),
+                Input::LinkLost,
+            )
+            .unwrap();
+            let settled = next(unknown, input).unwrap();
+            assert_eq!(settled, expected);
+            assert!(next(settled, Input::RetryDue).is_err());
+            assert_eq!(next(settled, Input::LinkLost).unwrap(), settled);
+        }
+    }
+
+    #[test]
     fn the_real_table_has_no_structural_violations() {
         assert_eq!(steve_runtime::machine::check::table(&TABLE), vec![]);
-        assert_eq!(TABLE.rows.len(), 94);
+        assert_eq!(TABLE.rows.len(), 130);
     }
 
     #[test]

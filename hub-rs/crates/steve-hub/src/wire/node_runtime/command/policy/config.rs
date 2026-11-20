@@ -9,7 +9,6 @@ pub struct ConfigStale<'a> {
     pub now: HubTime,
     pub node_view_refreshed: bool,
     pub source: HintSource,
-    pub jitter_ms: u64,
 }
 
 impl ConfigStale<'_> {
@@ -30,13 +29,12 @@ impl ConfigStale<'_> {
             return Err(Refusal::WrongIntent);
         }
         self.history.failed(2, self.now)?;
-        match retry {
-            Retry::Now => schedule(self.now, self.source, None, 0, 0, None),
-            Retry::Later { after_ms } => {
-                schedule(self.now, self.source, after_ms, 1000, self.jitter_ms, None)
-            }
-            Retry::Never => Err(Refusal::Never),
-        }
+        let hint = match retry {
+            Retry::Later { after_ms } => after_ms,
+            _ => None,
+        };
+        // Stale configuration is refreshed from the Node view before a new operation is planned.
+        schedule(self.now, self.source, hint, 0, None, None)
     }
 }
 
@@ -70,7 +68,6 @@ mod tests {
                 now: HubTime(10),
                 node_view_refreshed: false,
                 source: HintSource::CommandReceipt,
-                jitter_ms: 5,
             };
             assert_eq!(rule.decide(Retry::Never), Decision::Stop(Refusal::Never));
             for retry in [Retry::Now, Retry::Later { after_ms: None }] {
@@ -111,11 +108,7 @@ mod tests {
             }
             assert_eq!(
                 rule.decide(Retry::Later { after_ms: Some(1) }),
-                Decision::Stop(if revision == 2 {
-                    Refusal::Budget
-                } else {
-                    Refusal::MissingEventAnchor
-                })
+                rule.decide(Retry::Later { after_ms: None })
             );
         }
     }

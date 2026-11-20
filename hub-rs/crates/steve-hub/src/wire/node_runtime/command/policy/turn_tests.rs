@@ -1,6 +1,6 @@
 use super::super::Gates;
 use super::super::history::{Revision, Settled, Terminal};
-use super::super::time::{Delay, Due, NodeTime};
+use super::super::time::{Delay, Due, Jitter, NodeTime};
 use super::*;
 use steve_node_api::{IntentKey, Outcome, TurnId};
 
@@ -44,7 +44,8 @@ fn capacity<'a>(intent: &'a Intent, rows: &'a [Revision]) -> TurnCapacity<'a> {
         },
         facts: facts(),
         now: HubTime(2000),
-        jitter_ms: 1000,
+        jitter: Jitter::new(1000).unwrap(),
+        first_capacity_failure: Some(HubTime(1000)),
         source: HintSource::JournalEvent { at: NodeTime(2000) },
     }
 }
@@ -81,7 +82,6 @@ fn capacity_has_three_retries_and_is_deterministic_across_reconstructed_history(
             } else {
                 let schedule = at(decision);
                 let expected = match retry {
-                    Retry::Now => 2000,
                     Retry::Later { after_ms: Some(_) } => 33_000,
                     _ => 3000 + CAPACITY_DELAYS_MS[ordinal as usize] as i64,
                 };
@@ -161,7 +161,7 @@ fn every_business_gate_cancellation_and_outcome_is_an_explicit_input() {
 }
 
 #[test]
-fn interrupted_turns_use_twenty_and_sixty_seconds_and_stop_after_acting() {
+fn interrupted_turns_keep_twenty_and_sixty_seconds_even_after_acting() {
     let intent = intent();
     for ordinal in 0..=2 {
         let rows = rows(&intent, ordinal);
@@ -170,8 +170,6 @@ fn interrupted_turns_use_twenty_and_sixty_seconds_and_stop_after_acting() {
             history: cap.history,
             facts: cap.facts,
             now: cap.now,
-            jitter_ms: 0,
-            source: cap.source,
         };
         for retry in [Retry::Never, Retry::Later { after_ms: None }, Retry::Now] {
             let decision = rule.decide(retry);
@@ -194,13 +192,7 @@ fn interrupted_turns_use_twenty_and_sixty_seconds_and_stop_after_acting() {
             } else {
                 assert_eq!(
                     at(decision).due,
-                    HubTime(
-                        2000 + if retry == Retry::Now {
-                            0
-                        } else {
-                            INTERRUPTED_DELAYS_MS[ordinal as usize] as i64
-                        }
-                    )
+                    HubTime(2000 + INTERRUPTED_DELAYS_MS[ordinal as usize] as i64)
                 );
             }
         }
@@ -213,7 +205,7 @@ fn interrupted_turns_use_twenty_and_sixty_seconds_and_stop_after_acting() {
                 ..rule
             }
             .decide(Retry::Now),
-            Decision::Stop(Refusal::MustCheckAfterActing)
+            rule.decide(Retry::Now)
         );
     }
     for retry in [Retry::Never, Retry::Later { after_ms: None }, Retry::Now] {
@@ -306,12 +298,8 @@ fn recovery_at_or_past_the_ceiling_never_creates_a_send_plan() {
         );
     }
     // A genuinely earlier recovery may send; it was not squeezed down from the ceiling.
-    let before = at(TurnCapacity {
-        jitter_ms: 0,
-        ..rule
-    }
-    .decide(Retry::Later {
-        after_ms: Some(898_999),
+    let before = at(TurnCapacity { ..rule }.decide(Retry::Later {
+        after_ms: Some(897_999),
     }));
     assert_eq!(before.due, HubTime(900_999));
     assert_eq!(before.status(HubTime(900_999)), Due::Ready);
@@ -417,7 +405,7 @@ fn unanchored_receipts_and_completion_copies_cannot_consume_after_ms() {
             rule.decide(Retry::Later {
                 after_ms: Some(30_000)
             }),
-            Decision::Stop(Refusal::MissingEventAnchor)
+            rule.decide(Retry::Later { after_ms: None })
         );
         assert_eq!(
             at(rule.decide(Retry::Later { after_ms: None })).due,
