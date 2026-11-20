@@ -89,13 +89,22 @@ impl Home {
 const VERSION: &str = "0.9.0";
 
 /// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Child);
+struct Hub(Option<Child>);
 
 impl Hub {
     /// SIGKILL the Hub and its agents. The Hub puts each agent in its own process group, so they
     /// are found as its children first (and their groups killed), then the Hub's group.
     fn kill(&mut self) {
-        let pid = self.0.id() as i32;
+        if let Some(child) = self.0.take() {
+            Self::kill_child(child);
+        }
+    }
+    fn kill_child(mut child: Child) {
+        // A completed child no longer pins its cached PID/group number.
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = child.id() as i32;
         let children: Vec<i32> = Command::new("pgrep")
             .args(["-P", &pid.to_string()])
             .output()
@@ -113,7 +122,7 @@ impl Hub {
                 libc::kill(*c, libc::SIGKILL);
             }
         }
-        let _ = self.0.wait();
+        let _ = child.wait();
     }
 }
 
@@ -166,7 +175,7 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
     if let Some(id) = upgrade {
         c.env("STEVE_UPGRADE_ID", id);
     }
-    Hub(c.spawn().expect("spawn hub"))
+    Hub(Some(c.spawn().expect("spawn hub")))
 }
 
 async fn health(h: &Home) -> Option<Value> {

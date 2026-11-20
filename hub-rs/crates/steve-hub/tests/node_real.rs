@@ -172,12 +172,21 @@ impl Home {
 }
 
 /// A running Hub process (its own process group: killing it takes its agents along).
-struct Hub(Child);
+struct Hub(Option<Child>);
 
 impl Hub {
     /// SIGKILL the Hub and its agents (each agent runs in its own process group).
     fn kill(&mut self) {
-        let pid = self.0.id() as i32;
+        if let Some(child) = self.0.take() {
+            Self::kill_child(child);
+        }
+    }
+    fn kill_child(mut child: Child) {
+        // A completed child no longer pins its cached PID/group number.
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = child.id() as i32;
         let children: Vec<i32> = Command::new("pgrep")
             .args(["-P", &pid.to_string()])
             .output()
@@ -195,21 +204,27 @@ impl Hub {
                 libc::kill(*c, libc::SIGKILL);
             }
         }
-        let _ = self.0.wait();
+        let _ = child.wait();
     }
     /// SIGTERM: the Hub stops its Node and the Node its harnesses; SIGKILL after 60 s.
     fn stop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
         unsafe {
-            libc::kill(self.0.id() as i32, libc::SIGTERM);
+            libc::kill(child.id() as i32, libc::SIGTERM);
         }
         let end = std::time::Instant::now() + Duration::from_secs(60);
         while std::time::Instant::now() < end {
-            if matches!(self.0.try_wait(), Ok(Some(_))) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        self.kill();
+        Self::kill_child(child);
     }
 }
 
@@ -280,7 +295,7 @@ fn spawn(h: &Home) -> Hub {
             .env("STEVE_ADAPTER_CLAUDE", fake)
             .env_remove("CLAUDE_CONFIG_DIR");
     }
-    Hub(c.spawn().expect("spawn hub"))
+    Hub(Some(c.spawn().expect("spawn hub")))
 }
 
 /// Now, in ms since the epoch (the clock the Hub stamps rows with).

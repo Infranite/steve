@@ -138,12 +138,21 @@ impl Home {
 }
 
 /// A running Hub process (its own process group: killing it takes its agent along).
-struct Hub(Child);
+struct Hub(Option<Child>);
 
 impl Hub {
     /// SIGKILL the Hub and its agents (each agent runs in its own process group).
     fn kill(&mut self) {
-        let pid = self.0.id() as i32;
+        if let Some(child) = self.0.take() {
+            Self::kill_child(child);
+        }
+    }
+    fn kill_child(mut child: Child) {
+        // A completed child no longer pins its cached PID/group number.
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        let pid = child.id() as i32;
         let children: Vec<i32> = Command::new("pgrep")
             .args(["-P", &pid.to_string()])
             .output()
@@ -161,7 +170,7 @@ impl Hub {
                 libc::kill(*c, libc::SIGKILL);
             }
         }
-        let _ = self.0.wait();
+        let _ = child.wait();
     }
 }
 
@@ -231,7 +240,7 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
     for (k, v) in extra {
         c.env(k, v);
     }
-    Hub(c.spawn().expect("spawn hub"))
+    Hub(Some(c.spawn().expect("spawn hub")))
 }
 
 /// Up and serving the full app.
@@ -1336,12 +1345,13 @@ async fn the_node_is_the_default() {
     let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
     assert!(
         eventually_sync("node_e2e state", || matches!(
-            refused.0.try_wait(),
+            refused.0.as_mut().unwrap().try_wait(),
             Ok(Some(_))
         ))
         .await,
         "an explicit local on a STEVE_NO_RESUME copy exits"
     );
+    refused.0.take();
     assert!(
         hub_log(&h).contains("STEVE_NO_RESUME"),
         "says why; log:\n{}",
@@ -2063,11 +2073,12 @@ async fn a_service_node_turn_outlives_the_hub() {
         .await;
     assert!(eventually_sync("node_e2e state", || h.got("存活验收-V6") == 1).await);
     let started = std::time::Instant::now();
-    let pid = hub.0.id() as i32;
-    unsafe { libc::killpg(pid, libc::SIGKILL) };
     let mut hub = hub;
-    let _ = hub.0.wait();
-    std::mem::forget(hub);
+    let mut child = hub.0.take().unwrap();
+    let pid = child.id() as i32;
+    unsafe { libc::killpg(pid, libc::SIGKILL) };
+    let _ = child.wait();
+    drop(child);
     let node_pid: i32 = std::fs::read_to_string(h.steve().join("data/node/service.pid"))
         .expect("the Node's pid")
         .trim()
