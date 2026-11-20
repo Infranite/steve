@@ -356,6 +356,39 @@ pub async fn rotate(
     }
 }
 
+/// How the Node's latest link reached the Hub (G1), with its latency while it is up.
+fn link_view(svc: &NodeService, n: &steve_store::nodes::NodeRow, linked: bool) -> Value {
+    let rtt = svc.registry.rtt(&n.node_id).filter(|_| linked);
+    match n
+        .link
+        .as_deref()
+        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        Some(mut l) => {
+            l["latency_ms"] = json!(rtt.map(|r| r.0));
+            l["latency_at"] = json!(rtt.map(|r| r.1));
+            l
+        }
+        None => Value::Null,
+    }
+}
+
+/// The Node's protocol and whether its link only serves upgrades; returns the latter.
+fn protocol_view(svc: &NodeService, node: &str, v: &mut Value) -> bool {
+    let upgrade_only = svc
+        .registry
+        .conn(node)
+        .is_some_and(|c| !c.is_closed() && c.is_upgrade());
+    v["protocol"] = json!(svc.fleet.protocol(node));
+    v["protocol_mode"] = json!(if upgrade_only { "upgrade" } else { "normal" });
+    let status = upgrade_only
+        .then(|| svc.fleet.protocol_status(node))
+        .flatten();
+    v["protocol_status"] = json!(status.map(|(_, text)| text));
+    v["protocol_older"] = json!(status.map(|(older, _)| older));
+    upgrade_only
+}
+
 pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
     let store = svc.store.clone();
     // each with how many of its turns run and wait, against its `max_sessions`
@@ -398,19 +431,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             v["max_sessions"] = json!(room.max);
             // how its latest link reached the Hub (G1): kept while it is away (`linked` says
             // whether it is up); its latency only while it is
-            let rtt = svc.registry.rtt(&n.node_id).filter(|_| linked);
-            v["link"] = match n
-                .link
-                .as_deref()
-                .and_then(|l| serde_json::from_str::<Value>(l).ok())
-            {
-                Some(mut l) => {
-                    l["latency_ms"] = json!(rtt.map(|r| r.0));
-                    l["latency_at"] = json!(rtt.map(|r| r.1));
-                    l
-                }
-                None => Value::Null,
-            };
+            v["link"] = link_view(&svc, &n, linked);
             // what its machine is, as it last said (G2)
             v["host"] = n
                 .host
@@ -420,17 +441,7 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
                 v["link_error"] = json!({ "at": at, "error": why });
             }
-            let upgrade_only = svc
-                .registry
-                .conn(&n.node_id)
-                .is_some_and(|c| !c.is_closed() && c.is_upgrade());
-            v["protocol"] = json!(svc.fleet.protocol(&n.node_id));
-            v["protocol_mode"] = json!(if upgrade_only { "upgrade" } else { "normal" });
-            let protocol_status = upgrade_only
-                .then(|| svc.fleet.protocol_status(&n.node_id))
-                .flatten();
-            v["protocol_status"] = json!(protocol_status.map(|(_, text)| text));
-            v["protocol_older"] = json!(protocol_status.map(|(older, _)| older));
+            let upgrade_only = protocol_view(&svc, &n.node_id, &mut v);
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));

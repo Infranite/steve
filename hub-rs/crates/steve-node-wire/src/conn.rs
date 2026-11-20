@@ -821,33 +821,16 @@ async fn reader(
             }
             Kind::Req => {
                 if env.generation != s.generation {
-                    if schema == Schema::V1 {
-                        let pre = s
-                            .control(
-                                upgrade::FENCED,
-                                serde_json::to_value(upgrade::Fenced {
-                                    generation: s.generation,
-                                })
-                                .unwrap(),
-                            )
-                            .ok();
-                        shut(&s, pre, crate::close::FENCED, "another connection");
+                    if refuse_other_generation(&s, env, schema) {
                         return;
                     }
-                    s.respond_now(
-                        env.id,
-                        Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
-                        env.generation,
-                        schema,
-                    );
                     continue;
                 }
                 let permit = inflight.clone().try_acquire_owned().ok().and_then(|n| {
-                    inflight_bytes
+                    let b = inflight_bytes
                         .clone()
-                        .try_acquire_many_owned(kib(frame.len()))
-                        .ok()
-                        .map(|b| (n, b))
+                        .try_acquire_many_owned(kib(frame.len()));
+                    b.ok().map(|b| (n, b))
                 });
                 let Some(permit) = permit else {
                     s.respond_now(
@@ -862,40 +845,8 @@ async fn reader(
                     continue;
                 };
                 drop(frame);
-                // the answer goes on its request's lane: a file chunk never sits in the
-                // control lane in front of a permission answer
-                let lane = if env.m == upgrade::UPGRADE_FETCH {
-                    Lane::Bulk
-                } else {
-                    methods::spec(&env.m).map_or(Lane::Control, |m| m.lane)
-                };
-                let (h, s2) = (handler.clone(), s.clone());
                 // the work outlives the link: a port never ties what it started to its caller
-                tokio::spawn(async move {
-                    if schema == Schema::V1 {
-                        let outcome = match h.handle_upgrade(&env.m, env.p).await {
-                            Ok(value) => upgrade::Outcome::Ok(value),
-                            Err(error) => upgrade::Outcome::Err(error),
-                        };
-                        if let Some(text) =
-                            s2.response_upgrade(env.id, &env.m, outcome, s2.generation)
-                        {
-                            s2.lane(lane).send(text, None).await;
-                        }
-                        drop(permit);
-                        return;
-                    }
-                    let outcome = match h.handle(&env.m, env.p).await {
-                        Ok(v) => Outcome::Ok(v),
-                        Err(e) => Outcome::Err(e),
-                    };
-                    // the slot is held until the answer is queued: a slow reader of answers
-                    // slows the peer's new requests too
-                    if let Some(text) = s2.response(env.id, &env.m, outcome, s2.generation) {
-                        s2.lane(lane).send(text, None).await;
-                    }
-                    drop(permit);
-                });
+                tokio::spawn(answer(handler.clone(), s.clone(), env, schema, permit));
             }
             Kind::Ctl => match env.m.as_str() {
                 upgrade::HEARTBEAT => {}
@@ -919,6 +870,63 @@ async fn reader(
             ),
         }
     }
+}
+
+/// A request of another generation: a v1 peer is fenced off (`true`: the link is shut), an
+/// ordinary one is told its connection is stale.
+fn refuse_other_generation(s: &Arc<Shared>, env: Envelope, schema: Schema) -> bool {
+    if schema == Schema::V1 {
+        let fenced = upgrade::Fenced {
+            generation: s.generation,
+        };
+        let pre = s
+            .control(upgrade::FENCED, serde_json::to_value(fenced).unwrap())
+            .ok();
+        shut(s, pre, crate::close::FENCED, "another connection");
+        return true;
+    }
+    s.respond_now(
+        env.id,
+        Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
+        env.generation,
+        schema,
+    );
+    false
+}
+
+/// Handles one admitted request and queues its answer. `permit` (the request's in-flight slot) is
+/// held until the answer is queued: a slow reader of answers slows the peer's new requests too.
+async fn answer<P: Send>(
+    h: Arc<dyn Handler>,
+    s: Arc<Shared>,
+    env: Envelope,
+    schema: Schema,
+    permit: P,
+) {
+    // the answer goes on its request's lane: a file chunk never sits in the control lane in
+    // front of a permission answer
+    let lane = if env.m == upgrade::UPGRADE_FETCH {
+        Lane::Bulk
+    } else {
+        methods::spec(&env.m).map_or(Lane::Control, |m| m.lane)
+    };
+    let text = if schema == Schema::V1 {
+        let outcome = match h.handle_upgrade(&env.m, env.p).await {
+            Ok(value) => upgrade::Outcome::Ok(value),
+            Err(error) => upgrade::Outcome::Err(error),
+        };
+        s.response_upgrade(env.id, &env.m, outcome, s.generation)
+    } else {
+        let outcome = match h.handle(&env.m, env.p).await {
+            Ok(v) => Outcome::Ok(v),
+            Err(e) => Outcome::Err(e),
+        };
+        s.response(env.id, &env.m, outcome, s.generation)
+    };
+    if let Some(text) = text {
+        s.lane(lane).send(text, None).await;
+    }
+    drop(permit);
 }
 
 async fn heartbeat(s: std::sync::Weak<Shared>, every: Duration) {

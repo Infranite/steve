@@ -287,18 +287,10 @@ async fn serve_after(
     svc.fleet.linked(&node, hello.proto);
     // its owner's pages show it linked; what its machine is, asked once per link (G2)
     super::tell(&svc.store, node.as_str()).await;
-    if !conn.is_upgrade() {
-        tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
-    }
-    if !conn.is_upgrade() {
-        conn.notify("paused", serde_json::json!({ "paused": paused }));
-    }
     tracing::info!(node = %node, generation, restarted, paused, "node linked");
-    if !conn.is_upgrade() && remote.is_reconciling() {
-        match svc.fleet.runtime_for(node.as_str()) {
-            Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
-            None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
-        };
+    // an upgrade-only link serves the upgrade methods and nothing else
+    if !conn.is_upgrade() {
+        start_ordinary(&svc, &node, &remote, &conn, paused);
     }
     let (code, reason) = conn.closed().await;
     tracing::info!(node = %node, generation, code, reason, "node link closed");
@@ -317,6 +309,25 @@ const HOST_ASK: Duration = Duration::from_secs(15);
 
 /// Asks the Node over `conn` what machine it is ([`Discovery::host`]) and keeps the answer with it, for
 /// while it is away too. A Node that does not answer keeps what it said before.
+/// What an ordinary link starts once installed: learning the host, the pause state the welcome no
+/// longer carries, and catching up on what the Node did while away.
+fn start_ordinary(
+    svc: &Arc<NodeService>,
+    node: &NodeId,
+    remote: &Arc<steve_node_wire::RemoteNode>,
+    conn: &Arc<Conn>,
+    paused: bool,
+) {
+    tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
+    conn.notify("paused", serde_json::json!({ "paused": paused }));
+    if remote.is_reconciling() {
+        match svc.fleet.runtime_for(node.as_str()) {
+            Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
+            None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
+        };
+    }
+}
+
 async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
     let remote = svc.fleet.remote(&node);
     let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
