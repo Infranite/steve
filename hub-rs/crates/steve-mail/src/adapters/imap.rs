@@ -725,8 +725,7 @@ fn folder_error(folder: &str, error: AdapterError) -> AdapterError {
     }
 }
 
-/// An untagged SELECT/EXAMINE refusal may leave this command's completion and metadata unread.
-/// Reuse the session only after a fresh, bounded NOOP has consumed everything up to its own OK.
+/// Before reusing a rejected session, consume through a fresh, bounded NOOP's own OK.
 async fn after_rejection(s: &mut Session, folder: &str, message: &str) -> Result<(), AdapterError> {
     let command = message
         .split_once(": ")
@@ -739,7 +738,7 @@ async fn after_rejection(s: &mut Session, folder: &str, message: &str) -> Result
         })
 }
 
-/// async-imap can return a default Mailbox on clean EOF. Never treat that as an epoch change.
+/// Missing or zero UIDVALIDITY must never be interpreted as an epoch change.
 fn mailbox_validity(
     mb: &async_imap::types::Mailbox,
     command: &str,
@@ -772,10 +771,11 @@ async fn checked_command(
             Response::Done { tag: t, status, .. } if *t == tag => {
                 return match status {
                     Status::Ok => Ok(()),
-                    _ => Err(command_error(
+                    Status::No | Status::Bad => Err(command_error(
                         cmd,
                         AdapterError::Rejected("邮件服务器拒绝了这个操作".into()),
                     )),
+                    _ => Err(AdapterError::Transient("和邮件服务器的连接断了".into())),
                 };
             }
             Response::Data {
@@ -785,6 +785,72 @@ async fn checked_command(
             _ => receive(r.parsed()),
         }
     }
+}
+
+/// Accumulate only untagged mailbox metadata; another command's tagged result is not ours.
+fn mailbox_data(mailbox: &mut async_imap::types::Mailbox, response: &Response<'_>) {
+    use async_imap::imap_proto::ResponseCode;
+    use async_imap::types::Flag;
+    match response {
+        Response::Data {
+            status: Status::Ok,
+            outcome,
+        } => match &outcome.code {
+            Some(ResponseCode::UidValidity(n)) => mailbox.uid_validity = Some(*n),
+            Some(ResponseCode::UidNext(n)) => mailbox.uid_next = Some(*n),
+            Some(ResponseCode::HighestModSeq(n)) => mailbox.highest_modseq = Some(*n),
+            Some(ResponseCode::Unseen(n)) => mailbox.unseen = Some(*n),
+            Some(ResponseCode::PermanentFlags(flags)) => {
+                mailbox
+                    .permanent_flags
+                    .extend(flags.iter().map(|f| Flag::from(f.to_string())));
+            }
+            _ => {}
+        },
+        Response::MailboxData(MailboxDatum::Exists(n)) => mailbox.exists = *n,
+        Response::MailboxData(MailboxDatum::Recent(n)) => mailbox.recent = *n,
+        Response::MailboxData(MailboxDatum::Flags(flags)) => {
+            mailbox
+                .flags
+                .extend(flags.iter().map(|f| Flag::from(f.to_string())));
+        }
+        _ => {}
+    }
+}
+
+/// Unlike async-imap's mailbox parser, unsolicited NO/BAD do not reject this command.
+/// Discard the accumulator unless its own tagged OK arrives, within the existing total deadline.
+async fn open_mailbox(
+    s: &mut Session,
+    wire: &str,
+    folder: &str,
+    command: &str,
+) -> Result<async_imap::types::Mailbox, AdapterError> {
+    // Preserve the library's quoted-string validation when bypassing select/examine.
+    if wire.contains(['\r', '\n']) {
+        return Err(AdapterError::Transient(format!(
+            "IMAP {command}: invalid mailbox name"
+        )));
+    }
+    timed(async {
+        let mut mailbox = async_imap::types::Mailbox::default();
+        checked_command(
+            s,
+            &format!("{command} {}", quote(wire)),
+            |response| match response {
+                Response::Data {
+                    status: status @ (Status::No | Status::Bad),
+                    ..
+                } => {
+                    tracing::warn!(folder, command, status = ?status, "IMAP mailbox warning");
+                }
+                _ => mailbox_data(&mut mailbox, response),
+            },
+        )
+        .await?;
+        Ok(mailbox)
+    })
+    .await
 }
 
 /// Collect FETCH data without losing Gmail's X-GM-THRID or the command's completion status.
@@ -1026,12 +1092,7 @@ impl ImapAdapter {
         sink: &mut dyn MailSink,
         report: &mut SyncReport,
     ) -> Result<(), AdapterError> {
-        let mb = timed(async {
-            s.examine(wire)
-                .await
-                .map_err(|e| command_error("EXAMINE", imap_err(e)))
-        })
-        .await?;
+        let mb = open_mailbox(s, wire, &f.name, "EXAMINE").await?;
         let validity = mailbox_validity(&mb, "EXAMINE", &f.name)?;
         if f.uidvalidity != Some(validity) {
             if f.uidvalidity.is_some() {
@@ -1186,12 +1247,7 @@ impl ImapAdapter {
         write: bool,
     ) -> Result<Option<u32>, AdapterError> {
         let command = if write { "SELECT" } else { "EXAMINE" };
-        let mb = if write {
-            s.select(wire).await
-        } else {
-            s.examine(wire).await
-        }
-        .map_err(|e| command_error(command, imap_err(e)))?;
+        let mb = open_mailbox(s, wire, name, command).await?;
         let validity = mailbox_validity(&mb, command, name)?;
         if let Some((expected, uid)) = known
             && validity == expected
@@ -1363,12 +1419,7 @@ impl MailAdapter for ImapAdapter {
             return Err(AdapterError::Unsupported);
         }
         loop {
-            let mb = timed(async {
-                s.examine("INBOX")
-                    .await
-                    .map_err(|e| command_error("EXAMINE", imap_err(e)))
-            })
-            .await?;
+            let mb = open_mailbox(&mut s, "INBOX", "INBOX", "EXAMINE").await?;
             mailbox_validity(&mb, "EXAMINE", "INBOX")?;
             let mut idle = s.idle();
             timed(async { idle.init().await.map_err(imap_err) }).await?;
@@ -1695,14 +1746,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uidnotsticky_responses_cannot_pollute_the_next_mailbox() {
+    async fn rejected_mailbox_metadata_cannot_pollute_the_next_mailbox() {
         for recovery_fails in [false, true] {
             let (fake, mut session) = fake_session().await;
-            // parse_mailbox stops at this untagged rejection. Its remaining metadata belongs
-            // to A, while B's normal fake response has no HIGHESTMODSEQ. No fake code changes.
+            // A's partial metadata must be discarded at its tagged refusal; B's normal
+            // response has no HIGHESTMODSEQ. The NOOP continuation barrier remains checked.
             fake.fail_next("NOOP", "OK staged\r\n* NO [UIDNOTSTICKY] no persistent UIDs\r\n* OK [UIDNEXT 999] stale next\r\n* OK [HIGHESTMODSEQ 777] stale modseq");
             session.noop().await.unwrap();
-            fake.fail_next("EXAMINE", "OK A completed");
+            fake.fail_next("EXAMINE", "NO A rejected");
             if recovery_fails {
                 fake.fail_next("NOOP", "NO [UNAVAILABLE] private-server-detail");
             }
@@ -1836,6 +1887,262 @@ mod tests {
     }
 
     /// The form and the name in the reader's language; zh-CN as declared.
+    #[derive(Default)]
+    struct Received(Vec<FetchedMessage>);
+    #[async_trait]
+    impl MailSink for Received {
+        async fn put_batch(
+            &mut self,
+            messages: Vec<FetchedMessage>,
+        ) -> Result<(), crate::MailError> {
+            self.0.extend(messages);
+            Ok(())
+        }
+        async fn flags_batch(
+            &mut self,
+            _: Vec<(String, Vec<String>)>,
+        ) -> Result<(), crate::MailError> {
+            Ok(())
+        }
+        async fn removed(&mut self, _: &str) -> Result<(), crate::MailError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_warnings_do_not_prevent_receiving_mail() {
+        use tracing::instrument::WithSubscriber;
+        for status in ["NO", "BAD"] {
+            let (fake, mut session) = fake_session().await;
+            fake.inject(
+                "me@example.com",
+                "INBOX",
+                crate::fake::fixtures::get("gbk.eml").unwrap(),
+            )
+            .unwrap();
+            // Stage an untagged warning before EXAMINE's genuine metadata/completion.
+            fake.fail_next(
+                "NOOP",
+                &format!("OK staged\r\n* {status} [UIDNOTSTICKY] private-server-detail"),
+            );
+            session.noop().await.unwrap();
+            let warnings = Warnings(Default::default());
+            let observed = warnings.0.clone();
+            let mut folder = folder_state("INBOX");
+            let mut received = Received::default();
+            let mut report = SyncReport::default();
+            ImapAdapter::sync_folder(
+                &mut session,
+                Caps::default(),
+                "INBOX",
+                &mut folder,
+                30,
+                123,
+                &mut received,
+                &mut report,
+            )
+            .with_subscriber(warnings.clone())
+            .await
+            .unwrap();
+            assert_eq!(
+                received.0.len(),
+                1,
+                "{status}: the warned folder actually receives its message"
+            );
+            assert_eq!(report.fetched, 1);
+            assert!(folder.uidvalidity.is_some_and(|n| n > 0));
+            assert_eq!(folder.last_uid, Some(1));
+            assert_eq!(folder.synced, Some(123));
+            // The warning remains legal on a later incremental round, not just first sync.
+            fake.inject(
+                "me@example.com",
+                "INBOX",
+                crate::fake::fixtures::get("iso-2022-jp.eml").unwrap(),
+            )
+            .unwrap();
+            fake.fail_next(
+                "NOOP",
+                &format!("OK staged\r\n* {status} [UIDNOTSTICKY] private-server-detail"),
+            );
+            session.noop().await.unwrap();
+            let mut next = SyncReport::default();
+            ImapAdapter::sync_folder(
+                &mut session,
+                Caps::default(),
+                "INBOX",
+                &mut folder,
+                30,
+                124,
+                &mut received,
+                &mut next,
+            )
+            .with_subscriber(warnings)
+            .await
+            .unwrap();
+            assert_eq!(next.fetched, 1);
+            assert_eq!(received.0.len(), 2);
+            assert_eq!(folder.last_uid, Some(2));
+            assert_eq!(folder.synced, Some(124));
+            let records = observed.lock().unwrap();
+            assert_eq!(records.len(), 2, "{status}: {records:?}");
+            assert_eq!(records[0].get("folder").map(String::as_str), Some("INBOX"));
+            assert_eq!(
+                records[0].get("command").map(String::as_str),
+                Some("EXAMINE")
+            );
+            assert!(!format!("{records:?}").contains("private-server-detail"));
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_selection_collects_metadata_until_its_own_ok() {
+        use async_imap::types::Flag;
+        for command in ["EXAMINE", "SELECT"] {
+            let (fake, mut session) = fake_session().await;
+            fake.fail_next(
+                "NOOP",
+                concat!(
+                    "OK staged\r\n* NO [UIDNOTSTICKY] private-server-detail\r\n",
+                    "* BAD private-server-detail\r\n* FLAGS (\\Seen \\Deleted)\r\n",
+                    "* 7 EXISTS\r\n* 2 RECENT\r\n* OK [UNSEEN 3] unseen\r\n",
+                    "* OK [PERMANENTFLAGS (\\Seen \\Deleted)] flags\r\n",
+                    "* OK [UIDVALIDITY 77] epoch\r\n* OK [UIDNEXT 88] next\r\n",
+                    "* OK [HIGHESTMODSEQ 99] highest\r\n",
+                    "other OK [UIDVALIDITY 999] not this command\r\n",
+                    "other NO not this command\r\nother BAD not this command\r\n",
+                    "* NO [UIDNEXT 999] a warning cannot supply metadata"
+                ),
+            );
+            session.noop().await.unwrap();
+            fake.fail_next(command, "OK mailbox completed");
+            let wire = r#"box "quoted"\name"#;
+            let mb = open_mailbox(&mut session, wire, "Box", command)
+                .await
+                .unwrap();
+            assert_eq!(mb.uid_validity, Some(77));
+            assert_eq!(mb.uid_next, Some(88));
+            assert_eq!(mb.highest_modseq, Some(99));
+            assert_eq!((mb.exists, mb.recent, mb.unseen), (7, 2, Some(3)));
+            assert_eq!(mb.flags, vec![Flag::Seen, Flag::Deleted]);
+            assert_eq!(mb.permanent_flags, vec![Flag::Seen, Flag::Deleted]);
+            assert!(
+                fake.commands()
+                    .last()
+                    .unwrap()
+                    .ends_with(r#" "box \"quoted\"\\name""#)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_selection_rejects_only_its_tagged_no_or_bad() {
+        for command in ["EXAMINE", "SELECT"] {
+            for status in ["NO", "BAD"] {
+                let (fake, mut session) = fake_session().await;
+                fake.fail_next("NOOP", "OK staged\r\n* NO [UIDNOTSTICKY] private-server-detail\r\n* OK [UIDVALIDITY 77] partial mailbox");
+                session.noop().await.unwrap();
+                fake.fail_next(command, &format!("{status} private-server-detail"));
+                let error = open_mailbox(&mut session, "INBOX", "INBOX", command)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, AdapterError::Rejected(ref e) if e.starts_with(command)),
+                    "{error:?}"
+                );
+                assert!(!error.to_string().contains("private-server-detail"));
+                // No metadata from the rejected mailbox can survive into a later one.
+                let mb = open_mailbox(&mut session, "Sent", "Sent", command)
+                    .await
+                    .unwrap();
+                assert_ne!(mb.uid_validity, Some(77));
+                assert!(mb.uid_validity.is_some_and(|n| n > 0));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_selection_keeps_crlf_out_of_commands() {
+        let (fake, mut session) = fake_session().await;
+        let before = fake.commands();
+        for wire in ["bad\nname", "bad\rname"] {
+            assert!(matches!(
+                open_mailbox(&mut session, wire, "Box", "EXAMINE").await,
+                Err(AdapterError::Transient(_))
+            ));
+        }
+        assert_eq!(fake.commands(), before);
+    }
+
+    // Unlike FakeImap's post-command drop control, this TLS peer sends no tagged completion.
+    async fn unfinished_mailbox_session(
+        reply: &'static str,
+    ) -> (Session, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let ca = crate::fake::TestCa::generate().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(ca.server_config());
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = BufReader::new(acceptor.accept(tcp).await.unwrap());
+            tls.get_mut()
+                .write_all(b"* OK test peer\r\n")
+                .await
+                .unwrap();
+            let mut command = String::new();
+            assert!(tls.read_line(&mut command).await.unwrap() > 0);
+            assert!(command.contains(" LOGIN "));
+            let tag = command.split_whitespace().next().unwrap();
+            tls.get_mut()
+                .write_all(format!("{tag} OK login\r\n").as_bytes())
+                .await
+                .unwrap();
+            command.clear();
+            assert!(tls.read_line(&mut command).await.unwrap() > 0);
+            assert!(command.contains(" EXAMINE ") || command.contains(" SELECT "));
+            tls.get_mut().write_all(reply.as_bytes()).await.unwrap();
+            tls.get_mut().shutdown().await.unwrap();
+        });
+        let tcp = TcpStream::connect(address).await.unwrap();
+        let tls = ca
+            .connector()
+            .unwrap()
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+        let mut client = async_imap::Client::new(tls);
+        client.read_response().await.unwrap().unwrap();
+        let session = client
+            .login("test", "test")
+            .await
+            .map_err(|(e, _)| e)
+            .unwrap();
+        (session, peer)
+    }
+
+    #[tokio::test]
+    async fn incomplete_mailbox_eof_and_bye_are_transient() {
+        for command in ["EXAMINE", "SELECT"] {
+            for reply in [
+                "",
+                "* OK [UIDVALIDITY 77] no completion\r\n",
+                "* NO [UIDNOTSTICKY] warning then EOF\r\n",
+                "* BYE private-server-detail\r\n",
+            ] {
+                let (mut session, peer) = unfinished_mailbox_session(reply).await;
+                let error = open_mailbox(&mut session, "INBOX", "INBOX", command)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, AdapterError::Transient(_)),
+                    "{command} {reply:?}: {error:?}"
+                );
+                assert!(!error.to_string().contains("private-server-detail"));
+                peer.await.unwrap();
+            }
+        }
+    }
+
     #[test]
     fn form_text_by_language() {
         use steve_modules::accounts::connections::{fields_shown, shown};
