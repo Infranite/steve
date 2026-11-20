@@ -39,6 +39,10 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with_retention(true).await
+}
+
+async fn start_with_retention(run_retention: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -86,6 +90,9 @@ async fn start() -> Env {
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
+        if job.name == "storage.retention" && !run_retention {
+            continue;
+        }
         job.start(&st.jobs);
     }
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
@@ -137,7 +144,7 @@ async fn owner_http_backup_publishes_manifest_and_updates_purpose_usage() {
     assert_eq!(unauthorized.status(), 401);
     let (status, m) = e.call("POST", "/api/system/backup", None).await;
     assert_eq!(status, 200, "{m}");
-    assert_eq!(m["reason"]["kind"], "diagnostic");
+    assert_eq!(m["reason"]["kind"], "manual");
     assert_eq!(m["completed"], true);
     let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_value(m).unwrap();
     let artifact = steve_store_sqlite::backup::plan::artifact(&manifest.database_path()).unwrap();
@@ -145,9 +152,33 @@ async fn owner_http_backup_publishes_manifest_and_updates_purpose_usage() {
     assert!(manifest.directory.join("manifest.json").is_file());
     let (status, usage) = e.call("GET", "/api/system/backup", None).await;
     assert_eq!(status, 200);
-    assert_eq!(usage["purposes"]["diagnostic"]["count"], 1);
-    assert!(usage["purposes"]["diagnostic"]["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(usage["purposes"]["manual"]["count"], 1);
+    assert!(usage["purposes"]["manual"]["bytes"].as_u64().unwrap() > 0);
     assert!(e.worktrees.is_dir());
+    let (status, second) = e.call("POST", "/api/system/backup", None).await;
+    assert_eq!(status, 200, "{second}");
+    let second: steve_store_sqlite::backup::Manifest = serde_json::from_value(second).unwrap();
+    assert_eq!(second.reason, steve_store_sqlite::backup::Reason::Manual);
+    // Sparse logical file creates total pressure without allocating/copying a large payload.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(manifest.database_path())
+        .unwrap()
+        .set_len(steve_store_sqlite::backup::TOTAL_BYTES + 1)
+        .unwrap();
+    let report = steve_store_sqlite::backup::retain_at(
+        &steve_hub::backup::root(&e.home),
+        u64::MAX,
+        steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS,
+    )
+    .unwrap();
+    assert_eq!(report.removed, 0);
+    assert!(manifest.database_path().exists() && second.database_path().exists());
+    assert!(
+        steve_store_sqlite::backup::retention_status(&steve_hub::backup::root(&e.home))
+            .unwrap()
+            .over_limit
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -216,4 +247,134 @@ async fn assembled_cleanup_route_receives_the_hub_backup_capability() {
             Ok(())
         })
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_backup_settings_persist_and_control_generation_and_retention() {
+    use steve_hub::backup;
+    use steve_store_sqlite::backup::{self as storage, Manifest};
+    // This test advances sweeps explicitly at a controlled `now`. A SystemClock background
+    // sweep would race those calls and could retire the old copy before our counted sweep.
+    let e = start_with_retention(false).await;
+    let (status, initial) = e.call("GET", "/api/system/backup", None).await;
+    assert_eq!(status, 200, "{initial}");
+    assert_eq!(
+        initial["settings"],
+        serde_json::json!({"enabled":true,"keep_days":7})
+    );
+    // Unauthorized callers cannot alter installation settings.
+    let unauthorized = e
+        .http
+        .patch(format!("{}/api/system/backup", e.base))
+        .json(&serde_json::json!({"enabled":false,"keep_days":30}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), 401);
+    let (status, saved) = e
+        .call(
+            "PATCH",
+            "/api/system/backup",
+            Some(serde_json::json!({"enabled":false,"keep_days":30})),
+        )
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(
+        backup::daily_settings(&e.store).unwrap(),
+        backup::DailySettings {
+            enabled: false,
+            keep_days: 30
+        }
+    );
+    let (_, current) = e.call("GET", "/api/system/backup", None).await;
+    assert_eq!(current["settings"], saved);
+    assert_eq!(current["keep_days"], 30);
+    assert_eq!(current["daily"], false);
+    let root = backup::root(&e.home);
+    assert!(
+        steve_hub::daily_backup::make_if_enabled(&e.store, &e.home, e.store.path(), "today")
+            .unwrap()
+            .is_none()
+    );
+    assert!(storage::list(&root).unwrap().is_empty());
+    // Create one 10-day-old daily backup and a newer daily backup; the wall clock is explicit.
+    let first = steve_hub::daily_backup::make(&e.home, e.store.path(), "older").unwrap();
+    let manifest_path = first.database.parent().unwrap().join("manifest.json");
+    let mut manifest: Manifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let now = manifest.created_ms;
+    manifest.created_ms = now - 10 * 86_400_000;
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let latest = steve_hub::daily_backup::make(&e.home, e.store.path(), "latest").unwrap();
+    assert_eq!(backup::retain(&e.store, &e.home, now).unwrap().removed, 0);
+    // Changing the saved period applies next sweep, even while generation is off.
+    let (status, saved) = e
+        .call(
+            "PATCH",
+            "/api/system/backup",
+            Some(serde_json::json!({"enabled":false,"keep_days":7})),
+        )
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert!(first.database.exists());
+    assert_eq!(backup::daily_settings(&e.store).unwrap().keep_days, 7);
+    let inventory = storage::list(&root).unwrap();
+    assert_eq!(inventory.len(), 2, "inventory: {inventory:?}");
+    let old = inventory
+        .iter()
+        .find(|m| m.database_path() == first.database)
+        .unwrap();
+    let newest = inventory
+        .iter()
+        .find(|m| m.database_path() == latest.database)
+        .unwrap();
+    assert_eq!(old.created_ms, now - 10 * 86_400_000);
+    assert!(
+        old.published_order < newest.published_order,
+        "{inventory:?}"
+    );
+    let children: Vec<_> = std::fs::read_dir(&old.directory)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let report = backup::retain(&e.store, &e.home, now).unwrap();
+    assert_eq!(report.failures, 0, "{report:?}");
+    assert_eq!(
+        report.removed, 1,
+        "{report:?}; inventory={inventory:?}; children={children:?}"
+    );
+    assert!(!first.database.exists() && latest.database.exists());
+    assert!(
+        steve_hub::daily_backup::make_if_enabled(&e.store, &e.home, e.store.path(), "today")
+            .unwrap()
+            .is_none()
+    );
+    let (status, saved) = e
+        .call(
+            "PATCH",
+            "/api/system/backup",
+            Some(serde_json::json!({"enabled":true,"keep_days":7})),
+        )
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert!(
+        steve_hub::daily_backup::make_if_enabled(&e.store, &e.home, e.store.path(), "today")
+            .unwrap()
+            .is_some()
+    );
+    for bad in [
+        serde_json::json!({"enabled":true,"keep_days":0}),
+        serde_json::json!({"enabled":true,"keep_days":366}),
+        serde_json::json!({"enabled":"yes","keep_days":7}),
+        serde_json::json!({"enabled":true,"keep_days":7,"max_bytes":1}),
+    ] {
+        assert_eq!(
+            e.call("PATCH", "/api/system/backup", Some(bad)).await.0,
+            400
+        );
+    }
+    assert_eq!(
+        backup::daily_settings(&e.store).unwrap(),
+        backup::DailySettings::default()
+    );
 }

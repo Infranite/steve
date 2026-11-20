@@ -33,6 +33,7 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
     let root = tempfile::tempdir().unwrap();
     let source = db(root.path());
     for reason in [
+        Reason::Manual,
         Reason::Daily,
         Reason::PreUpgrade {
             from: "old".into(),
@@ -74,7 +75,7 @@ fn each_purpose_publishes_verified_private_manifest_with_snapshot_schema() {
             );
         }
     }
-    assert_eq!(list(&root.path().join("backups")).unwrap().len(), 4);
+    assert_eq!(list(&root.path().join("backups")).unwrap().len(), 5);
 }
 #[test]
 fn attachment_failure_is_explicit_but_does_not_discard_the_database() {
@@ -142,27 +143,29 @@ fn retention_is_scoped_to_completed_owned_directories_and_the_correct_purpose() 
     )
     .unwrap();
     assert_eq!(
-        prune_at(&out, &Reason::Daily, daily.created_ms + 14 * 86400000).unwrap(),
-        0
+        retain_at(
+            &out,
+            daily.created_ms + DEFAULT_DAILY_KEEP_DAYS * 86400000,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        2 // upgrade count pressure; daily age is exactly at the boundary
     );
+    assert!(daily.database_path().exists());
     assert_eq!(
-        prune_at(&out, &Reason::Daily, daily.created_ms + 14 * 86400000 + 1).unwrap(),
+        retain_at(
+            &out,
+            daily.created_ms + DEFAULT_DAILY_KEEP_DAYS * 86400000 + 1,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
         1
     );
     assert!(!daily.database_path().exists());
     assert!(newest_daily.database_path().exists());
     assert!(diagnostic.database_path().exists());
-    assert_eq!(
-        prune(
-            &out,
-            &Reason::PreUpgrade {
-                from: "".into(),
-                to: "".into()
-            }
-        )
-        .unwrap(),
-        2
-    );
     assert_eq!(usage(&out).unwrap()["pre-upgrade"].count, 8);
     assert!(
         out.join("daily-notes.txt").exists()
@@ -170,7 +173,17 @@ fn retention_is_scoped_to_completed_owned_directories_and_the_correct_purpose() 
             && out.join("daily-foreign").exists()
     );
     fs::write(diagnostic.directory.join("operator-note"), "keep").unwrap();
-    assert_eq!(prune_at(&out, &Reason::Diagnostic, u64::MAX).unwrap(), 0);
+    assert_eq!(
+        retain_at(
+            &out,
+            u64::MAX,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        7
+    );
+    assert!(diagnostic.directory.exists());
 }
 #[test]
 fn database_failure_cancel_and_deadline_do_not_publish_directories() {
@@ -222,6 +235,17 @@ fn backup_publication_never_runs_retention_even_after_a_clock_correction() {
     let current = backup(&source, &p, &|_| {}, &CancelFlag::default()).unwrap();
     assert!(current.database_path().exists());
     assert_eq!(list(&p.dest_root).unwrap().len(), 11);
+    assert_eq!(
+        retain_at(
+            &p.dest_root,
+            u64::MAX,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        10
+    );
+    assert!(current.database_path().exists());
 }
 
 #[test]
@@ -250,13 +274,11 @@ fn unfamiliar_application_schema_metadata_does_not_prevent_a_verified_copy() {
 }
 
 #[test]
-fn explicit_keep_all_is_persisted_and_respected_by_scheduled_retention() {
+fn manual_reason_is_the_only_permanent_retention_policy() {
     let root = tempfile::tempdir().unwrap();
     let source = db(root.path());
-    let mut manual = plan(root.path(), Reason::Diagnostic);
-    manual.keep = Keep::All;
+    let manual = plan(root.path(), Reason::Manual);
     let mut first = backup(&source, &manual, &|_| {}, &CancelFlag::default()).unwrap();
-    assert!(first.keep_all);
     first.created_ms = 0;
     fs::write(
         first.directory.join("manifest.json"),
@@ -265,7 +287,7 @@ fn explicit_keep_all_is_persisted_and_respected_by_scheduled_retention() {
     .unwrap();
     let latest = backup(
         &source,
-        &plan(root.path(), Reason::Diagnostic),
+        &plan(root.path(), Reason::Manual),
         &|_| {},
         &CancelFlag::default(),
     )
@@ -276,8 +298,57 @@ fn explicit_keep_all_is_persisted_and_respected_by_scheduled_retention() {
             .iter()
             .find(|m| m.id == first.id)
             .unwrap()
-            .keep_all
+            .reason
+            .rule()
+            .limits
+            .is_none()
     );
-    assert_eq!(retain_at(&manual.dest_root, u64::MAX).unwrap().removed, 0);
+    assert_eq!(
+        retain_at(
+            &manual.dest_root,
+            u64::MAX,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        0
+    );
     assert!(first.database_path().exists() && latest.database_path().exists());
+}
+
+#[test]
+fn wal_snapshot_metadata_is_immutable_and_leaves_no_sidecars_to_block_retention() {
+    let root = tempfile::tempdir().unwrap();
+    let special = root.path().join("space #?% 中文");
+    fs::create_dir(&special).unwrap();
+    let source = db(&special);
+    let writer = rusqlite::Connection::open(&source).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode=WAL; INSERT INTO old_record VALUES('wal');")
+        .unwrap();
+    let plan = plan(&special, Reason::Daily);
+    let first = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
+    assert_eq!(first.schema_version, Some(50));
+    let mut names: Vec<_> = fs::read_dir(&first.directory)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut expected = vec!["manifest.json".to_owned(), first.database.name.clone()];
+    expected.sort();
+    assert_eq!(names, expected);
+    let actual = steve_store_sqlite::backup::plan::artifact(&first.database_path()).unwrap();
+    assert_eq!(actual.sha256, first.database.sha256);
+    let latest = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
+    let report = retain_at(&plan.dest_root, u64::MAX, DEFAULT_DAILY_KEEP_DAYS).unwrap();
+    assert_eq!(report.failures, 0);
+    assert_eq!(report.removed, 1);
+    assert!(!first.directory.exists() && latest.database_path().exists());
+    assert_eq!(
+        writer
+            .query_row("SELECT count(*) FROM old_record", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
 }

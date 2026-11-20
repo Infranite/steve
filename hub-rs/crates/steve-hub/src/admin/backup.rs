@@ -24,7 +24,7 @@ pub(crate) fn files(home: &Path) -> FileSet {
     }
 }
 pub(crate) fn reason(args: &[String]) -> Result<Reason> {
-    let mut chosen = "diagnostic";
+    let mut chosen = "manual";
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("backup") {
         bail!("expected backup command");
@@ -34,13 +34,16 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
             "--json" => {}
             "--reason" => {
                 chosen = it.next().ok_or_else(|| {
-                    anyhow::anyhow!("--reason needs pre-upgrade, pre-destructive or diagnostic")
+                    anyhow::anyhow!(
+                        "--reason needs manual, pre-upgrade, pre-destructive or diagnostic"
+                    )
                 })?
             }
             _ => bail!("unknown backup option: {arg}"),
         }
     }
     match chosen {
+        "manual" => Ok(Reason::Manual),
         "diagnostic" => Ok(Reason::Diagnostic),
         "pre-upgrade" => Ok(Reason::PreUpgrade {
             from: "unknown".into(),
@@ -49,13 +52,12 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
         "pre-destructive" => Ok(Reason::PreDestructive {
             what: "manual".into(),
         }),
-        _ => bail!("backup reason must be pre-upgrade, pre-destructive or diagnostic"),
+        _ => bail!("backup reason must be manual, pre-upgrade, pre-destructive or diagnostic"),
     }
 }
 pub(crate) fn run(home: &Path, db: &Path, reason: Reason) -> Result<Manifest> {
     let mut plan = crate::backup::plan(home, reason);
     plan.deadline = Some(std::time::Duration::from_secs(25));
-    plan.with_files = plan.reason.rule().with_files.then(|| files(home));
     Ok(backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?)
 }
 pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String> {
@@ -173,6 +175,7 @@ mod tests {
             .execute_batch("CREATE TABLE record(v);")
             .unwrap();
         for reason in [
+            Reason::Manual,
             Reason::Diagnostic,
             Reason::PreUpgrade {
                 from: "a".into(),

@@ -143,7 +143,7 @@ async fn make_backup(
     let args = vec![
         "backup".into(),
         "--reason".into(),
-        input.reason.unwrap_or_else(|| "diagnostic".into()),
+        input.reason.unwrap_or_else(|| "manual".into()),
     ];
     let result = tokio::task::spawn_blocking(move || {
         let db = store.path();

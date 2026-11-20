@@ -11,7 +11,9 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     let db = data.path().join("elsewhere.sqlite3");
     let store = steve_store::Store::open(&db, steve_store::NoPublisher).unwrap();
     let root = home.path().join("backups");
+    std::fs::write(home.path().join("steve.env"), "fixture").unwrap();
     for reason in [
+        Reason::Manual,
         Reason::Daily,
         Reason::Diagnostic,
         Reason::PreUpgrade {
@@ -22,7 +24,9 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
             what: "purge".into(),
         },
     ] {
-        assert_eq!(backup::plan(home.path(), reason).dest_root, root);
+        let plan = backup::plan(home.path(), reason.clone());
+        assert_eq!(plan.dest_root, root);
+        assert_eq!(plan.with_files.is_some(), reason.rule().with_files);
     }
     let port = ChannelBackup::new(home.path().to_owned(), db.clone());
     let relative = port.backup("purge").unwrap();
@@ -37,6 +41,7 @@ fn cleanup_daily_and_management_plans_share_the_configured_backup_root() {
     );
     let manifests = steve_store_sqlite::backup::list(&root).unwrap();
     assert_eq!(manifests.len(), 2);
+    assert!(manifests.iter().all(|m| !m.files.artifacts.is_empty()));
     assert!(manifests.iter().any(|m| m.reason
         == Reason::PreDestructive {
             what: "purge".into()
@@ -74,4 +79,33 @@ fn channel_backup_does_not_acquire_the_legacy_writer_mutex() {
         .expect("backup must use an independent connection")
         .unwrap();
     assert!(home.path().join("backups").join(relative).is_file());
+}
+
+#[test]
+fn daily_backup_off_keeps_the_real_channel_cleanup_backup_capability_active() {
+    let home = tempfile::tempdir().unwrap();
+    let store =
+        steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
+    std::fs::write(home.path().join("steve.env"), "fixture").unwrap();
+    backup::save_daily_settings(
+        &store,
+        backup::DailySettings {
+            enabled: false,
+            keep_days: 7,
+        },
+        "usr_dev",
+    )
+    .unwrap();
+    assert!(
+        steve_hub::daily_backup::make_if_enabled(&store, home.path(), store.path(), "today")
+            .unwrap()
+            .is_none()
+    );
+    let port = ChannelBackup::new(home.path().to_owned(), store.path().to_owned());
+    let relative = port.backup("purge").unwrap();
+    assert!(backup::root(home.path()).join(relative).is_file());
+    let manifests = steve_store_sqlite::backup::list(&backup::root(home.path())).unwrap();
+    assert_eq!(manifests.len(), 1);
+    assert!(matches!(manifests[0].reason, Reason::PreDestructive { .. }));
+    assert!(!manifests[0].files.artifacts.is_empty());
 }

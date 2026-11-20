@@ -24,6 +24,9 @@ pub struct Manifest {
     pub reason: Reason,
     pub created_at: String,
     pub created_ms: u64,
+    /// Monotonic publication order; wall-clock steps cannot retire a just-published copy.
+    #[serde(default)]
+    pub published_order: u64,
     pub source: PathBuf,
     pub directory: PathBuf,
     pub schema_version: Option<i64>,
@@ -31,9 +34,6 @@ pub struct Manifest {
     pub files: Files,
     /// A verified database and durable manifest were published. Files may be incomplete.
     pub completed: bool,
-    /// Explicit Keep::All copies are never automatically retired.
-    #[serde(default)]
-    pub keep_all: bool,
 }
 impl Manifest {
     pub fn database_path(&self) -> PathBuf {

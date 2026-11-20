@@ -12,7 +12,7 @@ const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
 install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.join("backups"))));
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.clone())));
 }}
 
 struct State {
@@ -120,7 +120,14 @@ where
                             .unwrap_or_else(|e| e.into_inner())
                             .resources_done = !more
                     }
-                    Err(e) => error = Some(DueError(e.to_string())),
+                    Err(e) => {
+                        // Retry resources next interval, without freezing completed row policies.
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .resources_done = true;
+                        error = Some(DueError(e.to_string()));
+                    }
                 }
             }
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -135,9 +142,10 @@ where
         error.map_or(Ok(()), Err)
     }
 }
-async fn run(db: steve_store::Store, backups: std::path::PathBuf) {
+async fn run(db: steve_store::Store, home: std::path::PathBuf) {
     let clock = Arc::new(SystemClock);
     let optimizer = db.clone();
+    let backup_store = db.clone();
     let source = Arc::new(Source::new(
         clock.now(),
         move |kind, now, after| {
@@ -159,10 +167,11 @@ async fn run(db: steve_store::Store, backups: std::path::PathBuf) {
             }
         },
         move |now: i64| {
-            let root = backups.clone();
+            let home = home.clone();
+            let store = backup_store.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
-                    steve_store_sqlite::backup::retain_at(&root, now.max(0) as u64)
+                    crate::backup::retain(&store, &home, now.max(0) as u64)
                         .map(|report| report.more)
                         .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))
                 })
@@ -246,11 +255,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_retries_resources_without_replaying_completed_row_policies() {
+    async fn retention_resource_failure_never_blocks_the_next_row_sweep() {
         let rows = Arc::new(AtomicUsize::new(0));
-        let resources = Arc::new(AtomicUsize::new(0));
         let row_calls = rows.clone();
-        let resource_calls = resources.clone();
         let source = Source::new(
             0,
             move |_: Kind, _: i64, _: Option<i64>| {
@@ -267,28 +274,24 @@ mod tests {
                 }
             },
             || async { Ok(()) },
-            move |_: i64| {
-                let first = resource_calls.fetch_add(1, Ordering::SeqCst) == 0;
-                async move {
-                    if first {
-                        Err(steve_store::StoreError::Conflict(
-                            "retry filesystem I/O".into(),
-                        ))
-                    } else {
-                        Ok(false)
-                    }
-                }
+            |_: i64| async {
+                Err(steve_store::StoreError::Conflict(
+                    "filesystem unavailable".into(),
+                ))
             },
         );
-        assert!(source.run_due(0).await.is_err());
-        assert_eq!(source.next_due().await.unwrap(), Some(0));
-        source.run_due(1).await.unwrap();
-        assert_eq!(rows.load(Ordering::SeqCst), ALL.len());
-        assert_eq!(resources.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            source.next_due().await.unwrap(),
-            Some(1 + INTERVAL.as_millis() as i64)
-        );
+        for sweep in 0..3 {
+            let now = sweep * INTERVAL.as_millis() as i64;
+            assert!(source.run_due(now).await.is_err());
+            assert_eq!(
+                rows.load(Ordering::SeqCst),
+                (sweep as usize + 1) * ALL.len()
+            );
+            assert_eq!(
+                source.next_due().await.unwrap(),
+                Some(now + INTERVAL.as_millis() as i64)
+            );
+        }
     }
 
     #[tokio::test]

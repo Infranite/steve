@@ -1364,16 +1364,58 @@ pub async fn system_workspaces_reclaim(
 pub async fn system_backup(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> ApiResult {
     instance_owner(&c)?;
     let cfg = st.cfg.clone();
-    let v = tokio::task::spawn_blocking(move || {
-        // as the job is started (`wire`): not on a copy of a real database
-        crate::daily_backup::status(&cfg.home, &cfg.db_path(), cfg.backup && !cfg.no_resume)
+    let store = st
+        .modules
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("storage unavailable"))?
+        .store
+        .clone();
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let settings = crate::backup::daily_settings(&store)?;
+        let mut status = crate::daily_backup::status(
+            &cfg.home,
+            &cfg.db_path(),
+            cfg.backup && !cfg.no_resume && settings.enabled,
+            settings.keep_days,
+        );
+        status["settings"] = serde_json::to_value(settings)?;
+        status["available"] = json!(cfg.backup && !cfg.no_resume);
+        Ok(status)
     })
     .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
     ok(v)
 }
 
-/// An owner-requested diagnostic copy, using the same plan as daily/admin backups.
+/// Installation owner settings; stored atomically through the existing Settings repository.
+pub async fn system_backup_patch(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    instance_owner(&c)?;
+    let settings: crate::backup::DailySettings =
+        serde_json::from_value(body(&b)?).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    settings
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let store = st
+        .modules
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("storage unavailable"))?
+        .store
+        .clone();
+    tokio::task::spawn_blocking(move || {
+        crate::backup::save_daily_settings(&store, settings, &c.me)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    ok(serde_json::to_value(settings).map_err(|e| ApiError::internal(e.to_string()))?)
+}
+
+/// An owner-requested manual copy, using the same plan as daily/admin backups.
 pub async fn system_backup_now(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -1384,7 +1426,7 @@ pub async fn system_backup_now(
         crate::admin::client::backup::run(
             &cfg.home,
             &cfg.db_path(),
-            steve_store_sqlite::backup::Reason::Diagnostic,
+            steve_store_sqlite::backup::Reason::Manual,
         )
     })
     .await
@@ -1696,7 +1738,9 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
         )
         .route(
             "/system/backup",
-            get(misc::system_backup).post(misc::system_backup_now),
+            get(misc::system_backup)
+                .post(misc::system_backup_now)
+                .patch(misc::system_backup_patch),
         )
         .route("/system/outbox", get(misc::system_outbox))
         .route("/system/outbox/revive", post(misc::system_outbox_revive))

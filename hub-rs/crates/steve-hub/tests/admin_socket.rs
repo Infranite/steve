@@ -607,6 +607,12 @@ async fn backup_command_uses_the_live_socket_and_management_inventory() {
     .await
     .unwrap();
     assert_eq!(empty.code, 0, "{}", empty.stderr);
+    let default_manifest: steve_store_sqlite::backup::Manifest =
+        serde_json::from_str(&empty.stdout).unwrap();
+    assert_eq!(
+        default_manifest.reason,
+        steve_store_sqlite::backup::Reason::Manual
+    );
     let bad = hub.cli(&["backup", "--reason", "daily"]).await;
     assert_eq!(bad.code, 2);
     assert_eq!(
@@ -726,4 +732,161 @@ async fn management_backup_uses_configured_home_with_a_detached_database() {
     .unwrap();
     assert_eq!(usage["diagnostic"]["count"], 1);
     hub.stop().await;
+}
+
+#[tokio::test]
+async fn default_management_backup_is_manual_and_survives_age_and_total_pressure() {
+    use steve_store_sqlite::backup::{self, Manifest, Reason};
+    let hub = Hub::start(false);
+    std::fs::write(hub.cfg.home.join("steve.env"), "fixture").unwrap();
+    let mut manifests = vec![];
+    for _ in 0..2 {
+        let result = hub.cli(&["backup"]).await;
+        assert_eq!(result.code, 0, "{}", result.stderr);
+        let manifest: Manifest = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(manifest.reason, Reason::Manual);
+        assert!(!manifest.files.artifacts.is_empty());
+        manifests.push(manifest);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(manifests[0].database_path())
+        .unwrap()
+        .set_len(backup::TOTAL_BYTES + 1)
+        .unwrap();
+    let root = steve_hub::backup::root(&hub.cfg.home);
+    assert_eq!(
+        backup::retain_at(
+            &root,
+            u64::MAX,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        0
+    );
+    assert!(manifests.iter().all(|m| m.database_path().exists()));
+    assert!(backup::retention_status(&root).unwrap().over_limit);
+    hub.stop().await;
+}
+
+#[test]
+fn default_offline_management_backup_is_manual() {
+    use steve_store_sqlite::backup::{self, Manifest, Reason};
+    let temp = tempfile::tempdir().unwrap();
+    let (cfg, _) = config(temp.path());
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    rusqlite::Connection::open(cfg.db_path())
+        .unwrap()
+        .execute_batch("CREATE TABLE record(v);")
+        .unwrap();
+    let first = access::command(&cfg, &["backup".into()]);
+    let second = access::command(&cfg, &["backup".into()]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    let first: Manifest = serde_json::from_str(&first.stdout).unwrap();
+    let second: Manifest = serde_json::from_str(&second.stdout).unwrap();
+    assert_eq!(first.reason, Reason::Manual);
+    assert_eq!(second.reason, Reason::Manual);
+    assert_eq!(
+        backup::retain_at(
+            &steve_hub::backup::root(&cfg.home),
+            u64::MAX,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+        )
+        .unwrap()
+        .removed,
+        0
+    );
+    assert!(first.database_path().exists() && second.database_path().exists());
+}
+
+#[tokio::test]
+async fn daily_backup_off_does_not_disable_other_purposes_or_their_retention_rules() {
+    use steve_hub::backup as host;
+    use steve_store_sqlite::backup::{self, Manifest, Reason};
+    let hub = Hub::start(false);
+    std::fs::write(hub.cfg.home.join("steve.env"), "fixture").unwrap();
+    host::save_daily_settings(
+        &hub.store,
+        host::DailySettings {
+            enabled: false,
+            keep_days: 1,
+        },
+        "usr_dev",
+    )
+    .unwrap();
+    assert!(
+        steve_hub::daily_backup::make_if_enabled(
+            &hub.store,
+            &hub.cfg.home,
+            hub.store.path(),
+            "today"
+        )
+        .unwrap()
+        .is_none()
+    );
+    let mut manifests = vec![];
+    for reason in ["pre-upgrade", "pre-destructive", "manual", "diagnostic"] {
+        let result = hub.cli(&["backup", "--reason", reason]).await;
+        assert_eq!(result.code, 0, "{reason}: {}", result.stderr);
+        let m: Manifest = serde_json::from_str(&result.stdout).unwrap();
+        assert!(m.completed && m.database_path().is_file());
+        assert_eq!(m.reason.kind(), reason);
+        assert_eq!(!m.files.artifacts.is_empty(), m.reason.rule().with_files);
+        let copied = rusqlite::Connection::open(m.database_path()).unwrap();
+        let check: String = copied
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(check, "ok");
+        manifests.push(m);
+    }
+    // One-day Daily retention must not replace the upgrade purpose's own age/count rules.
+    for _ in 0..8 {
+        let result = hub.cli(&["backup", "--reason", "pre-upgrade"]).await;
+        assert_eq!(result.code, 0, "{}", result.stderr);
+    }
+    let now = backup::plan::now_ms() + 2 * 86_400_000;
+    host::retain(&hub.store, &hub.cfg.home, now).unwrap();
+    let all = backup::list(&host::root(&hub.cfg.home)).unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|m| matches!(m.reason, Reason::PreUpgrade { .. }))
+            .count(),
+        8
+    );
+    assert!(!manifests[0].database_path().exists());
+    assert!(manifests[1..].iter().all(|m| m.database_path().exists()));
+    assert!(!all.iter().any(|m| m.reason == Reason::Daily));
+    hub.stop().await;
+}
+
+#[test]
+fn offline_pre_upgrade_backup_runs_when_daily_backup_is_off() {
+    use steve_hub::backup as host;
+    use steve_store_sqlite::backup::{Manifest, Reason};
+    let temp = tempfile::tempdir().unwrap();
+    let (cfg, _) = config(temp.path());
+    std::fs::create_dir_all(&cfg.data_dir).unwrap();
+    let store = Store::open(cfg.db_path(), steve_store::NoPublisher).unwrap();
+    host::save_daily_settings(
+        &store,
+        host::DailySettings {
+            enabled: false,
+            keep_days: 7,
+        },
+        "usr_dev",
+    )
+    .unwrap();
+    drop(store);
+    // The native installer asks its verified candidate for this same offline command.
+    let result = access::command(
+        &cfg,
+        &["backup".into(), "--reason".into(), "pre-upgrade".into()],
+    );
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let manifest: Manifest = serde_json::from_str(&result.stdout).unwrap();
+    assert!(matches!(manifest.reason, Reason::PreUpgrade { .. }));
+    assert!(manifest.completed && manifest.database_path().is_file());
+    assert_eq!(manifest.database.quick_check.as_deref(), Some("ok"));
 }

@@ -13,12 +13,14 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Reason {
+    Manual,
     Daily,
     PreUpgrade { from: String, to: String },
     PreDestructive { what: String },
@@ -27,6 +29,7 @@ pub enum Reason {
 impl Reason {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Manual => "manual",
             Self::Daily => "daily",
             Self::PreUpgrade { .. } => "pre-upgrade",
             Self::PreDestructive { .. } => "pre-destructive",
@@ -44,54 +47,78 @@ impl Reason {
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Rule {
     pub kind: &'static str,
-    pub days: u64,
-    pub copies: usize,
-    pub bytes: u64,
+    /// None means this purpose is never automatically retired.
+    pub limits: Option<Limits>,
     pub with_files: bool,
 }
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Limits {
+    /// None resolves the installation's daily retention setting each sweep.
+    pub days: Option<u64>,
+    pub copies: usize,
+    pub bytes: u64,
+}
+pub const DEFAULT_DAILY_KEEP_DAYS: u64 = 7;
+pub const MAX_DAILY_KEEP_DAYS: u64 = 365;
 const DAY_MS: u64 = 86_400_000;
 const GIB: u64 = 1024 * 1024 * 1024;
 pub const TOTAL_BYTES: u64 = 64 * GIB;
-pub const RULES: [Rule; 4] = [
+pub const RULES: [Rule; 5] = [
+    Rule {
+        kind: "manual",
+        limits: None,
+        with_files: true,
+    },
     Rule {
         kind: "daily",
-        days: 14,
-        copies: 14,
-        bytes: 32 * GIB,
+        limits: Some(Limits {
+            days: None,
+            copies: MAX_DAILY_KEEP_DAYS as usize + 1,
+            bytes: 32 * GIB,
+        }),
         with_files: true,
     },
     Rule {
         kind: "pre-upgrade",
-        days: 90,
-        copies: 8,
-        bytes: 16 * GIB,
+        limits: Some(Limits {
+            days: Some(90),
+            copies: 8,
+            bytes: 16 * GIB,
+        }),
         with_files: true,
     },
     Rule {
         kind: "pre-destructive",
-        days: 30,
-        copies: 8,
-        bytes: 16 * GIB,
+        limits: Some(Limits {
+            days: Some(30),
+            copies: 8,
+            bytes: 16 * GIB,
+        }),
         with_files: true,
     },
     Rule {
         kind: "diagnostic",
-        days: 7,
-        copies: 4,
-        bytes: 2 * GIB,
+        limits: Some(Limits {
+            days: Some(7),
+            copies: 4,
+            bytes: 2 * GIB,
+        }),
         with_files: false,
     },
 ];
 impl Reason {
     pub fn rule(&self) -> &'static Rule {
-        // The enum has exactly the purposes described above.
-        RULES.iter().find(|r| r.kind == self.kind()).unwrap()
+        &RULES[self.rule_index()]
     }
-}
-#[derive(Clone, Copy, Debug)]
-pub enum Keep {
-    Default,
-    All,
+    fn rule_index(&self) -> usize {
+        match self {
+            Self::Manual => 0,
+            Self::Daily => 1,
+            Self::PreUpgrade { .. } => 2,
+            Self::PreDestructive { .. } => 3,
+            Self::Diagnostic => 4,
+        }
+    }
 }
 /// Archive implementation is supplied by the host, so storage has no mandatory tar/process
 /// dependency. The callback returns a path in the supplied output directory, or None.
@@ -103,7 +130,6 @@ pub struct FileSet {
 pub struct BackupPlan {
     pub reason: Reason,
     pub dest_root: PathBuf,
-    pub keep: Keep,
     pub deadline: Option<Duration>,
     pub with_files: Option<FileSet>,
 }
@@ -112,7 +138,6 @@ impl BackupPlan {
         Self {
             reason,
             dest_root,
-            keep: Keep::Default,
             deadline: Some(Duration::from_secs(300)),
             with_files: None,
         }
@@ -199,7 +224,20 @@ pub fn artifact(path: &Path) -> io::Result<Artifact> {
 }
 /// Schema metadata comes from the verified copy, hence describes its exact snapshot.
 fn schema(path: &Path) -> rusqlite::Result<Option<i64>> {
-    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // This is our fully closed, verified snapshot. A normal read-only WAL connection
+    // can leave -wal/-shm files that make the owned directory look foreign to retention.
+    // Immutable mode reads only the snapshot; encode all path bytes so ?, #, % and Unicode
+    // in installation/database paths cannot change SQLite's URI parameters.
+    let encoded: String = path
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
+    let c = Connection::open_with_flags(
+        format!("file:{encoded}?immutable=1"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
     let exists: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schema_version' AND type='table')",
         [],
@@ -279,19 +317,31 @@ pub fn backup(
     };
     let files = archive_files(plan, &partial, start, cancel)?;
     check(start, plan.deadline, cancel)?;
+    // All Hub/offline writers publish under the installation owner. Serialize only the
+    // publication phase in-process, then derive a durable sequence independent of wall time.
+    static PUBLISH: Mutex<()> = Mutex::new(());
+    let _publish = PUBLISH.lock().unwrap_or_else(|e| e.into_inner());
+    let published_order = inventory(&plan.dest_root, false)?
+        .manifests
+        .iter()
+        .map(|m| m.published_order)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("backup publication order exhausted"))?;
     let manifest = Manifest {
         format: 1,
         id,
         reason: plan.reason.clone(),
         created_at,
         created_ms,
+        published_order,
         source: db_path.to_owned(),
         directory: directory.clone(),
         schema_version,
         database,
         files,
         completed: true,
-        keep_all: matches!(plan.keep, Keep::All),
     };
     let mut output = OpenOptions::new()
         .write(true)
@@ -305,7 +355,7 @@ pub fn backup(
     if fs::symlink_metadata(&directory).is_ok() {
         return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
     }
-    fs::rename(&partial, &directory)?;
+    rename(&partial, &directory)?;
     if let Err(error) = File::open(&plan.dest_root).and_then(|f| f.sync_all()) {
         let _ = fs::remove_dir_all(&directory);
         return Err(error.into());
@@ -356,58 +406,95 @@ fn archive_files(
     Ok(files)
 }
 
+fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
 fn single_name(name: &str) -> bool {
     Path::new(name).file_name().is_some_and(|n| n == name) && name != "." && name != ".."
 }
 /// Inventory only completed, recognizable directories, never symlinked or foreign paths.
 pub fn list(root: &Path) -> io::Result<Vec<Manifest>> {
-    inventory(root, true)
+    Ok(inventory(root, true)?.manifests)
 }
-fn inventory(root: &Path, require_database: bool) -> io::Result<Vec<Manifest>> {
+#[derive(Default)]
+struct Inventory {
+    manifests: Vec<Manifest>,
+    failures: usize,
+}
+fn directory_failure(path: &Path, error: &io::Error) {
+    tracing::warn!(path = %path.display(), %error, "backup retention skipped directory");
+}
+fn inventory(root: &Path, require_database: bool) -> io::Result<Inventory> {
     let entries = match fs::read_dir(root) {
         Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Inventory::default()),
         Err(e) => return Err(e),
     };
-    let mut all = vec![];
+    let mut all = Inventory::default();
     for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+        let result = (|| -> io::Result<Option<Manifest>> {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                return Ok(None);
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".partial") {
+                return Ok(None);
+            }
+            let path = entry.path();
+            let read = (|| -> io::Result<Option<Manifest>> {
+                let meta = path.join("manifest.json");
+                match fs::symlink_metadata(&meta) {
+                    Ok(m) if m.is_file() => {}
+                    Ok(_) => return Ok(None),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e),
+                }
+                let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
+                    return Ok(None);
+                };
+                if m.files.artifacts.iter().any(|a| !single_name(&a.name))
+                    || m.format != 1
+                    || !m.completed
+                    || m.id != name
+                    || !name.starts_with(&format!("{}-{}-", m.reason.prefix(), m.created_at))
+                    || !single_name(&m.database.name)
+                    || m.database.quick_check.as_deref() != Some("ok")
+                {
+                    return Ok(None);
+                }
+                if require_database {
+                    match fs::symlink_metadata(path.join(&m.database.name)) {
+                        Ok(f) if f.is_file() => {}
+                        Ok(_) => return Ok(None),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) => return Err(e),
+                    }
+                }
+                m.directory = path.clone();
+                Ok(Some(m))
+            })();
+            if let Err(ref error) = read {
+                directory_failure(&path, error);
+            }
+            read
+        })();
+        match result {
+            Ok(Some(m)) => all.manifests.push(m),
+            Ok(None) => {}
+            Err(error) => {
+                all.failures += 1;
+                // An unreadable root entry has no usable directory path.
+                tracing::warn!(%error, "backup inventory entry failed");
+            }
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".partial") {
-            continue;
-        }
-        let path = entry.path();
-        let meta = path.join("manifest.json");
-        if !fs::symlink_metadata(&meta).is_ok_and(|m| m.is_file()) {
-            continue;
-        }
-        let Ok(mut m) = serde_json::from_slice::<Manifest>(&fs::read(meta)?) else {
-            continue;
-        };
-        if m.files.artifacts.iter().any(|a| !single_name(&a.name)) {
-            continue;
-        }
-        if m.format != 1
-            || !m.completed
-            || m.id != name
-            || !name.starts_with(&format!("{}-{}-", m.reason.prefix(), m.created_at))
-            || !single_name(&m.database.name)
-            || m.database.quick_check.as_deref() != Some("ok")
-        {
-            continue;
-        }
-        if require_database
-            && !fs::symlink_metadata(path.join(&m.database.name)).is_ok_and(|f| f.is_file())
-        {
-            continue;
-        }
-        m.directory = path;
-        all.push(m);
     }
-    all.sort_by(|a, b| a.created_ms.cmp(&b.created_ms).then(a.id.cmp(&b.id)));
+    all.manifests.sort_by(|a, b| {
+        a.published_order
+            .cmp(&b.published_order)
+            .then(a.created_ms.cmp(&b.created_ms))
+            .then(a.id.cmp(&b.id))
+    });
     Ok(all)
 }
 /// Actual on-disk logical bytes, rather than the historical sizes in the manifest.
@@ -438,17 +525,25 @@ pub fn usage(root: &Path) -> io::Result<BTreeMap<String, Usage>> {
         .iter()
         .map(|r| (r.kind.into(), Usage::default()))
         .collect();
-    for m in inventory(root, false)? {
-        let bytes = directory_state(&m)?.bytes;
+    for m in inventory(root, false)?.manifests {
+        let bytes = match directory_state(&m) {
+            Ok(state) => state.bytes,
+            Err(error) => {
+                directory_failure(&m.directory, &error);
+                continue;
+            }
+        };
         let u = result.get_mut(m.reason.kind()).unwrap();
         u.count += 1;
         u.bytes = u.bytes.saturating_add(bytes);
         // Inventory is oldest first: the final value describes the protected latest copy.
-        u.latest_over_limit = bytes > m.reason.rule().bytes;
+        u.latest_over_limit = m.reason.rule().limits.is_some_and(|l| bytes > l.bytes);
     }
     for rule in RULES {
         let u = result.get_mut(rule.kind).unwrap();
-        u.over_limit = u.bytes > rule.bytes || u.count > rule.copies as u64;
+        u.over_limit = rule
+            .limits
+            .is_some_and(|l| u.bytes > l.bytes || u.count > l.copies as u64);
     }
     Ok(result)
 }
@@ -472,89 +567,136 @@ pub fn retention_status(root: &Path) -> io::Result<RetentionStatus> {
         over_limit,
     })
 }
-pub fn prune(root: &Path, reason: &Reason) -> io::Result<usize> {
-    prune_at(root, reason, now_ms())
-}
-/// Scoped compatibility entry, interpreted by the same cleaner as the scheduled sweep.
-pub fn prune_at(root: &Path, reason: &Reason, now: u64) -> io::Result<usize> {
-    Ok(prune_impl(root, Some(reason), now, &RULES, TOTAL_BYTES, usize::MAX)?.removed)
-}
 #[derive(Debug, Default)]
 pub struct Pruned {
+    pub failures: usize,
     pub removed: usize,
     pub more: bool,
 }
 /// Resource hook for storage.retention. No SQLite connection/write grant is held here.
 /// Bound deletions per turn; the existing Source continues immediately when more remain.
-pub fn retain_at(root: &Path, now: u64) -> io::Result<Pruned> {
+pub fn retain_at(root: &Path, now: u64, daily_keep_days: u64) -> io::Result<Pruned> {
     prune_impl(
         root,
-        None,
         now,
         &RULES,
+        daily_keep_days,
         TOTAL_BYTES,
         crate::retention::MAX_SLICE_ROWS as usize,
     )
 }
-/// Single interpreter: evaluate age/count/byte pressure in oldest-first order.
-/// Every purpose's newest copy and explicit Keep::All copies survive every rule, even when
+/// Single interpreter: evaluate age/count/byte pressure in publication order, oldest first.
+/// Every purpose's newest copy and all Manual copies survive every rule, even when
 /// those protected copies alone exceed the cap. Status reports that irreducible excess.
 fn prune_impl(
     root: &Path,
-    reason: Option<&Reason>,
     now: u64,
-    rules: &[Rule],
+    rules: &[Rule; 5],
+    daily_keep_days: u64,
     max_bytes: u64,
     limit: usize,
 ) -> io::Result<Pruned> {
-    let all = inventory(root, false)?;
+    let inventory = inventory(root, false)?;
+    let all = inventory.manifests;
     let mut remaining: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     let mut newest = BTreeMap::new();
     let mut sizes = Vec::with_capacity(all.len());
+    let mut report = Pruned {
+        failures: inventory.failures,
+        ..Pruned::default()
+    };
     let mut total = 0u64;
     for m in &all {
-        let bytes = directory_state(m)?.bytes;
+        let bytes = match directory_state(m) {
+            Ok(state) => Some(state.bytes),
+            Err(error) => {
+                directory_failure(&m.directory, &error);
+                report.failures += 1;
+                None
+            }
+        };
         sizes.push(bytes);
-        total = total.saturating_add(bytes);
+        total = total.saturating_add(bytes.unwrap_or(0));
         let state = remaining.entry(m.reason.kind()).or_default();
         state.0 += 1;
-        state.1 = state.1.saturating_add(bytes);
+        state.1 = state.1.saturating_add(bytes.unwrap_or(0));
         newest.insert(m.reason.kind(), m.id.as_str());
     }
-    let mut report = Pruned::default();
+    let mut changed = false;
     for (m, bytes) in all.iter().zip(sizes) {
         let kind = m.reason.kind();
-        if reason.is_some_and(|r| r.kind() != kind)
-            || m.keep_all
-            || newest.get(kind).copied() == Some(m.id.as_str())
-        {
+        let rule = &rules[m.reason.rule_index()];
+        let Some(limits) = rule.limits else {
+            continue;
+        };
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        if newest.get(kind).copied() == Some(m.id.as_str()) {
+            if bytes > limits.bytes {
+                tracing::warn!(
+                    reason = kind,
+                    bytes,
+                    max_bytes = limits.bytes,
+                    "latest backup exceeds retention limit; retained"
+                );
+            }
             continue;
         }
-        let rule = rules
-            .iter()
-            .find(|r| r.kind == kind)
-            .ok_or_else(|| io::Error::other("backup purpose has no retention rule"))?;
         let state = remaining.get_mut(kind).unwrap();
-        let expired = now.saturating_sub(m.created_ms) > rule.days.saturating_mul(DAY_MS);
-        if !(expired || state.0 > rule.copies || state.1 > rule.bytes || total > max_bytes) {
+        let expired = now.saturating_sub(m.created_ms)
+            > limits
+                .days
+                .unwrap_or(daily_keep_days)
+                .saturating_mul(DAY_MS);
+        if !(expired || state.0 > limits.copies || state.1 > limits.bytes || total > max_bytes) {
             continue;
         }
-        // Recheck ownership immediately before deletion. Missing declared artifacts are harmless.
-        if !directory_state(m)?.owned {
-            continue;
+        // Recheck ownership immediately before retirement; directory errors never stop others.
+        match directory_state(m) {
+            Ok(state) if state.owned => {}
+            Ok(_) => continue,
+            Err(error) => {
+                directory_failure(&m.directory, &error);
+                report.failures += 1;
+                continue;
+            }
         }
         if report.removed == limit {
             report.more = true;
             break;
         }
-        fs::remove_dir_all(&m.directory)?;
+        let retired = root.join(format!("{}.partial", m.id));
+        let result = (|| -> io::Result<()> {
+            if fs::symlink_metadata(&retired).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "retired backup path exists",
+                ));
+            }
+            rename(&m.directory, &retired)?;
+            changed = true;
+            fs::remove_dir_all(&retired)
+        })();
+        if let Err(error) = result {
+            directory_failure(&m.directory, &error);
+            report.failures += 1;
+            continue;
+        }
         report.removed += 1;
         state.0 -= 1;
         state.1 = state.1.saturating_sub(bytes);
         total = total.saturating_sub(bytes);
     }
-    if report.removed > 0 {
+    if changed {
         File::open(root)?.sync_all()?;
+    }
+    if total > max_bytes {
+        tracing::warn!(
+            bytes = total,
+            max_bytes,
+            "backup retention remains over total limit; protected or inaccessible copies retained"
+        );
     }
     Ok(report)
 }
@@ -563,7 +705,7 @@ fn prune_impl(
 mod retention_tests {
     use super::*;
 
-    fn copy(root: &Path, reason: Reason, at: u64, keep_all: bool) -> Manifest {
+    fn copy(root: &Path, reason: Reason, at: u64) -> Manifest {
         let id = format!("{}-20260101T000000-{at:04}", reason.prefix());
         let directory = root.join(&id);
         fs::create_dir(&directory).unwrap();
@@ -580,6 +722,7 @@ mod retention_tests {
             reason,
             created_at: "20260101T000000".into(),
             created_ms: at,
+            published_order: at,
             source: PathBuf::from("source.sqlite3"),
             directory,
             schema_version: None,
@@ -591,7 +734,6 @@ mod retention_tests {
                 error: None,
             },
             completed: true,
-            keep_all,
         };
         save(&m);
         m
@@ -621,20 +763,31 @@ mod retention_tests {
     fn every_purpose_has_age_count_and_bytes_limits_but_keeps_its_latest() {
         for reason in purposes() {
             let root = tempfile::tempdir().unwrap();
-            let rule = reason.rule();
-            assert!(rule.days > 0 && rule.copies > 0 && rule.bytes > 0);
+            let rule = reason.rule().limits.unwrap();
+            assert!(
+                rule.days.unwrap_or(DEFAULT_DAILY_KEEP_DAYS) > 0
+                    && rule.copies > 0
+                    && rule.bytes > 0
+            );
             for at in 0..=rule.copies as u64 {
-                copy(root.path(), reason.clone(), at, false);
+                copy(root.path(), reason.clone(), at);
             }
             assert_eq!(
-                retain_at(root.path(), rule.copies as u64).unwrap().removed,
+                retain_at(root.path(), rule.copies as u64, DEFAULT_DAILY_KEEP_DAYS)
+                    .unwrap()
+                    .removed,
                 1
             );
             assert_eq!(list(root.path()).unwrap().len(), rule.copies);
-            let report = retain_at(root.path(), u64::MAX).unwrap();
+            let report = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS).unwrap();
             assert_eq!(report.removed, rule.copies - 1);
             assert_eq!(list(root.path()).unwrap()[0].created_ms, rule.copies as u64);
-            assert_eq!(retain_at(root.path(), u64::MAX).unwrap().removed, 0);
+            assert_eq!(
+                retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS)
+                    .unwrap()
+                    .removed,
+                0
+            );
         }
     }
 
@@ -642,18 +795,28 @@ mod retention_tests {
     fn every_purpose_enforces_its_own_byte_cap() {
         for reason in purposes() {
             let root = tempfile::tempdir().unwrap();
-            let old = copy(root.path(), reason.clone(), 1, false);
-            let latest = copy(root.path(), reason.clone(), 2, false);
+            let old = copy(root.path(), reason.clone(), 1);
+            let latest = copy(root.path(), reason.clone(), 2);
             let mut rules = RULES;
             rules
                 .iter_mut()
                 .find(|r| r.kind == reason.kind())
                 .unwrap()
+                .limits
+                .as_mut()
+                .unwrap()
                 .bytes = directory_state(&latest).unwrap().bytes;
             assert_eq!(
-                prune_impl(root.path(), None, 2, &rules, TOTAL_BYTES, 500)
-                    .unwrap()
-                    .removed,
+                prune_impl(
+                    root.path(),
+                    2,
+                    &rules,
+                    DEFAULT_DAILY_KEEP_DAYS,
+                    TOTAL_BYTES,
+                    500
+                )
+                .unwrap()
+                .removed,
                 1
             );
             assert!(!old.directory.exists() && latest.directory.exists());
@@ -661,43 +824,65 @@ mod retention_tests {
     }
 
     #[test]
-    fn age_boundary_is_strict_and_keep_all_survives_even_extreme_pressure() {
+    fn age_boundary_is_strict_and_manual_survives_even_extreme_pressure() {
         let root = tempfile::tempdir().unwrap();
-        let old = copy(root.path(), Reason::Daily, 1, false);
-        let manual = copy(root.path(), Reason::Daily, 2, true);
-        let latest = copy(root.path(), Reason::Daily, 3, false);
-        let deadline = 1 + Reason::Daily.rule().days * DAY_MS;
-        assert_eq!(retain_at(root.path(), deadline).unwrap().removed, 0);
-        assert_eq!(retain_at(root.path(), deadline + 1).unwrap().removed, 1);
-        assert!(!old.directory.exists());
+        let old = copy(root.path(), Reason::Daily, 1);
+        let manual = copy(root.path(), Reason::Manual, 2);
+        let newest_manual = copy(root.path(), Reason::Manual, 4);
+        let latest = copy(root.path(), Reason::Daily, 3);
+        let deadline = 1 + DEFAULT_DAILY_KEEP_DAYS * DAY_MS;
         assert_eq!(
-            prune_impl(root.path(), None, u64::MAX, &RULES, 0, 500)
+            retain_at(root.path(), deadline, DEFAULT_DAILY_KEEP_DAYS)
                 .unwrap()
                 .removed,
             0
         );
-        assert!(manual.directory.exists() && latest.directory.exists());
+        assert_eq!(
+            retain_at(root.path(), deadline + 1, DEFAULT_DAILY_KEEP_DAYS)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(!old.directory.exists());
+        assert_eq!(
+            prune_impl(
+                root.path(),
+                u64::MAX,
+                &RULES,
+                DEFAULT_DAILY_KEEP_DAYS,
+                0,
+                500
+            )
+            .unwrap()
+            .removed,
+            0
+        );
+        assert!(
+            manual.directory.exists()
+                && newest_manual.directory.exists()
+                && latest.directory.exists()
+        );
     }
 
     #[test]
     fn byte_caps_remove_oldest_globally_and_never_the_latest_of_any_purpose() {
         let root = tempfile::tempdir().unwrap();
-        let old_daily = copy(root.path(), Reason::Daily, 1, false);
-        let old_diagnostic = copy(root.path(), Reason::Diagnostic, 2, false);
-        let daily = copy(root.path(), Reason::Daily, 3, false);
-        let diagnostic = copy(root.path(), Reason::Diagnostic, 4, false);
+        let old_daily = copy(root.path(), Reason::Daily, 1);
+        let old_diagnostic = copy(root.path(), Reason::Diagnostic, 2);
+        let daily = copy(root.path(), Reason::Daily, 3);
+        let diagnostic = copy(root.path(), Reason::Diagnostic, 4);
         let bytes = usage(root.path())
             .unwrap()
             .values()
             .map(|u| u.bytes)
             .sum::<u64>();
         let cap = bytes - directory_state(&old_daily).unwrap().bytes;
-        let report = prune_impl(root.path(), None, 4, &RULES, cap, 500).unwrap();
+        let report = prune_impl(root.path(), 4, &RULES, DEFAULT_DAILY_KEEP_DAYS, cap, 500).unwrap();
         assert_eq!(report.removed, 1);
         assert!(!old_daily.directory.exists());
         assert!(old_diagnostic.directory.exists());
         assert_eq!(
-            prune_impl(root.path(), None, 4, &RULES, 0, 500)
+            prune_impl(root.path(), 4, &RULES, DEFAULT_DAILY_KEEP_DAYS, 0, 500)
                 .unwrap()
                 .removed,
             1
@@ -709,25 +894,48 @@ mod retention_tests {
     #[test]
     fn purpose_bytes_are_independent_and_slices_resume_idempotently() {
         let root = tempfile::tempdir().unwrap();
-        let old = copy(root.path(), Reason::Daily, 1, false);
-        let middle = copy(root.path(), Reason::Daily, 2, false);
-        let latest = copy(root.path(), Reason::Daily, 3, false);
-        let other = copy(root.path(), Reason::Diagnostic, 4, false);
+        let old = copy(root.path(), Reason::Daily, 1);
+        let middle = copy(root.path(), Reason::Daily, 2);
+        let latest = copy(root.path(), Reason::Daily, 3);
+        let other = copy(root.path(), Reason::Diagnostic, 4);
         let mut rules = RULES;
-        rules[0].bytes = directory_state(&latest).unwrap().bytes;
-        let report = prune_impl(root.path(), None, 4, &rules, TOTAL_BYTES, 1).unwrap();
+        rules[1].limits.as_mut().unwrap().bytes = directory_state(&latest).unwrap().bytes;
+        let report = prune_impl(
+            root.path(),
+            4,
+            &rules,
+            DEFAULT_DAILY_KEEP_DAYS,
+            TOTAL_BYTES,
+            1,
+        )
+        .unwrap();
         assert_eq!(report.removed, 1);
         assert!(report.more);
         assert!(!old.directory.exists() && middle.directory.exists());
-        let report = prune_impl(root.path(), None, 4, &rules, TOTAL_BYTES, 1).unwrap();
+        let report = prune_impl(
+            root.path(),
+            4,
+            &rules,
+            DEFAULT_DAILY_KEEP_DAYS,
+            TOTAL_BYTES,
+            1,
+        )
+        .unwrap();
         assert_eq!(report.removed, 1);
         assert!(!report.more);
         assert!(!middle.directory.exists());
         assert!(latest.directory.exists() && other.directory.exists());
         assert_eq!(
-            prune_impl(root.path(), None, 4, &rules, TOTAL_BYTES, 1)
-                .unwrap()
-                .removed,
+            prune_impl(
+                root.path(),
+                4,
+                &rules,
+                DEFAULT_DAILY_KEEP_DAYS,
+                TOTAL_BYTES,
+                1
+            )
+            .unwrap()
+            .removed,
             0
         );
     }
@@ -735,21 +943,26 @@ mod retention_tests {
     #[test]
     fn missing_archives_and_database_are_retired_but_foreign_children_are_kept() {
         let root = tempfile::tempdir().unwrap();
-        let mut no_archive = copy(root.path(), Reason::Daily, 1, false);
+        let mut no_archive = copy(root.path(), Reason::Daily, 1);
         let mut artifact = no_archive.database.clone();
         artifact.name = "files.tar".into();
         artifact.bytes = u64::MAX; // historical size must not count as current disk usage
         no_archive.files.artifacts.push(artifact);
         save(&no_archive);
-        let no_database = copy(root.path(), Reason::Daily, 2, false);
+        let no_database = copy(root.path(), Reason::Daily, 2);
         fs::remove_file(no_database.database_path()).unwrap();
-        let foreign = copy(root.path(), Reason::Daily, 3, false);
+        let foreign = copy(root.path(), Reason::Daily, 3);
         fs::write(foreign.directory.join("operator-note"), "keep").unwrap();
-        let linked = copy(root.path(), Reason::Daily, 4, false);
+        let linked = copy(root.path(), Reason::Daily, 4);
         std::os::unix::fs::symlink("outside", linked.directory.join("files.tar")).unwrap();
-        let newest = copy(root.path(), Reason::Daily, 5, false);
+        let newest = copy(root.path(), Reason::Daily, 5);
         assert!(usage(root.path()).unwrap()["daily"].bytes < 20_000);
-        assert_eq!(retain_at(root.path(), u64::MAX).unwrap().removed, 2);
+        assert_eq!(
+            retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS)
+                .unwrap()
+                .removed,
+            2
+        );
         assert!(!no_archive.directory.exists() && !no_database.directory.exists());
         assert!(
             foreign.directory.exists() && linked.directory.exists() && newest.directory.exists()
@@ -757,21 +970,69 @@ mod retention_tests {
     }
 
     #[test]
+    fn unreadable_manifest_is_reported_without_blocking_other_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let bad = copy(root.path(), Reason::Daily, 1);
+        let good = copy(root.path(), Reason::Daily, 2);
+        let latest = copy(root.path(), Reason::Daily, 3);
+        let path = bad.directory.join("manifest.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = fs::read(&path).is_err();
+        let report = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(denied, "fixture must actually deny manifest access");
+        let report = report.unwrap();
+        assert_eq!(report.failures, 1);
+        assert_eq!(report.removed, 1);
+        assert!(!report.more);
+        assert!(bad.directory.exists() && latest.directory.exists());
+        assert!(!good.directory.exists());
+        assert_eq!(
+            retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS)
+                .unwrap()
+                .removed,
+            1
+        );
+    }
+
+    #[test]
+    fn retirement_error_is_reported_without_blocking_later_backups() {
+        let root = tempfile::tempdir().unwrap();
+        let bad = copy(root.path(), Reason::Daily, 1);
+        let good = copy(root.path(), Reason::Daily, 2);
+        let latest = copy(root.path(), Reason::Daily, 3);
+        let interrupted = root.path().join(format!("{}.partial", bad.id));
+        fs::create_dir(&interrupted).unwrap();
+        let report = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS).unwrap();
+        assert_eq!(report.failures, 1);
+        assert_eq!(report.removed, 1);
+        assert!(!report.more);
+        assert!(bad.directory.exists() && interrupted.exists() && latest.directory.exists());
+        assert!(!good.directory.exists());
+        assert!(!root.path().join(format!("{}.partial", good.id)).exists());
+    }
+
+    #[test]
     fn protected_oversized_copy_is_visible_in_status() {
         let root = tempfile::tempdir().unwrap();
-        let latest = copy(root.path(), Reason::Diagnostic, 1, false);
+        let latest = copy(root.path(), Reason::Diagnostic, 1);
         // Sparse logical file: no large allocation, copy, archive or hashing.
         File::options()
             .write(true)
             .open(latest.database_path())
             .unwrap()
-            .set_len(Reason::Diagnostic.rule().bytes + 1)
+            .set_len(Reason::Diagnostic.rule().limits.unwrap().bytes + 1)
             .unwrap();
         let status = retention_status(root.path()).unwrap();
         assert!(status.over_limit);
         assert!(status.purposes["diagnostic"].latest_over_limit);
         assert!(status.purposes["diagnostic"].over_limit);
-        assert_eq!(retain_at(root.path(), u64::MAX).unwrap().removed, 0);
+        assert_eq!(
+            retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS)
+                .unwrap()
+                .removed,
+            0
+        );
         assert!(latest.directory.exists());
     }
 }

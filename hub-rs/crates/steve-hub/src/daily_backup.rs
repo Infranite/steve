@@ -54,15 +54,14 @@ pub struct Made {
     pub files: Option<PathBuf>,
 }
 pub fn make(home: &Path, db: &Path, _day: &str) -> Result<Made> {
-    let mut plan = crate::backup::plan(home, Reason::Daily);
-    plan.with_files = plan.reason.rule().with_files.then(|| crate::admin::client::backup::files(home));
+    let plan = crate::backup::plan(home, Reason::Daily);
     let m = backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?;
     Ok(Made {
         database: m.database_path(),
         files: m.files.artifacts.first().map(|a| m.directory.join(&a.name)),
     })
 }
-pub fn status(home: &Path, db: &Path, on: bool) -> Value {
+pub fn status(home: &Path, db: &Path, on: bool, keep_days: u64) -> Value {
     let out = dir(home);
     let all = backup::list(&out).unwrap_or_default();
     let last = all
@@ -71,10 +70,22 @@ pub fn status(home: &Path, db: &Path, on: bool) -> Value {
         .find(|m| m.reason == Reason::Daily)
         .map(|m| json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes}));
     let retention = backup::retention_status(&out).unwrap_or_default();
-    json!({"database":db,"dir":out,"daily":on,"keep_days":Reason::Daily.rule().days,"last":last,"purposes":retention.purposes,"retention":{"bytes":retention.bytes,"max_bytes":retention.max_bytes,"over_limit":retention.over_limit,"rules":backup::RULES}})
+    json!({"database":db,"dir":out,"daily":on,"keep_days":keep_days,"last":last,"purposes":retention.purposes,"retention":{"bytes":retention.bytes,"max_bytes":retention.max_bytes,"over_limit":retention.over_limit,"rules":backup::RULES}})
+}
+/// Re-read settings immediately before a scheduled generation; disabling never deletes copies.
+pub fn make_if_enabled(
+    store: &steve_store::Store,
+    home: &Path,
+    db: &Path,
+    day: &str,
+) -> Result<Option<Made>> {
+    if !crate::backup::daily_settings(store)?.enabled {
+        return Ok(None);
+    }
+    make(home, db, day).map(Some)
 }
 /// The background loop (a Hub job): looks every ten minutes whether the day's copy is due.
-pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
+pub async fn run(home: PathBuf, db: PathBuf, store: steve_store::Store, on: bool) {
     if !on {
         tracing::info!("daily backup turned off (STEVE_BACKUP=off)");
         return;
@@ -87,8 +98,14 @@ pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
             wait -= 1;
         } else if due(&home, &day, minute) {
             let (h, d) = (home.clone(), db.clone());
-            match tokio::task::spawn_blocking(move || make(&h, &d, &day)).await {
-                Ok(Ok(m)) => tracing::info!(
+            let store_for_copy = store.clone();
+            match tokio::task::spawn_blocking(move || {
+                make_if_enabled(&store_for_copy, &h, &d, &day)
+            })
+            .await
+            {
+                Ok(Ok(None)) => {}
+                Ok(Ok(Some(m))) => tracing::info!(
                     "daily backup: {}{}",
                     m.database.display(),
                     if m.files.is_some() {
@@ -320,13 +337,13 @@ mod tests {
         make(t.path(), &db, "newest").unwrap();
         let root = dir(t.path());
         fs::write(root.join("daily-notes.txt"), "foreign").unwrap();
-        let removed = backup::prune_at(
+        let removed = backup::retain_at(
             &root,
-            &Reason::Daily,
-            backup::plan::now_ms() + (Reason::Daily.rule().days + 1) * 86400000,
+            backup::plan::now_ms() + (backup::DEFAULT_DAILY_KEEP_DAYS + 1) * 86400000,
+            steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS,
         )
         .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed.removed, 1);
         assert!(!made.database.exists());
         assert!(root.join("daily-notes.txt").exists());
     }
@@ -342,9 +359,13 @@ mod tests {
         let latest = make(t.path(), &db, "latest").unwrap();
         assert!(first.database.exists());
         assert_eq!(
-            backup::retain_at(&dir(t.path()), backup::plan::now_ms())
-                .unwrap()
-                .removed,
+            backup::retain_at(
+                &dir(t.path()),
+                backup::plan::now_ms(),
+                steve_store_sqlite::backup::DEFAULT_DAILY_KEEP_DAYS
+            )
+            .unwrap()
+            .removed,
             1
         );
         assert!(!first.database.exists() && latest.database.exists());
@@ -352,7 +373,7 @@ mod tests {
     #[test]
     fn status_names_the_places_and_the_newest_copy() {
         let (t, db) = home();
-        let v = status(t.path(), &db, true);
+        let v = status(t.path(), &db, true, backup::DEFAULT_DAILY_KEEP_DAYS);
         assert_eq!(v["database"], db.to_string_lossy().as_ref());
         assert_eq!(
             v["dir"],
@@ -361,9 +382,9 @@ mod tests {
         assert_eq!((&v["daily"], &v["last"]), (&json!(true), &Value::Null));
         make(t.path(), &db, "20260102").unwrap();
         make(t.path(), &db, "20260103").unwrap();
-        let v = status(t.path(), &db, false);
+        let v = status(t.path(), &db, false, backup::DEFAULT_DAILY_KEEP_DAYS);
         assert_eq!(v["daily"], false);
-        assert_eq!(v["keep_days"], Reason::Daily.rule().days);
+        assert_eq!(v["keep_days"], backup::DEFAULT_DAILY_KEEP_DAYS);
         assert_eq!(v["retention"]["max_bytes"], backup::TOTAL_BYTES);
         assert_eq!(v["retention"]["over_limit"], false);
         assert!(v["last"]["name"].as_str().unwrap().starts_with("daily-"));
