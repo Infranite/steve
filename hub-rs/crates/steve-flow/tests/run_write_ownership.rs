@@ -1,295 +1,143 @@
-//! Flow is the sole production owner of flow_runs writes. Test fixtures and historical schema
-//! are excluded; the guard has no production allowlist. Runtime-built identifiers cannot be
-//! resolved by this lexical check; literal/concat!/include_str! SQL is checked conservatively.
+//! All production run writes belong to Flow. Outside Flow, every table-name literal is
+//! counted per file: moving SQL's table name into a variable must still trip the ratchet.
+use std::collections::BTreeMap;
 use std::path::Path;
-
-fn literals(source: &str) -> Vec<&str> {
-    let b = source.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i..].starts_with(b"//") {
-            i += b[i..]
-                .iter()
-                .position(|x| *x == b'\n')
-                .unwrap_or(b.len() - i);
-        } else if b[i..].starts_with(b"/*") {
-            i += 2;
-            let mut depth = 1;
-            while i < b.len() && depth > 0 {
-                if b[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if b[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if b[i] == b'r' {
-            let start = i + 1;
-            let mut end = start;
-            while end < b.len() && b[end] == b'#' {
-                end += 1;
-            }
-            if end < b.len() && b[end] == b'"' {
-                let terminator = format!("\"{}", "#".repeat(end - start));
-                let text = &source[end + 1..];
-                if let Some(len) = text.find(&terminator) {
-                    result.push(&text[..len]);
-                    i = end + 1 + len + terminator.len();
-                } else {
-                    i = b.len();
-                }
-            } else {
-                i += 1;
-            }
-        } else if b[i] == b'\'' && i + 2 < b.len() && b[i + 2] == b'\'' {
-            i += 3; // A character literal such as '"', not a string delimiter.
-        } else if b[i] == b'"' {
-            let start = i + 1;
-            i = start;
-            while i < b.len() {
-                if b[i] == b'\\' {
-                    i = (i + 2).min(b.len());
-                } else if b[i] == b'"' {
-                    result.push(&source[start..i]);
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    result
+#[path = "run_write_ownership/syntax.rs"]
+mod syntax;
+use syntax::{groups, production};
+type Inventory = BTreeMap<String, usize>;
+fn mentions(sql: &str) -> bool {
+    sql.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|w| w.eq_ignore_ascii_case("flow_runs"))
 }
-fn joined_literals(source: &str) -> Vec<(usize, String)> {
-    let mut out: Vec<(usize, String)> = Vec::new();
-    let mut end = 0;
-    let mut nesting = Vec::new();
-    let mut token = String::new();
-    for literal in literals(source) {
-        let start = literal.as_ptr() as usize - source.as_ptr() as usize;
-        let gap = &source[end..start];
-        let bytes = gap.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i..].starts_with(b"//") {
-                i += bytes[i..]
-                    .iter()
-                    .position(|c| *c == b'\n')
-                    .unwrap_or(bytes.len() - i);
-            } else if bytes[i..].starts_with(b"/*") {
-                i += 2;
-                let mut depth = 1;
-                while i < bytes.len() && depth > 0 {
-                    if bytes[i..].starts_with(b"/*") {
-                        depth += 1;
-                        i += 2;
-                    } else if bytes[i..].starts_with(b"*/") {
-                        depth -= 1;
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-            } else if bytes[i] == b'\'' && i + 2 < bytes.len() && bytes[i + 2] == b'\'' {
-                i += 3;
-            } else {
-                let c = bytes[i] as char;
-                if c.is_ascii_alphanumeric() || c == '_' || c == '!' {
-                    token.push(c);
-                } else if c == '(' {
-                    nesting.push(token == "concat!");
-                    token.clear();
-                } else if c == ')' {
-                    nesting.pop();
-                    token.clear();
-                } else if !c.is_whitespace() {
-                    token.clear();
-                }
-                i += 1;
-            }
-        }
-        let adjacent = !out.is_empty()
-            && (!gap.contains(',') || nesting.contains(&true))
-            && source[end..start]
-                .chars()
-                .all(|c| c.is_whitespace() || r##""#rb,+()"##.contains(c));
-        if adjacent {
-            out.last_mut().unwrap().1.push_str(literal);
-        } else {
-            out.push((start, literal.to_owned()));
-        }
-        end = start + literal.len();
-    }
-    out
-}
-fn groups(source: &str) -> Vec<String> {
-    joined_literals(source)
-        .into_iter()
-        .map(|(_, text)| text)
-        .collect()
-}
-
-// Match whole SQL identifiers conservatively, including quoted/schema-qualified tables, CTEs,
-// body-only updates, comments inside SQL and concat! literals, like digest_write_sites.
 fn writes(sql: &str) -> bool {
-    let words: Vec<_> = sql
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(str::to_ascii_lowercase)
-        .collect();
-    words.iter().any(|w| w == "flow_runs")
-        && words
-            .iter()
-            .any(|w| matches!(w.as_str(), "insert" | "update" | "delete" | "replace"))
+    mentions(sql)
+        && sql
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| {
+                matches!(
+                    w.to_ascii_lowercase().as_str(),
+                    "insert" | "update" | "delete" | "replace"
+                )
+            })
 }
-
-// SQL fixtures may write runs. Exclude cfg(test) items structurally, not everything after the
-// first test attribute: a later production item must still be checked. Comments/strings/chars
-// are masked while finding item braces; the SQL scanner gets the original production text.
-fn production(source: &str) -> String {
-    let mut code = source.as_bytes().to_vec();
-    for text in literals(source) {
-        let at = text.as_ptr() as usize - source.as_ptr() as usize;
-        code[at..at + text.len()].fill(b' ');
-    }
-    let mut i = 0;
-    while i + 1 < code.len() {
-        let start = i;
-        if code[i..].starts_with(b"//") {
-            while i < code.len() && code[i] != b'\n' {
-                i += 1;
-            }
-            code[start..i].fill(b' ');
-        } else if code[i..].starts_with(b"/*") {
-            i += 2;
-            let mut depth = 1;
-            while i + 1 < code.len() && depth > 0 {
-                if code[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if code[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            code[start..i].fill(b' ');
-        } else {
-            i += 1;
-        }
-    }
-    let mut code = String::from_utf8(code).unwrap();
-    let chars =
-        regex::Regex::new(r"'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'").unwrap();
-    let ranges: Vec<_> = chars.find_iter(&code).map(|m| m.range()).collect();
-    for range in ranges {
-        code.replace_range(range.clone(), &" ".repeat(range.len()));
-    }
-    let attrs = regex::Regex::new(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]").unwrap();
-    let mut result = source.as_bytes().to_vec();
-    for attr in attrs.find_iter(&code) {
-        let start = attr.start();
-        let mut end = attr.end();
-        let mut depth = 0;
-        for (offset, b) in code.as_bytes()[end..].iter().enumerate() {
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end += offset + 1;
-                        break;
-                    }
-                }
-                b';' if depth == 0 => {
-                    end += offset + 1;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        result[start..end].fill(b' ');
-    }
-    String::from_utf8(result).unwrap()
-}
-
 fn historical(path: &Path) -> bool {
     path.starts_with("crates/steve-store/migrations")
         || path.starts_with("crates/steve-store-sqlite/legacy")
         || path.starts_with("crates/steve-store-sqlite/schema")
 }
-
-fn scan(path: &Path, root: &Path, found: &mut Vec<String>) {
+fn observe(sql: &str, file: &str, writers: &mut Vec<String>, found: &mut Inventory) {
+    if mentions(sql) {
+        *found.entry(file.into()).or_default() += 1;
+    }
+    if writes(sql) {
+        writers.push(file.into());
+    }
+}
+fn scan_inventory(path: &Path, root: &Path, writers: &mut Vec<String>, found: &mut Inventory) {
     let relative = path.strip_prefix(root).unwrap();
     if relative
         .components()
-        .any(|part| matches!(part.as_os_str().to_str(), Some("tests" | "target" | ".git")))
+        .any(|p| matches!(p.as_os_str().to_str(), Some("tests" | "target" | ".git")))
         || historical(relative)
         || relative.starts_with("crates/steve-flow")
     {
         return;
     }
+    let file = relative.to_string_lossy().to_string();
     let source = std::fs::read_to_string(path).unwrap();
     if path.extension().is_some_and(|x| x == "rs") {
         let source = production(&source);
-        for (at, sql) in joined_literals(&source) {
-            if writes(&sql) {
-                found.push(relative.display().to_string());
-            }
-            let prefix = &source[..at];
-            if let Some(start) = prefix.rfind("include_str!")
-                && prefix[start + "include_str!".len()..]
-                    .replace("concat!", "")
-                    .chars()
-                    .all(|c| c.is_whitespace() || r##"("#r"##.contains(c))
-            {
-                let target = path.parent().unwrap().join(&sql);
-                if target.is_file()
-                    && !historical(target.canonicalize().unwrap().strip_prefix(root).unwrap())
-                    && writes(&std::fs::read_to_string(target).unwrap())
-                {
-                    found.push(format!("{} (include_str!)", relative.display()));
+        for text in groups(&source) {
+            observe(&text, &file, writers, found);
+        }
+        for target in syntax::includes(&source, path) {
+            let target = target
+                .canonicalize()
+                .unwrap_or_else(|e| panic!("{}: {e}", target.display()));
+            let relative = target.strip_prefix(root).unwrap_or(&target);
+            if !historical(relative) {
+                for sql in std::fs::read_to_string(&target).unwrap().split(';') {
+                    observe(sql, &file, writers, found);
                 }
             }
         }
-    } else if writes(&source) {
-        found.push(relative.display().to_string());
+    } else {
+        for sql in source.split(';') {
+            observe(sql, &file, writers, found);
+        }
     }
 }
-fn walk(dir: &Path, root: &Path, found: &mut Vec<String>) {
+fn scan(path: &Path, root: &Path, writers: &mut Vec<String>) {
+    scan_inventory(path, root, writers, &mut Inventory::new());
+}
+fn walk(dir: &Path, root: &Path, writers: &mut Vec<String>, found: &mut Inventory) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
             if !["target", ".git"].contains(&path.file_name().unwrap().to_str().unwrap()) {
-                walk(&path, root, found);
+                walk(&path, root, writers, found);
             }
         } else if path.extension().is_some_and(|x| x == "rs" || x == "sql") {
-            scan(&path, root, found);
+            scan_inventory(&path, root, writers, found);
         }
     }
 }
-
+fn compare(found: &Inventory, listed: &Inventory) -> Result<(), String> {
+    for (file, count) in found {
+        if *count > listed.get(file).copied().unwrap_or(0) {
+            return Err(format!("new flow_runs table literal: {file} ({count})"));
+        }
+    }
+    Ok(())
+}
 #[test]
 fn flow_alone_owns_production_run_writes_across_the_workspace() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
-    let mut found = Vec::new();
-    walk(&root, &root, &mut found);
-    found.sort();
-    found.dedup();
+    let mut writers = Vec::new();
+    let mut found = Inventory::new();
+    walk(&root, &root, &mut writers, &mut found);
     assert!(
-        found.is_empty(),
-        "flow_runs writes outside steve-flow: {found:?}"
+        writers.is_empty(),
+        "flow_runs writes outside steve-flow (never exempt): {writers:?}"
     );
+    let list = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run_write_ownership.txt");
+    let init = std::env::var_os("STEVE_FLOW_RUN_TABLES_INIT").is_some();
+    let bless = std::env::var_os("STEVE_FLOW_RUN_TABLES_BLESS").is_some();
+    if let Ok(text) = std::fs::read_to_string(&list) {
+        assert!(!init, "cannot reinitialize an existing run-table inventory");
+        let listed: Inventory = text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|line| {
+                let (file, count) = line.split_once('\t').expect("file<TAB>count");
+                (file.into(), count.parse().unwrap())
+            })
+            .collect();
+        compare(&found, &listed).unwrap();
+        if !bless {
+            assert_eq!(
+                found, listed,
+                "run table readers decreased; bless to shrink inventory"
+            );
+        }
+    } else {
+        assert!(!list.exists(), "cannot overwrite an unreadable inventory");
+        assert!(
+            init,
+            "missing run table inventory; first import requires STEVE_FLOW_RUN_TABLES_INIT=1"
+        );
+    }
+    if init || bless {
+        let body = found
+            .iter()
+            .map(|(file, count)| format!("{file}\t{count}\n"))
+            .collect::<String>();
+        std::fs::write(list,format!("# flow_runs literals outside Flow: reads only; exact equality, only shrink.\n{body}")).unwrap();
+    }
 }
 #[test]
 fn recognizer_covers_sql_shapes_and_test_exclusions_without_hiding_later_code() {
@@ -354,7 +202,7 @@ fn includes_preserve_the_historical_schema_boundary_but_not_runtime_writers() {
     std::fs::write(&runtime, "UPDATE flow_runs SET status='done';").unwrap();
     std::fs::write(&file, r#"const WRITE: &str=include_str!("write.sql");"#).unwrap();
     scan(&file, root, &mut found);
-    assert_eq!(found, vec!["crates/other/src/module.rs (include_str!)"]);
+    assert_eq!(found, vec!["crates/other/src/module.rs"]);
     found.clear();
     scan(&runtime, root, &mut found);
     assert_eq!(found, vec!["crates/other/src/write.sql"]);
@@ -381,7 +229,113 @@ fn includes_preserve_the_historical_schema_boundary_but_not_runtime_writers() {
     scan(&file, root, &mut found);
     assert_eq!(
         found,
-        vec!["crates/other/src/module.rs (include_str!)"],
+        vec!["crates/other/src/module.rs"],
         "an outside executor cannot hide SQL in Flow's directory"
+    );
+}
+
+#[test]
+fn variable_table_names_are_counted_even_when_the_write_verb_is_elsewhere() {
+    let source =
+        r#"fn cleanup() { for t in ["flow_runs"] { execute(format!("DELETE FROM {t}")); } }"#;
+    let mut found = Inventory::new();
+    let mut writers = Vec::new();
+    for text in groups(source) {
+        observe(
+            &text,
+            "crates/other/src/cleanup.rs",
+            &mut writers,
+            &mut found,
+        );
+    }
+    assert!(
+        writers.is_empty(),
+        "the literal scanner cannot resolve the variable's value"
+    );
+    assert_eq!(found["crates/other/src/cleanup.rs"], 1);
+    assert!(
+        compare(&found, &Inventory::new()).is_err(),
+        "adding that table literal still fails the ratchet"
+    );
+    assert!(
+        compare(
+            &found,
+            &BTreeMap::from([("crates/other/src/cleanup.rs".into(), 0)])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn cfg_test_fields_and_match_arms_do_not_hide_subsequent_production_sql() {
+    for source in [
+        r#"struct S { #[cfg(test)] fixture: (fn(i32,i32)->[u8;2],), }
+            impl S { fn write() { execute("UPDATE flow_runs SET status='done'"); } }"#,
+        r#"struct S { #[cfg(test)] fixture: [u8;2] }
+            impl S { fn write() { execute("UPDATE flow_runs SET status='done'"); } }"#,
+        r#"fn f(x:E) { match x { #[cfg(test)] E::Test => fixture([1,2],(3,4)),
+            E::Prod => execute("UPDATE flow_runs SET status='done'"), } }"#,
+        r#"fn f(x:E) { match x { #[cfg(test)] E::Test => fixture([1,2],(3,4)) } }
+            fn write() { execute("UPDATE flow_runs SET status='done'"); }"#,
+    ] {
+        let sql: Vec<_> = groups(&production(source))
+            .into_iter()
+            .filter(|s| writes(s))
+            .collect();
+        assert_eq!(sql, vec!["UPDATE flow_runs SET status='done'"], "{source}");
+    }
+}
+
+#[test]
+fn escaped_character_literals_and_manifest_concat_includes_are_recognized() {
+    let source = r###"fn f<'a>(x:&'a str) { let quote='\"'; let brace='\u{7d}'; execute("UPDATE flow_runs SET status='done'"); }"###;
+    assert_eq!(
+        groups(&production(source))
+            .into_iter()
+            .filter(|s| writes(s))
+            .count(),
+        1
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let package = root.join("crates/other");
+    let src = package.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(package.join("Cargo.toml"), "[package]\nname='other'\n").unwrap();
+    std::fs::write(src.join("write.sql"), "DELETE FROM flow_runs;").unwrap();
+    let file = src.join("module.rs");
+    std::fs::write(
+        &file,
+        r#"const Q: &str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/", "write.sql"));"#,
+    )
+    .unwrap();
+    let mut writers = Vec::new();
+    scan(&file, &root, &mut writers);
+    assert_eq!(writers, vec!["crates/other/src/module.rs"]);
+    std::fs::write(&file, r#"macro_rules! q {($name:literal)=>{include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/src/",$name,".sql"))};} q!("write");"#).unwrap();
+    writers.clear();
+    scan(&file, &root, &mut writers);
+    assert_eq!(writers, vec!["crates/other/src/module.rs"]);
+}
+
+#[test]
+fn the_reader_inventory_can_only_shrink_and_never_licenses_a_writer() {
+    let listed = BTreeMap::from([("reader.rs".into(), 2)]);
+    assert!(compare(&BTreeMap::from([("reader.rs".into(), 1)]), &listed).is_ok());
+    assert!(compare(&BTreeMap::from([("reader.rs".into(), 3)]), &listed).is_err());
+    assert!(compare(&BTreeMap::from([("new.rs".into(), 1)]), &listed).is_err());
+    let mut writers = Vec::new();
+    let mut found = Inventory::new();
+    observe(
+        "DELETE FROM flow_runs",
+        "reader.rs",
+        &mut writers,
+        &mut found,
+    );
+    assert!(compare(&found, &listed).is_ok());
+    assert_eq!(
+        writers,
+        vec!["reader.rs"],
+        "a listed table reader is still forbidden to write"
     );
 }

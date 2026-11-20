@@ -420,3 +420,129 @@ fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
         assert_eq!(history(&e), before);
     }
 }
+
+#[test]
+fn an_edited_configuration_starts_at_zero_without_overwriting_damaged_history() {
+    let e = FlowEnv::new();
+    let id = bounded(&e, "bad", 1, 1000);
+    e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&id])?;Ok(())}).unwrap();
+    let before = e
+        .env
+        .store()
+        .reader(|c| runs::get(c, &id))
+        .unwrap()
+        .unwrap();
+    assert!(state(&e, 2).is_none());
+    let next = bounded(&e, "still bad", 2, 61_000);
+    assert_ne!(next, id);
+    assert_eq!(state(&e, 2).unwrap().attempts, 1);
+    assert_eq!(
+        e.env
+            .store()
+            .reader(|c| runs::get(c, &id))
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    let diagnostic = e
+        .env
+        .store()
+        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        diagnostic.run_id, id,
+        "newer valid metadata does not hide the old damage"
+    );
+    assert!(diagnostic.message.contains("修改调度或 Bot 即可恢复"));
+}
+
+#[test]
+fn diagnostics_decode_columns_independently_instead_of_loading_a_full_run() {
+    for change in [
+        "cost=x'ff'",
+        "started=x'ff'",
+        "status=x'ff'",
+        "error=x'ff'",
+        "id=x'ff'",
+        "context=CAST(context AS BLOB)",
+    ] {
+        let e = FlowEnv::new();
+        let id = bounded(&e, "bad", 1, 1000);
+        e.env.store().with_conn(|c|{
+            c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken') WHERE id=?",[&id])?;
+            c.execute(&format!("UPDATE flow_runs SET {change} WHERE id=?"),[&id])?;Ok(())
+        }).unwrap();
+        let diagnostic = e
+            .env
+            .store()
+            .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(diagnostic.code, "startup_metadata_invalid", "{change}");
+        assert_eq!(diagnostic.flow_id, "flow_start");
+        assert!(!diagnostic.run_id.is_empty());
+        if change != "id=x'ff'" {
+            assert_eq!(diagnostic.run_id, id);
+        }
+    }
+}
+
+#[test]
+fn unreadable_unrelated_history_cannot_replace_a_known_dead_source_budget() {
+    let e = FlowEnv::new();
+    for n in 0..3 {
+        bounded(&e, "bad", 1, 1000 + n);
+    }
+    let dead = state(&e, 1).unwrap();
+    let unrelated = ordinary(&e, 2000);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE flow_runs SET context='not json' WHERE id=?",
+                [&unrelated],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(state(&e, 1).unwrap(), dead);
+    let diagnostic = e
+        .env
+        .store()
+        .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic.run_id, unrelated);
+}
+
+#[test]
+fn startup_rejection_and_recovery_diagnostics_follow_the_readers_language() {
+    for (locale, rejected, recovery) in [
+        (
+            steve_i18n::ZH_CN,
+            "此调度无法启动",
+            "修改调度或 Bot 即可恢复",
+        ),
+        (
+            steve_i18n::EN,
+            "This schedule could not start",
+            "Edit the schedule or Bot to recover",
+        ),
+    ] {
+        steve_i18n::with(locale, || {
+            assert!(steve_flow::scheduler::start_rejected().contains(rejected));
+            let e = FlowEnv::new();
+            let id = bounded(&e, "bad", 1, 1000);
+            e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.limit',0) WHERE id=?",[&id])?;Ok(())}).unwrap();
+            let d = e
+                .env
+                .store()
+                .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(d.code, "startup_metadata_invalid");
+            assert!(d.message.contains(recovery));
+        });
+    }
+}

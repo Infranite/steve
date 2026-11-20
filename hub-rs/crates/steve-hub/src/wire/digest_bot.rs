@@ -73,61 +73,84 @@ async fn bind(
 }
 
 /// The ordinary flow scheduler remains the Bot's execution and policy boundary.
-struct Runner(Arc<FlowCx>);
+struct Runner(
+    Arc<FlowCx>,
+    std::sync::Mutex<std::collections::HashSet<String>>,
+);
 const BOT_SOURCE: &str = "digest.bot";
 const START_LIMIT: i64 = 3;
 
-fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64)>> {
-    let Some(id) = bot::schedule(c, ws)? else {
-        return Ok(None);
-    };
-    let Some(s) = schedules::get(c, ws, &id)? else {
-        return Ok(None);
-    };
-    if !s.enabled
-        || !matches!(
-            s.spec.mode,
-            schedules::Mode::Item | schedules::Mode::ItemAuto
-        )
-        || s.spec.overlap != OverlapPolicy::Skip
-        || s.spec.requester.is_none()
-        || s.spec.requester != conv::owner(c, ws)?
-    {
-        return Ok(None);
+impl Runner {
+    fn new(flow: Arc<FlowCx>) -> Self {
+        Self(flow, Default::default())
     }
-    if let Err(e) = schedules::check_refs(c, ws, &s.spec) {
-        tracing::debug!(workspace = ws, "digest Bot binding: {e}");
-        return Ok(None);
-    }
-    let busy: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM flow_runs r LEFT JOIN items i ON i.id = r.work_item_id
+
+    fn runnable(&self, c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64)>> {
+        let Some(id) = bot::schedule(c, ws)? else {
+            return Ok(None);
+        };
+        let Some(s) = schedules::get(c, ws, &id)? else {
+            return Ok(None);
+        };
+        if !s.enabled
+            || !matches!(
+                s.spec.mode,
+                schedules::Mode::Item | schedules::Mode::ItemAuto
+            )
+            || s.spec.overlap != OverlapPolicy::Skip
+            || s.spec.requester.is_none()
+            || s.spec.requester != conv::owner(c, ws)?
+        {
+            return Ok(None);
+        }
+        if let Err(e) = schedules::check_refs(c, ws, &s.spec) {
+            tracing::debug!(workspace = ws, "digest Bot binding: {e}");
+            return Ok(None);
+        }
+        let busy: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM flow_runs r LEFT JOIN items i ON i.id = r.work_item_id
         WHERE r.workspace_id = ? AND r.flow_id = ? AND (r.status IN ('running', 'waiting', 'retry')
           OR (i.id IS NOT NULL AND i.archived = 0 AND i.status NOT IN ('done', 'drop'))))",
-        params![ws, id],
-        |r| r.get(0),
-    )?;
-    if busy {
-        return Ok(None);
+            params![ws, id],
+            |r| r.get(0),
+        )?;
+        if busy {
+            return Ok(None);
+        }
+        let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, &id)? else {
+            return Ok(None);
+        };
+        match runs::startup_check(c, ws, &id, BOT_SOURCE, &revision)? {
+            runs::StartupCheck::State(Some(state)) if state.state == runs::StartupStatus::Dead => {
+                return Ok(None);
+            }
+            runs::StartupCheck::Invalid(diagnostic) => {
+                // Observability only: never use this set as source liveness or retry state.
+                let first = self
+                    .1
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(diagnostic.run_id.clone());
+                if first {
+                    tracing::warn!(workspace = ws, flow = %id, run = %diagnostic.run_id,
+                    code = diagnostic.code, "digest Bot startup metadata is damaged");
+                }
+                return Ok(None);
+            }
+            runs::StartupCheck::State(_) => {}
+        }
+        // A skipped/failed/empty run must not immediately start again while packets still wait.
+        // All runs (including cron/manual starts) share this minute, using durable run history.
+        let last: Option<i64> = c.query_row(
+            "SELECT max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ?",
+            params![ws, id],
+            |r| r.get(0),
+        )?;
+        Ok(Some((
+            id,
+            last.map_or(i64::MIN, |at| at.saturating_add(60_000)),
+        )))
     }
-    let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, &id)? else {
-        return Ok(None);
-    };
-    if runs::startup_state(c, ws, &id, BOT_SOURCE, &revision)?
-        .is_some_and(|state| state.state == runs::StartupStatus::Dead)
-    {
-        return Ok(None);
-    }
-    // A skipped/failed/empty run must not immediately start again while packets still wait.
-    // All runs (including cron/manual starts) share this minute, using durable run history.
-    let last: Option<i64> = c.query_row(
-        "SELECT max(started) FROM flow_runs WHERE workspace_id = ? AND flow_id = ?",
-        params![ws, id],
-        |r| r.get(0),
-    )?;
-    Ok(Some((
-        id,
-        last.map_or(i64::MIN, |at| at.saturating_add(60_000)),
-    )))
 }
 
 impl queue::BotRunner for Runner {
@@ -136,7 +159,7 @@ impl queue::BotRunner for Runner {
         c: &rusqlite::Connection,
         ws: &str,
     ) -> Result<Option<i64>, steve_store::StoreError> {
-        runnable(c, ws)
+        self.runnable(c, ws)
             .map(|s| s.map(|(_, at)| at))
             .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
     }
@@ -151,7 +174,11 @@ impl queue::BotRunner for Runner {
             BOT_SOURCE,
             START_LIMIT,
             now,
-            |c| Ok(runnable(c, ws)?.is_some_and(|(bound, at)| bound == id && at <= now)),
+            |c| {
+                Ok(self
+                    .runnable(c, ws)?
+                    .is_some_and(|(bound, at)| bound == id && at <= now))
+            },
         )?;
         if let Some((run, true)) = outcome {
             drop(steve_flow::scheduler::spawn_drive(self.0.clone(), run));
@@ -201,7 +228,7 @@ pub async fn run(m: Modules, flow: Arc<FlowCx>) {
         reset_after: None,
     };
     initialize(&m, &backoff).await;
-    let source = Arc::new(queue::BotSource::new(&m, Runner(flow)));
+    let source = Arc::new(queue::BotSource::new(&m, Runner::new(flow)));
     steve_runtime::due::due_loop(source, m.clock.clone(), wake, backoff).await;
 }
 
@@ -307,7 +334,8 @@ mod tests {
             steve_flow::scheduler::start_manual(&e.flow, WS, &id),
             Err(ApiError::Rule(_))
         ));
-        let source = queue::BotSource::new(&e.env.modules, PartlyBroken(Runner(e.flow.clone())));
+        let source =
+            queue::BotSource::new(&e.env.modules, PartlyBroken(Runner::new(e.flow.clone())));
         let changed = wake(e.env.store());
         assert_eq!(source.next_due().await.unwrap(), Some(now));
         source
@@ -330,10 +358,13 @@ mod tests {
         assert_eq!(rows[0].ended, Some(now));
         assert_eq!(
             rows[0].error.as_deref(),
-            Some(steve_flow::scheduler::START_REJECTED)
+            Some(steve_flow::scheduler::start_rejected().as_str())
         );
         assert_eq!(
-            e.env.store().reader(|c| runnable(c, WS)).unwrap(),
+            e.env
+                .store()
+                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
+                .unwrap(),
             Some((id.clone(), now + 60_000))
         );
         let state = |ws: &str, packet: &str| {
@@ -385,7 +416,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let history = || {
             e.env
@@ -448,7 +479,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let before = e
             .env
@@ -483,7 +514,7 @@ mod tests {
             c.execute_batch("CREATE TRIGGER reject_failed_run BEFORE INSERT ON flow_runs WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'cannot persist failed start'); END")?;
             Ok(())
         }).unwrap();
-        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         let error = source.run_due(now).await.unwrap_err();
         assert!(error.0.contains("cannot persist failed start"));
         assert!(
@@ -505,7 +536,7 @@ mod tests {
             env.env.clock.set(1_800_000_000_000);
             let source = Arc::new(queue::BotSource::new(
                 &env.env.modules,
-                Runner(env.flow.clone()),
+                Runner::new(env.flow.clone()),
             ));
             Self { env, source }
         }
@@ -578,7 +609,7 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+            let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             for _ in 0..START_LIMIT {
                 source
                     .run_due(e.env.clock.now())
@@ -695,7 +726,12 @@ mod tests {
         let (e, id) = bound().await;
         let changed = wake(e.env.store());
         let assert_changed = || assert!(changed.notified().now_or_never().is_some());
-        let read = || e.env.store().reader(|c| runnable(c, WS)).unwrap();
+        let read = || {
+            e.env
+                .store()
+                .reader(|c| Runner::new(e.flow.clone()).runnable(c, WS))
+                .unwrap()
+        };
         assert_eq!(read(), Some((id.clone(), i64::MIN)));
         e.env
             .store()
@@ -923,7 +959,7 @@ mod tests {
                                 flow_id: &id,
                                 flow_version: 1,
                                 source: BOT_SOURCE,
-                                error: steve_flow::scheduler::START_REJECTED,
+                                error: &steve_flow::scheduler::start_rejected(),
                                 now: now - 60_000,
                                 revision: &revision,
                                 limit: START_LIMIT,
@@ -949,7 +985,7 @@ mod tests {
                 c.execute_batch("CREATE TRIGGER reject_running_start BEFORE INSERT ON flow_runs WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'running insert unavailable'); END")?;
                 Ok(())
             }).unwrap();
-            let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+            let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
             let error = source.run_due(now).await.unwrap_err();
             assert!(error.0.contains("running insert unavailable"));
             assert_eq!(
@@ -978,7 +1014,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         e.env.clock.advance(60_000);
         e.env
@@ -1002,7 +1038,7 @@ mod tests {
         for row in &rows {
             assert_eq!(
                 row.view().error.as_deref(),
-                Some(steve_flow::scheduler::START_REJECTED)
+                Some(steve_flow::scheduler::start_rejected().as_str())
             );
             assert_eq!(row.view().start_failures, Some(1));
             assert!(!row.context.to_string().contains("Blob"));
@@ -1028,7 +1064,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+        let source = queue::BotSource::new(&e.env.modules, Runner::new(e.flow.clone()));
         source.run_due(now).await.unwrap();
         let run = e
             .env
@@ -1062,7 +1098,140 @@ mod tests {
         assert_eq!(d["code"], "startup_metadata_invalid");
         assert_eq!(d["flow_id"], id);
         assert_eq!(d["run_id"], run);
-        assert!(d["message"].as_str().unwrap().contains("diagnostic report"));
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains("修改调度或 Bot 即可恢复")
+        );
         assert!(!body.to_string().contains("invalid type"));
+    }
+
+    #[tokio::test]
+    async fn damaged_metadata_warns_once_and_real_schedule_or_bot_edits_recover() {
+        use std::io::Write;
+        use steve_runtime::{Clock, due::DueSource};
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for repair in ["schedule", "bot"] {
+            let (e, id) = bound().await;
+            let now = e.env.clock.now();
+            packet(&e, WS, now);
+            e.env
+                .store()
+                .with_conn(|c| {
+                    c.execute("UPDATE flows SET graph='broken json' WHERE id=?", [&id])?;
+                    Ok(())
+                })
+                .unwrap();
+            let runner = Runner::new(e.flow.clone());
+            queue::BotRunner::start(&runner, WS, now).unwrap();
+            let old = e
+                .env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap()[0]
+                .id
+                .clone();
+            e.env.store().with_conn(|c|{c.execute("UPDATE flow_runs SET context=json_set(context,'$.startup.attempts','broken'),cost=x'ff' WHERE id=?",[&old])?;Ok(())}).unwrap();
+            e.env.clock.advance(60_000);
+            let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = buffer.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || Capture(sink.clone()))
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                for _ in 0..5 {
+                    assert_eq!(
+                        e.env
+                            .store()
+                            .reader(|c| queue::BotRunner::ready(&runner, c, WS))
+                            .unwrap(),
+                        None
+                    );
+                }
+            });
+            let log = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+            assert_eq!(
+                log.matches("digest Bot startup metadata is damaged")
+                    .count(),
+                1,
+                "{log}"
+            );
+            assert!(log.contains(&old));
+            let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
+            let (status, body) =
+                call(&api, Some(&caller(WS, ME)), "GET", "/digest/bot", None).await;
+            assert_eq!(status, 200);
+            assert_eq!(body["diagnostics"][0]["run_id"], old);
+            assert!(
+                body["diagnostics"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("修改调度或 Bot 即可恢复")
+            );
+            if repair == "schedule" {
+                e.env
+                    .store()
+                    .transaction(|tx| -> ApiResult<()> {
+                        let old = schedules::own(tx, WS, &id)?;
+                        schedules::update(
+                            tx,
+                            &old,
+                            &schedules::Fields {
+                                name: "owner saved",
+                                spec: &old.spec,
+                                enabled: true,
+                            },
+                            ME,
+                            "repair",
+                            e.env.clock.now(),
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+            } else {
+                let patch = serde_json::from_value(json!({"role":"owner saved"})).unwrap();
+                e.env.store().bots().patch("steve", &patch, ME).unwrap();
+            }
+            let source = queue::BotSource::new(&e.env.modules, runner);
+            assert!(source.next_due().await.unwrap().is_some());
+            source.run_due(e.env.clock.now()).await.unwrap();
+            let revision = e
+                .env
+                .store()
+                .reader(|c| steve_flow::scheduler::startup_revision(c, WS, &id))
+                .unwrap()
+                .unwrap();
+            let state = e
+                .env
+                .store()
+                .reader(|c| runs::startup_state(c, WS, &id, BOT_SOURCE, &revision))
+                .unwrap()
+                .unwrap();
+            assert_ne!(state.run_id, old);
+            assert_eq!(state.attempts, if repair == "schedule" { 0 } else { 1 });
+            let (status, body) =
+                call(&api, Some(&caller(WS, ME)), "GET", "/digest/bot", None).await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                body["diagnostics"][0]["run_id"], old,
+                "old damaged run remains diagnosable after recovery"
+            );
+            let original:(String,String)=e.env.store().reader(|c|Ok::<_,steve_store::StoreError>(c.query_row("SELECT json_extract(context,'$.startup.attempts'),typeof(cost) FROM flow_runs WHERE id=?",[&old],|r|Ok((r.get(0)?,r.get(1)?)))?)).unwrap();
+            assert_eq!(original, ("broken".into(), "blob".into()));
+        }
     }
 }

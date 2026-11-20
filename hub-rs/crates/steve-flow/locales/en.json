@@ -246,5 +246,7 @@
   "flow.correction.exception": "Exception: %{describe} → %{verb}",
   "flow.correction.none": "(none)",
   "flow.correction.rule_memory": "Rule memory",
-  "flow.correction.title": "Correction: %{summary}"
+  "flow.correction.title": "Correction: %{summary}",
+  "flow.startup.rejected": "This schedule could not start. Check the schedule and Bot configuration, then save either one to try again.",
+  "flow.startup.metadata_invalid": "Startup failure tracking is damaged. Edit the schedule or Bot to recover; this old run remains available for diagnosis."
 }

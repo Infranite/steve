@@ -75,21 +75,35 @@ pub(super) fn summary(context: &Value) -> Option<StartupSummary> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StartupDiagnostic {
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: String,
     pub flow_id: String,
     pub run_id: String,
 }
+fn diagnostic(row: &StartupRecord, flow: &str) -> StartupDiagnostic {
+    StartupDiagnostic {
+        code: "startup_metadata_invalid",
+        message: steve_i18n::t!("flow.startup.metadata_invalid"),
+        flow_id: flow.into(),
+        run_id: row.id.clone(),
+    }
+}
+
+/// The latest damaged record remains diagnosable even after a new configuration starts.
 pub fn startup_diagnostic(
     c: &Connection,
     ws: &str,
     flow: &str,
     source: &str,
 ) -> FlowResult<Option<StartupDiagnostic>> {
-    Ok(latest_row(c, ws, flow, source)?.filter(|row| metadata(&row.context).is_err()).map(|row| StartupDiagnostic {
-        code: "startup_metadata_invalid",
-        message: "Startup failure tracking is damaged. Include this flow and run in a diagnostic report.",
-        flow_id: row.flow_id, run_id: row.id,
-    }))
+    inspect_records(c, ws, flow, source, true, |row| {
+        (row.unreadable || metadata(&row.context).is_err()).then(|| diagnostic(&row, flow))
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartupCheck {
+    State(Option<StartupState>),
+    Invalid(StartupDiagnostic),
 }
 
 /// A rejected startup; revision is the caller's immutable configuration snapshot.
@@ -104,34 +118,88 @@ pub struct FailedStart<'a> {
     pub limit: i64,
 }
 
-fn latest_row(c: &Connection, ws: &str, flow: &str, source: &str) -> FlowResult<Option<RunRow>> {
-    Ok(c.query_row(
-        "SELECT * FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2
-         AND CASE WHEN json_valid(context) THEN json_extract(context,'$.source')=?3
-           AND json_type(context,'$.startup') IS NOT NULL ELSE 0 END
-         ORDER BY rowid DESC LIMIT 1",
-        params![ws, flow, source],
-        RunRow::from_row,
-    )
-    .optional()?)
+struct StartupRecord {
+    id: String,
+    context: Value,
+    unreadable: bool,
 }
+
+// Only the identifiers and metadata are needed. Decode each column independently so unrelated
+// damaged columns (or a malformed context) cannot make the owner's diagnostic endpoint fail.
+fn inspect_records<T>(
+    c: &Connection,
+    ws: &str,
+    flow: &str,
+    source: &str,
+    include_unattributed: bool,
+    mut select: impl FnMut(StartupRecord) -> Option<T>,
+) -> FlowResult<Option<T>> {
+    let mut stmt = c.prepare_cached(
+        "SELECT rowid,id,context FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2
+         AND CASE WHEN json_valid(CAST(context AS TEXT)) AND json_type(CAST(context AS TEXT))='object' THEN
+           json_extract(CAST(context AS TEXT),'$.source')=?3 AND json_type(CAST(context AS TEXT),'$.startup') IS NOT NULL
+         ELSE ?4 END ORDER BY rowid DESC",
+    )?;
+    let rows = stmt.query_map(params![ws, flow, source, include_unattributed], |r| {
+        let rowid: i64 = r.get(0)?;
+        let id = r.get::<_, String>(1).ok();
+        let raw = r.get_ref(2)?;
+        let context = match raw {
+            rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                serde_json::from_slice(bytes).ok()
+            }
+            _ => None,
+        };
+        let context_type_ok = matches!(raw, rusqlite::types::ValueRef::Text(_));
+        Ok(StartupRecord {
+            unreadable: id.is_none() || context.is_none() || !context_type_ok,
+            id: id.unwrap_or_else(|| format!("rowid:{rowid}")),
+            context: context.unwrap_or(Value::Null),
+        })
+    })?;
+    for row in rows {
+        if let Some(value) = select(row?) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 fn latest(
     c: &Connection,
     ws: &str,
     flow: &str,
     source: &str,
-) -> FlowResult<Option<(RunRow, Metadata)>> {
-    latest_row(c, ws, flow, source)?
-        .map(|row| {
-            let meta = metadata(&row.context).map_err(|e| {
-                crate::FlowError::Internal(format!("Invalid startup state for run {}: {e}", row.id))
-            })?;
-            Ok((row, meta))
-        })
-        .transpose()
+    revision: &Value,
+) -> FlowResult<Option<StartupRecord>> {
+    // Filter the configuration identity BEFORE decoding the budget. Keep the damaged old row
+    // unchanged; a deliberate save has a new identity and must be able to start at zero.
+    Ok(inspect_records(c, ws, flow, source, false, Some)?
+        .filter(|row| row.context["startup"]["revision"] == *revision))
 }
 
-/// Only source-owned records advance the budget; unrelated manual/cron/skipped history does not.
+pub fn startup_check(
+    c: &Connection,
+    ws: &str,
+    flow: &str,
+    source: &str,
+    revision: &Value,
+) -> FlowResult<StartupCheck> {
+    let Some(row) = latest(c, ws, flow, source, revision)? else {
+        return Ok(StartupCheck::State(None));
+    };
+    match metadata(&row.context) {
+        Ok(meta) if !row.unreadable => Ok(StartupCheck::State(Some(StartupState {
+            run_id: row.id,
+            state: meta.state,
+            attempts: meta.attempts,
+            limit: meta.limit,
+        }))),
+        _ => Ok(StartupCheck::Invalid(diagnostic(&row, flow))),
+    }
+}
+
+/// Only source-owned records in this configuration advance the budget.
 pub fn startup_state(
     c: &Connection,
     ws: &str,
@@ -139,14 +207,13 @@ pub fn startup_state(
     source: &str,
     revision: &Value,
 ) -> FlowResult<Option<StartupState>> {
-    Ok(latest(c, ws, flow, source)?
-        .filter(|(_, m)| &m.revision == revision)
-        .map(|(r, m)| StartupState {
-            run_id: r.id,
-            state: m.state,
-            attempts: m.attempts,
-            limit: m.limit,
-        }))
+    match startup_check(c, ws, flow, source, revision)? {
+        StartupCheck::State(state) => Ok(state),
+        StartupCheck::Invalid(d) => Err(crate::FlowError::Internal(format!(
+            "Invalid startup state for run {}",
+            d.run_id
+        ))),
+    }
 }
 
 /// A successful start resets this source's budget in the same transaction as the new run.
@@ -205,8 +272,16 @@ pub(crate) fn record_start_rejection(
         .map_or(0, |s| s.attempts)
         .saturating_add(1)
         .min(f.limit);
-    let row = tx.query_row("SELECT * FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2 ORDER BY rowid DESC LIMIT 1",
-        params![f.ws,f.flow_id],RunRow::from_row).optional()?;
+    let previous_id: Option<(Option<String>, Value)> = tx.query_row(
+        "SELECT id,context FROM flow_runs WHERE workspace_id=?1 AND flow_id=?2 ORDER BY rowid DESC LIMIT 1",
+        params![f.ws,f.flow_id], |r| {
+            let context = r.get::<_,String>(1).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+            Ok((r.get(0)?,context))
+        }).optional()?;
+    let row = match previous_id.filter(|(_, ctx)| ctx["startup"]["revision"] == *f.revision) {
+        Some((Some(id), _)) => get(tx, &id)?,
+        _ => None,
+    };
     let previous = row.filter(|r| {
         r.status == "failed"
             && r.error.as_deref() == Some(f.error)

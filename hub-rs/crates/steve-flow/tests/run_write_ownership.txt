@@ -1,0 +1,5 @@
+# flow_runs literals outside Flow: reads only; exact equality, only shrink.
+crates/steve-channels/src/cleanup.rs	1
+crates/steve-digest/src/queue.rs	1
+crates/steve-hub/src/wire/digest_bot.rs	2
+crates/steve-knowledge/src/uses.rs	1

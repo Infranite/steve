@@ -246,5 +246,7 @@
   "flow.correction.exception": "例外：%{describe} → %{verb}",
   "flow.correction.none": "（没有）",
   "flow.correction.rule_memory": "规则记忆",
-  "flow.correction.title": "纠正：%{summary}"
+  "flow.correction.title": "纠正：%{summary}",
+  "flow.startup.rejected": "此调度无法启动。请检查调度和 Bot 配置，保存其中一项后重试。",
+  "flow.startup.metadata_invalid": "启动失败记录已损坏。修改调度或 Bot 即可恢复，旧运行记录仍保留供诊断。"
 }
