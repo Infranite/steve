@@ -7,7 +7,6 @@ use crate::thread::onboard::{BRIEF, DONE, ENDED, PENDING, STATE, TURNS};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 /// A router that always says research; returns how many times it was asked.
 fn router(k: &Kit) -> Arc<AtomicUsize> {
@@ -22,14 +21,18 @@ fn router(k: &Kit) -> Arc<AtomicUsize> {
 }
 
 async fn settle(k: &Kit, n: usize) -> Vec<crate::repo::Message> {
-    for _ in 0..500 {
-        let ms = k.db().messages(WS).unwrap();
-        if ms.len() >= n {
-            return ms;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no reply: {:?}", k.db().messages(WS).unwrap());
+    let mut ms = Vec::new();
+    steve_runtime::testkit::eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!("no reply: {:?}", k.db().messages(WS).unwrap())
+        }),
+        || {
+            ms = k.db().messages(WS).unwrap();
+            ms.len() >= n
+        },
+    )
+    .await;
+    ms
 }
 
 #[tokio::test]

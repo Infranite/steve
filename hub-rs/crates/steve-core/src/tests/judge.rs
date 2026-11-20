@@ -1037,17 +1037,6 @@ fn candidates_are_one_per_key_and_refuse_unknown_values() {
     assert!(facts.candidate_release(&id, "k1", None, false, 0).unwrap());
 }
 
-/// Polls `f` (≤15 s) without blocking the runtime the watches run on.
-async fn eventually(f: impl Fn() -> bool) -> bool {
-    for _ in 0..1500 {
-        if f() {
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    false
-}
-
 /// The judge runs in its own watch: while one of its model calls hangs, the stall watch still
 /// opens the card of an item that stopped after the call began (in one loop it would wait behind
 /// the call, and so would the Release build and pull request checks).
@@ -1064,7 +1053,14 @@ async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
             .stall_watch(std::time::Duration::from_millis(50)),
     );
     assert!(
-        eventually(|| k.gw.calls.lock().unwrap().len() == 1).await,
+        steve_runtime::testkit::eventually_sync("The judge call is under way.", || k
+            .gw
+            .calls
+            .lock()
+            .unwrap()
+            .len()
+            == 1)
+        .await,
         "the judge's call is under way"
     );
 
@@ -1089,7 +1085,11 @@ async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
             .any(|d| d.subject_type == crate::stall::STALL)
     };
     assert!(
-        eventually(card).await,
+        steve_runtime::testkit::eventually_sync(
+            "The stall card opens while the judge waits.",
+            card
+        )
+        .await,
         "the stall card opens while the judge waits"
     );
     // the judge call is still hanging: nothing of it was written, and no second pass began

@@ -189,7 +189,19 @@ async fn the_first_takeover_wins_and_core_does_not_finish() {
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     wait_log(&log, 2).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    steve_runtime::testkit::eventually_sync(
+        "The hook consultation records the module takeover.",
+        || {
+            k.db()
+                .store()
+                .items()
+                .operations(&x.id, 1)
+                .unwrap()
+                .iter()
+                .any(|o| o.kind == "hooks.accepted" && o.status == "running")
+        },
+    )
+    .await;
     assert_eq!(
         logged(&log),
         [
@@ -203,27 +215,30 @@ async fn the_first_takeover_wins_and_core_does_not_finish() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_acceptance_undone_before_the_hooks_answered_does_not_finish() {
-    struct Slow(Log);
+    struct Slow(Log, Arc<tokio::sync::Notify>);
     #[async_trait]
     impl ItemHooks for Slow {
         fn name(&self) -> &'static str {
             "slow"
         }
         async fn on_accepted(&self, _: &Item) -> Option<Takeover> {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.1.notified().await;
             self.0.lock().unwrap().push("asked".into());
             None
         }
     }
     let k = Kit::new();
     let log = Log::default();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
     let l = log.clone();
     attach(&k, |r| {
-        r.item_hooks(Box::new(Slow(l)));
+        r.item_hooks(Box::new(Slow(l, gate)));
     });
     let x = k.delivered(false);
     k.core.resolve(&x.decision, "pass", "", "me").unwrap();
     k.core.undo_decision(&x.decision, "me").unwrap();
+    release.notify_one();
     wait_log(&log, 1).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     /* back to waiting for the reopened acceptance */
@@ -378,14 +393,18 @@ fn router(k: &Kit, answer: &'static str) {
 }
 
 async fn reply(k: &Kit) -> crate::repo::Message {
-    for _ in 0..300 {
-        let ms = k.db().messages(WS).unwrap();
-        if ms.len() >= 2 && !ms[1].meta["cites"].is_null() {
-            return ms[1].clone();
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("no reply: {:?}", k.db().messages(WS).unwrap());
+    let mut ms = Vec::new();
+    steve_runtime::testkit::eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!("no reply: {:?}", k.db().messages(WS).unwrap())
+        }),
+        || {
+            ms = k.db().messages(WS).unwrap();
+            ms.len() >= 2 && !ms[1].meta["cites"].is_null()
+        },
+    )
+    .await;
+    ms[1].clone()
 }
 
 #[tokio::test]
@@ -451,12 +470,10 @@ async fn chat_without_a_user_sees_as_the_workspace_and_without_context_is_unchan
     });
     router(&k, "你好呀");
     k.core.say(WS, "你好", &[]).unwrap();
-    for _ in 0..300 {
-        if k.db().messages(WS).unwrap().len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync("The workspace chat reply is stored.", || {
+        k.db().messages(WS).unwrap().len() >= 2
+    })
+    .await;
     let ms = k.db().messages(WS).unwrap();
     assert_eq!(ms[1].text, "你好呀");
     assert!(ms[1].meta.get("cites").is_none());
@@ -791,7 +808,19 @@ async fn after_a_crash_before_the_hooks_were_recorded_they_are_asked_before_the_
         wait_log(&log, 1).await,
         [format!("gh accepted {} run", x.id)]
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    steve_runtime::testkit::eventually_sync(
+        "The hook consultation records the module takeover.",
+        || {
+            k.db()
+                .store()
+                .items()
+                .operations(&x.id, 1)
+                .unwrap()
+                .iter()
+                .any(|o| o.kind == "hooks.accepted" && o.status == "running")
+        },
+    )
+    .await;
     // gh took the wrap-up over: closed once it says so
     assert_eq!(k.phase(&x.id), "closing");
     k.core.lifecycle_tick().unwrap();

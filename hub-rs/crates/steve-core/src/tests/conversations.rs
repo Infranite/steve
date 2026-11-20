@@ -56,17 +56,21 @@ fn router(
 }
 
 async fn settle(k: &Kit, space: &str, n: usize) -> Vec<Message> {
-    for _ in 0..500 {
-        let ms = k.db().messages_in(WS, space, 200).unwrap();
-        if ms.len() >= n {
-            return ms;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!(
-        "waited for {n}: {:#?}",
-        k.db().messages_in(WS, space, 200).unwrap()
-    );
+    let mut ms = Vec::new();
+    steve_runtime::testkit::eventually_sync(
+        steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "waited for {n}: {:#?}",
+                k.db().messages_in(WS, space, 200).unwrap()
+            )
+        }),
+        || {
+            ms = k.db().messages_in(WS, space, 200).unwrap();
+            ms.len() >= n
+        },
+    )
+    .await;
+    ms
 }
 
 /// Someone else speaking in a group (not the owner: what they ask for waits for the owner's yes).
@@ -109,12 +113,11 @@ async fn main_channel_turns_report_outcomes_without_using_the_hosts_voice() {
     let ms = settle(&k, crate::thread::MAIN, 2).await;
     assert_eq!(ms[1].text, "主线的回答");
     assert_eq!(ms[1].meta["origin"], origin);
-    for _ in 0..500 {
-        if !host.said.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "The host receives the main conversation reply.",
+        || !host.said.lock().unwrap().is_empty(),
+    )
+    .await;
     let mut expected = vec![(crate::thread::MAIN.to_string(), ms[1].id.clone())];
     assert_eq!(*host.said.lock().unwrap(), expected);
     assert!(host.answered.lock().unwrap().is_empty());
@@ -340,24 +343,25 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
         },
     );
     let mut own = None;
-    for _ in 0..300 {
-        own = k
-            .db()
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT item_id FROM thread_items WHERE origin_msg = ?",
-                    [&mine],
-                    |r| r.get::<_, String>(0),
-                )
-                .ok())
-            })
-            .unwrap();
-        if own.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "The owner's conversation is bound to its new item.",
+        || {
+            own = k
+                .db()
+                .store()
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT item_id FROM thread_items WHERE origin_msg = ?",
+                        [&mine],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok())
+                })
+                .unwrap();
+            own.is_some()
+        },
+    )
+    .await;
     let own = own.expect("your item");
     assert_ne!(own, id);
     assert_eq!(k.db().item(&own).unwrap().unwrap().source.1, "chat");
@@ -633,18 +637,14 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     assert_eq!(log.outcome.as_deref(), Some("needs_tools"));
     assert_eq!(log.item_id.as_deref(), Some(id.as_str()));
     // the announcement reaches the chat through the host, like any item made there
-    for _ in 0..300 {
-        if host
-            .said
+    steve_runtime::testkit::eventually_sync("The host receives the handoff announcement.", || {
+        host.said
             .lock()
             .unwrap()
             .iter()
             .any(|(_, m)| m == &ms[1].id)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await;
     assert!(
         host.said
             .lock()
@@ -792,18 +792,19 @@ async fn a_full_queue_is_marked_as_a_system_text() {
         turn(&k, &format!("在吗 {i}"), guest(true, true));
     }
     let mut full = None;
-    for _ in 0..1000 {
-        full = k
-            .db()
-            .messages_in(WS, SPACE, 200)
-            .unwrap()
-            .into_iter()
-            .find(|m| m.author == "steve");
-        if full.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "A full conversation queue records its system reply.",
+        || {
+            full = k
+                .db()
+                .messages_in(WS, SPACE, 200)
+                .unwrap()
+                .into_iter()
+                .find(|m| m.author == "steve");
+            full.is_some()
+        },
+    )
+    .await;
     let m = full.expect("the queue filled up");
     assert_eq!(m.text, crate::thread::research::QUEUE_FULL);
     assert_eq!(m.meta[crate::thread::research::SYSTEM], json!(true));
@@ -865,8 +866,8 @@ async fn stopping_during_research_preparation_keeps_the_result_without_sending_a
     );
     assert_eq!(ms[1].meta["steps"]["research"]["stopped"], "user");
     assert!(ms[1].text.contains("已读到的部分摘要") && ms[1].text.contains("已停下"));
-    for _ in 0..100 {
-        if k.db()
+    steve_runtime::testkit::eventually_sync("The stopped research run settles durably.", || {
+        k.db()
             .store()
             .thread()
             .run(&run.id)
@@ -874,10 +875,6 @@ async fn stopping_during_research_preparation_keeps_the_result_without_sending_a
             .unwrap()
             .status
             == "stopped"
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("stopped run did not settle");
+    })
+    .await;
 }

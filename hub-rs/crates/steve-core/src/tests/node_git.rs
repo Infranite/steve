@@ -49,14 +49,21 @@ fn command<T>(op: &str, body: T) -> Command<T> {
 }
 
 async fn finished(n: &steve_node::LocalNode, op: &OperationId) -> Observed {
-    for _ in 0..1500 {
-        let r = n.operation(op.clone()).await.unwrap();
-        if r.state.is_finished() || matches!(r.state, Observed::Unknown { .. }) {
-            return r.state;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("{op} never finished")
+    let result = Mutex::new(None);
+    steve_runtime::testkit::eventually(
+        format!("Node operation {op} finishes or reports an unknown outcome."),
+        || async {
+            let r = n.operation(op.clone()).await.unwrap();
+            if r.state.is_finished() || matches!(r.state, Observed::Unknown { .. }) {
+                *result.lock().unwrap() = Some(r.state);
+                true
+            } else {
+                false
+            }
+        },
+    )
+    .await;
+    result.into_inner().unwrap().unwrap()
 }
 
 impl OnNode {
@@ -363,14 +370,14 @@ fn a_gathering_slower_than_the_periodic_check_still_decides() {
     std::fs::write(wt.join("c.txt"), "c\n").unwrap();
     assert!(!k.core.tx().lc_try_close(&i).unwrap());
     let mut moved = false;
-    for _ in 0..100 {
-        k.core.tx().lc_tick().unwrap();
-        if k.phase(&i) == "active" {
-            moved = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    steve_runtime::testkit::eventually_blocking(
+        "The periodic check observes the changed Node worktree.",
+        || {
+            k.core.tx().lc_tick().unwrap();
+            moved = k.phase(&i) == "active";
+            moved
+        },
+    );
     assert!(moved, "the change is seen while the check keeps polling");
 }
 

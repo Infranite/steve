@@ -5,7 +5,7 @@ use crate::patch;
 use crate::repo::WS;
 use crate::testkit::Kit;
 use serde_json::json;
-use std::time::Duration;
+use std::future::Future;
 
 fn chat_answer(k: &Kit) -> String {
     k.db()
@@ -38,16 +38,37 @@ async fn promoting_with_a_slow_router_waits_for_the_same_item() {
     let m = chat_answer(&k);
     let before = count(&k);
     let gw = k.gw.clone();
-    gw.set(|_, _| {
-        std::thread::sleep(Duration::from_millis(50));
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let started = entered.clone();
+    let (release, gate) = std::sync::mpsc::sync_channel(1);
+    let gate = std::sync::Mutex::new(gate);
+    gw.set(move |_, _| {
+        started.notify_one();
+        gate.lock()
+            .unwrap()
+            .recv_timeout(steve_runtime::testkit::EVENTUALLY)
+            .expect("the second promotion polls while routing is held");
         Err(crate::error::msg("slow and broken"))
     });
     let c1 = k.core.clone();
     let c2 = k.core.clone();
     let (m1, m2) = (m.clone(), m.clone());
     let a = tokio::spawn(async move { c1.promote(WS, &m1, None).await.map(|i| i.id) });
-    let b = tokio::spawn(async move { c2.promote(WS, &m2, None).await.map(|i| i.id) });
-    let (a, b) = (a.await.unwrap().unwrap(), b.await.unwrap().unwrap());
+    tokio::time::timeout(steve_runtime::testkit::EVENTUALLY, entered.notified())
+        .await
+        .unwrap();
+    let mut b = Box::pin(async move { c2.promote(WS, &m2, None).await.map(|i| i.id) });
+    // The second caller must actually reach the shared in-flight promotion before it is released.
+    std::future::poll_fn(|cx| {
+        assert!(
+            b.as_mut().poll(cx).is_pending(),
+            "the second promotion waits for the same item"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    let (a, b) = (a.await.unwrap().unwrap(), b.await.unwrap());
     assert_eq!(a, b);
     assert_eq!(count(&k), before + 1);
 }
@@ -192,9 +213,14 @@ fn on_boot_reminders_left_on_finished_or_dropped_items_are_cleared() {
 #[test]
 fn on_boot_a_question_older_than_a_delivery_expires() {
     let k = Kit::new();
-    let (i, _) = waiting(&k, "ask");
-    std::thread::sleep(Duration::from_millis(5));
+    let (i, question) = waiting(&k, "ask");
     let acc = k.decision(&i, None, "accept", "item", &["pass", "rework"]);
+    k.db()
+        .exec(
+            "UPDATE decisions SET created=(SELECT created+1 FROM decisions WHERE id=?) WHERE id=?",
+            &[&question, &acc],
+        )
+        .unwrap();
     k.core.recover().unwrap();
     let open: Vec<String> = k
         .db()
