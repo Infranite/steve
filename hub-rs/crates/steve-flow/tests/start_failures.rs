@@ -77,7 +77,7 @@ fn a_rejected_history_write_rolls_back_the_whole_operation() {
                     source: "fixture.start",
                     revision: &serde_json::json!({"flow":1}),
                     limit: 10,
-                    error: "new error",
+                    error: "bad graph",
                     now: 61_000,
                 },
             )
@@ -295,5 +295,128 @@ fn run_view_exposes_historical_counts_and_budget_without_internal_revision() {
     let json = serde_json::to_value(plain.view()).unwrap();
     for key in ["first_at", "start_failures", "startup"] {
         assert!(json.get(key).is_none(), "ordinary runs omit {key}");
+    }
+}
+
+#[test]
+fn ordinary_runs_and_new_versions_split_error_history_without_rewriting_earlier_rows() {
+    for barrier in ["version", "done", "failed", "skipped"] {
+        let e = FlowEnv::new();
+        let first = record(&e, "first failure", 1, 1000);
+        let before = history(&e)[0].clone();
+        if barrier != "version" {
+            e.env
+                .store()
+                .transaction(|tx| {
+                    runs::insert(
+                        tx,
+                        &runs::NewRun {
+                            ws: WS,
+                            flow_id: "flow_start",
+                            flow_version: 1,
+                            trigger_kind: "manual",
+                            status: barrier,
+                            error: None,
+                            outcome_label: "other run",
+                            cursor: None,
+                            context: &serde_json::json!({"at":61_000}),
+                            now: 61_000,
+                        },
+                    )
+                })
+                .unwrap();
+        }
+        let version = 1 + i64::from(barrier == "version");
+        let next = record(&e, "first failure", version, 121_000);
+        let rows = history(&e);
+        assert_ne!(first, next, "{barrier}");
+        assert_eq!(rows.len(), if barrier == "version" { 2 } else { 3 });
+        assert_eq!(rows[0].view().start_failures, Some(1));
+        assert_eq!(rows[0].view().first_at, Some(121_000));
+        assert_eq!(rows[0].flow_version, version);
+        assert_eq!(rows.last().unwrap(), &before);
+    }
+}
+
+#[test]
+fn inserting_a_new_failure_never_issues_a_redundant_update() {
+    let e = FlowEnv::new();
+    e.env.store().with_conn(|c| {
+        c.execute_batch("CREATE TRIGGER deny_any_run_update BEFORE UPDATE ON flow_runs BEGIN SELECT RAISE(ABORT,'updates unavailable'); END")?;
+        Ok(())
+    }).unwrap();
+    let first = record(&e, "bad graph", 1, 1000);
+    assert_eq!(history(&e)[0].id, first);
+    assert_eq!(history(&e)[0].view().start_failures, Some(1));
+}
+
+#[test]
+fn changed_errors_start_new_history_with_view_counts_and_first_times() {
+    let e = FlowEnv::new();
+    let first = record(&e, "first error", 1, 1000);
+    assert_eq!(record(&e, "first error", 1, 61_000), first);
+    let repeated = history(&e)[0].clone();
+    assert_eq!(repeated.view().start_failures, Some(2));
+    assert_eq!(repeated.view().first_at, Some(1000));
+    record(&e, "changed error", 1, 121_000);
+    let changed = history(&e)[0].clone();
+    assert_eq!(changed.view().start_failures, Some(1));
+    assert_eq!(changed.view().error.as_deref(), Some("changed error"));
+    assert_eq!(changed.view().first_at, Some(121_000));
+    record(&e, "first error", 1, 181_000);
+    let rows = history(&e);
+    assert_eq!(rows.len(), 3);
+    assert_ne!(rows[0].id, first);
+    assert_eq!(rows[0].view().start_failures, Some(1));
+    assert_eq!(rows[1], changed);
+    assert_eq!(rows[2], repeated);
+}
+
+#[test]
+fn corrupt_source_metadata_is_diagnosable_and_cannot_spend_or_erase_budget() {
+    for (key, value) in [
+        ("attempts", serde_json::json!("bad")),
+        ("limit", serde_json::json!(0)),
+        ("format", serde_json::json!(99)),
+        ("state", serde_json::json!("unknown")),
+    ] {
+        let e = FlowEnv::new();
+        let id = bounded(&e, "bad graph", 1, 1000);
+        e.env
+            .store()
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE flow_runs SET context=json_set(context,?1,json(?2)) WHERE id=?3",
+                    rusqlite::params![format!("$.startup.{key}"), value.to_string(), id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let before = history(&e);
+        let error = e
+            .env
+            .store()
+            .reader(|c| {
+                runs::startup_state(
+                    c,
+                    WS,
+                    "flow_start",
+                    "fixture.start",
+                    &serde_json::json!({"epoch":1}),
+                )
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid startup"));
+        let diagnostic = e
+            .env
+            .store()
+            .reader(|c| runs::startup_diagnostic(c, WS, "flow_start", "fixture.start"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(diagnostic.code, "startup_metadata_invalid");
+        assert_eq!(diagnostic.run_id, id);
+        assert_eq!(diagnostic.flow_id, "flow_start");
+        assert!(!diagnostic.message.contains("invalid type"));
+        assert_eq!(history(&e), before);
     }
 }

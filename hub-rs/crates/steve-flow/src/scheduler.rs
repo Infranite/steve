@@ -24,6 +24,8 @@ use steve_runtime::schedule::CronExpr;
 pub const BATCH: usize = 200;
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
+/// Stable owner-facing rejection; detailed decoder/storage messages belong in the log.
+pub const START_REJECTED: &str = "This schedule could not start. Check the schedule and Bot configuration, then save either one to try again.";
 
 /// Keep row decoding failures distinct from a failing storage engine until the source boundary.
 #[derive(Debug, thiserror::Error)]
@@ -504,18 +506,19 @@ pub fn start_from_source(
                 Ok(Some((run, go)))
             }
             Err(StartError::Row(error)) => {
-                runs::record_start_failure(
+                runs::record_start_rejection(
                     tx,
                     &runs::FailedStart {
                         ws,
                         flow_id: id,
                         flow_version: revision["flow_version"].as_i64().expect("flow revision"),
                         source,
-                        error: &error.to_string(),
+                        error: START_REJECTED,
                         now,
                         revision: &revision,
                         limit,
                     },
+                    &error.to_string(),
                 )
                 .map_err(source_error)?;
                 tracing::warn!(

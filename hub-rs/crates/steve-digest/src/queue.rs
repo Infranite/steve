@@ -534,7 +534,7 @@ fn bot_work(c: &Connection, runner: &impl BotRunner, now: i64) -> Result<Vec<(i6
                     at = Some(at.map_or(queued, |lease| lease.min(queued)));
                 }
                 Ok(None) => {}
-                Err(e) => tracing::debug!(workspace = %ws, "digest Bot binding: {e}"),
+                Err(e) => tracing::warn!(workspace = %ws, "digest Bot binding: {e}"),
             }
         }
         if let Some(at) = at {
