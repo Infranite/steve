@@ -1,0 +1,21 @@
+# Production DomainEvent tap sites; reviewed inventory, only shrinks.
+# file<TAB>count. BLESS only records removals; a missing inventory requires explicit INIT.
+# Existing debt is not approval to use DomainEvent as a due-loop wake; use Store::commit_wake.
+# steve-hub/src/extension.rs: Plugin event API forwards selected committed business facts; it is not a DueSource wake.
+# steve-hub/src/wire/install/domain/contacts.rs: Existing contacts.watch due-loop wake debt; R7f removes this subscriber in its second commit.
+# steve-hub/src/wire/install/domain/extensions.rs: Connection lifecycle hooks start/stop reactive adapter instances, not a DueSource wake.
+# steve-hub/src/wire/install/domain/knowledge.rs: Memory/Bot changes invoke indexing of the changed business record.
+# steve-hub/src/wire/install/domain/mail.rs: A new mailbox business event installs its triage template.
+# steve-hub/src/wire/install/domain/plugins.rs: Plugin supervision reacts to connection lifecycle changes, not due-time scheduling.
+# steve-hub/src/wire/install/hub/research.rs: Workspace projection follows Project/Knowledge business changes for research roots.
+# steve-hub/src/wire/install/hub/runtime.rs: Workspace projection follows Project/Knowledge business changes for execution roots.
+# steve-hub/src/wire/install/hub/yolo.rs: Decision and Yolo business events drive the reactive approval engine; ticks are separate.
+steve-hub/src/extension.rs	1
+steve-hub/src/wire/install/domain/contacts.rs	1
+steve-hub/src/wire/install/domain/extensions.rs	1
+steve-hub/src/wire/install/domain/knowledge.rs	1
+steve-hub/src/wire/install/domain/mail.rs	1
+steve-hub/src/wire/install/domain/plugins.rs	1
+steve-hub/src/wire/install/hub/research.rs	1
+steve-hub/src/wire/install/hub/runtime.rs	1
+steve-hub/src/wire/install/hub/yolo.rs	1
