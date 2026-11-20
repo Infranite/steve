@@ -621,3 +621,261 @@ async fn the_profile_says_what_is_missing_and_lookups_are_retried() {
             .unwrap();
     assert_eq!(p.fields.org.state, "missing");
 }
+
+#[test]
+fn sg8_enrichment_name_and_promotion_table() {
+    for (incoming, directory, manual, active, expected_name, promoted, source) in [
+        ("  Alice  ", true, false, true, "Alice", true, "sync"),
+        ("Alice", false, false, true, "Alice", true, "chat"),
+        (
+            "ou_abcdef123456",
+            true,
+            false,
+            true,
+            "ou_sg8unknown",
+            false,
+            "infer",
+        ),
+        ("   ", true, false, true, "ou_sg8unknown", false, "infer"),
+        ("Alice", true, true, true, "ou_manual123456", true, "sync"),
+        ("Alice", true, false, false, "ou_sg8unknown", false, "infer"),
+    ] {
+        let t = TestEnv::new(accounts::register);
+        let known = t
+            .store()
+            .transaction(|tx| {
+                accounts::identify(
+                    tx,
+                    WS,
+                    ME,
+                    "feishu",
+                    "ou_sg8unknown",
+                    &accounts::Hints::default(),
+                )
+            })
+            .unwrap();
+        if manual {
+            t.store()
+                .transaction(|tx| {
+                    let party = contacts::repo::get(tx, &known.party_id)?.unwrap();
+                    contacts::service::revise_as(
+                        tx,
+                        &party,
+                        &contacts::repo::PartyPatch {
+                            name: Some("ou_manual123456".into()),
+                            ..Default::default()
+                        },
+                        json!({"name": party.name}),
+                        json!({"name": "ou_manual123456"}),
+                        ME,
+                    )
+                })
+                .unwrap();
+        }
+        if !active {
+            t.store()
+                .with_conn(|c| {
+                    Ok(c.execute(
+                        "UPDATE parties SET status='deleted' WHERE id=?",
+                        [&known.party_id],
+                    )?)
+                })
+                .unwrap();
+        }
+        let before_source = t
+            .store()
+            .reader(|c| -> steve_store::Result<_> {
+                Ok(c.query_row(
+                    "SELECT source FROM parties WHERE id=?",
+                    [&known.party_id],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        let r = t
+            .store()
+            .transaction(|tx| {
+                accounts::enrich(
+                    tx,
+                    &[],
+                    WS,
+                    ME,
+                    &known.account_id,
+                    &Enrichment {
+                        name: Some(incoming.into()),
+                        directory,
+                        avatar_url: Some("https://avatar.test/a".into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+        let (account, party) = t
+            .store()
+            .reader(|c| -> steve_store::Result<_> {
+                Ok((
+                    accounts::repo::get(c, &known.account_id)?.unwrap(),
+                    contacts::repo::get(c, &known.party_id)?.unwrap(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            party.name, expected_name,
+            "incoming={incoming:?} manual={manual} active={active}"
+        );
+        assert_eq!(r.promoted, promoted);
+        assert_eq!(r.renamed, promoted && !manual);
+        assert_eq!(r.account_named, promoted);
+        assert_eq!(
+            party.contact_kind.as_deref(),
+            Some(if promoted { "real" } else { "unconfirmed" })
+        );
+        assert_eq!(party.source, if promoted { source } else { &before_source });
+        assert_eq!(account.display_name, if promoted { "Alice" } else { "" });
+        assert_eq!(
+            party.avatar.get("url").and_then(Value::as_str),
+            active.then_some("https://avatar.test/a")
+        );
+        assert_eq!(r.party_id, known.party_id);
+    }
+}
+
+#[test]
+fn sg8_enrichment_job_and_email_idempotence_table() {
+    for directory in [false, true] {
+        let t = TestEnv::new(accounts::register);
+        let known = t
+            .store()
+            .transaction(|tx| {
+                accounts::identify(
+                    tx,
+                    WS,
+                    ME,
+                    "feishu",
+                    "ou_sg8unknown",
+                    &accounts::Hints::default(),
+                )
+            })
+            .unwrap();
+        let org = t
+            .store()
+            .transaction(|tx| {
+                accounts::tenant_org(
+                    tx,
+                    WS,
+                    ME,
+                    &TenantHint {
+                        key: "sg8-tenant".into(),
+                        own: false,
+                        name: Some("SG8 org".into()),
+                        seen_in: None,
+                    },
+                )
+            })
+            .unwrap();
+        let e = Enrichment {
+            name: Some("Alice".into()),
+            org_id: Some(org.clone()),
+            title: Some("  Engineer  ".into()),
+            dept: Some(" Platform ".into()),
+            email: Some(" Alice@Example.test ".into()),
+            directory,
+            ..Default::default()
+        };
+        let first = t
+            .store()
+            .transaction(|tx| accounts::enrich(tx, &[], WS, ME, &known.account_id, &e))
+            .unwrap();
+        assert!(first.org_linked);
+        assert!(first.email_added);
+        let second = t
+            .store()
+            .transaction(|tx| accounts::enrich(tx, &[], WS, ME, &known.account_id, &e))
+            .unwrap();
+        assert!(
+            !second.org_linked
+                && !second.job_filled
+                && !second.email_added
+                && !second.promoted
+                && !second.renamed
+        );
+        let (props, source): (String,String) = t.store().reader(|c| -> steve_store::Result<_> { Ok(c.query_row("SELECT props,source FROM links WHERE subject_id=?1 AND object_id=?2 AND predicate='works_at'", rusqlite::params![known.party_id,org], |r| Ok((r.get(0)?,r.get(1)?)))?) }).unwrap();
+        let props: Value = serde_json::from_str(&props).unwrap();
+        assert_eq!(props["title"], "Engineer");
+        assert_eq!(props["dept"], "Platform");
+        assert_eq!(source, if directory { "sync" } else { "infer" });
+        let mail = t.store().reader(|c| -> steve_store::Result<_> { Ok(c.query_row("SELECT a.verified,a.confidence,a.display_name FROM accounts a JOIN account_handles h ON h.account_id=a.id WHERE h.family='email' AND h.handle='alice@example.test'", [], |r| Ok((r.get::<_,bool>(0)?,r.get::<_,f64>(1)?,r.get::<_,String>(2)?)))?) }).unwrap();
+        assert_eq!(
+            mail,
+            (directory, if directory { 1.0 } else { 0.8 }, "Alice".into())
+        );
+    }
+}
+
+#[test]
+fn sg8_enrichment_strong_handle_evidence_merge_direction_table() {
+    for (mine_real, theirs_real, expected_merge) in [
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let t = TestEnv::new(accounts::register);
+        let identify = |handle| {
+            t.store()
+                .transaction(|tx| {
+                    accounts::identify(tx, WS, ME, "feishu", handle, &accounts::Hints::default())
+                })
+                .unwrap()
+        };
+        let mine = identify("ou_sg8mine");
+        let theirs = identify("on_sg8theirs");
+        for (party, real) in [(&mine.party_id, mine_real), (&theirs.party_id, theirs_real)] {
+            if real {
+                t.store()
+                    .with_conn(|c| {
+                        Ok(
+                            c.execute(
+                                "UPDATE parties SET contact_kind='real' WHERE id=?",
+                                [party],
+                            )?,
+                        )
+                    })
+                    .unwrap();
+            }
+        }
+        let r = t
+            .store()
+            .transaction(|tx| {
+                accounts::enrich(
+                    tx,
+                    &[Arc::new(accounts::AccountHooks)],
+                    WS,
+                    ME,
+                    &mine.account_id,
+                    &Enrichment {
+                        handles: vec![accounts::ExtraHandle {
+                            handle: "on_sg8theirs".into(),
+                            connection_id: None,
+                        }],
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+        let owner = if expected_merge && !mine_real {
+            &theirs.party_id
+        } else {
+            &mine.party_id
+        };
+        assert_eq!(r.merged_into.as_ref(), expected_merge.then_some(owner));
+        assert_eq!(&r.party_id, owner);
+        let mine_account = t
+            .store()
+            .reader(|c| accounts::repo::get(c, &mine.account_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(&mine_account.party_id, owner);
+        assert!(!r.account_named && !r.promoted && !r.org_linked && !r.email_added);
+    }
+}
