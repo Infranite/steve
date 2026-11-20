@@ -894,7 +894,12 @@ server.serve_forever()
         })
         .unwrap();
         fs::create_dir_all(&cfg.data_dir).unwrap();
-        let db = rusqlite::Connection::open(cfg.db_path()).unwrap();
+        let mut db = rusqlite::Connection::open(cfg.db_path()).unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut db,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
         db.execute_batch(
             "CREATE TABLE evidence(value); INSERT INTO evidence VALUES('before-upgrade');",
         )
@@ -1004,10 +1009,16 @@ server.serve_forever()
     fn pre_upgrade_backup_uses_the_shared_manifest_directory() {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
+        let mut connection = rusqlite::Connection::open(&db).unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut connection,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
+        connection
             .execute_batch("CREATE TABLE record(v); INSERT INTO record VALUES(42);")
             .unwrap();
+        drop(connection);
         let saved = backup(&db, t.path(), "old".into(), "new".into()).unwrap();
         let manifest: steve_store_sqlite::backup::Manifest = serde_json::from_slice(
             &fs::read(saved.parent().unwrap().join("manifest.json")).unwrap(),

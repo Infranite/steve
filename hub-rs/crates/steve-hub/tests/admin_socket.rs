@@ -805,10 +805,14 @@ fn default_offline_management_backup_is_manual() {
     let temp = tempfile::tempdir().unwrap();
     let (cfg, _) = config(temp.path());
     std::fs::create_dir_all(&cfg.data_dir).unwrap();
-    rusqlite::Connection::open(cfg.db_path())
-        .unwrap()
-        .execute_batch("CREATE TABLE record(v);")
-        .unwrap();
+    let mut connection = rusqlite::Connection::open(cfg.db_path()).unwrap();
+    steve_store_sqlite::migrate::initialize(
+        &mut connection,
+        &steve_store_sqlite::layout::Layout::single_file(),
+    )
+    .unwrap();
+    connection.execute_batch("CREATE TABLE record(v);").unwrap();
+    drop(connection);
     let first = access::command(&cfg, &["backup".into()]);
     let second = access::command(&cfg, &["backup".into()]);
     assert_eq!(first.code, 0, "{}", first.stderr);

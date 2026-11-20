@@ -240,8 +240,9 @@ mod tests {
     #[tokio::test]
     async fn retention_no_resume_cleans_rows_but_never_backup_directories() {
         let home = tempfile::tempdir().unwrap();
-        let db = steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher)
-            .unwrap();
+        let db =
+            steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
         let old = crate::daily_backup::make(home.path(), db.path(), "old").unwrap();
         let latest = crate::daily_backup::make(home.path(), db.path(), "latest").unwrap();
         let path = old.database.parent().unwrap().join("manifest.json");
