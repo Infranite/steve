@@ -184,33 +184,15 @@ pub fn apply(
         }
     }
 
-    // members and leads; a dissolved department has nobody in it any more
-    for team in &dissolved {
-        members(tx, ws, team, &[], &mut r)?;
-    }
-    for d in &snap.departments {
-        let Some(team) = team_of.get(&d.id) else {
-            continue;
-        };
-        let mut want: Vec<(String, &str)> = Vec::new();
-        if let Some(l) = d.leader_id.as_ref().and_then(|l| contact_of.get(l)) {
-            want.push((l.clone(), "lead"));
-        }
-        for u in snap
-            .users
-            .iter()
-            .filter(|u| !u.departed && u.department_ids.contains(&d.id))
-        {
-            if let Some(c) = contact_of.get(&u.id)
-                && !want.iter().any(|(w, _)| w == c)
-            {
-                want.push((c.clone(), "member"));
-            }
-        }
-        if members(tx, ws, team, &want, &mut r)? {
-            touched.insert(team.clone());
-        }
-    }
+    sync_members(
+        tx,
+        ws,
+        &snap,
+        &team_of,
+        &dissolved,
+        &contact_of,
+        (&mut r, &mut touched),
+    )?;
 
     // reports_to
     for u in snap.users.iter().filter(|u| !u.departed) {
@@ -241,9 +223,86 @@ pub fn apply(
     Ok(r)
 }
 
+fn sync_members(
+    tx: &Tx,
+    ws: &str,
+    snap: &Snapshot,
+    team_of: &HashMap<String, String>,
+    dissolved: &[String],
+    contact_of: &HashMap<String, String>,
+    changes: (&mut SyncReport, &mut BTreeSet<String>),
+) -> ApiResult<()> {
+    let (r, touched) = changes;
+    // members and leads; a dissolved department has nobody in it any more
+    for team in dissolved {
+        members(tx, ws, team, &[], r)?;
+    }
+    for d in &snap.departments {
+        let Some(team) = team_of.get(&d.id) else {
+            continue;
+        };
+        let mut want: Vec<(String, &str)> = Vec::new();
+        if let Some(l) = d.leader_id.as_ref().and_then(|l| contact_of.get(l)) {
+            want.push((l.clone(), "lead"));
+        }
+        for u in snap
+            .users
+            .iter()
+            .filter(|u| !u.departed && u.department_ids.contains(&d.id))
+        {
+            if let Some(c) = contact_of.get(&u.id)
+                && !want.iter().any(|(w, _)| w == c)
+            {
+                want.push((c.clone(), "member"));
+            }
+        }
+        if members(tx, ws, team, &want, r)? {
+            touched.insert(team.clone());
+        }
+    }
+
+    Ok(())
+}
+
 /// Upserts a team per department, sets parents, dissolves the vanished ones; returns department id →
 /// team id, and the teams dissolved now.
 #[allow(clippy::too_many_arguments)]
+fn refresh_team(
+    tx: &Tx,
+    actor: &str,
+    t: &SyncedTeam,
+    name: &str,
+    r: &mut SyncReport,
+    touched: &mut BTreeSet<String>,
+) -> ApiResult<()> {
+    let (mut before, mut after) = (Map::new(), Map::new());
+    let mut patch = PartyPatch::default();
+    if t.party.name != name {
+        before.insert("name".into(), json!(t.party.name));
+        after.insert("name".into(), json!(name));
+        patch.name = Some(name.to_string());
+        r.renamed += 1;
+    }
+    if t.party.status != "active" {
+        before.insert("status".into(), json!(t.party.status));
+        after.insert("status".into(), json!("active"));
+        patch.status = Some("active".into());
+        r.restored += 1;
+    }
+    if !after.is_empty() {
+        revise(
+            tx,
+            &t.party,
+            &patch,
+            Value::Object(before),
+            Value::Object(after),
+            actor,
+        )?;
+        touched.insert(t.party.id.clone());
+    }
+    Ok(())
+}
+
 fn teams(
     tx: &Tx,
     conn: &DirConnection,
@@ -265,31 +324,7 @@ fn teams(
         }
         match existing.iter().find(|t| t.external_id == d.id) {
             Some(t) => {
-                let (mut before, mut after) = (Map::new(), Map::new());
-                let mut patch = PartyPatch::default();
-                if t.party.name != name {
-                    before.insert("name".into(), json!(t.party.name));
-                    after.insert("name".into(), json!(name));
-                    patch.name = Some(name.clone());
-                    r.renamed += 1;
-                }
-                if t.party.status != "active" {
-                    before.insert("status".into(), json!(t.party.status));
-                    after.insert("status".into(), json!("active"));
-                    patch.status = Some("active".into());
-                    r.restored += 1;
-                }
-                if !after.is_empty() {
-                    revise(
-                        tx,
-                        &t.party,
-                        &patch,
-                        Value::Object(before),
-                        Value::Object(after),
-                        actor,
-                    )?;
-                    touched.insert(t.party.id.clone());
-                }
+                refresh_team(tx, actor, t, &name, r, touched)?;
                 team_of.insert(d.id.clone(), t.party.id.clone());
             }
             None => {
@@ -398,6 +433,77 @@ fn by_email(tx: &Tx, ws: &str, emails: &[String]) -> ApiResult<Option<Party>> {
 }
 
 /// Finds or creates the contact of a directory person; `None` for the own organization's accounts.
+fn directory_account(
+    tx: &Tx,
+    conn: &DirConnection,
+    system: &System,
+    u: &DirUser,
+    label: &str,
+    name: &str,
+    extra: Vec<ExtraHandle>,
+) -> ApiResult<Option<(String, bool)>> {
+    let ws = conn.workspace_id.as_str();
+    let actor = conn.owner.as_str();
+    let mut new = false;
+    let party_id = match known(tx, ws, system, u)? {
+        Some(_) => None,
+        None => by_email(tx, ws, &u.emails)?.map(|p| p.id),
+    };
+    let party_id = match party_id {
+        // the directory account joins the contact its email belongs to
+        Some(pid) => {
+            let viewer = Viewer::load(tx, ws, actor)?;
+            let a = asvc::record_tx(
+                tx,
+                &viewer,
+                actor,
+                &Record {
+                    system_id: system.id.clone(),
+                    party_id: pid.clone(),
+                    kind: "personal".into(),
+                    handle: u.id.clone(),
+                    display_name: name.to_string(),
+                    verified: true,
+                    confidence: 1.0,
+                    source: "sync".into(),
+                    source_label: label.into(),
+                },
+            )?;
+            for x in &extra {
+                arepo::add_handle(
+                    tx,
+                    ws,
+                    &system.family,
+                    &x.handle,
+                    &a.id,
+                    x.connection_id.as_deref(),
+                )?;
+            }
+            pid
+        }
+        None => {
+            let hints = Hints {
+                display_name: Some(name.to_string()),
+                extra,
+                source: Some("sync".into()),
+                source_label: Some(label.into()),
+                ..Default::default()
+            };
+            let got = identify(tx, ws, actor, &system.id, &u.id, &hints)?;
+            if got.is_ours {
+                return Ok(None);
+            }
+            let p = prepo::get(tx, &got.party_id)?;
+            new = got.created
+                && p.as_ref().is_some_and(|p| {
+                    p.source == "identify" && p.contact_kind.as_deref() == Some("unconfirmed")
+                });
+            got.party_id
+        }
+    };
+    Ok(Some((party_id, new)))
+}
+
 fn person(
     tx: &Tx,
     conn: &DirConnection,
@@ -420,62 +526,8 @@ fn person(
             connection_id: Some(conn.id.clone()),
         })
         .collect();
-    let mut new = false;
-    let party_id = match known(tx, ws, system, u)? {
-        Some(_) => None,
-        None => by_email(tx, ws, &u.emails)?.map(|p| p.id),
-    };
-    let party_id = match party_id {
-        // the directory account joins the contact its email belongs to
-        Some(pid) => {
-            let viewer = Viewer::load(tx, ws, actor)?;
-            let a = asvc::record_tx(
-                tx,
-                &viewer,
-                actor,
-                &Record {
-                    system_id: system.id.clone(),
-                    party_id: pid.clone(),
-                    kind: "personal".into(),
-                    handle: u.id.clone(),
-                    display_name: name.clone(),
-                    verified: true,
-                    confidence: 1.0,
-                    source: "sync".into(),
-                    source_label: label.into(),
-                },
-            )?;
-            for x in &extra {
-                arepo::add_handle(
-                    tx,
-                    ws,
-                    &system.family,
-                    &x.handle,
-                    &a.id,
-                    x.connection_id.as_deref(),
-                )?;
-            }
-            pid
-        }
-        None => {
-            let hints = Hints {
-                display_name: Some(name.clone()),
-                extra,
-                source: Some("sync".into()),
-                source_label: Some(label.into()),
-                ..Default::default()
-            };
-            let got = identify(tx, ws, actor, &system.id, &u.id, &hints)?;
-            if got.is_ours {
-                return Ok(None);
-            }
-            let p = prepo::get(tx, &got.party_id)?;
-            new = got.created
-                && p.as_ref().is_some_and(|p| {
-                    p.source == "identify" && p.contact_kind.as_deref() == Some("unconfirmed")
-                });
-            got.party_id
-        }
+    let Some((party_id, new)) = directory_account(tx, conn, system, u, label, &name, extra)? else {
+        return Ok(None);
     };
     let Some(p) = prepo::get(tx, &party_id)?.filter(|p| p.status == "active") else {
         return Ok(None);

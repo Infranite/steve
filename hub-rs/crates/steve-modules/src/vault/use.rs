@@ -262,6 +262,165 @@ impl Pending {
     }
 }
 
+struct UseContext {
+    session: String,
+    item: ItemRow,
+    fields: Vec<irepo::FieldRow>,
+    workdir: String,
+    work_item: Option<String>,
+    project: Option<String>,
+    bot_name: String,
+}
+
+fn request_injections(fields: &[irepo::FieldRow], r: &UseRequest) -> VaultResult<Vec<Injection>> {
+    // injections: every label must be a field of the item, every VAR valid and used once
+    let mut injections = Vec::new();
+    let mut vars: Vec<&str> = Vec::new();
+    let labels: Vec<&str> = fields.iter().map(|f| f.label.as_str()).collect();
+    let check_label = |l: &str| -> VaultResult<()> {
+        if labels.contains(&l) {
+            Ok(())
+        } else {
+            Err(ApiError::rule(format!(
+                "No field \"{l}\" in this credential. Its fields: {}.",
+                labels.join(", ")
+            ))
+            .into())
+        }
+    };
+    for (how, list) in [(How::Env, &r.env), (How::File, &r.files)] {
+        for (var, label) in list {
+            if !inject::valid_var(var) {
+                return Err(
+                    ApiError::rule(format!("\"{var}\" is not a valid variable name.")).into(),
+                );
+            }
+            if vars.contains(&var.as_str()) {
+                return Err(ApiError::rule(format!("Variable {var} is given twice.")).into());
+            }
+            vars.push(var);
+            check_label(label)?;
+            injections.push(Injection {
+                var: var.clone(),
+                label: label.clone(),
+                how,
+            });
+        }
+    }
+    if let Some(l) = &r.stdin {
+        check_label(l)?;
+        injections.push(Injection {
+            var: String::new(),
+            label: l.clone(),
+            how: How::Stdin,
+        });
+    }
+    if injections.is_empty() {
+        return Err(ApiError::rule(
+            "Nothing to inject: name at least one field in env, files or stdin.",
+        )
+        .into());
+    }
+    Ok(injections)
+}
+
+fn pending_use(
+    cx: &UseCx,
+    r: &UseRequest,
+    place: Option<&NodePlace>,
+    session: &str,
+    context: &UseContext,
+    injections: Vec<Injection>,
+) -> VaultResult<Pending> {
+    let UseContext {
+        item,
+        workdir,
+        work_item,
+        project,
+        ..
+    } = context;
+    // on a Node the directory is checked there, inside the session's workspace
+    let (cwd, node) = match place {
+        None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
+        Some(p) => {
+            if !p.files && injections.iter().any(|i| i.how == How::File) {
+                return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
+            }
+            let rel = node_cwd(&workdir, r.cwd.as_deref())?;
+            let shown = match &rel {
+                Some(rel) => Path::new(&workdir).join(rel),
+                None => PathBuf::from(&workdir),
+            };
+            (shown, Some(rel))
+        }
+    };
+    let secs = r
+        .timeout_s
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .map_or(DEFAULT_TIMEOUT_S, |t| {
+            (t.ceil() as u64).clamp(1, MAX_TIMEOUT_S)
+        });
+    let scope = match &project {
+        Some(p) => json!({ "project_id": p }),
+        None => json!({ "scratch": true }),
+    };
+    let use_id = uid("su");
+    let pending = Pending {
+        ws: cx.ws.clone(),
+        item_id: item.id.clone(),
+        title: item.title.clone(),
+        bot_id: cx.bot_id.clone(),
+        work_item: work_item.clone(),
+        session_id: Some(session.to_string()),
+        scope: scope.clone(),
+        spec: RunSpec {
+            use_id: use_id.clone(),
+            cwd: cwd.clone(),
+            command: r.command.clone(),
+            injections,
+            timeout: Duration::from_secs(secs),
+        },
+        node,
+    };
+    Ok(pending)
+}
+
+fn pending_row(
+    cx: &UseCx,
+    r: &UseRequest,
+    place: Option<&NodePlace>,
+    context: &UseContext,
+    pending: &Pending,
+) -> UseRecord {
+    let item = &context.item;
+    let work_item = &context.work_item;
+    let use_id = &pending.spec.use_id;
+    let session = context.session.as_str();
+    let shown = r.command.clone();
+    let at = now();
+    let row = UseRecord {
+        id: use_id.clone(),
+        workspace_id: cx.ws.clone(),
+        item_id: item.id.clone(),
+        actor_type: "bot".into(),
+        actor_id: cx.bot_id.clone(),
+        session_id: Some(session.to_string()),
+        work_item_id: work_item.clone(),
+        purpose: r.purpose.trim().into(),
+        mode: mode_of(&pending.spec.injections).into(),
+        command: Some(shown.clone()),
+        fields: pending.labels(),
+        decision_id: None,
+        grant_id: None,
+        device_id: place.map_or_else(|| "hub".into(), |p| p.device.clone()),
+        status: "pending".into(),
+        exit_code: None,
+        created: at,
+        finished: None,
+    };
+    row
+}
+
 enum Job {
     Run(String),
     Denied(String),
@@ -509,136 +668,15 @@ impl SecretUses {
             .session_id
             .as_deref()
             .ok_or_else(|| ApiError::rule("steve_secret_use only works inside a Steve session."))?;
+        let context = self.use_context(cx, r, session)?;
+        let injections = request_injections(&context.fields, r)?;
+        let pending = pending_use(cx, r, place, session, &context, injections)?;
+        let use_id = pending.spec.use_id.clone();
+        let mut row = pending_row(cx, r, place, &context, &pending);
         let store = self.0.vault.store();
-        let (item, fields, workdir, work_item, project, bot_name) = store.reader(|c| {
-            let (cwd, s_item, _) =
-                urepo::session(c, &cx.ws, session)?.ok_or_else(|| ApiError::not_found("会话"))?;
-            let item = find_item(c, &cx.ws, &cx.user, &r.item)?;
-            let fields = irepo::fields(c, &item.id)?;
-            let work_item = cx.item_id.clone().or(s_item);
-            let project = match &work_item {
-                Some(w) => urepo::item_project(c, &cx.ws, w)?.flatten(),
-                None => None,
-            };
-            let bot = urepo::bot_name(c, &cx.bot_id)?.unwrap_or_else(|| cx.bot_id.clone());
-            Ok::<_, VaultError>((item, fields, cwd, work_item, project, bot))
-        })?;
-
-        // injections: every label must be a field of the item, every VAR valid and used once
-        let mut injections = Vec::new();
-        let mut vars: Vec<&str> = Vec::new();
-        let labels: Vec<&str> = fields.iter().map(|f| f.label.as_str()).collect();
-        let check_label = |l: &str| -> VaultResult<()> {
-            if labels.contains(&l) {
-                Ok(())
-            } else {
-                Err(ApiError::rule(format!(
-                    "No field \"{l}\" in this credential. Its fields: {}.",
-                    labels.join(", ")
-                ))
-                .into())
-            }
-        };
-        for (how, list) in [(How::Env, &r.env), (How::File, &r.files)] {
-            for (var, label) in list {
-                if !inject::valid_var(var) {
-                    return Err(
-                        ApiError::rule(format!("\"{var}\" is not a valid variable name.")).into(),
-                    );
-                }
-                if vars.contains(&var.as_str()) {
-                    return Err(ApiError::rule(format!("Variable {var} is given twice.")).into());
-                }
-                vars.push(var);
-                check_label(label)?;
-                injections.push(Injection {
-                    var: var.clone(),
-                    label: label.clone(),
-                    how,
-                });
-            }
-        }
-        if let Some(l) = &r.stdin {
-            check_label(l)?;
-            injections.push(Injection {
-                var: String::new(),
-                label: l.clone(),
-                how: How::Stdin,
-            });
-        }
-        if injections.is_empty() {
-            return Err(ApiError::rule(
-                "Nothing to inject: name at least one field in env, files or stdin.",
-            )
-            .into());
-        }
-        // on a Node the directory is checked there, inside the session's workspace
-        let (cwd, node) = match place {
-            None => (resolve_cwd(Path::new(&workdir), r.cwd.as_deref())?, None),
-            Some(p) => {
-                if !p.files && injections.iter().any(|i| i.how == How::File) {
-                    return Err(ApiError::rule(steve_i18n::t!("modules.vault.files_remote")).into());
-                }
-                let rel = node_cwd(&workdir, r.cwd.as_deref())?;
-                let shown = match &rel {
-                    Some(rel) => Path::new(&workdir).join(rel),
-                    None => PathBuf::from(&workdir),
-                };
-                (shown, Some(rel))
-            }
-        };
-        let secs = r
-            .timeout_s
-            .filter(|t| t.is_finite() && *t > 0.0)
-            .map_or(DEFAULT_TIMEOUT_S, |t| {
-                (t.ceil() as u64).clamp(1, MAX_TIMEOUT_S)
-            });
-        let scope = match &project {
-            Some(p) => json!({ "project_id": p }),
-            None => json!({ "scratch": true }),
-        };
-        let use_id = uid("su");
-        let pending = Pending {
-            ws: cx.ws.clone(),
-            item_id: item.id.clone(),
-            title: item.title.clone(),
-            bot_id: cx.bot_id.clone(),
-            work_item: work_item.clone(),
-            session_id: Some(session.to_string()),
-            scope: scope.clone(),
-            spec: RunSpec {
-                use_id: use_id.clone(),
-                cwd: cwd.clone(),
-                command: r.command.clone(),
-                injections,
-                timeout: Duration::from_secs(secs),
-            },
-            node,
-        };
-        let shown = r.command.clone();
-        let at = now();
-        let mut row = UseRecord {
-            id: use_id.clone(),
-            workspace_id: cx.ws.clone(),
-            item_id: item.id.clone(),
-            actor_type: "bot".into(),
-            actor_id: cx.bot_id.clone(),
-            session_id: Some(session.to_string()),
-            work_item_id: work_item.clone(),
-            purpose: r.purpose.trim().into(),
-            mode: mode_of(&pending.spec.injections).into(),
-            command: Some(shown.clone()),
-            fields: pending.labels(),
-            decision_id: None,
-            grant_id: None,
-            device_id: place.map_or_else(|| "hub".into(), |p| p.device.clone()),
-            status: "pending".into(),
-            exit_code: None,
-            created: at,
-            finished: None,
-        };
-
-        let grant = store.reader(|c| grants::covering(c, &cx.ws, &item, &cx.bot_id, &scope))?;
+        let item = &context.item;
+        let grant =
+            store.reader(|c| grants::covering(c, &cx.ws, &item, &cx.bot_id, &pending.scope))?;
         if let Some(g) = grant {
             row.status = "running".into();
             row.grant_id = Some(g.clone());
@@ -660,7 +698,51 @@ impl SecretUses {
                 pending: Box::new(pending),
             });
         }
+        self.ask_use(cx, r, &context, pending, row)
+    }
 
+    fn use_context(&self, cx: &UseCx, r: &UseRequest, session: &str) -> VaultResult<UseContext> {
+        let store = self.0.vault.store();
+        let (item, fields, workdir, work_item, project, bot_name) = store.reader(|c| {
+            let (cwd, s_item, _) =
+                urepo::session(c, &cx.ws, session)?.ok_or_else(|| ApiError::not_found("会话"))?;
+            let item = find_item(c, &cx.ws, &cx.user, &r.item)?;
+            let fields = irepo::fields(c, &item.id)?;
+            let work_item = cx.item_id.clone().or(s_item);
+            let project = match &work_item {
+                Some(w) => urepo::item_project(c, &cx.ws, w)?.flatten(),
+                None => None,
+            };
+            let bot = urepo::bot_name(c, &cx.bot_id)?.unwrap_or_else(|| cx.bot_id.clone());
+            Ok::<_, VaultError>((item, fields, cwd, work_item, project, bot))
+        })?;
+        Ok(UseContext {
+            session: session.to_string(),
+            item,
+            fields,
+            workdir,
+            work_item,
+            project,
+            bot_name,
+        })
+    }
+
+    fn ask_use(
+        &self,
+        cx: &UseCx,
+        r: &UseRequest,
+        context: &UseContext,
+        pending: Pending,
+        row: UseRecord,
+    ) -> VaultResult<Prepared> {
+        let store = self.0.vault.store();
+        let item = &context.item;
+        let bot_name = &context.bot_name;
+        let work_item = &context.work_item;
+        let session = context.session.as_str();
+        let use_id = pending.spec.use_id.clone();
+        let shown = &r.command;
+        let cwd = &pending.spec.cwd;
         let high = !grants::grantable(&item);
         let mut question = format!("{bot_name} 想用「{}」：{}", item.title, r.purpose.trim());
         if item.template == BANK_CARD {
