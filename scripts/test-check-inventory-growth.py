@@ -23,6 +23,9 @@ COUNT = f"{guard.HUB_TESTS}/test_sleep.txt"
 DEBT = f"{guard.SCHEMA}/debt_stream.txt"
 TRIGGERS = f"{guard.SCHEMA}/triggers.tsv"
 STRUCTURE = guard.STRUCTURE
+DIGEST_WRITES = "hub-rs/crates/steve-store-sqlite/tests/digest_write_sites.txt"
+RUN_OWNERSHIP = "hub-rs/crates/steve-flow/tests/run_write_ownership.txt"
+DUE_WAKE = f"{guard.HUB_TESTS}/due_wake_sites.txt"
 
 
 # Complete structure.txt at 955f19fe; Git blob 1f2dad5392047ad9cbeb75eaed67f46f9020c2da.
@@ -187,6 +190,47 @@ class Snapshots(unittest.TestCase):
         text = 'src/a.ts\t"汉\u2028字"\t1\r\n'
         self.assertEqual(guard.parse("web/test/guard-zh-compare.txt", text), {("src/a.ts", '"汉\u2028字"'): [1]})
 
+
+
+    def test_rg4b_three_paths_are_discovered_by_the_shared_entry(self):
+        for path in [DIGEST_WRITES, RUN_OWNERSHIP, DUE_WAKE]:
+            self.assertTrue(guard.is_inventory(path), path)
+        self.assertFalse(guard.is_inventory(f"{guard.HUB_TESTS}/layering.txt"))
+
+    def test_rg4b_digest_kind_and_path_are_the_count_identity(self):
+        parsed = guard.parse(DIGEST_WRITES, "table\tsrc/a.rs\t2\nwrite\tsrc/a.rs\t1\n")
+        self.assertEqual(parsed, {("table", "src/a.rs"): [2], ("write", "src/a.rs"): [1]})
+        changes = self.growth("table\tsrc/a.rs\t2\n", "write\tsrc/a.rs\t2\n", DIGEST_WRITES)
+        self.assertIn(DIGEST_WRITES, changes)
+
+    def test_rg4b_run_total_and_bare_are_independent_including_zero(self):
+        before = "src/a.rs\t2\t0\n"
+        self.assertEqual(guard.parse(RUN_OWNERSHIP, before),
+                         {("src/a.rs", "total"): [2], ("src/a.rs", "bare"): [0]})
+        self.assertNotIn(("src/a.rs", "bare"), guard.parse(RUN_OWNERSHIP, "src/a.rs\t2\n"))
+        for after in ["src/a.rs\t2\t1\n", "src/a.rs\t1\t1\n"]:
+            with self.subTest(after=after):
+                changes = self.growth(before, after, RUN_OWNERSHIP)[RUN_OWNERSHIP]
+                self.assertEqual([(x["key"], x["before"], x["head"]) for x in changes],
+                                 [(("src/a.rs", "bare"), [0], [1])])
+        self.assertFalse(self.growth("src/a.rs\t2\t1\n", "src/a.rs\t1\t0\n", RUN_OWNERSHIP))
+        changes = self.growth("src/a.rs\t2\t1\n", "src/a.rs\t3\t0\n", RUN_OWNERSHIP)[RUN_OWNERSHIP]
+        self.assertEqual([(x["key"], x["before"], x["head"]) for x in changes],
+                         [(("src/a.rs", "total"), [2], [3])])
+
+    def test_rg4b_new_family_formats_fail_closed(self):
+        for path, text in [(DIGEST_WRITES, "table\tsrc/a.rs\t0\n"),
+                           (DIGEST_WRITES, "table\tsrc/a.rs\textra\t1\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t0\t0\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\t-1\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t1\t2\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\t0\t1\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\nsrc/b.rs\t2\t0\n"),
+                           (RUN_OWNERSHIP, "src/a.rs\t2\t0\nsrc/b.rs\t2\n"),
+                           (DUE_WAKE, "src/a.rs\tother\t1\n"),
+                           (DUE_WAKE, "src/a.rs\t0\n")]:
+            with self.subTest(path=path, text=text), self.assertRaises(guard.InventoryError):
+                guard.parse(path, text)
 
 
 
@@ -526,6 +570,109 @@ class Histories(unittest.TestCase):
             with self.subTest(name=name, event=event), self.assertRaises(guard.InventoryError):
                 guard.event_range(self.repo, name, event)
 
+    def comparator_cli(self, base):
+        return subprocess.run([sys.executable, str(guard.ROOT / "scripts/check-inventory-growth.py"),
+                               "--repo", str(self.repo), "--base", base], env=self.env,
+                              text=True, capture_output=True)
+
+    def test_rg4b_each_new_family_is_found_blocked_then_can_purely_shrink(self):
+        families = [
+            (DIGEST_WRITES, "table\tsrc/a.rs\t2\n", ["table\tsrc/a.rs\t3\n"], "table\tsrc/a.rs\t1\n"),
+            (RUN_OWNERSHIP, "src/a.rs\t2\t0\n", ["src/a.rs\t2\t1\n", "src/a.rs\t1\t1\n"], "src/a.rs\t1\t0\n"),
+            (DUE_WAKE, "src/a.rs\t2\n", ["src/a.rs\t3\n", "src/a.rs\t2\nsrc/b.rs\t1\n"], "src/a.rs\t1\n"),
+        ]
+        for path, original, failures, shrink in families:
+            with self.subTest(path=path):
+                self.put(path, original)
+                base = self.commit("Known baseline for " + path)
+                for after in failures:
+                    self.put(path, after)
+                    self.commit("Unreviewed increase for " + path)
+                    report = guard.check(self.repo, base)
+                    self.assertIn(path, report["paths"])
+                    self.assertIn(path, report["unreviewed"])
+                    self.assertEqual(self.comparator_cli(base).returncode, 1)
+                    if path == RUN_OWNERSHIP:
+                        self.assertEqual(report["changes"][path][0]["key"], ("src/a.rs", "bare"))
+                self.put(path, shrink)
+                self.commit("Pure decrease for " + path)
+                self.assertEqual(guard.check(self.repo, base)["unreviewed"], [])
+                self.assertEqual(self.comparator_cli(base).returncode, 0)
+
+    def test_rg4b_existing_run_format_switch_cannot_use_an_import_or_infer_bare_zero(self):
+        for before, after, old_columns, new_columns in [
+            ("src/a.rs\t2\n", "src/a.rs\t2\t0\n", 2, 3),
+            ("src/a.rs\t2\n", "src/a.rs\t1\t1\n", 2, 3),
+            ("src/a.rs\t2\t0\n", "src/a.rs\t2\n", 3, 2),
+        ]:
+            with self.subTest(old=old_columns, new=new_columns, after=after):
+                self.put(RUN_OWNERSHIP, before)
+                base = self.commit("Existing run inventory layout")
+                self.put(RUN_OWNERSHIP, after)
+                self.commit("Switch run inventory layout")
+                blob = self.git("rev-parse", f"HEAD:{RUN_OWNERSHIP}")
+                self.commit(f"An existing path cannot import\n\nInventory-Growth: {RUN_OWNERSHIP}: import {blob}: not a new file")
+                report = guard.check(self.repo, base)
+                self.assertIn(RUN_OWNERSHIP, report["unreviewed"])
+                formats = [c for c in report["changes"][RUN_OWNERSHIP] if c["kind"] == "format"]
+                self.assertEqual([(c["before_format"], c["head_format"]) for c in formats], [(old_columns, new_columns)])
+                self.assertTrue(any("only a newly introduced" in n for n in report["notes"]))
+                self.assertFalse(any(m["kind"] == "import" for m in report["markers"]))
+                self.assertEqual(self.comparator_cli(base).returncode, 1)
+                # Each new bare budget AND the layout change need their own exact human reason.
+                lines = [f"Inventory-Growth: {RUN_OWNERSHIP}: format {old_columns}->{new_columns}: reviewed column semantics"]
+                for change in report["changes"][RUN_OWNERSHIP]:
+                    if change["kind"] == "budget":
+                        lines.append(f"Inventory-Growth: {RUN_OWNERSHIP} {guard.key_text(change['key'])} = {guard.value_text(change['head'])}: reviewed new column budget")
+                self.commit("Explicit layout and key review\n\n" + "\n".join(lines))
+                self.assertEqual(self.comparator_cli(base).returncode, 0)
+
+    def assert_run_layout(self, before, after, formats, bare_before, bare_after):
+        self.put(RUN_OWNERSHIP, before)
+        base = self.commit("Run layout baseline with exact line endings")
+        self.put(RUN_OWNERSHIP, after)
+        self.commit("Run layout after line ending or column change")
+        self.assertEqual(guard.snapshot(self.repo, base)[RUN_OWNERSHIP], before)
+        self.assertEqual(guard.snapshot(self.repo, "HEAD")[RUN_OWNERSHIP], after)
+        report = guard.check(self.repo, base)
+        actual = [(c["before_format"], c["head_format"])
+                  for c in report["changes"].get(RUN_OWNERSHIP, []) if c["kind"] == "format"]
+        self.assertEqual(actual, formats)
+        self.assertEqual(report["totals"][RUN_OWNERSHIP],
+                         {"baseline": 2, "head": 2, "bare_baseline": bare_before, "bare_head": bare_after})
+        result = self.comparator_cli(base)
+        self.assertEqual(result.returncode, 1 if formats else 0, result.stderr)
+        if formats:
+            self.assertIn(RUN_OWNERSHIP, report["unreviewed"])
+            old, new = formats[0]
+            self.assertIn(f"format changed {old}->{new}", result.stderr)
+        else:
+            self.assertEqual(report["changes"], {})
+            self.assertEqual(report["unreviewed"], [])
+
+    def test_rg4b_crlf_blank_line_cannot_hide_three_to_two_columns(self):
+        self.assert_run_layout("\r\nsrc/a.rs\t2\t0\r\n", "\r\nsrc/a.rs\t2\r\n",
+                               [(3, 2)], 0, None)
+
+    def test_rg4b_crlf_blank_line_cannot_hide_two_to_three_columns(self):
+        self.assert_run_layout("\r\nsrc/a.rs\t2\r\n", "\r\nsrc/a.rs\t2\t0\r\n",
+                               [(2, 3)], None, 0)
+
+    def test_rg4b_adding_only_crlf_blank_lines_preserves_layout_and_totals(self):
+        for row, bare in [("src/a.rs\t2\r\n", None), ("src/a.rs\t2\t0\r\n", 0)]:
+            with self.subTest(bare=bare):
+                self.assert_run_layout(row, "\r\n" + row, [], bare, bare)
+
+    def test_rg4b_a_layout_review_cannot_authorize_later_inventory_removal(self):
+        self.put(RUN_OWNERSHIP, "src/a.rs\t2\n")
+        base = self.commit("Existing run inventory")
+        self.put(RUN_OWNERSHIP, "src/a.rs\t2\t0\n")
+        self.commit(f"Format review only\n\nInventory-Growth: {RUN_OWNERSHIP}: format 2->3: reviewed layout")
+        (self.repo / RUN_OWNERSHIP).unlink()
+        self.commit("Later removal has no removal reason")
+        self.assertIn(RUN_OWNERSHIP, guard.check(self.repo, base)["unreviewed"])
+
+
 
 class WorkflowWiring(unittest.TestCase):
     def setUp(self):
@@ -549,6 +696,14 @@ class WorkflowWiring(unittest.TestCase):
         self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
         return eval(compile(tree, "structure-job-if", "eval"), {"__builtins__": {}},
                     {"event": event, "changed": changed, "cancelled": cancelled})
+
+    def test_rg4b_ci_executes_import_marker_tests_in_the_scripts_job(self):
+        step = next(s for s in self.steps("scripts") if "name: Verify public boundary" in s)
+        commands = [line.strip() for line in step.split("run: |\n", 1)[1].splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+        command = "python3 scripts/test-inventory-import-markers.py"
+        self.assertEqual(commands.count(command), 1)
+        self.assertLess(commands.index("python3 scripts/test-check-inventory-growth.py"), commands.index(command))
 
     def test_structure_is_an_independent_macos_pr_job_and_is_required_by_the_gate(self):
         structure = self.job("structure")

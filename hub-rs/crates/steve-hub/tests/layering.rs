@@ -32,6 +32,14 @@ fn found() -> BTreeSet<String> {
         String::from_utf8_lossy(&out.stderr)
     );
     let meta: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata JSON");
+    collect_edges(&meta)
+}
+
+fn is_production_dep(dep: &serde_json::Value) -> bool {
+    dep["kind"].as_str() != Some("dev")
+}
+
+fn collect_edges(meta: &serde_json::Value) -> BTreeSet<String> {
     let packages = meta["packages"].as_array().expect("packages");
     let members: BTreeSet<&str> = packages.iter().filter_map(|p| p["name"].as_str()).collect();
     let mut lines = BTreeSet::new();
@@ -39,11 +47,13 @@ fn found() -> BTreeSet<String> {
         let name = p["name"].as_str().expect("package name");
         for d in p["dependencies"].as_array().into_iter().flatten() {
             let dep = d["name"].as_str().expect("dependency name");
+            if !is_production_dep(d) {
+                continue;
+            }
             if dep == "rusqlite" {
                 lines.insert(format!("rusqlite {name}"));
             }
-            let production = d["kind"].is_null() || d["kind"] == "build";
-            if production && members.contains(dep) {
+            if members.contains(dep) {
                 lines.insert(format!("edge {name} {dep}"));
             }
         }
@@ -174,4 +184,72 @@ fn c1_debt_is_not_reported_as_an_assigned_group() {
     );
     assert_eq!(actual, debt);
     assert_eq!(debt_counts(&actual), (1, 1));
+}
+
+fn metadata_with_deps(dependencies: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({"packages": [
+        {"name": "app", "dependencies": dependencies},
+        {"name": "contract", "dependencies": []}
+    ]})
+}
+
+#[test]
+fn only_explicit_dev_dependencies_are_exempt_for_both_rules() {
+    for scope in [
+        serde_json::json!({"kind": null}),
+        serde_json::json!({}),
+        serde_json::json!({"kind": null, "optional": true}),
+        serde_json::json!({"kind": null, "target": "cfg(unix)"}),
+        serde_json::json!({"kind": "build"}),
+        serde_json::json!({"kind": "future"}),
+        serde_json::json!({"kind": 1}),
+        serde_json::json!({"kind": true}),
+    ] {
+        let dependencies = ["rusqlite", "contract"]
+            .into_iter()
+            .map(|name| {
+                let mut dep = scope.clone();
+                dep["name"] = name.into();
+                dep
+            })
+            .collect();
+        assert_eq!(
+            collect_edges(&metadata_with_deps(dependencies)),
+            BTreeSet::from(["rusqlite app".into(), "edge app contract".into()]),
+            "production scope: {scope}"
+        );
+    }
+}
+
+#[test]
+fn dev_duplicates_never_hide_normal_or_build_dependencies() {
+    for kind in [serde_json::Value::Null, serde_json::json!("build")] {
+        for dev_first in [true, false] {
+            let mut dependencies = Vec::new();
+            for name in ["rusqlite", "contract"] {
+                let mut pair = vec![
+                    serde_json::json!({"name": name, "kind": "dev"}),
+                    serde_json::json!({"name": name, "kind": kind}),
+                ];
+                if !dev_first {
+                    pair.reverse();
+                }
+                dependencies.extend(pair);
+            }
+            assert_eq!(
+                collect_edges(&metadata_with_deps(dependencies)),
+                BTreeSet::from(["rusqlite app".into(), "edge app contract".into()]),
+                "kind: {kind}, dev first: {dev_first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dev_only_rusqlite_and_workspace_edges_are_exempt() {
+    let meta = metadata_with_deps(vec![
+        serde_json::json!({"name": "rusqlite", "kind": "dev"}),
+        serde_json::json!({"name": "contract", "kind": "dev"}),
+    ]);
+    assert!(collect_edges(&meta).is_empty());
 }
