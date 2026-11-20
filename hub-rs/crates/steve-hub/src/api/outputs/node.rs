@@ -412,26 +412,7 @@ pub(super) async fn view(
     .await?;
     let Some(pre) = pre else { return Ok(None) };
     Ok(Some(match pre {
-        Pre::Local(bound, rest) => {
-            let mut bases = vec![];
-            let git = match bound {
-                Some((node, w)) => match workspace_base(&node, &w).await? {
-                    Some(a) => {
-                        bases.push(a);
-                        Git::Node(node, w, true)
-                    }
-                    // the workspace is gone there: the project's checkout, as the Hub had it
-                    None => Git::Hub,
-                },
-                None => Git::Hub,
-            };
-            bases.extend(rest);
-            View {
-                bases,
-                local: Some(Local { ws, places, tmp }),
-                git,
-            }
-        }
+        Pre::Local(bound, rest) => local_view(ws, places, tmp, bound, rest).await?,
         Pre::Remote(found) => {
             let mut bases = vec![];
             let mut git = Git::Elsewhere;
@@ -462,6 +443,34 @@ pub(super) async fn view(
             }
         }
     }))
+}
+
+/// Prefer a local bound workspace's Node git, retaining the original Hub-checkout fallback.
+async fn local_view(
+    ws: Arc<Workspaces>,
+    places: Vec<PathBuf>,
+    tmp: Vec<PathBuf>,
+    bound: Option<(Arc<dyn na::Node>, na::WorkspaceRef)>,
+    rest: Vec<Addr>,
+) -> Result<View, ApiError> {
+    let mut bases = vec![];
+    let git = match bound {
+        Some((node, w)) => match workspace_base(&node, &w).await? {
+            Some(a) => {
+                bases.push(a);
+                Git::Node(node, w, true)
+            }
+            // the workspace is gone there: the project's checkout, as the Hub had it
+            None => Git::Hub,
+        },
+        None => Git::Hub,
+    };
+    bases.extend(rest);
+    Ok(View {
+        bases,
+        local: Some(Local { ws, places, tmp }),
+        git,
+    })
 }
 
 /// The top of a bound workspace, shown as its Node shows it; `None` when it is gone there.

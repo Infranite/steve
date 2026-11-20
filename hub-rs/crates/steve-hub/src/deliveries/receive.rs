@@ -97,6 +97,49 @@ impl Service {
             .and_then(|s| s.to_str())
             .ok_or("invalid delivery filename")?
             .to_string();
+        let src = self.source_for_delivery(session, path, cwd, &source, workspaces)?;
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
+            .await
+            .map_err(|_| "delivery transfer timed out before complete receipt")??;
+        if let Source::Execution(_, q) = &src {
+            crate::wire::node_tools::authorize(&self.store, &q.workspace.node, &q.execution, true)
+                .map_err(|e| e.safe_detail)?;
+            let current = workspaces
+                .placement_of(Subject::Session(&session.id))
+                .map_err(|e| e.to_string())?;
+            if current.at != At::Workspace(q.workspace.clone()) {
+                return Err("delivery workspace binding changed during transfer".into());
+            }
+        }
+        let (service, session, title, entrypoint) = (
+            self.clone(),
+            session.clone(),
+            title.unwrap_or(&name).to_string(),
+            entrypoint.map(str::to_string),
+        );
+        tokio::task::spawn_blocking(move || {
+            service.publish(
+                super::Publisher::Session(&session),
+                &title,
+                &name,
+                &bytes,
+                entrypoint.as_deref(),
+                interactive,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Select the authenticated Node source; Hub-owned outputs retain their own root boundary.
+    fn source_for_delivery(
+        &self,
+        session: &Session,
+        path: &str,
+        cwd: &Path,
+        source: &Path,
+        workspaces: &Workspaces,
+    ) -> Result<Source, String> {
         let durable = match session.item_id.as_deref() {
             Some(item) => Some(
                 crate::wire::output_files::directory(&self.home, item)
@@ -104,7 +147,7 @@ impl Service {
             ),
             None => None,
         };
-        let src = if durable.as_ref().is_some_and(|d| source.starts_with(d)) {
+        Ok(if durable.as_ref().is_some_and(|d| source.starts_with(d)) {
             // Hub-owned outputs always use this machine's Node, even for a remote session.
             // Anchor above item/output directories so the Node rejects links in those components.
             let root = self.home.join("workspaces");
@@ -167,38 +210,7 @@ impl Service {
                 },
                 Err(e) => return Err(format!("delivery Node unavailable: {e}")),
             }
-        };
-        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
-            .await
-            .map_err(|_| "delivery transfer timed out before complete receipt")??;
-        if let Source::Execution(_, q) = &src {
-            crate::wire::node_tools::authorize(&self.store, &q.workspace.node, &q.execution, true)
-                .map_err(|e| e.safe_detail)?;
-            let current = workspaces
-                .placement_of(Subject::Session(&session.id))
-                .map_err(|e| e.to_string())?;
-            if current.at != At::Workspace(q.workspace.clone()) {
-                return Err("delivery workspace binding changed during transfer".into());
-            }
-        }
-        let (service, session, title, entrypoint) = (
-            self.clone(),
-            session.clone(),
-            title.unwrap_or(&name).to_string(),
-            entrypoint.map(str::to_string),
-        );
-        tokio::task::spawn_blocking(move || {
-            service.publish(
-                super::Publisher::Session(&session),
-                &title,
-                &name,
-                &bytes,
-                entrypoint.as_deref(),
-                interactive,
-            )
         })
-        .await
-        .map_err(|e| e.to_string())?
     }
 
     /// `steve_deliver` references the exact version returned by `steve_deliver_file`. Validate it

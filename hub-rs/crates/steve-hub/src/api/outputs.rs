@@ -159,26 +159,7 @@ pub async fn raw(
 ) -> ApiResult {
     let (o, v) = load(&st, &c.ws, &id, &art).await?;
     let sub = q.get("path").cloned();
-    fn not_a_file() -> ApiError {
-        ApiError::not_found(steve_i18n::t!("hub.output.not_a_file"))
-    }
-    fn on_disk(f: Result<Found, String>) -> Result<PathBuf, ApiError> {
-        match f {
-            Ok(Found::Disk(p, _)) if p.is_file() => Ok(p),
-            Ok(_) => Err(not_a_file()),
-            Err(e) => Err(ApiError::not_found(e)),
-        }
-    }
-    let src = match &v {
-        None => Src::Disk(blocking(move || on_disk(locate(&o, sub.as_deref()))).await?),
-        Some(v) => match node::locate(&o, v, sub.as_deref()).await {
-            Ok(node::Located::Node(a, e)) if !e.is_dir() => Src::Node(a, e),
-            Ok(node::Located::Disk(f)) => Src::Disk(blocking(move || on_disk(Ok(f))).await?),
-            Ok(_) => return Err(not_a_file()),
-            Err(node::Fail::Missing(r)) => return Err(ApiError::not_found(r)),
-            Err(node::Fail::Api(e)) => return Err(e),
-        },
-    };
+    let src = raw_source(o, v, sub).await?;
     let (size, name) = match &src {
         Src::Disk(p) => (
             tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0),
@@ -260,6 +241,30 @@ pub async fn raw(
     );
     put(header::CACHE_CONTROL, "private, no-cache".into());
     Ok(res)
+}
+
+/// Resolve one downloadable file, preserving Node errors and rejecting directory previews.
+async fn raw_source(o: Out, v: Option<node::View>, sub: Option<String>) -> Result<Src, ApiError> {
+    fn not_a_file() -> ApiError {
+        ApiError::not_found(steve_i18n::t!("hub.output.not_a_file"))
+    }
+    fn on_disk(f: Result<Found, String>) -> Result<PathBuf, ApiError> {
+        match f {
+            Ok(Found::Disk(p, _)) if p.is_file() => Ok(p),
+            Ok(_) => Err(not_a_file()),
+            Err(e) => Err(ApiError::not_found(e)),
+        }
+    }
+    Ok(match &v {
+        None => Src::Disk(blocking(move || on_disk(locate(&o, sub.as_deref()))).await?),
+        Some(v) => match node::locate(&o, v, sub.as_deref()).await {
+            Ok(node::Located::Node(a, e)) if !e.is_dir() => Src::Node(a, e),
+            Ok(node::Located::Disk(f)) => Src::Disk(blocking(move || on_disk(Ok(f))).await?),
+            Ok(_) => return Err(not_a_file()),
+            Err(node::Fail::Missing(r)) => return Err(ApiError::not_found(r)),
+            Err(node::Fail::Api(e)) => return Err(e),
+        },
+    })
 }
 
 /// `len` bytes of `file` from `start`, streamed from disk instead of read into memory first.

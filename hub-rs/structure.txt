@@ -40,15 +40,9 @@ steve-github	crates/steve-github/src/sync.rs	too_many_lines	185,119,117,109
 steve-hub	crates/steve-hub/src/access.rs	cognitive_complexity	31,27
 steve-hub	crates/steve-hub/src/access.rs	too_many_lines	205,132
 steve-hub	crates/steve-hub/src/api/harness_updates.rs	too_many_lines	155,103
-steve-hub	crates/steve-hub/src/api/items.rs	too_many_lines	124
 steve-hub	crates/steve-hub/src/api/misc.rs	too_many_lines	105
-steve-hub	crates/steve-hub/src/api/outputs.rs	too_many_lines	102
-steve-hub	crates/steve-hub/src/api/outputs/node.rs	too_many_lines	112
-steve-hub	crates/steve-hub/src/api/projects.rs	too_many_lines	131
 steve-hub	crates/steve-hub/src/config.rs	too_many_lines	181
 steve-hub	crates/steve-hub/src/daily_backup.rs	cognitive_complexity	38
-steve-hub	crates/steve-hub/src/deliveries/mod.rs	too_many_lines	114
-steve-hub	crates/steve-hub/src/deliveries/receive.rs	too_many_lines	118
 steve-hub	crates/steve-hub/src/extension.rs	cognitive_complexity	41
 steve-hub	crates/steve-hub/src/extension.rs	too_many_lines	217
 steve-hub	crates/steve-hub/src/nodes/install.rs	cognitive_complexity	29,26
