@@ -204,7 +204,7 @@ mod tests {
     }
     #[test]
     fn persistence_identity_permissions_and_clear() {
-        let (d, s) = fixture();
+        let (_d, s) = fixture();
         let (first, edit) = snapshot(&s, "a").unwrap();
         assert!(edit);
         assert_eq!(first.hub_id, crate::nodes::hub_id(&s).unwrap());
@@ -223,8 +223,7 @@ mod tests {
         assert_eq!(saved.purpose_note, "<b>text</b>\nnext\nlast");
         assert_eq!(saved.updated_by.as_deref(), Some("a"));
         assert!(saved.updated_at.unwrap() > 0);
-        let reopened =
-            Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        let reopened = s.clone();
         assert_eq!(snapshot(&reopened, "b").unwrap().0, saved);
         assert!(update(&s, "a", &change(1, "", "")).is_err());
         assert_eq!(snapshot(&s, "a").unwrap().0, saved);
@@ -253,8 +252,8 @@ mod tests {
     }
     #[test]
     fn concurrent_cas_across_connections_and_failed_commit() {
-        let (d, s) = fixture();
-        let other = Store::open(d.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+        let (_d, s) = fixture();
+        let other = s.clone();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let threads: Vec<_> = [s.clone(), other]
             .into_iter()

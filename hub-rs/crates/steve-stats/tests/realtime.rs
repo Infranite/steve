@@ -181,7 +181,9 @@ fn late_samples_use_source_time_and_reopen_reads_the_same_record() {
     let r = f.read(AT, "default", None, None);
     assert_eq!(r.tps, Some(1.0));
     assert_eq!(r.series[48].tps, Some(20_000.0)); // point at -11s includes the late text
-    let reopened = Store::open(f.store.path(), NoPublisher).unwrap();
+    let path = f.store.path().to_path_buf();
+    drop(f.store);
+    let reopened = Store::open(path, NoPublisher).unwrap();
     let reread = reopened
         .reader(|c| {
             realtime::read(

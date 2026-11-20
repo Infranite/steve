@@ -10,6 +10,7 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
+    store: steve_store::Store,
     _home: tempfile::TempDir,
     db: std::path::PathBuf,
     base: String,
@@ -41,7 +42,7 @@ impl Env {
         )
     }
     fn store(&self) -> steve_store::Store {
-        steve_store::Store::open(&self.db, steve_store::FnPublisher(|_| {})).expect("store")
+        self.store.clone()
     }
 }
 
@@ -88,6 +89,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().expect("wired modules").store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
@@ -114,6 +116,7 @@ async fn start() -> Env {
         .await
         .expect("dev login");
     Env {
+        store,
         _home: home,
         db: cfg.db_path(),
         base,

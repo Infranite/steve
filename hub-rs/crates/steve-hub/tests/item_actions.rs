@@ -15,6 +15,7 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
+    store: steve_store::Store,
     /// one Hub at a time in this process: the fake agent's log path is a process env var (see [`start`])
     _one: tokio::sync::MutexGuard<'static, ()>,
     _home: tempfile::TempDir,
@@ -22,7 +23,6 @@ struct Env {
     http: reqwest::Client,
     cookie: String,
     log: PathBuf,
-    db: PathBuf,
 }
 
 impl Env {
@@ -150,6 +150,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().expect("wired modules").store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -182,13 +183,13 @@ async fn start() -> Env {
         .map(|c| c.split(';').next().unwrap_or_default().to_string())
         .expect("session cookie");
     Env {
+        store,
         _one: one,
         _home: home,
         base,
         http,
         cookie,
         log,
-        db: cfg.db_path(),
     }
 }
 
@@ -339,7 +340,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
     let e = start().await;
-    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let store = e.store.clone();
     let parent = store
         .items()
         .create(
@@ -907,11 +908,12 @@ async fn a_failing_shadow_state_never_breaks_the_item_page() {
         "the shadow state rides along: {v}"
     );
     // the shadow state cannot be computed (a table it reads is gone): the page leaves it out
-    let c = rusqlite::Connection::open(&e.db).expect("db");
-    c.busy_timeout(Duration::from_secs(10))
-        .expect("busy timeout");
-    c.execute_batch("DROP TABLE work_policy").expect("drop");
-    drop(c);
+    e.store
+        .with_conn(|c| {
+            c.execute_batch("DROP TABLE work_policy")?;
+            Ok(())
+        })
+        .expect("drop");
     let (s, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     assert_eq!(s, 200, "the item page stays up: {v}");
     assert!(v.get("shadow").is_none(), "{v}");
@@ -938,11 +940,7 @@ async fn a_projects_completion_rule_is_set_through_the_api() {
     // no release set up: nothing to say when it is finished
     let (s, v) = patch(json!({"done_when": "tag"})).await;
     assert_eq!(s, 400, "{v}");
-    let store = steve_store::Store::open(
-        e._home.path().join("steve/data/steve.sqlite3"),
-        steve_store::NoPublisher,
-    )
-    .unwrap();
+    let store = e.store.clone();
     store
         .projects()
         .patch(
@@ -1072,7 +1070,7 @@ async fn only_the_owner_switches_the_design_gate() {
                 .is_some_and(|t| t.starts_with("开启设计确认")))),
         "{i}"
     );
-    let store = steve_store::Store::open(&e.db, steve_store::FnPublisher(|_| {})).unwrap();
+    let store = e.store.clone();
     let member = store
         .users()
         .create("design-gate-member", "Member", None, "member")
@@ -1115,7 +1113,7 @@ async fn project_setup_requires_owner_and_a_current_preview_and_registers_after_
             .unwrap();
         assert_eq!(anon.status(), 401);
     }
-    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let store = e.store.clone();
     let member = store
         .users()
         .create("setup-member", "Member", None, "member")

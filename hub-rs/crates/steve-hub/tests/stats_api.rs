@@ -15,6 +15,7 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
+    store: steve_store::Store,
     _home: tempfile::TempDir,
     base: String,
     http: reqwest::Client,
@@ -42,7 +43,7 @@ impl Env {
     }
 
     fn db(&self) -> rusqlite::Connection {
-        let c = rusqlite::Connection::open(&self.db).expect("db");
+        let c = steve_store_sqlite::open::open_readonly(&self.db).expect("db");
         c.busy_timeout(Duration::from_secs(5)).expect("timeout");
         c
     }
@@ -55,9 +56,9 @@ async fn start() -> Env {
 #[tokio::test]
 async fn live_accounting_is_the_same_on_session_item_and_summary_http_apis() {
     use steve_node_api::{Epoch, Measurement, Tokens, UsageReport, UsageScope};
-    use steve_store::{NewItem, NewSession, NoPublisher, Store, TurnBegin, TurnFinish, WS};
+    use steve_store::{NewItem, NewSession, TurnBegin, TurnFinish, WS};
     let e = start().await;
-    let s = Store::open(&e.db, NoPublisher).unwrap();
+    let s = e.store.clone();
     let item = s
         .items()
         .create(
@@ -228,6 +229,7 @@ async fn start_with(extra: &[(&str, String)]) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().expect("wired modules").store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -260,6 +262,7 @@ async fn start_with(extra: &[(&str, String)]) -> Env {
         .map(|c| c.split(';').next().unwrap_or_default().to_string())
         .expect("session cookie");
     Env {
+        store,
         _home: home,
         base,
         http,
@@ -286,8 +289,7 @@ async fn realtime_auth_filters_and_dates_are_independent() {
         (json!(0.0), json!("idle"))
     );
     let at = steve_store::now().div_euclid(1000) * 1000;
-    {
-        let c = e.db();
+    e.store.with_conn(|c| {
         c.execute(
             "INSERT INTO workspaces(id,name,created) VALUES ('private','private',?)",
             [at],
@@ -321,7 +323,8 @@ async fn realtime_auth_filters_and_dates_are_independent() {
             c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended) VALUES (?,?1,?,?,?,'fixture',?,?)",rusqlite::params![id,ws,project,bot,at-2_000,at-1_000]).unwrap();
             c.execute("INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units) VALUES ('fixture',?,'e',1,?1,?1,?2,?2,?2,'text',?3)",rusqlite::params![id,at-1_000,units]).unwrap();
         }
-    }
+        Ok(())
+    }).unwrap();
     for (query, tps, output) in [
         ("", 6.0, 3),
         ("project=p1", 3.0, 2),
@@ -387,8 +390,7 @@ async fn stats_routes() {
     let e = start().await;
     let today = steve_stats::day(steve_store::now(), None);
     // two cube rows today, before anything is cached: 1M opus input = $4, and an unpriced model
-    {
-        let c = e.db();
+    e.store.with_conn(|c| {
         c.execute_batch(&format!(
             "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
              VALUES ('default', '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 3000000, 0, 4000000, 1, 2, 60000, 3, '{{\"execute\":2,\"mcp:steve_deliver\":1,\"tool:Bash\":2}}'),
@@ -399,7 +401,8 @@ async fn stats_routes() {
              INSERT INTO workspaces (id, name, created) VALUES ('elsewhere', '别处', 1);
              INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_other', 'elsewhere', '别处', '/nonexistent', 1, 1);", at=steve_store::now()))
         .expect("seed");
-    }
+        Ok(())
+    }).unwrap();
 
     /* the summary and its previous range */
     let (s, v) = e.call("GET", "/api/stats/summary", None).await;
@@ -802,8 +805,7 @@ async fn models_dev_prices() {
     let yesterday = steve_stats::day(now - 86_400_000, None);
     let tomorrow = steve_stats::day(now + 86_400_000, None);
     // 1M GPT-5 input yesterday and today, 1M Opus input today (the table has it: $4), an unknown model
-    {
-        let c = e.db();
+    e.store.with_conn(|c| {
         c.execute_batch(&format!(
             "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
              VALUES ('default', '{yesterday}', 'agent', 'turn', 'codex', 'gpt-5', 1000000, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}'),
@@ -812,7 +814,8 @@ async fn models_dev_prices() {
                     ('default', '{today}', 'agent', 'turn', 'claude-code', 'mystery-1', 500, 0, 0, 0, 0, 1, 1, 0, 0, '{{}}');"
         ))
         .expect("seed");
-    }
+        Ok(())
+    }).unwrap();
     let est = |v: &Value| v["usage"]["est"].as_f64().unwrap_or(-1.0);
 
     /* before any sync: GPT-5 is unpriced, not free */

@@ -567,14 +567,10 @@ impl Kit {
     pub fn db(&self) -> &Store {
         self.core.store()
     }
-    /// A Hub restart: a new core on the same SQLite file opened afresh (nothing kept in memory),
-    /// with the same runtime, gateway and settings.
+    /// Rebuild Core state on the same authoritative Store, runtime, gateway and settings.
+    /// Actual disk close/reopen is covered by the Store lifecycle tests.
     pub fn reopened(&self) -> Core {
-        let raw = steve_store::Store::open(
-            self.dir.path().join("data/steve.sqlite3"),
-            steve_store::NoPublisher,
-        )
-        .unwrap();
+        let raw = self.core.store().store().clone();
         Core::new(
             Store::new(raw),
             self.rt.clone(),

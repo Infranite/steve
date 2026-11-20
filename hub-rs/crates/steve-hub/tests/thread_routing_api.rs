@@ -14,8 +14,8 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
 struct Env {
+    store: steve_store::Store,
     _home: tempfile::TempDir,
-    db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -133,6 +133,7 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().expect("wired modules").store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
     for job in w.jobs {
@@ -165,8 +166,8 @@ async fn start() -> Env {
         .map(|c| c.split(';').next().unwrap_or_default().to_string())
         .expect("session cookie");
     Env {
+        store,
         _home: home,
-        db: cfg.db_path(),
         base,
         http,
         cookie,
@@ -456,7 +457,7 @@ async fn research_runs_get_read_only_mcp() {
     .await;
     let t = e.settle(2).await;
     let item = t[1]["item_id"].as_str().unwrap().to_string();
-    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let store = e.store.clone();
     let th = store.thread();
     let run = th
         .run_add(&steve_store::NewThreadRun {
@@ -956,7 +957,7 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     assert_eq!(v["message"], hello.as_str(), "one meeting, one welcome");
     assert_eq!(e.thread().await.len(), 1);
 
-    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let store = e.store.clone();
     let th = store.thread();
     for (message, token) in [
         (hello.as_str(), "meet-token-1"),
