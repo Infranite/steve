@@ -305,3 +305,78 @@ fn daily_backup_without_file_parts_records_no_skips() {
     assert!(files.complete && files.artifacts.is_empty() && files.skipped_dirs.is_empty());
     assert_eq!(files.skipped_bytes, 0);
 }
+
+#[cfg(unix)]
+#[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS rejects non-UTF-8 filenames; the storage publication regression runs separately"
+)]
+fn daily_backup_publishes_and_reads_distinct_non_utf8_skipped_paths() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let home = tempfile::tempdir().unwrap();
+    let signature = "Signature: 8a477f597d28d172789f06886806bc55";
+    let mut expected = vec![];
+    for (name, payload) in [
+        (b"cache-\xff".as_slice(), "one"),
+        (b"cache-\xfe".as_slice(), "second"),
+        ("cache-�".as_bytes(), "readable"),
+    ] {
+        let relative = Path::new("workspaces/item").join(OsString::from_vec(name.to_vec()));
+        let directory = home.path().join(&relative);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("CACHEDIR.TAG"), signature).unwrap();
+        fs::write(directory.join("payload"), payload).unwrap();
+        expected.push(SkippedDir {
+            path: relative,
+            bytes: (signature.len() + payload.len()) as u64,
+        });
+    }
+    expected.sort_by(|a, b| a.path.cmp(&b.path));
+    write(home.path(), "workspaces/item/kept.txt", "kept");
+    let db = home.path().join("database.sqlite3");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');")
+        .unwrap();
+    let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
+    assert!(made.database.is_file());
+    let files = saved_files(&made.database);
+    assert!(files.complete && files.error.is_none());
+    assert_eq!(files.artifacts.len(), 1);
+    assert_eq!(files.skipped_dirs, expected);
+    assert_eq!(
+        files.skipped_bytes,
+        expected.iter().map(|entry| entry.bytes).sum::<u64>()
+    );
+    assert_eq!(
+        rusqlite::Connection::open(&made.database)
+            .unwrap()
+            .query_row("SELECT v FROM evidence", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "kept"
+    );
+    let archive = made.files.as_ref().unwrap();
+    assert!(archive.is_file());
+    let entries = archive_entries(archive);
+    let archived_files: Vec<_> = entries
+        .iter()
+        .filter(|(_, kind)| kind.is_file())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(archived_files, ["workspaces/item/kept.txt"]);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(made.database.parent().unwrap().join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["completed"], true);
+    let paths: Vec<_> = manifest["files"]["skipped_dirs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["path"])
+        .collect();
+    assert_eq!(paths.iter().filter(|path| path.is_string()).count(), 1);
+    assert_eq!(paths.iter().filter(|path| path.is_object()).count(), 2);
+    assert!(paths.iter().any(|path| **path == "workspaces/item/cache-�"));
+}

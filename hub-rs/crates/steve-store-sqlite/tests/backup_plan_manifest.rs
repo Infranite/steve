@@ -431,3 +431,102 @@ fn retry_records_only_the_successfully_verified_archive() {
         }]
     );
 }
+
+#[test]
+fn skipped_utf8_paths_remain_strings_even_when_they_look_like_encoded_bytes() {
+    for path in ["workspaces/缓存/node_modules", r#"{"unix_bytes":[255]}"#] {
+        let entry = SkippedDir {
+            path: path.into(),
+            bytes: 17,
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["path"], path);
+        assert_eq!(serde_json::from_value::<SkippedDir>(value).unwrap(), entry);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn skipped_unix_path_bytes_round_trip_without_loss_or_string_collisions() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let raw = b"workspaces/cache-\xff";
+    let entry = SkippedDir {
+        path: OsString::from_vec(raw.to_vec()).into(),
+        bytes: 23,
+    };
+    let value = serde_json::to_value(&entry).unwrap();
+    assert_eq!(value["path"], serde_json::json!({"unix_bytes": raw}));
+    assert_eq!(serde_json::from_value::<SkippedDir>(value).unwrap(), entry);
+    let replacement = SkippedDir {
+        path: "workspaces/cache-�".into(),
+        bytes: 23,
+    };
+    assert_ne!(entry, replacement);
+    assert_ne!(
+        serde_json::to_value(&entry).unwrap(),
+        serde_json::to_value(&replacement).unwrap()
+    );
+}
+
+#[cfg(unix)]
+fn unix_skips() -> Vec<SkippedDir> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    [
+        (b"workspaces/cache-\xff".as_slice(), 7),
+        (b"workspaces/cache-\xfe".as_slice(), 11),
+        ("workspaces/cache-�".as_bytes(), 13),
+    ]
+    .into_iter()
+    .map(|(path, bytes)| SkippedDir {
+        path: OsString::from_vec(path.to_vec()).into(),
+        bytes,
+    })
+    .collect()
+}
+
+#[cfg(unix)]
+fn archive_with_unix_skips(_: &Path, out: &Path) -> io::Result<FileArchive> {
+    let path = out.join("files.tar");
+    // A valid empty tar: the callback supplies traversal metadata without requiring
+    // the local filesystem to support these names (macOS rejects them with EILSEQ).
+    fs::write(&path, [0u8; 1024])?;
+    Ok(FileArchive {
+        path: Some(path),
+        skipped_dirs: unix_skips(),
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_skip_metadata_publishes_and_reads_a_verified_backup() {
+    let root = tempfile::tempdir().unwrap();
+    let source = db(root.path());
+    let mut plan = plan(root.path(), Reason::Daily);
+    plan.with_files = Some(FileSet {
+        home: root.path().to_owned(),
+        archive: archive_with_unix_skips,
+    });
+    let made = backup(&source, &plan, &|_| {}, &CancelFlag::default()).unwrap();
+    assert!(made.completed && made.files.complete && made.files.error.is_none());
+    assert!(made.database_path().is_file());
+    assert!(made.directory.join("files.tar").is_file());
+    assert_eq!(made.database.quick_check.as_deref(), Some("ok"));
+    let saved: Manifest =
+        serde_json::from_slice(&fs::read(made.directory.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(saved.files.skipped_dirs, unix_skips());
+    assert_eq!(saved.files.skipped_bytes, 31);
+    assert_eq!(saved.files.artifacts.len(), 1);
+    assert_eq!(saved.files.artifacts[0].bytes, 1024);
+    let listed = list(&plan.dest_root).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].files.skipped_dirs, saved.files.skipped_dirs);
+    assert_eq!(listed[0].files.skipped_bytes, 31);
+    assert_eq!(
+        rusqlite::Connection::open(saved.database_path())
+            .unwrap()
+            .query_row("SELECT v FROM old_record", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "旧库😀"
+    );
+}
