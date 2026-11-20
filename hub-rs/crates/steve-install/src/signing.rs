@@ -285,7 +285,7 @@ pub(crate) fn validate_bundle(
             && manifest["hub_version"] == version
             && manifest["web_version"] == version
             && info["target"] == "aarch64-apple-darwin"
-            && manifest["schema"]["target"] == info["schema"],
+            && crate::release::check_build_storage(&manifest, &info).is_ok(),
         "release metadata does not match the macOS Hub build"
     );
     let html = fs::read_to_string(candidate.join("web/dist/index.html"))?;
@@ -665,7 +665,9 @@ pub(crate) mod tests {
             fs::create_dir_all(candidate.join(name)).unwrap();
         }
         let candidate = fs::canonicalize(candidate).unwrap();
-        let manifest = json!({"format_version":1,"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hub_version":"1.2.3","web_version":"1.2.3","schema":{"target":54}});
+        let storage = steve_store_sqlite::compat::StorageCapabilities::compiled();
+        let head = storage.legacy.unwrap().target;
+        let manifest = json!({"format_version":1,"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hub_version":"1.2.3","web_version":"1.2.3","schema":{"min_read":head,"max_read":head,"target":head},"storage":storage});
         fs::write(
             candidate.join("release.json"),
             serde_json::to_vec(&manifest).unwrap(),
@@ -683,7 +685,10 @@ pub(crate) mod tests {
         .unwrap();
         executable(
             &candidate.join("bin/steve-hub"),
-            "#!/bin/sh\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                json!({"version":"1.2.3","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target":"aarch64-apple-darwin","schema":head,"storage":storage})
+            ),
         );
         executable(
             &candidate.join("bin/steve-keyhelper"),

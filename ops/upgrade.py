@@ -39,6 +39,9 @@ DEFAULT_REPOSITORY = "Infranite/steve"
 MAX_JSON = 1024 * 1024
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import schema_gate
+
 class Refused(Exception):
     pass
 
@@ -213,7 +216,8 @@ class Upgrade:
         stable(info.get("version"))
         if (not re.fullmatch(r"[0-9a-f]{40}", str(info.get("commit", "")))
                 or any(manifest.get(k) != info.get(k) for k in ("version", "commit"))
-                or info.get("target") != "aarch64-apple-darwin"):
+                or info.get("target") != "aarch64-apple-darwin"
+                or not schema_gate.matching_storage(manifest, info)):
             raise Refused("installed release and Hub build identities do not agree")
         capability = info.get("upgrade_runner")
         if capability is None:
@@ -281,10 +285,10 @@ class Upgrade:
                 or manifest.get("api_protocol") != 1
                 or not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("commit", "")))):
             raise Refused("invalid published release identity")
-        schema = manifest.get("schema", {})
-        if (not isinstance(schema, dict) or any(type(schema.get(k)) is not int or schema[k] < 0 for k in ("min_read", "max_read", "target"))
-                or not schema["min_read"] <= schema["target"] <= schema["max_read"]):
-            raise Refused("invalid release schema compatibility")
+        try:
+            schema_gate.capabilities(manifest.get("storage"))
+        except ValueError as error:
+            raise Refused(f"invalid release storage compatibility: {error}") from error
         target = self.info["target"]
         assets = [a for a in manifest.get("assets", []) if isinstance(a, dict) and a.get("target") == target]
         expected = f"steve-{selected}-{target}.tar.gz"

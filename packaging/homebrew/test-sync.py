@@ -42,12 +42,14 @@ def bundle(manifest, change=None, target="aarch64-apple-darwin"):
     return output.getvalue()
 
 
+STORAGE = json.loads((Path(__file__).parents[2] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())["manifest"]["storage"]
+
 class FakeGitHub:
     def __init__(self, version="1.2.3", commit="a" * 40, change_bundle=None):
         self.downloads, self.calls = {}, []
         self.manifest = dict(format_version=1, cli_protocol=2, version=version, commit=commit,
                              hub_version=version, web_version=version, api_protocol=1,
-                             schema=dict(min_read=24, max_read=24, target=24), assets=[])
+                             storage=STORAGE, schema=dict(min_read=114, max_read=114, target=114), assets=[])
         self.release = dict(draft=False, prerelease=False, published_at="2026-11-08T00:00:00Z",
                             tag_name="v" + version, assets=[])
         self.objects = {API + "git/ref/tags/v" + version: {"object": {"type": "commit", "sha": commit}}}
@@ -284,6 +286,33 @@ class DownloadTests(unittest.TestCase):
                     "https://api.github.com:444/file", "https://api.github.com:invalid/file"):
             with self.subTest(url=url), self.assertRaises(sync.Refused):
                 handler.redirect_request(request, None, 302, "Found", {}, url)
+
+
+class StorageContractTests(unittest.TestCase):
+    def test_shared_invalid_storage_contracts_are_refused(self):
+        data = json.loads((Path(__file__).parents[2] / "hub-rs/crates/steve-install/tests/storage_matrix.json").read_text())
+        baseline = FakeGitHub().manifest
+        for case in data["cases"]:
+            if not case.get("patch"):
+                continue
+            with self.subTest(case=case["name"]):
+                value = copy.deepcopy(baseline)
+                for path, replacement in case["patch"].items():
+                    keys = path.strip("/").split("/")
+                    parent = value
+                    for key in keys[:-1]: parent = parent[key]
+                    if replacement is None: parent.pop(keys[-1])
+                    else: parent[keys[-1]] = replacement
+                with self.assertRaises(sync.Refused):
+                    sync.check_manifest(value)
+
+    def test_old_scalar_shell_does_not_grant_or_restrict_storage_permission(self):
+        value = FakeGitHub().manifest
+        value["schema"] = {"target":0}
+        sync.check_manifest(value)
+        value.pop("storage")
+        with self.assertRaisesRegex(sync.Refused, "storage"):
+            sync.check_manifest(value)
 
 
 if __name__ == "__main__":

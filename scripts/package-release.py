@@ -11,8 +11,12 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import sys
 from pathlib import Path
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops"))
+import schema_gate
 
 RUNTIME_OPS = ("run.sh", "run-managed.sh", "schema_gate.py", "local-release.py", "steve-service.py", "upgrade.py", "sign-setup.sh", "release-lib.sh")
 INSTALLER_OPS = ("run.sh", "run-managed.sh", "sign-setup.sh", "release-lib.sh")
@@ -73,13 +77,11 @@ def package(a):
         cli_identity = json.loads(subprocess.check_output([str(cli.resolve()), "--build-info"], timeout=15))
         if any(cli_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
             raise ValueError("CLI build identity does not match release")
-    schema = identity.get("schema")
-    if not isinstance(schema, int) or schema < 1:
-        raise ValueError("binary did not report a valid schema")
+    storage_identity = schema_gate.release_identity(identity)
     out.mkdir(parents=True, exist_ok=True)
     manifest = dict(format_version=1, version=a.version, commit=a.commit,
                     hub_version=a.version, web_version=a.version, api_protocol=1,
-                    schema=dict(min_read=schema, max_read=schema, target=schema), assets=[])
+                    **storage_identity, assets=[])
     with tempfile.TemporaryDirectory(prefix="steve-bundle-") as tmp:
         root = Path(tmp)
         (root / "bin").mkdir()
@@ -122,6 +124,8 @@ def package(a):
 
 def merge(a):
     manifests = [json.loads(Path(p).read_text()) for p in a.manifests]
+    for manifest in manifests:
+        schema_gate.capabilities(manifest.get("storage"), converter=True)
     result = dict(manifests[0], assets=[])
     targets = set()
     for manifest in manifests:
