@@ -71,14 +71,19 @@ fn inspect_current(conn: &Connection) -> Result<StorageState, Error> {
         }
     }
     check_reader_fence(conn)?;
+    check_current_metadata(conn)?;
     let layout = Layout::read_state(conn)?;
     let domains = conn
         .prepare("SELECT domain,version FROM domain_schema")
         .map_err(db_error)?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(db_error)?
-        .collect::<rusqlite::Result<std::collections::BTreeMap<String, u32>>>()
+        .collect::<rusqlite::Result<Vec<(String, u32)>>>()
         .map_err(db_error)?;
+    if domains.len() != crate::layout::DOMAINS.len() {
+        return Err(incompatible("duplicate or incomplete domain schema"));
+    }
+    let domains = domains.into_iter().collect();
     crate::compat::require_domains(&domains)?;
     let contract_schema = crate::layout::meta(
         conn,
@@ -92,6 +97,22 @@ fn inspect_current(conn: &Connection) -> Result<StorageState, Error> {
         domains,
         contract_schema,
     })
+}
+fn check_current_metadata(conn: &Connection) -> Result<(), Error> {
+    let (invalid, duplicate): (bool, bool) = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta
+                WHERE domain NOT IN (?1,?2,?3) OR typeof(domain)!='text'
+                   OR typeof(key)!='text' OR typeof(value)!='text'),
+                EXISTS(SELECT 1 FROM meta GROUP BY domain,key HAVING count(*)>1)",
+            crate::layout::DOMAINS.map(crate::layout::domain_name),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db_error)?;
+    if invalid || duplicate {
+        return Err(incompatible("invalid or duplicate storage metadata"));
+    }
+    Ok(())
 }
 fn check_reader_fence(conn: &Connection) -> Result<(), Error> {
     if object_kind(conn, "schema_version")?.is_some() {
@@ -139,6 +160,7 @@ fn inspect_legacy_or_empty(conn: &Connection) -> Result<StorageState, Error> {
         }
     }
     if object_kind(conn, "schema_version")?.as_deref() == Some("table") {
+        check_legacy_reader(conn)?;
         // Distinguish future schema/min_reader from unsupported older inputs.
         // version validates both headers without changing persistent state.
         let schema_version = crate::legacy::version(conn).map_err(|_| incompatible("legacy storage requires a newer program or valid version metadata (需要更新的程序)"))?;
@@ -146,7 +168,7 @@ fn inspect_legacy_or_empty(conn: &Connection) -> Result<StorageState, Error> {
     }
     let count: u32 = conn
         .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            "SELECT count(*) FROM sqlite_schema WHERE lower(substr(name,1,7)) != 'sqlite_'",
             [],
             |r| r.get(0),
         )
@@ -155,6 +177,25 @@ fn inspect_legacy_or_empty(conn: &Connection) -> Result<StorageState, Error> {
         return Err(incompatible("unrecognized nonempty storage schema"));
     }
     Ok(StorageState::Empty)
+}
+fn check_legacy_reader(conn: &Connection) -> Result<(), Error> {
+    match object_kind(conn, "schema_compat")?.as_deref() {
+        None => return Ok(()),
+        Some("table") => {}
+        Some(_) => return Err(incompatible("invalid legacy reader object")),
+    }
+    let (rows, valid): (u32, u32) = conn
+        .query_row(
+            "SELECT count(*), count(CASE WHEN typeof(min_reader)='integer'
+                AND min_reader>=0 THEN 1 END) FROM schema_compat",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(db_error)?;
+    if rows != 1 || valid != 1 {
+        return Err(incompatible("invalid legacy minimum reader"));
+    }
+    Ok(())
 }
 fn preflight(dir: &Path, state: &StorageState, exact: bool) -> Result<(), Error> {
     StorageCapabilities::compiled().can_open(state, exact)?;
