@@ -296,13 +296,11 @@ impl Client {
         assert_eq!(st, 200, "{i}");
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
-        assert!(
-            eventually_sync("The item receives its session binding.", || {
-                sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
-                sid.is_some()
-            })
-            .await
-        );
+        eventually_sync("The item receives its session binding.", || {
+            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+            sid.is_some()
+        })
+        .await;
         sid.expect("session")
     }
     async fn code(&self) -> String {
@@ -574,12 +572,10 @@ async fn a_second_node_runs_a_whole_item() {
         Some(node.as_str()),
         "bound to the second Node"
     );
-    assert!(
-        eventually_sync("The session has a finished runtime attempt.", || attempts(
-            &h, &sid, "finished"
-        ) >= 1)
-        .await
-    );
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
     assert_eq!(n.got("hello-remote-5R"), 1, "the Node's agent got it once");
 
     // a permission request becomes a card on the Hub; its answer reaches the Node's agent
@@ -697,13 +693,11 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     // up on its own once the restarted Node confirms its harness is gone (B6)
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || n.got("断电验收-K7") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || n.got("断电验收-K7") == 1,
+    )
+    .await;
     p.kill();
     let _p = n.run();
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -1082,15 +1076,15 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     c.confirm(&id_b).await;
     let _proc_a = a.run();
     let mut proc_b = b.run();
-    assert!(
-        eventually_sync(
-            "Both test Nodes complete their live link generations.",
-            || [&id_a, &id_b]
+    eventually_sync(
+        "Both test Nodes complete their live link generations.",
+        || {
+            [&id_a, &id_b]
                 .iter()
-                .all(|id| { h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0 })
-        )
-        .await
-    );
+                .all(|id| h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0)
+        },
+    )
+    .await;
     let (_, report) = c
         .call(
             "GET",

@@ -565,17 +565,17 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
         2
     );
     h.make_retry_due(&sid);
-    assert!(
-        eventually_sync(
-            "The retry prompt states that no undelivered continuation budget is consumed.",
-            || h.prompts()
+    eventually_sync(
+        "The retry prompt states that no undelivered continuation budget is consumed.",
+        || {
+            h.prompts()
                 .iter()
                 .filter(|p| p.contains("不占用未交付续跑次数"))
                 .count()
                 >= 1
-        )
-        .await
-    );
+        },
+    )
+    .await;
     assert_eq!(cards(), 0);
     eventually_sync(
         "The second Node retry is saved before it is made due.",
@@ -837,13 +837,11 @@ async fn a_node_session_end_to_end() {
 
     // ── a cancel ends the running turn
     c.say(&sid, "取消验收-C4 @sleep 600000").await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || h.got("取消验收-C4") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("取消验收-C4") == 1,
+    )
+    .await;
     let (st, v) = c
         .call("POST", &format!("/api/sessions/{sid}/cancel"), None)
         .await;
@@ -896,24 +894,20 @@ async fn a_node_session_end_to_end() {
         )
     });
     eventually_sync(diagnostic, || h.got("排队验收-H8") == 1).await;
-    assert!(
-        eventually_sync(
-            "The reply from the released held session is stored.",
-            || steve_v1(&h, &sid, "held-done") > 0
-        )
-        .await
-    );
+    eventually_sync(
+        "The reply from the released held session is stored.",
+        || steve_v1(&h, &sid, "held-done") > 0,
+    )
+    .await;
 
     // ── the Hub killed mid-turn: the attempt is never re-run; the Hub gives it up on its own once
     // the Node confirms the old harness is gone, and the agent is continued (B6)
     c.say(&sid, "崩溃验收-K2 @sleep 600000").await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || h.got("崩溃验收-K2") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("崩溃验收-K2") == 1,
+    )
+    .await;
     hub.kill();
     let mut hub = spawn(&h, true, &[]);
     serving(&h).await;
@@ -1054,12 +1048,10 @@ async fn an_idle_node_session_is_not_resumed_after_a_restart() {
         )
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "idle-node-3R") > 0).await;
-    assert!(
-        eventually_sync("The session has a finished runtime attempt.", || attempts(
-            &h, &sid, "finished"
-        ) >= 1)
-        .await
-    );
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
     let fails = || {
         h.count(
             "SELECT COUNT(*) FROM decisions WHERE item_id=(SELECT item_id FROM sessions WHERE id=?) AND kind='fail' AND status='open'",
@@ -1139,13 +1131,11 @@ async fn a_node_session_shows_its_status_and_harness_id() {
     eventually(diagnostic, || async { status(&get().await) == "idle" }).await;
 
     c.say(&sid, "状态验收-运行 @sleep 600000").await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || h.got("状态验收-运行") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("状态验收-运行") == 1,
+    )
+    .await;
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!(
             "The Node session status becomes running; running during the turn: {}",
@@ -1212,22 +1202,18 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
     });
     eventually_sync(diagnostic, || steve_v1(&h, &sid, "drain-node-3D") > 0).await;
-    assert!(
-        eventually_sync("The session has a finished runtime attempt.", || attempts(
-            &h, &sid, "finished"
-        ) >= 1)
-        .await
-    );
+    eventually_sync("The session has a finished runtime attempt.", || {
+        attempts(&h, &sid, "finished") >= 1
+    })
+    .await;
 
     // ── a running turn holds the drain
     c.say(&sid, "排空验收-运行 @sleep 600000").await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || h.got("排空验收-运行") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("排空验收-运行") == 1,
+    )
+    .await;
     let d = drain(&h, "POST", &token).await;
     assert_eq!(d["maintenance"], true, "{d}");
     assert_eq!(d["ready"], false, "not sealed under a running turn: {d}");
@@ -1315,13 +1301,10 @@ async fn the_upgrade_drain_waits_for_node_turns() {
         )
     });
     eventually_sync(diagnostic, || h.got("排空验收-排队") == 1).await;
-    assert!(
-        eventually_sync(
-            "The released drain turn stores its final reply.",
-            || steve_v1(&h, &sid, "drained-done") > 0
-        )
-        .await
-    );
+    eventually_sync("The released drain turn stores its final reply.", || {
+        steve_v1(&h, &sid, "drained-done") > 0
+    })
+    .await;
 }
 
 /// A4: past STEVE_IDLE_RELEASE_MS an idle Node session's agent is let go (its process exits),
@@ -1606,13 +1589,11 @@ async fn git_worktree_case(mode: &str) {
     assert_eq!(st, 200, "{i}");
     let item = i["id"].as_str().expect("item").to_string();
     let mut sid = None;
-    assert!(
-        eventually_sync("The item receives its session binding.", || {
-            sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
-            sid.is_some()
-        })
-        .await
-    );
+    eventually_sync("The item receives its session binding.", || {
+        sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
+        sid.is_some()
+    })
+    .await;
     let sid = sid.expect("session");
     let wt = h.steve().join("worktrees").join(&item);
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
@@ -1668,16 +1649,16 @@ async fn git_worktree_case(mode: &str) {
         !wt.exists()
     })
     .await;
-    assert!(
-        eventually_sync(
-            "Removing the Node worktree records one cleanup event.",
-            || h.count(
+    eventually_sync(
+        "Removing the Node worktree records one cleanup event.",
+        || {
+            h.count(
                 "SELECT COUNT(*) FROM timeline WHERE item_id=? AND text LIKE '删除了工作区%'",
-                &item
+                &item,
             ) == 1
-        )
-        .await
-    );
+        },
+    )
+    .await;
     assert_eq!(
         h.count(
             "SELECT COUNT(*) FROM node_commands WHERE method='tidy_workspace' AND json_extract(request,'$.subject')=?",
@@ -2036,13 +2017,11 @@ async fn a_node_sessions_attachments_are_placed_by_the_node() {
             sha256_hex(bytes)
         );
     }
-    assert!(
-        eventually_sync(
-            "The agent confirms that the forwarded attachments arrived.",
-            || steve_v1(&h, &sid, "got-files") > 0
-        )
-        .await
-    );
+    eventually_sync(
+        "The agent confirms that the forwarded attachments arrived.",
+        || steve_v1(&h, &sid, "got-files") > 0,
+    )
+    .await;
 
     // the blob is gone from the Hub: the turn goes on without it, and says so
     let lost = c.upload("lost.txt", b"never placed".to_vec()).await;
@@ -2200,13 +2179,11 @@ async fn a_service_node_turn_outlives_the_hub() {
     .await;
     c.say(&sid, "存活验收-V6 @sleep 12000 @say survived-V6")
         .await;
-    assert!(
-        eventually_sync(
-            "The fake adapter records the target prompt exactly once.",
-            || h.got("存活验收-V6") == 1
-        )
-        .await
-    );
+    eventually_sync(
+        "The fake adapter records the target prompt exactly once.",
+        || h.got("存活验收-V6") == 1,
+    )
+    .await;
     let started = std::time::Instant::now();
     let mut hub = hub;
     let mut child = hub.0.take().unwrap();
