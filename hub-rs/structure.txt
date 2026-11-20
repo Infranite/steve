@@ -121,7 +121,7 @@ steve-hub	crates/steve-hub/src/daily_backup.rs	cognitive_complexity	38
 steve-hub	crates/steve-hub/src/deliveries/mod.rs	too_many_lines	114
 steve-hub	crates/steve-hub/src/deliveries/receive.rs	too_many_lines	118
 steve-hub	crates/steve-hub/src/extension.rs	cognitive_complexity	41
-steve-hub	crates/steve-hub/src/extension.rs	too_many_lines	217
+steve-hub	crates/steve-hub/src/extension.rs	too_many_lines	213
 steve-hub	crates/steve-hub/src/nodes/install.rs	cognitive_complexity	29,26
 steve-hub	crates/steve-hub/src/nodes/install.rs	too_many_lines	154
 steve-hub	crates/steve-hub/src/nodes/listener.rs	cognitive_complexity	30,26
