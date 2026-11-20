@@ -47,3 +47,25 @@ fn an_item_made_without_a_category_gets_steves_and_never_two() {
     let b = make(&k, "x", "y", vec![doc.clone(), "tag_ghost".into(), ops]);
     assert_eq!(k.db().tags_of_item(&b).unwrap(), [doc]);
 }
+
+#[test]
+fn an_optional_delivery_name_collision_does_not_block_item_creation() {
+    let k = Kit::new();
+    let report = k.db().tag_by_name(WS, "报告").unwrap().unwrap();
+    k.db()
+        .tag_patch(
+            &report.id,
+            &steve_store::TagPatch {
+                cat: Some("领域".into()),
+                description: Some("user report".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let item = make(&k, "调研报告", "分析结论", vec![]);
+    assert_eq!(kinds_of(&k, &item), ["doc"]);
+    assert!(!k.db().tags_of_item(&item).unwrap().contains(&report.id));
+    let kept = k.db().tag(&report.id).unwrap().unwrap();
+    assert_eq!(kept.cat, "领域");
+    assert_eq!(kept.description, "user report");
+}

@@ -243,6 +243,5 @@ steve-stats	crates/steve-stats/src/views.rs	too_many_lines	324,138
 steve-stats	crates/steve-stats/src/workflow.rs	too_many_lines	183
 steve-store	crates/steve-store/src/diagnostics.rs	too_many_lines	151
 steve-store	crates/steve-store/src/repo/gateway_ledger.rs	too_many_lines	169
-steve-store	crates/steve-store/src/repo/kinds.rs	too_many_lines	128
 steve-store	crates/steve-store/src/repo/workflows.rs	too_many_lines	116,115,108
 steve-types	crates/steve-types/src/fact.rs	too_many_lines	120

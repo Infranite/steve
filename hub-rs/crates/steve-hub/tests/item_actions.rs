@@ -620,6 +620,62 @@ async fn pause_finish_drop_and_new_cycles() {
 
     workspace_is_named_never_guessed(&e).await;
     an_item_keeps_exactly_one_category(&e).await;
+    optional_delivery_names_do_not_block_creation(&e).await;
+}
+
+async fn optional_delivery_names_do_not_block_creation(e: &Env) {
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let report = state["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "报告" && t["cat"] == "交付")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let (status, body) = e
+        .call(
+            "PATCH",
+            &format!("/api/tags/{report}"),
+            Some(json!({"cat":"领域","description":"user report"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = e
+        .call(
+            "POST",
+            "/api/tags",
+            Some(json!({"name":"BF4 topic","cat":"主题","description":"fixture"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = e.call("POST", "/api/items", Some(json!({
+        "title":"调研报告", "goal":"分析结论", "bot":state["bots"][0]["id"], "mode":"propose"
+    }))).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, item) = e
+        .call(
+            "GET",
+            &format!("/api/items/{}", body["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert!(
+        !item["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == report)
+    );
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let kept = state["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == report)
+        .unwrap();
+    assert_eq!(kept["cat"], "领域");
+    assert_eq!(kept["description"], "user report");
 }
 
 /// ST-34 over HTTP: an item made through the API has one category; no write leaves it with none or two;

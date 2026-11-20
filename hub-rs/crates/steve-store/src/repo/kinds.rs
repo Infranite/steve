@@ -7,7 +7,7 @@
 
 use rusqlite::{Connection, params};
 
-use super::{Cached, all, must, one};
+use super::{Cached, must, one};
 use crate::{Result, StoreError, Tag, W, now, uid};
 
 /// The tag category the six item categories live in, and only they.
@@ -152,12 +152,10 @@ pub fn is_kind(name: &str) -> bool {
     KINDS.iter().any(|(k, _)| *k == name)
 }
 
-/// Where a domain tag goes when it was filed under [`KIND_CAT`] before the categories existed.
-const MOVED_CAT: &str = "主题";
-
 /// Seeds the six categories in `ws` and returns them in [`KINDS`] order. Existing category
 /// tags keep their ids and descriptions. A reserved name in another category is refused before
-/// any seeding; an operator must explicitly rename that tag first.
+/// any seeding; an operator must explicitly rename that tag first. Missing delivery names are
+/// seeded too, without recategorizing existing tags or changing existing items.
 pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
     let mut pending = Vec::with_capacity(KINDS.len());
     for (name, desc) in KINDS {
@@ -202,92 +200,26 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             }
         }
     }
-    let strays: Vec<String> = all(
-        w.c,
-        "SELECT id FROM tags WHERE workspace_id = ? AND cat = ? AND name NOT IN ('bug', 'feat', 'doc', 'refactor', 'ops', 'chore')",
-        [ws, KIND_CAT],
-        |r| r.get(0),
-    )?;
-    for id in strays {
-        w.c.run("UPDATE tags SET cat = ? WHERE id = ?", [MOVED_CAT, &id])?;
+    // Delivery tags are optional. A name in another category belongs to its user;
+    // leave it and its associations untouched, and let automatic labeling skip that name.
+    for (name, desc) in DELIVERIES {
+        if w.c
+            .prepare_cached("SELECT 1 FROM tags WHERE workspace_id = ? AND name = ?")?
+            .exists([ws, name])?
+        {
+            continue;
+        }
+        let id = uid("tag");
+        w.c.run(
+            "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
+            params![id, ws, name, DELIVERY_CAT, desc, now()],
+        )?;
         w.publish(steve_types::DomainEvent::from(
             steve_types::ConfigEvent::Tag {
                 ws: ws.into(),
                 id: id.into(),
             },
         ));
-    }
-    // Seed and infer only once. Delivery tags remain ordinary editable tags, so a person's later
-    // choice to rename or remove one is not silently reversed by `ensure` on the next boot.
-    let marker = "__delivery_tags_backfilled_v1";
-    if !w
-        .c
-        .prepare_cached("SELECT 1 FROM settings WHERE workspace_id = ? AND key = ?")?
-        .exists(params![ws, marker])?
-    {
-        for (name, desc) in DELIVERIES {
-            match one(
-                w.c,
-                "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
-                [ws, name],
-                Tag::from_row,
-            )? {
-                Some(t) if t.cat == DELIVERY_CAT => {}
-                Some(t) => {
-                    w.c.run(
-                        "UPDATE tags SET cat = ? WHERE id = ?",
-                        [DELIVERY_CAT, &t.id],
-                    )?;
-                    w.publish(steve_types::DomainEvent::from(
-                        steve_types::ConfigEvent::Tag {
-                            ws: ws.into(),
-                            id: t.id.into(),
-                        },
-                    ));
-                }
-                None => {
-                    let id = uid("tag");
-                    w.c.run(
-                    "INSERT INTO tags (id, workspace_id, name, cat, description, created_by, created) VALUES (?, ?, ?, ?, ?, 'Steve', ?)",
-                    params![id, ws, name, DELIVERY_CAT, desc, now()],
-                )?;
-                    w.publish(steve_types::DomainEvent::from(
-                        steve_types::ConfigEvent::Tag {
-                            ws: ws.into(),
-                            id: id.into(),
-                        },
-                    ));
-                }
-            }
-        }
-        // One pass for pre-existing cards. A removed inferred tag stays removed afterwards.
-        let items: Vec<(String, String, String)> = all(
-            w.c,
-            "SELECT i.id,i.title,COALESCE((SELECT text FROM item_goals WHERE item_id=i.id ORDER BY version DESC LIMIT 1),'') FROM items i WHERE i.workspace_id=? AND i.kind='task'",
-            [ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        for (item, title, goal) in items {
-            add_delivery_labels(w.c, ws, &item, &expected_deliveries(&title, &goal))?;
-            let outputs: Vec<(String, String, Option<String>, Option<String>)> = all(
-                w.c,
-                "SELECT a.kind,a.title,a.location,r.role FROM artifacts a LEFT JOIN artifact_roles r ON r.artifact_id=a.id WHERE a.item_id=?",
-                [&item],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
-            for (kind, title, location, role) in outputs {
-                add_delivery_labels(
-                    w.c,
-                    ws,
-                    &item,
-                    &output_deliveries(&kind, &title, location.as_deref(), role.as_deref()),
-                )?;
-            }
-        }
-        w.c.run(
-            "INSERT INTO settings(workspace_id,key,value,updated) VALUES(?,?, 'true',?)",
-            params![ws, marker, now()],
-        )?;
     }
     Ok(out)
 }

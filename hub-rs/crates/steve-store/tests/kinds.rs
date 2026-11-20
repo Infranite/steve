@@ -157,7 +157,7 @@ fn a_legacy_reserved_name_is_refused_without_reclassifying_its_items() {
         legacy
     );
     assert_eq!(s.tags().get(&legacy).unwrap().unwrap().cat, "领域");
-    assert_eq!(s.tags().get("tag_old_type").unwrap().unwrap().cat, "主题");
+    assert_eq!(s.tags().get("tag_old_type").unwrap().unwrap().cat, KIND_CAT);
     assert_eq!(s.tags().of_item(&item.id).unwrap(), [feat, legacy]);
 }
 
