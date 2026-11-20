@@ -701,6 +701,44 @@ fn item_of(attrs: &[AttributeValue<'_>]) -> Item {
     it
 }
 
+fn command_error(command: &str, error: AdapterError) -> AdapterError {
+    match error {
+        AdapterError::Rejected(message) => {
+            let words = if command.starts_with("UID ") { 2 } else { 1 };
+            let command = command
+                .split_whitespace()
+                .take(words)
+                .collect::<Vec<_>>()
+                .join(" ");
+            AdapterError::Rejected(format!("{command}: {message}"))
+        }
+        error => error,
+    }
+}
+
+fn folder_error(folder: &str, error: AdapterError) -> AdapterError {
+    match error {
+        AdapterError::Rejected(message) => {
+            AdapterError::Rejected(format!("IMAP {folder}: {message}"))
+        }
+        error => error,
+    }
+}
+
+/// async-imap can return a default Mailbox on clean EOF. Never treat that as an epoch change.
+fn mailbox_validity(
+    mb: &async_imap::types::Mailbox,
+    command: &str,
+    folder: &str,
+) -> Result<i64, AdapterError> {
+    mb.uid_validity
+        .filter(|v| *v != 0)
+        .map(i64::from)
+        .ok_or_else(|| {
+            AdapterError::Transient(format!("IMAP {folder} {command}: UIDVALIDITY 缺失或为 0"))
+        })
+}
+
 /// A command succeeds only at its own tagged OK, never at an empty or partial data stream.
 async fn checked_command(
     s: &mut Session,
@@ -720,7 +758,10 @@ async fn checked_command(
             Response::Done { tag: t, status, .. } if *t == tag => {
                 return match status {
                     Status::Ok => Ok(()),
-                    _ => Err(AdapterError::Rejected("邮件服务器拒绝了这个操作".into())),
+                    _ => Err(command_error(
+                        cmd,
+                        AdapterError::Rejected("邮件服务器拒绝了这个操作".into()),
+                    )),
                 };
             }
             Response::Data {
@@ -971,8 +1012,13 @@ impl ImapAdapter {
         sink: &mut dyn MailSink,
         report: &mut SyncReport,
     ) -> Result<(), AdapterError> {
-        let mb = timed(async { s.examine(wire).await.map_err(imap_err) }).await?;
-        let validity = mb.uid_validity.map(i64::from).unwrap_or(0);
+        let mb = timed(async {
+            s.examine(wire)
+                .await
+                .map_err(|e| command_error("EXAMINE", imap_err(e)))
+        })
+        .await?;
+        let validity = mailbox_validity(&mb, "EXAMINE", &f.name)?;
         if f.uidvalidity != Some(validity) {
             if f.uidvalidity.is_some() {
                 // the UIDs mean something else now: rescan the window, the store dedupes
@@ -1117,6 +1163,43 @@ impl ImapAdapter {
         Ok(())
     }
 
+    async fn find_in_mailbox(
+        s: &mut Session,
+        name: &str,
+        wire: &str,
+        known: Option<(i64, u32)>,
+        message_id: Option<&str>,
+        write: bool,
+    ) -> Result<Option<u32>, AdapterError> {
+        let command = if write { "SELECT" } else { "EXAMINE" };
+        let mb = if write {
+            s.select(wire).await
+        } else {
+            s.examine(wire).await
+        }
+        .map_err(|e| command_error(command, imap_err(e)))?;
+        let validity = mailbox_validity(&mb, command, name)?;
+        if let Some((expected, uid)) = known
+            && validity == expected
+            && fetch(s, &format!("UID FETCH {uid} (UID)"))
+                .await?
+                .iter()
+                .any(|h| h.uid == Some(uid))
+        {
+            return Ok(Some(uid));
+        }
+        if let Some(mid) = message_id {
+            return Ok(search_uids(
+                s,
+                &format!("HEADER Message-ID {}", quote(&format!("<{mid}>"))),
+            )
+            .await?
+            .into_iter()
+            .min());
+        }
+        Ok(None)
+    }
+
     async fn find_uid(
         s: &mut Session,
         ext: &str,
@@ -1127,37 +1210,26 @@ impl ImapAdapter {
         let gone = || AdapterError::Gone("原件已经不在邮箱里了".into());
         let (folder, validity, uid) = split_ext(ext).ok_or_else(gone)?;
         let mut candidates: Vec<&str> = vec![folder];
-        candidates.extend(wires.keys().map(String::as_str).filter(|k| *k != folder));
+        // Only Message-ID can identify the same message in a different folder.
+        if message_id.is_some() {
+            candidates.extend(wires.keys().map(String::as_str).filter(|k| *k != folder));
+        }
+        let mut rejected = None;
         for (i, name) in candidates.iter().enumerate() {
             let Some((wire, _)) = wires.get(*name) else {
                 continue;
             };
-            let mb = if write {
-                s.select(wire.as_str()).await
-            } else {
-                s.examine(wire.as_str()).await
-            }
-            .map_err(imap_err)?;
-            if i == 0 && mb.uid_validity.map(i64::from) == Some(validity) {
-                let hit = fetch(s, &format!("UID FETCH {uid} (UID)")).await?;
-                if hit.iter().any(|h| h.uid == Some(uid)) {
-                    return Ok((wire.clone(), uid));
+            let known = (i == 0).then_some((validity, uid));
+            match Self::find_in_mailbox(s, name, wire, known, message_id, write).await {
+                Ok(Some(uid)) => return Ok((wire.clone(), uid)),
+                Ok(None) => {}
+                Err(error @ AdapterError::Rejected(_)) => {
+                    rejected.get_or_insert_with(|| folder_error(name, error));
                 }
-            }
-            if let Some(mid) = message_id {
-                let found = search_uids(
-                    s,
-                    &format!("HEADER Message-ID {}", quote(&format!("<{mid}>"))),
-                )
-                .await?;
-                if let Some(u) = found.into_iter().min() {
-                    return Ok((wire.clone(), u));
-                }
-            } else {
-                break;
+                Err(error) => return Err(error),
             }
         }
-        Err(gone())
+        Err(rejected.unwrap_or_else(gone))
     }
 }
 
@@ -1275,7 +1347,13 @@ impl MailAdapter for ImapAdapter {
             return Err(AdapterError::Unsupported);
         }
         loop {
-            timed(async { s.examine("INBOX").await.map_err(imap_err) }).await?;
+            let mb = timed(async {
+                s.examine("INBOX")
+                    .await
+                    .map_err(|e| command_error("EXAMINE", imap_err(e)))
+            })
+            .await?;
+            mailbox_validity(&mb, "EXAMINE", "INBOX")?;
             let mut idle = s.idle();
             timed(async { idle.init().await.map_err(imap_err) }).await?;
             loop {
@@ -1433,6 +1511,7 @@ impl SyncSession for ImapSync {
     ) -> Result<SyncReport, AdapterError> {
         let ImapSync { mut s, caps, wires } = *self;
         let mut report = SyncReport::default();
+        let mut rejected = None;
         for f in state.folders.iter_mut() {
             if f.mode == ScopeMode::Ignore {
                 continue;
@@ -1440,7 +1519,7 @@ impl SyncSession for ImapSync {
             let Some((wire, _)) = wires.get(&f.ext_id) else {
                 continue;
             };
-            ImapAdapter::sync_folder(
+            match ImapAdapter::sync_folder(
                 &mut s,
                 caps,
                 wire,
@@ -1450,10 +1529,17 @@ impl SyncSession for ImapSync {
                 sink,
                 &mut report,
             )
-            .await?;
+            .await
+            {
+                Ok(()) => {}
+                Err(error @ AdapterError::Rejected(_)) => {
+                    rejected.get_or_insert_with(|| folder_error(&f.name, error));
+                }
+                Err(error) => return Err(error),
+            }
         }
         logout(s).await;
-        Ok(report)
+        rejected.map_or(Ok(report), Err)
     }
 
     async fn close(self: Box<Self>) {
@@ -1464,6 +1550,115 @@ impl SyncSession for ImapSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_session() -> (crate::fake::FakeImap, Session) {
+        let fake = crate::fake::FakeImap::start(Default::default())
+            .await
+            .unwrap();
+        let tcp = TcpStream::connect(fake.addr()).await.unwrap();
+        let tls = fake
+            .ca()
+            .connector()
+            .unwrap()
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+        let mut client = async_imap::Client::new(tls);
+        client.read_response().await.unwrap().unwrap();
+        let session = client
+            .login("me@example.com", "app-password")
+            .await
+            .map_err(|(e, _)| e)
+            .unwrap();
+        (fake, session)
+    }
+
+    struct NoWrites;
+    #[async_trait]
+    impl MailSink for NoWrites {
+        async fn put_batch(&mut self, _: Vec<FetchedMessage>) -> Result<(), crate::MailError> {
+            panic!("invalid mailbox must not reach the sink")
+        }
+        async fn flags_batch(
+            &mut self,
+            _: Vec<(String, Vec<String>)>,
+        ) -> Result<(), crate::MailError> {
+            panic!("invalid mailbox must not reach the sink")
+        }
+        async fn removed(&mut self, _: &str) -> Result<(), crate::MailError> {
+            panic!("invalid mailbox must not reach the sink")
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_zero_uidvalidity_never_resets_folder_state() {
+        for zero in [false, true] {
+            let (fake, mut session) = fake_session().await;
+            if zero {
+                fake.fail_next("NOOP", "OK staged\r\n* OK [UIDVALIDITY 0] invalid epoch");
+                session.noop().await.unwrap();
+            }
+            fake.fail_next("EXAMINE", "OK no valid UIDVALIDITY");
+            let mut folder = crate::adapter::FolderState {
+                ext_id: "INBOX".into(),
+                name: "INBOX".into(),
+                role: "inbox".into(),
+                mode: ScopeMode::Receive,
+                uidvalidity: Some(77),
+                last_uid: Some(87),
+                modseq: Some(19),
+                cursor: Some("[88,2]".into()),
+                synced: Some(111),
+                flags_checked: Some(112),
+            };
+            let before = folder.clone();
+            let mut report = SyncReport::default();
+            let error = ImapAdapter::sync_folder(
+                &mut session,
+                Caps::default(),
+                "INBOX",
+                &mut folder,
+                30,
+                123,
+                &mut NoWrites,
+                &mut report,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, AdapterError::Transient(_)),
+                "zero={zero}: {error:?}"
+            );
+            assert_eq!(folder, before, "zero={zero}");
+            assert_eq!(report, SyncReport::default());
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_search_and_another_tags_ok_do_not_authorize_the_result() {
+        let (fake, mut session) = fake_session().await;
+        fake.inject(
+            "me@example.com",
+            "INBOX",
+            crate::fake::fixtures::get("gbk.eml").unwrap(),
+        )
+        .unwrap();
+        session.examine("INBOX").await.unwrap();
+        fake.fail_next(
+            "NOOP",
+            "OK staged\r\nstale OK another command\r\n* SEARCH 1",
+        );
+        session.noop().await.unwrap();
+        fake.fail_next("UID SEARCH", "NO [UNAVAILABLE] private-server-detail");
+        assert!(matches!(
+            search_uids(&mut session, "ALL").await,
+            Err(AdapterError::Rejected(_))
+        ));
+        assert_eq!(
+            search_uids(&mut session, "ALL").await.unwrap(),
+            HashSet::from([1])
+        );
+    }
 
     /// The form and the name in the reader's language; zh-CN as declared.
     #[test]

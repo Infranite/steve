@@ -81,7 +81,23 @@ async fn command_failures_keep_cursors_and_replay_the_window() {
         } else {
             AdapterError::Rejected("邮件服务器拒绝了这个操作".into())
         };
-        assert_eq!(result.unwrap_err(), expected, "{name}");
+        let error = result.unwrap_err();
+        if name == "store" {
+            assert_eq!(error, expected, "{name}");
+        } else {
+            let command = match name {
+                "examine" => "EXAMINE",
+                "search" => "UID SEARCH",
+                _ => "UID FETCH",
+            };
+            let AdapterError::Rejected(message) = error else {
+                panic!("{name}: {error:?}")
+            };
+            assert!(
+                message.contains("INBOX") && message.contains(command),
+                "{name}: {message}"
+            );
+        }
         let commands: Vec<_> = h.imap.commands()[start..]
             .iter()
             .filter_map(|c| {
@@ -114,5 +130,59 @@ async fn command_failures_keep_cursors_and_replay_the_window() {
         assert_eq!(state.folders[0].synced, Some(state.now), "{name}");
         assert_eq!(sink.messages.len(), 1, "{name}");
         assert!(sink.messages.iter().all(|m| m.backfill), "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transient_and_store_errors_stop_before_the_next_folder() {
+    for failure in ["transient", "store"] {
+        let h = setup().await;
+        let conn = h.connect().await;
+        let adapter = h.mail.adapter("imap").unwrap();
+        let cx = h.conns.cx(WS, &conn).unwrap();
+        let mut state = SyncState {
+            folders: ["INBOX", "Sent"]
+                .into_iter()
+                .map(|name| FolderState {
+                    ext_id: name.into(),
+                    name: name.into(),
+                    role: name.into(),
+                    mode: ScopeMode::Record,
+                    uidvalidity: None,
+                    last_uid: None,
+                    modseq: None,
+                    cursor: None,
+                    synced: None,
+                    flags_checked: None,
+                })
+                .collect(),
+            cursor: None,
+            sync_days: 30,
+            now: h.env.clock.now(),
+        };
+        let mut sink = Sink::default();
+        adapter.sync(&cx, &mut state, &mut sink).await.unwrap();
+        let before = state.clone();
+        h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
+        h.inject("Sent", fixtures::get("big5.eml").unwrap());
+        if failure == "transient" {
+            h.imap.fail_next("EXAMINE", "OK without UIDVALIDITY");
+        }
+        sink.fail = failure == "store";
+        let start = h.imap.commands().len();
+        let error = adapter.sync(&cx, &mut state, &mut sink).await.unwrap_err();
+        assert!(
+            matches!(
+                (&error, failure),
+                (AdapterError::Transient(_), "transient") | (AdapterError::Store(_), "store")
+            ),
+            "{failure}: {error:?}"
+        );
+        assert_eq!(state, before, "{failure}");
+        assert!(
+            h.imap.commands()[start..]
+                .iter()
+                .all(|c| !(c.contains("EXAMINE") && c.contains("Sent")))
+        );
     }
 }

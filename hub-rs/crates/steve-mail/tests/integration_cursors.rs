@@ -148,12 +148,26 @@ fn inbox(h: &H, conn: &str) -> FolderState {
         .unwrap()
 }
 
-fn assert_rejected(error: MailError) {
+fn assert_folder_rejected(error: &AdapterError, folder: &str, command: &str) {
+    let AdapterError::Rejected(message) = error else {
+        panic!("{error:?}")
+    };
     assert!(
-        matches!(error, MailError::Adapter(AdapterError::Rejected(ref message))
-        if message == "邮件服务器拒绝了这个操作"),
-        "{error:?}"
+        message.contains(folder) && message.contains(command),
+        "{message}"
     );
+    assert!(message.contains("邮件服务器拒绝了这个操作"), "{message}");
+    assert!(
+        !message.contains("private-server-detail"),
+        "server response must stay private"
+    );
+}
+
+fn assert_rejected(error: MailError, command: &str) {
+    let MailError::Adapter(error) = error else {
+        panic!("{error:?}")
+    };
+    assert_folder_rejected(&error, "INBOX", command);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -170,7 +184,7 @@ async fn rejected_first_search_keeps_the_persisted_window_for_retry() {
             &format!("{status} [UNAVAILABLE] private-server-detail"),
         );
         let start = h.imap.commands().len();
-        assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err());
+        assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err(), "UID SEARCH");
         let saved = inbox(&h, &conn);
         assert_eq!(
             (saved.last_uid, saved.synced, saved.cursor, saved.modseq),
@@ -231,7 +245,7 @@ async fn rejected_incremental_uid_fetch_preserves_the_saved_prefix() {
             "UID FETCH",
             &format!("{status} [UNAVAILABLE] private-server-detail"),
         );
-        assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err());
+        assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err(), "UID FETCH");
         assert_eq!(inbox(&h, &conn), before, "{status}");
         assert_eq!(h.sync(&conn).await.fetched, 1);
         assert_eq!(last_uid(&h, &conn), 2);
@@ -287,10 +301,7 @@ async fn message_id_search_rejection_is_not_reported_as_gone() {
             .fetch_raw(&cx, &old_ext, message.message_id.as_deref())
             .await
             .unwrap_err();
-        assert_eq!(
-            error,
-            AdapterError::Rejected("邮件服务器拒绝了这个操作".into())
-        );
+        assert_folder_rejected(&error, "INBOX", "UID SEARCH");
     }
     assert_eq!(
         adapter
@@ -302,26 +313,129 @@ async fn message_id_search_rejection_is_not_reported_as_gone() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn partial_search_data_and_another_tags_ok_do_not_authorize_a_window() {
+async fn rejected_first_folder_does_not_block_later_folders_and_logs_out() {
+    let h = setup().await;
+    h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
+    let thread = fixtures::thread();
+    h.inject("Sent", thread[1]);
+    let conn = h.connect().await;
+    for round in 0..2 {
+        if round == 1 {
+            h.inject("Sent", thread[2]);
+        }
+        h.imap
+            .fail_next("UID SEARCH", "NO [UNAVAILABLE] private-server-detail");
+        let start = h.imap.commands().len();
+        assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err(), "UID SEARCH");
+        let first = inbox(&h, &conn);
+        assert_eq!(
+            (first.last_uid, first.synced, first.cursor, first.modseq),
+            (None, None, None, None)
+        );
+        let saved = h
+            .env
+            .store()
+            .reader(|c| steve_mail::repo::folders(c, &conn))
+            .unwrap();
+        let sent = saved.iter().find(|f| f.ext_id == "Sent").unwrap();
+        assert_eq!(sent.last_uid, Some(round + 1));
+        assert!(sent.synced.is_some());
+        assert_eq!(h.messages(&conn).len(), (round + 1) as usize);
+        assert!(
+            h.imap.commands()[start..]
+                .iter()
+                .any(|c| c.ends_with(" LOGOUT"))
+        );
+    }
+    assert_eq!(
+        h.sync(&conn).await.fetched,
+        1,
+        "the refused folder can still recover"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn find_uid_checks_later_candidates_before_rejected_or_gone() {
+    for rejected_command in ["EXAMINE", "UID SEARCH"] {
+        let h = setup().await;
+        let raw = fixtures::get("gbk.eml").unwrap();
+        let uid = h.inject("INBOX", raw);
+        let conn = h.connect().await;
+        h.sync(&conn).await;
+        let message = h.messages(&conn).remove(0);
+        h.imap.remove(ADDR, "INBOX", uid).unwrap();
+        let moved = h.inject("Archive", raw);
+        let adapter = h.mail.adapter("imap").unwrap();
+        let cx = h.conns.cx(WS, &conn).unwrap();
+        h.imap
+            .fail_next(rejected_command, "NO [UNAVAILABLE] private-server-detail");
+        assert_eq!(
+            adapter
+                .fetch_raw(&cx, &message.ext_id, message.message_id.as_deref())
+                .await
+                .unwrap(),
+            raw
+        );
+        h.imap.remove(ADDR, "Archive", moved).unwrap();
+        h.imap
+            .fail_next(rejected_command, "NO [UNAVAILABLE] private-server-detail");
+        let start = h.imap.commands().len();
+        let error = adapter
+            .fetch_raw(&cx, &message.ext_id, message.message_id.as_deref())
+            .await
+            .unwrap_err();
+        assert_folder_rejected(&error, "INBOX", rejected_command);
+        assert!(
+            h.imap.commands()[start..]
+                .iter()
+                .any(|c| c.contains("EXAMINE") && c.contains("Trash")),
+            "all candidates must be checked"
+        );
+        assert!(matches!(
+            adapter
+                .fetch_raw(&cx, &message.ext_id, message.message_id.as_deref())
+                .await,
+            Err(AdapterError::Gone(_))
+        ));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_examine_disconnect_does_not_reset_the_persisted_window() {
     let h = setup().await;
     h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
     let conn = h.connect().await;
-    // Data buffered after EXAMINE's completion precedes the SEARCH completion. The fake's
-    // own SEARCH is rejected: neither a partial set nor a different tag's OK is authoritative.
-    h.imap.fail_next(
-        "EXAMINE",
-        "OK scripted examine\r\nstale OK another command\r\n* SEARCH 1",
-    );
-    h.imap
-        .fail_next("UID SEARCH", "NO [UNAVAILABLE] private-server-detail");
-    let start = h.imap.commands().len();
-    assert_rejected(h.mail.sync_now(WS, &conn).await.unwrap_err());
+    h.sync(&conn).await;
+    h.inject("INBOX", fixtures::get("big5.eml").unwrap());
+    let mut before = inbox(&h, &conn);
+    before.cursor = Some("[2,1]".into());
+    h.env
+        .store()
+        .transaction(|tx| steve_mail::repo::save_folder(tx, &conn, &before))
+        .unwrap();
+    let (entered, release) = h.imap.pause_next("EXAMINE");
+    let (mail, id) = (h.mail.clone(), conn.clone());
+    let task = tokio::spawn(async move { mail.sync_now(WS, &id).await });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    h.imap.drop_connections();
+    let _ = release.send(());
+    let error = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
     assert!(
-        h.imap.commands()[start..]
-            .iter()
-            .all(|c| !c.contains(" UID FETCH "))
+        matches!(error, MailError::Adapter(AdapterError::Transient(_))),
+        "{error:?}"
     );
-    let saved = inbox(&h, &conn);
-    assert_eq!((saved.last_uid, saved.synced), (None, None));
+    assert_eq!(inbox(&h, &conn), before);
     assert_eq!(h.sync(&conn).await.fetched, 1);
+    assert_eq!(
+        h.events.ingested().len(),
+        1,
+        "the new message must stay live, not become backfill"
+    );
 }
