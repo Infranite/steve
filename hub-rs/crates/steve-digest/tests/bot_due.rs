@@ -5,7 +5,9 @@ use std::time::Duration;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use steve_digest::queue::{self, BOT_BATCH, BOT_WAKE_TABLES, BotRunner, BotSource};
-use steve_modules::testkit::TestEnv;
+#[path = "../../steve-channels/tests/support/digest_env.rs"]
+mod digest_env;
+use digest_env::TestEnv;
 use steve_runtime::due::contract::{self, Fixture};
 use steve_runtime::due::{DueSource, due_loop};
 use steve_runtime::policy::{Backoff, Jitter};

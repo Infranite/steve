@@ -20,15 +20,6 @@ brief_alarms_policy_update	1
 brief_alarms_tz_delete	1
 brief_alarms_tz_insert	1
 brief_alarms_tz_update	1
-digest_chan_messages_delete	1
-digest_chan_messages_insert	1
-digest_chan_messages_update	1
-digest_mail_messages_delete	1
-digest_mail_messages_insert	1
-digest_mail_messages_update	1
-digest_pending_delete	1
-digest_pending_insert	1
-digest_receipt_ack	1
 event_payload_refs_gc	1
 gateway_result_clean	1
 gateway_result_dirty	1
