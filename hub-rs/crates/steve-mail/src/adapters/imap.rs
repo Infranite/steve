@@ -773,6 +773,157 @@ pub fn split_ext(ext: &str) -> Option<(&str, i64, u32)> {
     Some((it.next()?, v, uid))
 }
 
+/// Discover the first window or new UIDs, then retain any unresolved UID across retries.
+async fn discover_uids(
+    s: &mut Session,
+    last_uid: Option<i64>,
+    pending: Option<(u32, u32)>,
+    sync_days: i64,
+    now: i64,
+) -> Result<Vec<u32>, AdapterError> {
+    let mut uids: Vec<u32> = if last_uid.is_none() {
+        let since = search_date(now - sync_days.max(1) * 86_400_000);
+        let mut u: Vec<u32> = timed(async {
+            s.uid_search(format!("SINCE {since}"))
+                .await
+                .map_err(imap_err)
+        })
+        .await?
+        .into_iter()
+        .collect();
+        u.sort_unstable();
+        let skip = u.len().saturating_sub(FIRST_SYNC_MAX);
+        u.split_off(skip)
+    } else {
+        let last = last_uid.unwrap_or(0) as u32;
+        let mut u: Vec<u32> = fetch(s, &format!("UID FETCH {}:* (UID)", last + 1))
+            .await?
+            .into_iter()
+            .filter_map(|i| i.uid)
+            .filter(|u| *u > last)
+            .collect();
+        u.sort_unstable();
+        u
+    };
+    if let Some((uid, _)) = pending {
+        // A UID that vanished after discovery still needs an explicit retry/diagnostic.
+        uids.push(uid);
+        uids.sort_unstable();
+    }
+    uids.dedup();
+    Ok(uids)
+}
+
+/// Fetch sizes first, then complete small messages before headers/structure for large ones.
+async fn fetch_batch(
+    s: &mut Session,
+    caps: Caps,
+    chunk: &[u32],
+) -> Result<Vec<Item>, AdapterError> {
+    let thrid = if caps.gmail { " X-GM-THRID" } else { "" };
+    let sizes = fetch(
+        s,
+        &format!("UID FETCH {} (UID RFC822.SIZE)", uid_set(chunk)),
+    )
+    .await?;
+    let (big, small): (Vec<u32>, Vec<u32>) = chunk.iter().partition(|u| {
+        sizes
+            .iter()
+            .any(|i| i.uid == Some(**u) && i.size.unwrap_or(0) > LARGE_BYTES)
+    });
+    let mut items = Vec::new();
+    if !small.is_empty() {
+        items.extend(
+            fetch(
+                s,
+                &format!(
+                    "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]{thrid})",
+                    uid_set(&small)
+                ),
+            )
+            .await?,
+        );
+    }
+    if !big.is_empty() {
+        items.extend(
+            fetch(
+                s,
+                &format!(
+                    "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER] BODYSTRUCTURE{thrid})",
+                    uid_set(&big)
+                ),
+            )
+            .await?,
+        );
+    }
+    Ok(items)
+}
+
+struct PreparedBatch {
+    messages: Vec<FetchedMessage>,
+    top: Option<i64>,
+    missing: Option<(u32, u32)>,
+    skipped: Vec<String>,
+}
+
+/// Keep the available UID prefix and its retry decision; only the caller commits after storing it.
+fn prepare_batch(
+    f: &crate::adapter::FolderState,
+    validity: i64,
+    chunk: &[u32],
+    items: Vec<Item>,
+    pending: Option<(u32, u32)>,
+    backfill: bool,
+) -> PreparedBatch {
+    let mut items: BTreeMap<_, _> = items
+        .into_iter()
+        // Unsolicited flag-only FETCH responses must not replace a fetched body.
+        .filter(|i| i.body.is_some() || i.header.is_some())
+        .filter_map(|i| Some((i.uid?, i)))
+        .collect();
+    let mut batch = Vec::with_capacity(items.len());
+    let mut top = None;
+    let mut missing = None;
+    let mut skipped = Vec::new();
+    for &uid in chunk {
+        let it = items.remove(&uid).unwrap_or_default();
+        let partial = it.body.is_none();
+        let Some(raw) = it.body.or(it.header) else {
+            let attempts = pending
+                .filter(|(u, _)| *u == uid)
+                .map_or(1, |(_, n)| n.saturating_add(1));
+            if attempts < MISSING_UID_ATTEMPTS {
+                missing = Some((uid, attempts));
+                break;
+            }
+            tracing::warn!(folder = %f.ext_id, uid, attempts, "imap UID unavailable after retry limit; advancing past it");
+            skipped.push(ext_id(&f.ext_id, validity, uid));
+            top = Some(i64::from(uid));
+            continue;
+        };
+        batch.push(FetchedMessage {
+            ext_id: ext_id(&f.ext_id, validity, uid),
+            folder: f.ext_id.clone(),
+            mode: f.mode,
+            raw,
+            partial,
+            parts: it.parts,
+            flags: it.flags,
+            internal_date: it.internal_date,
+            size: it.size.map(i64::from).unwrap_or(0),
+            provider_thread: it.thrid.map(|t| t.to_string()),
+            backfill,
+        });
+        top = top.max(Some(i64::from(uid)));
+    }
+    PreparedBatch {
+        messages: batch,
+        top,
+        missing,
+        skipped,
+    }
+}
+
 impl ImapAdapter {
     /// The wire names of the folders by decoded name.
     async fn wire_names(
@@ -817,117 +968,18 @@ impl ImapAdapter {
             .cursor
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-        let mut uids: Vec<u32> = if first {
-            let since = search_date(now - sync_days.max(1) * 86_400_000);
-            let mut u: Vec<u32> = timed(async {
-                s.uid_search(format!("SINCE {since}"))
-                    .await
-                    .map_err(imap_err)
-            })
-            .await?
-            .into_iter()
-            .collect();
-            u.sort_unstable();
-            let skip = u.len().saturating_sub(FIRST_SYNC_MAX);
-            u.split_off(skip)
-        } else {
-            let last = f.last_uid.unwrap_or(0) as u32;
-            let mut u: Vec<u32> = fetch(s, &format!("UID FETCH {}:* (UID)", last + 1))
-                .await?
-                .into_iter()
-                .filter_map(|i| i.uid)
-                .filter(|u| *u > last)
-                .collect();
-            u.sort_unstable();
-            u
-        };
-        if let Some((uid, _)) = pending {
-            // A UID that vanished after discovery still needs an explicit retry/diagnostic.
-            uids.push(uid);
-            uids.sort_unstable();
-        }
-        uids.dedup();
-        let thrid = if caps.gmail { " X-GM-THRID" } else { "" };
+        let uids = discover_uids(s, f.last_uid, pending, sync_days, now).await?;
         for chunk in uids.chunks(BATCH) {
-            let sizes = fetch(
-                s,
-                &format!("UID FETCH {} (UID RFC822.SIZE)", uid_set(chunk)),
-            )
-            .await?;
-            let (big, small): (Vec<u32>, Vec<u32>) = chunk.iter().partition(|u| {
-                sizes
-                    .iter()
-                    .any(|i| i.uid == Some(**u) && i.size.unwrap_or(0) > LARGE_BYTES)
-            });
-            let mut items = Vec::new();
-            if !small.is_empty() {
-                items.extend(
-                    fetch(
-                        s,
-                        &format!(
-                            "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]{thrid})",
-                            uid_set(&small)
-                        ),
-                    )
-                    .await?,
-                );
-            }
-            if !big.is_empty() {
-                items.extend(
-                    fetch(
-                        s,
-                        &format!(
-                            "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER] BODYSTRUCTURE{thrid})",
-                            uid_set(&big)
-                        ),
-                    )
-                    .await?,
-                );
-            }
-            let mut items: BTreeMap<_, _> = items
-                .into_iter()
-                // Unsolicited flag-only FETCH responses must not replace a fetched body.
-                .filter(|i| i.body.is_some() || i.header.is_some())
-                .filter_map(|i| Some((i.uid?, i)))
-                .collect();
-            let mut batch = Vec::with_capacity(items.len());
-            let mut top = None;
-            let mut missing = None;
-            let mut skipped = Vec::new();
-            for &uid in chunk {
-                let it = items.remove(&uid).unwrap_or_default();
-                let partial = it.body.is_none();
-                let Some(raw) = it.body.or(it.header) else {
-                    let attempts = pending
-                        .filter(|(u, _)| *u == uid)
-                        .map_or(1, |(_, n)| n.saturating_add(1));
-                    if attempts < MISSING_UID_ATTEMPTS {
-                        missing = Some((uid, attempts));
-                        break;
-                    }
-                    tracing::warn!(folder = %f.ext_id, uid, attempts, "imap UID unavailable after retry limit; advancing past it");
-                    skipped.push(ext_id(&f.ext_id, validity, uid));
-                    top = Some(i64::from(uid));
-                    continue;
-                };
-                batch.push(FetchedMessage {
-                    ext_id: ext_id(&f.ext_id, validity, uid),
-                    folder: f.ext_id.clone(),
-                    mode: f.mode,
-                    raw,
-                    partial,
-                    parts: it.parts,
-                    flags: it.flags,
-                    internal_date: it.internal_date,
-                    size: it.size.map(i64::from).unwrap_or(0),
-                    provider_thread: it.thrid.map(|t| t.to_string()),
-                    backfill,
-                });
-                top = top.max(Some(i64::from(uid)));
-            }
+            let items = fetch_batch(s, caps, chunk).await?;
+            let PreparedBatch {
+                messages,
+                top,
+                missing,
+                skipped,
+            } = prepare_batch(f, validity, chunk, items, pending, backfill);
             // the cursor moves only once the whole chunk is stored
-            let n = batch.len();
-            sink.put_batch(batch).await?;
+            let n = messages.len();
+            sink.put_batch(messages).await?;
             report.fetched += n;
             report.skipped.extend(skipped);
             if let Some(top) = top {

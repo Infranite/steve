@@ -158,6 +158,52 @@ fn day(d: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
 }
 
+struct EventTimes {
+    all_day: bool,
+    start_ms: i64,
+    end_ms: i64,
+    start_date: Option<String>,
+    end_date: Option<String>,
+}
+
+/// Resolve timed/all-day boundaries in the calendar's zone, retaining the provider's defaults.
+fn event_times(e: &RemoteEvent, zone: &Zone) -> Result<EventTimes, String> {
+    let (all_day, start_ms, end_ms, start_date, end_date) = match (&e.start, &e.end) {
+        (When { ms: Some(s), .. }, end) => {
+            let end = end.ms.unwrap_or(*s).max(*s);
+            (false, *s, end, None, None)
+        }
+        (When { date: Some(s), .. }, end) => {
+            let s = day(s).ok_or("bad start date")?;
+            let end = end
+                .date
+                .as_deref()
+                .and_then(day)
+                .filter(|d| *d > s)
+                .unwrap_or(s + chrono::Duration::days(1));
+            let at = |d: NaiveDate| {
+                zone.instant(d.and_time(NaiveTime::MIN))
+                    .map_err(|e| e.to_string())
+            };
+            (
+                true,
+                at(s)?,
+                at(end)?,
+                Some(s.format("%Y-%m-%d").to_string()),
+                Some(end.format("%Y-%m-%d").to_string()),
+            )
+        }
+        _ => return Err("event without a start".into()),
+    };
+    Ok(EventTimes {
+        all_day,
+        start_ms,
+        end_ms,
+        start_date,
+        end_date,
+    })
+}
+
 /// Who the people in an event are.
 pub(crate) struct People<'a> {
     pub(crate) c: &'a Connection,
@@ -197,33 +243,13 @@ pub(crate) fn normalize(
         cal.tz.as_deref(),
     )
     .map_err(|e| e.to_string())?;
-    let (all_day, start_ms, end_ms, start_date, end_date) = match (&e.start, &e.end) {
-        (When { ms: Some(s), .. }, end) => {
-            let end = end.ms.unwrap_or(*s).max(*s);
-            (false, *s, end, None, None)
-        }
-        (When { date: Some(s), .. }, end) => {
-            let s = day(s).ok_or("bad start date")?;
-            let end = end
-                .date
-                .as_deref()
-                .and_then(day)
-                .filter(|d| *d > s)
-                .unwrap_or(s + chrono::Duration::days(1));
-            let at = |d: NaiveDate| {
-                zone.instant(d.and_time(NaiveTime::MIN))
-                    .map_err(|e| e.to_string())
-            };
-            (
-                true,
-                at(s)?,
-                at(end)?,
-                Some(s.format("%Y-%m-%d").to_string()),
-                Some(end.format("%Y-%m-%d").to_string()),
-            )
-        }
-        _ => return Err("event without a start".into()),
-    };
+    let EventTimes {
+        all_day,
+        start_ms,
+        end_ms,
+        start_date,
+        end_date,
+    } = event_times(e, &zone)?;
     let status = match e.status.as_deref() {
         Some(s @ ("confirmed" | "tentative" | "cancelled")) => s.to_string(),
         _ => "confirmed".into(),

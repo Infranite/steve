@@ -12,7 +12,7 @@ steve-acp	crates/steve-acp/src/session.rs	too_many_lines	170
 steve-acp	crates/steve-acp/src/usage.rs	too_many_lines	142
 steve-calendar	crates/steve-calendar/src/merge.rs	too_many_lines	123
 steve-calendar	crates/steve-calendar/src/sources.rs	too_many_lines	132
-steve-calendar	crates/steve-calendar/src/sync.rs	too_many_lines	161,148,119
+steve-calendar	crates/steve-calendar/src/sync.rs	too_many_lines	148,141,119
 steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	cognitive_complexity	38,26
 steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	too_many_lines	119
 steve-channels	crates/steve-channels/src/adapters/feishu/app_registration/service.rs	cognitive_complexity	41
@@ -188,8 +188,7 @@ steve-knowledge	crates/steve-knowledge/src/index.rs	too_many_lines	105
 steve-knowledge	crates/steve-knowledge/src/scan.rs	cognitive_complexity	28
 steve-knowledge	crates/steve-knowledge/src/scan.rs	too_many_lines	101
 steve-knowledge	crates/steve-knowledge/src/steward.rs	too_many_lines	160
-steve-mail	crates/steve-mail/src/adapters/imap.rs	cognitive_complexity	44
-steve-mail	crates/steve-mail/src/adapters/imap.rs	too_many_lines	183
+steve-mail	crates/steve-mail/src/adapters/imap.rs	cognitive_complexity	27
 steve-mail	crates/steve-mail/src/compose.rs	too_many_lines	156,145
 steve-mail	crates/steve-mail/src/mcp.rs	too_many_lines	118
 steve-mail	crates/steve-mail/src/send.rs	too_many_lines	113
