@@ -1,5 +1,7 @@
 mod common;
 
+steve_i18n::init!();
+
 use common::*;
 use serde_json::{Value, json};
 use steve_store::*;
@@ -1322,13 +1324,43 @@ fn claiming_a_child_checks_inherited_categories_before_writing() {
     s.tags()
         .set_item(&parent, &[feat.clone(), topic.clone()])
         .unwrap();
+    let stray = s
+        .tags()
+        .create(
+            WS,
+            &NewTag {
+                name: "legacy category".into(),
+                cat: "主题".into(),
+                description: String::new(),
+            },
+            "me",
+        )
+        .unwrap()
+        .id;
     plan(&t, &parent, &specs);
     let before = s.workflows().get(&parent).unwrap();
     let counter = s.peek_counter("item:ST").unwrap();
     let count = s.items().all(WS).unwrap().len();
 
     // Historical corruption cannot be introduced through set_item, so model it only in this DB.
-    for invalid in [vec![], vec![feat.clone(), bug]] {
+    s.with_conn(|c| {
+        c.execute(
+            "UPDATE tags SET cat=? WHERE id=?",
+            [steve_store::kinds::KIND_CAT, &stray],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let missing = steve_i18n::t!("store.kinds.missing", names = steve_store::kinds::names());
+    let several = steve_i18n::t!(
+        "store.kinds.several",
+        tags = format!("feat{}bug", steve_i18n::t!("store.list_sep"))
+    );
+    for (invalid, expected) in [
+        (vec![], missing.clone()),
+        (vec![stray.clone()], missing),
+        (vec![feat.clone(), bug], several),
+    ] {
         s.with_conn(|c| {
             c.execute("DELETE FROM item_tags WHERE item_id=?", [&parent])?;
             for tag in &invalid {
@@ -1342,7 +1374,14 @@ fn claiming_a_child_checks_inherited_categories_before_writing() {
         .unwrap();
         t.events.take();
         let error = s.workflows().claim(&parent, "a").unwrap_err();
-        assert!(matches!(error, StoreError::Conflict(_)));
+        assert!(
+            matches!(error, StoreError::Conflict(ref message) if message == &expected),
+            "expected {expected:?}, got {error:?}"
+        );
+        assert_eq!(
+            s.tags().get(&stray).unwrap().unwrap().cat,
+            steve_store::kinds::KIND_CAT
+        );
         assert_eq!(s.workflows().get(&parent).unwrap(), before);
         assert_eq!(s.peek_counter("item:ST").unwrap(), counter);
         assert_eq!(s.items().all(WS).unwrap().len(), count);

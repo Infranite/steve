@@ -162,6 +162,85 @@ fn a_legacy_reserved_name_is_refused_without_reclassifying_its_items() {
 }
 
 #[test]
+fn a_conflicting_workspace_refuses_item_writes_without_side_effects() {
+    let t = fresh();
+    let s = &t.store;
+    steve(s);
+    let feat = kind(s, "feat");
+    let chore = kind(s, "chore");
+    let topic = domain(s, "topic");
+    let existing = item(s, vec![feat.clone(), topic.clone()]).unwrap().unwrap();
+    // Simulate a legacy reserved name in the wrong category, without using production data.
+    let c = Connection::open(t.dir.path().join("steve.sqlite3")).unwrap();
+    c.execute("UPDATE tags SET cat='领域' WHERE id=?", [&chore])
+        .unwrap();
+    let tags = s.tags().list(WS).unwrap();
+    let counter = s.peek_counter("item:ST").unwrap();
+    let items = serde_json::to_value(s.items().all(WS).unwrap()).unwrap();
+    let counts = || {
+        c.query_row(
+            "SELECT (SELECT COUNT(*) FROM items), (SELECT COUNT(*) FROM item_goals), (SELECT COUNT(*) FROM item_tags)",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+        ).unwrap()
+    };
+    let rows = counts();
+    t.events.take();
+    let unchanged = || {
+        assert_eq!(
+            counts(),
+            rows,
+            "no item, goal or tag association was written"
+        );
+        assert_eq!(
+            serde_json::to_value(s.items().all(WS).unwrap()).unwrap(),
+            items
+        );
+        assert_eq!(s.tags().list(WS).unwrap(), tags);
+        assert_eq!(s.peek_counter("item:ST").unwrap(), counter);
+        assert!(t.events.take().is_empty(), "a refusal publishes no event");
+    };
+    let diagnostic = conflict(s.ensure_workspace());
+    for field in [chore.as_str(), "chore", "领域", "改名后重启"] {
+        assert!(
+            diagnostic.contains(field),
+            "missing {field:?}: {diagnostic}"
+        );
+    }
+    unchanged();
+    assert_eq!(conflict(item(s, vec![feat.clone()])), diagnostic);
+    unchanged();
+    assert_eq!(
+        conflict(s.tags().set_item(&existing.id, std::slice::from_ref(&feat))),
+        diagnostic
+    );
+    unchanged();
+
+    // The documented offline recovery changes only this tag's name, preserving its identity.
+    let tx = c.unchecked_transaction().unwrap();
+    assert_eq!(
+        tx.execute(
+            "UPDATE tags SET name='legacy-chore' WHERE id=? AND name='chore' AND cat='领域'",
+            [&chore],
+        )
+        .unwrap(),
+        1
+    );
+    tx.commit().unwrap();
+    s.ensure_workspace().unwrap();
+    assert_eq!(s.tags().get(&chore).unwrap().unwrap().cat, "领域");
+    assert_eq!(s.tags().get(&chore).unwrap().unwrap().name, "legacy-chore");
+    let next = item(s, vec![feat.clone()]).unwrap().unwrap();
+    assert_eq!(next.no, counter + 1);
+    assert_eq!(
+        s.tags()
+            .set_item(&existing.id, &[feat.clone(), topic.clone()])
+            .unwrap(),
+        [feat, topic]
+    );
+}
+
+#[test]
 fn an_item_has_exactly_one_category() {
     let t = fresh();
     let s = &t.store;

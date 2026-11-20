@@ -167,10 +167,10 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             [ws, name],
             Tag::from_row,
         )?;
-        if existing.as_ref().is_some_and(|tag| tag.cat != KIND_CAT) {
-            return Err(StoreError::Conflict(steve_i18n::t!(
-                "store.tag.kind_name",
-                name = name
+        if let Some(tag) = existing.as_ref().filter(|tag| tag.cat != KIND_CAT) {
+            return Err(StoreError::Conflict(format!(
+                "分类初始化冲突：标签 id={:?}，名字={:?}，当前类别={:?} 占用了保留的分类名称；请离线改名后重启",
+                tag.id, tag.name, tag.cat
             )));
         }
         pending.push((name, desc, existing));
@@ -313,7 +313,7 @@ pub(crate) fn checked(c: &Connection, ws: &str, ids: &[String]) -> Result<Vec<St
             Tag::from_row,
         )?;
         match t {
-            Some(t) if t.cat == KIND_CAT => kinds.push((t.id, t.name)),
+            Some(t) if t.cat == KIND_CAT && is_kind(&t.name) => kinds.push((t.id, t.name)),
             Some(t) => rest.push(t.id),
             None => {}
         }
