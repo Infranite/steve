@@ -912,8 +912,8 @@ fn concurrent_capacity_leases_have_only_32_winners_and_survive_reopen() {
         joins.into_iter().map(|j| j.join().unwrap()).sum::<i32>(),
         32
     );
-    let reopened = steve_store::Store::open(t.store.path(), steve_store::NoPublisher).unwrap();
-    reopened
+    let t = common::reopen(t);
+    t.store
         .transaction::<_, StoreError>(|tx| {
             assert_eq!(
                 session_room(tx, "n")?,

@@ -423,6 +423,7 @@ fn what_was_committed_before_a_crash_is_delivered_after_it() {
     disp(std::slice::from_ref(&c)).register(&t.store).unwrap();
     emit(&t.store, "default", 1);
     // the process stops before any pass: a new store and dispatcher on the same file
+    drop(t.store);
     let again = Store::open(&path, steve_store::NoPublisher).unwrap();
     let d = disp(std::slice::from_ref(&c));
     d.register(&again).unwrap();

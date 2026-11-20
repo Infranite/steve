@@ -1153,11 +1153,11 @@ async fn maintenance_admission_is_persistent_and_waiters_resume_on_cancel() {
     t.store.maintenance_set(true).unwrap();
     assert!(t.store.try_activity("mail_send").is_none());
     assert_eq!(t.store.activities()["mail_send"], 1);
-    let reopened = Store::open(t.dir.path().join("steve.sqlite3"), FnPublisher(|_| {})).unwrap();
-    assert!(reopened.maintenance());
-    assert!(reopened.try_activity("flow").is_none());
     drop(p);
     assert!(t.store.activities().is_empty());
+    let t = common::reopen(t);
+    assert!(t.store.maintenance());
+    assert!(t.store.try_activity("flow").is_none());
     let s = t.store.clone();
     let waiter = tokio::spawn(async move { s.activity("thread_answer").await });
     tokio::task::yield_now().await;

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use rusqlite::params;
 use serde_json::{Value, json};
 use steve_store::diagnostics::{Details, Filter, MAX_ITEM_BYTES, Record, RecordStatus};
-use steve_store::{NewBot, NewDecision, NewItem, NewSession, NoPublisher, Store, WS};
+use steve_store::{NewBot, NewDecision, NewItem, NewSession, Store, WS};
 
 fn setup() -> (common::T, String, String) {
     let t = common::fresh();
@@ -132,9 +132,11 @@ fn critical_facts_survive_reopen_and_details_obey_the_capture_window() {
     let expired = settled(s, &item);
     assert_eq!(expired["capture"]["active"], false);
     assert_eq!(expired["capture"]["stop_reason"], "expired");
-    let reopened = Store::open(s.path(), NoPublisher).unwrap();
+    let t = common::reopen(t);
+    let s = &t.store;
+    let reopened = s;
     assert_eq!(
-        events(&reopened, &item)["events"].as_array().unwrap().len(),
+        events(reopened, &item)["events"].as_array().unwrap().len(),
         2
     );
     assert_eq!(
@@ -178,7 +180,8 @@ fn new_items_capture_immediately_without_reads_or_owner_activation() {
         })
         .unwrap();
     assert_eq!(actor, "system:item-created");
-    let reopened = Store::open(s.path(), NoPublisher).unwrap();
+    let t = common::reopen(t);
+    let reopened = &t.store;
     assert_eq!(
         reopened.diagnostics().explain(WS, &item).unwrap()["capture"],
         capture
@@ -209,7 +212,9 @@ fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
     s.diagnostics()
         .capture(WS, &item, "owner", Some(0))
         .unwrap();
-    let reopened = Store::open(s.path(), NoPublisher).unwrap();
+    settled(s, &item);
+    let t = common::reopen(t);
+    let reopened = &t.store;
     reopened
         .items()
         .patch(
@@ -226,24 +231,28 @@ fn default_capture_does_not_restart_after_expiry_manual_stop_or_legacy_reads() {
         assert_eq!(stopped["capture"]["stop_reason"], "manual");
         assert_eq!(stopped["capture"]["expires_at"], original["expires_at"]);
     }
-    s.with_conn(|c| {
+    reopened.with_conn(|c| {
         c.execute("UPDATE diagnostic_captures SET stop_reason=NULL,stopped_at=NULL,expires_at=? WHERE item_id=?",
             params![steve_store::now() - 1, item])?;
         Ok(())
     }).unwrap();
-    let expired_store = Store::open(s.path(), NoPublisher).unwrap();
+    settled(reopened, &item);
+    let t = common::reopen(t);
+    let expired_store = &t.store;
     for _ in 0..2 {
         let expired = expired_store.diagnostics().explain(WS, &item).unwrap();
         assert_eq!(expired["capture"]["active"], false);
         assert_eq!(expired["capture"]["stop_reason"], "expired");
     }
     // A pre-upgrade item has no capture row; neither opening the Store nor reading creates one.
-    s.with_conn(|c| {
-        c.execute("DELETE FROM diagnostic_captures WHERE item_id=?", [&item])?;
-        Ok(())
-    })
-    .unwrap();
-    let legacy = Store::open(s.path(), NoPublisher).unwrap();
+    expired_store
+        .with_conn(|c| {
+            c.execute("DELETE FROM diagnostic_captures WHERE item_id=?", [&item])?;
+            Ok(())
+        })
+        .unwrap();
+    let t = common::reopen(t);
+    let legacy = &t.store;
     let view = legacy.diagnostics().explain(WS, &item).unwrap();
     assert_eq!(view["capture"]["active"], false);
     assert!(view["capture"]["started_at"].is_null());

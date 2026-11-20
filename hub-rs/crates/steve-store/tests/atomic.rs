@@ -6,9 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
-use steve_store::{
-    BusEvent, FnPublisher, NewBot, NewDecision, NewItem, NoPublisher, Store, StoreError, WS,
-};
+use steve_store::{BusEvent, FnPublisher, NewBot, NewDecision, NewItem, Store, StoreError, WS};
 
 fn open_tracked() -> (tempfile::TempDir, Store, Arc<Mutex<Vec<BusEvent>>>) {
     let dir = tempfile::tempdir().unwrap();
@@ -41,7 +39,7 @@ fn open_tracked() -> (tempfile::TempDir, Store, Arc<Mutex<Vec<BusEvent>>>) {
 #[test]
 fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
     let (_dir, store, events) = open_tracked();
-    let external = Store::open(store.path(), NoPublisher).unwrap();
+    let external = steve_store_sqlite::open::open_readonly(store.path()).unwrap();
     let wake = store.outbox_wake();
 
     let (item_id, dec_id) = store
@@ -72,7 +70,13 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
             assert_eq!(seen_in_reader, 1);
 
             // External connection does NOT see uncommitted WAL writes yet.
-            assert!(external.items().get(&item.id)?.is_none());
+            assert_eq!(
+                external.query_row("SELECT count(*) FROM items WHERE id=?", [&item.id], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                0
+            );
 
             let dec = store
                 .decisions()
@@ -107,9 +111,35 @@ fn atomic_reads_uncommitted_writes_and_defers_events_until_outer_commit() {
         .unwrap();
 
     // Now committed: external connection sees everything, events published in order, outbox notified.
-    assert!(external.items().get(&item_id).unwrap().is_some());
-    assert!(external.decisions().get(&dec_id).unwrap().is_some());
-    assert_eq!(external.timeline().list(&item_id).unwrap().len(), 1);
+    assert_eq!(
+        external
+            .query_row("SELECT count(*) FROM items WHERE id=?", [&item_id], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT count(*) FROM decisions WHERE id=?",
+                [&dec_id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        external
+            .query_row(
+                "SELECT count(*) FROM timeline WHERE item_id=?",
+                [&item_id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
 
     let published = events.lock().unwrap().clone();
     assert_eq!(

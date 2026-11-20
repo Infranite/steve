@@ -24,6 +24,16 @@ pub struct T {
     pub events: Events,
 }
 
+/// Release the authoritative Store before a real disk reopen, preserving the fixture directory.
+pub fn reopen(t: T) -> T {
+    let T { dir, store, events } = t;
+    let path = store.path().to_path_buf();
+    drop(store);
+    let sink = events.clone();
+    let store = Store::open(path, FnPublisher(move |e| sink.0.lock().unwrap().push(e))).unwrap();
+    T { dir, store, events }
+}
+
 /// A store on a fresh database in a temp dir, with `ensure_workspace` done and events cleared.
 pub fn fresh() -> T {
     let dir = tempfile::tempdir().unwrap();
