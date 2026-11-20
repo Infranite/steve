@@ -27,17 +27,7 @@ fn io_error() -> Error {
     )
 }
 pub(crate) fn acquire_lock(dir: &Path, create: bool) -> Result<Arc<File>, Error> {
-    if create {
-        std::fs::create_dir_all(dir).map_err(|_| io_error())?;
-    }
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join("storage.lock"))
-        .map_err(|_| io_error())?;
-    file.try_lock().map_err(|e| match e {
+    let file = crate::backup::offline::storage_lock(dir, create).map_err(|e| match e {
         std::fs::TryLockError::WouldBlock => {
             steve_storage_api::error(Code::Busy, "storage is held by another process")
         }

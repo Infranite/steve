@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 /// Maximum number of object diagnostics included in a conversion error.
 const MAX_DIFFERENCE_DIAGNOSTICS: usize = 8;
 
-pub const CONTRACT_TABLES: [&str; 4] = ["meta", "uow_applied", "cursor", "domain_schema"];
+/// SQL identifier of the contract's durable consumer-position table.
+pub(crate) const CURSOR_TABLE: &str = stringify!(cursor);
+pub const CONTRACT_TABLES: [&str; 4] = ["meta", "uow_applied", CURSOR_TABLE, "domain_schema"];
 pub const LEGACY_TABLES: [&str; 2] = ["schema_version", "schema_compat"];
 
 /// Logical schema identity; physical root pages and optimizer statistics are excluded.
