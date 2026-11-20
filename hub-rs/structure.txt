@@ -1,10 +1,6 @@
 # Production Clippy structure inventory; only shrinks.
 # crate<TAB>workspace-relative file<TAB>lint<TAB>values, sorted largest first
 # Thresholds: too_many_lines 100, cognitive_complexity 25.
-steve-acp	crates/steve-acp/src/managed.rs	cognitive_complexity	37
-steve-acp	crates/steve-acp/src/managed.rs	too_many_lines	189
-steve-acp	crates/steve-acp/src/oneshot.rs	too_many_lines	161
-steve-acp	crates/steve-acp/src/rpc.rs	too_many_lines	162
 steve-calendar	crates/steve-calendar/src/sources.rs	too_many_lines	132
 steve-calendar	crates/steve-calendar/src/sync.rs	too_many_lines	148,141,119
 steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	cognitive_complexity	38,26

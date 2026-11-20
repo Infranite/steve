@@ -235,46 +235,7 @@ impl Conn {
             .map(|home| crate::managed::prefix_lock(home, false))
             .transpose()
             .map_err(RpcError::msg)?;
-        let mut cmd = Command::new(&sp.program);
-        if let Some(lease) = &prefix {
-            let fd = lease.fd();
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        if sp.clean_env {
-            cmd.env_clear();
-        }
-        cmd.args(&sp.args)
-            .current_dir(&sp.cwd)
-            .envs(sp.env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            // last line of defence if the runtime is dropped without shutdown()
-            .kill_on_drop(true);
-        // the upgrade channel, the key store and the secret files are the Hub's alone
-        let given = sp
-            .env
-            .iter()
-            .map(|(k, _)| std::ffi::OsString::from(k))
-            .filter(|k| {
-                k.to_str()
-                    .is_some_and(steve_vault::harness::hub_private_env)
-            });
-        for key in steve_vault::harness::hub_private_vars()
-            .into_iter()
-            .chain(given)
-            .chain(AGENT_ENV_DROPPED.into_iter().map(std::ffi::OsString::from))
-        {
-            cmd.env_remove(key);
-        }
+        let mut cmd = adapter_command(&sp, prefix.as_ref());
         let mut child = cmd
             .spawn()
             .map_err(|e| RpcError::msg(format!("spawn {} {e}", sp.program.display())))?;
@@ -309,44 +270,14 @@ impl Conn {
         let weak = Arc::downgrade(&conn);
         let read_error = Arc::new(AtomicBool::new(false));
         let read_error_in = read_error.clone();
-        let mut reader = tokio::spawn(async move {
-            let mut rd = BufReader::new(stdout);
-            let mut line = Vec::new();
-            loop {
-                line.clear();
-                let read = if max_frame_bytes == usize::MAX {
-                    rd.read_until(b'\n', &mut line).await
-                } else {
-                    (&mut rd)
-                        .take(max_frame_bytes as u64 + 1)
-                        .read_until(b'\n', &mut line)
-                        .await
-                };
-                match read {
-                    Ok(0) => break,
-                    Err(_) => {
-                        read_error_in.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-                let Some(c) = weak.upgrade() else { break };
-                let admitted = admit(line.len());
-                if line.len() > max_frame_bytes || !admitted {
-                    c.reader_failed.store(true, Ordering::SeqCst);
-                    for (_, tx) in c.pending.lock().unwrap().drain() {
-                        let _ = tx.send(Err(RpcError::msg("adapter exited: frame limit")));
-                    }
-                    break;
-                }
-                let wait = c.dispatch(&String::from_utf8_lossy(&line), &on_incoming);
-                // not held while waiting: the Conn goes when its owner lets it go
-                drop(c);
-                if let Some(wait) = wait {
-                    wait.await;
-                }
-            }
-        });
+        let mut reader = tokio::spawn(read_adapter_stdout(
+            stdout,
+            max_frame_bytes,
+            admit,
+            on_incoming,
+            weak,
+            read_error_in,
+        ));
 
         let pending = conn.pending.clone();
         let observed = Arc::downgrade(&conn);
@@ -562,6 +493,96 @@ impl Conn {
     pub async fn wait_exit(&self) {
         let mut rx = self.exited.clone();
         let _ = rx.wait_for(|e| *e).await;
+    }
+}
+
+fn adapter_command(sp: &Spawn, prefix: Option<&crate::managed::PrefixLock>) -> Command {
+    let mut cmd = Command::new(&sp.program);
+    if let Some(lease) = prefix {
+        let fd = lease.fd();
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    if sp.clean_env {
+        cmd.env_clear();
+    }
+    cmd.args(&sp.args)
+        .current_dir(&sp.cwd)
+        .envs(sp.env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        // last line of defence if the runtime is dropped without shutdown()
+        .kill_on_drop(true);
+    // the upgrade channel, the key store and the secret files are the Hub's alone
+    let given = sp
+        .env
+        .iter()
+        .map(|(k, _)| std::ffi::OsString::from(k))
+        .filter(|k| {
+            k.to_str()
+                .is_some_and(steve_vault::harness::hub_private_env)
+        });
+    for key in steve_vault::harness::hub_private_vars()
+        .into_iter()
+        .chain(given)
+        .chain(AGENT_ENV_DROPPED.into_iter().map(std::ffi::OsString::from))
+    {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
+async fn read_adapter_stdout(
+    stdout: tokio::process::ChildStdout,
+    max_frame_bytes: usize,
+    admit: impl Fn(usize) -> bool + Send + Sync + 'static,
+    on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
+    weak: std::sync::Weak<Conn>,
+    read_error_in: Arc<AtomicBool>,
+) {
+    let mut rd = BufReader::new(stdout);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = if max_frame_bytes == usize::MAX {
+            rd.read_until(b'\n', &mut line).await
+        } else {
+            (&mut rd)
+                .take(max_frame_bytes as u64 + 1)
+                .read_until(b'\n', &mut line)
+                .await
+        };
+        match read {
+            Ok(0) => break,
+            Err(_) => {
+                read_error_in.store(true, Ordering::Relaxed);
+                break;
+            }
+            Ok(_) => {}
+        }
+        let Some(c) = weak.upgrade() else { break };
+        let admitted = admit(line.len());
+        if line.len() > max_frame_bytes || !admitted {
+            c.reader_failed.store(true, Ordering::SeqCst);
+            for (_, tx) in c.pending.lock().unwrap().drain() {
+                let _ = tx.send(Err(RpcError::msg("adapter exited: frame limit")));
+            }
+            break;
+        }
+        let wait = c.dispatch(&String::from_utf8_lossy(&line), &on_incoming);
+        // not held while waiting: the Conn goes when its owner lets it go
+        drop(c);
+        if let Some(wait) = wait {
+            wait.await;
+        }
     }
 }
 
