@@ -1138,3 +1138,7 @@ impl Mail {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "send/sg17_goldens.rs"]
+mod sg17_goldens;
