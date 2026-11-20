@@ -54,12 +54,10 @@ impl gateway::ModelGateway for Inactive {
     }
 }
 
-/// Reopens the real on-disk store with a new Core/Engine. Module decision dispatch still uses the
-/// actual channel handler. Recreating this loses all Engine memory, as a Hub restart does.
+/// Rebuild Core and YOLO memory over the Modules' live Store. Decision dispatch still uses
+/// the actual channel handler; the durable writer remains shared while Modules is alive.
 pub fn engine(modules: &Modules, home: &Path, clock: Arc<dyn Clock>) -> steve_core::yolo::Engine {
-    let db = Db::new(
-        steve_store::Store::open(home.join("steve.sqlite3"), steve_store::NoPublisher).unwrap(),
-    );
+    let db = Db::new(modules.store.clone());
     let core = Core::new(
         db,
         Arc::new(Inactive),

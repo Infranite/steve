@@ -247,15 +247,21 @@ mod tests {
             )
         );
     }
+    fn current_database(path: &Path) {
+        let mut connection = rusqlite::Connection::open(path).unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut connection,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
+        connection.execute_batch("CREATE TABLE record(v);").unwrap();
+    }
     #[test]
     fn management_backup_uses_the_reason_archive_rule() {
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("steve.env"), "test fixture").unwrap();
         let db = home.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v);")
-            .unwrap();
+        current_database(&db);
         for reason in [
             Reason::Manual,
             Reason::Diagnostic,
@@ -282,10 +288,7 @@ mod tests {
         let _socket =
             std::os::unix::net::UnixListener::bind(home.path().join("signing/socket")).unwrap();
         let db = home.path().join("db.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
-            .execute_batch("CREATE TABLE record(v);")
-            .unwrap();
+        current_database(&db);
         let manifest = run(
             home.path(),
             &db,

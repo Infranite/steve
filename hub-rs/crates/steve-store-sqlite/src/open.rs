@@ -16,6 +16,12 @@ pub(crate) fn db_error(error: rusqlite::Error) -> Error {
     let code = match error.sqlite_error_code() {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Code::Busy,
         Some(rusqlite::ErrorCode::ReadOnly) => Code::Forbidden,
+        Some(rusqlite::ErrorCode::CannotOpen) => {
+            return steve_storage_api::error(
+                Code::Unavailable,
+                "storage database is missing or inaccessible",
+            );
+        }
         _ => Code::Internal,
     };
     steve_storage_api::error(code, "SQLite storage operation failed")

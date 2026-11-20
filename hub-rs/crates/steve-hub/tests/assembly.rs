@@ -774,6 +774,7 @@ async fn an_extension_declares_its_own_handle_systems() {
             "ext:probe".to_string()
         )]
     );
+    w.domain.shutdown().await;
     drop(w);
     let w = steve_hub::wire::wire_assembly(
         &h.cfg,
@@ -786,6 +787,7 @@ async fn an_extension_declares_its_own_handle_systems() {
     .expect("wire again");
     assert_eq!(rows(&w).len(), 1);
     assert_eq!(rows(&w)[0].1, "内部 ID");
+    w.domain.shutdown().await;
 }
 
 #[tokio::test]

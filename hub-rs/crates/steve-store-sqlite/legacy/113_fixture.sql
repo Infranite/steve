@@ -2424,14 +2424,14 @@ WHEN NEW.state IS NOT OLD.state OR NEW.remind_at IS NOT OLD.remind_at OR NEW.sno
     ON CONFLICT DO NOTHING;
 END;
 INSERT INTO "attention_meta"("id","epoch") VALUES(1,'00000000000000000000000000000001');
+INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_phone','*','both','phone','电话','phone','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_address','*','both','address','地址','address','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_birthday','*','contact','birthday','生日','date','[]','reasoning','builtin','active',0);
-INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_call','*','contact','call','偏好的称呼','text','[]','public','builtin','active',0);
-INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_contract','*','org','contract','合同','text','[]','reasoning','builtin','active',0);
-INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_lang','*','contact','lang','语言','text','[]','public','builtin','active',0);
-INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_phone','*','both','phone','电话','phone','[]','reasoning','builtin','active',0);
 INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_tz','*','contact','tz','时区','text','[]','public','builtin','active',0);
+INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_lang','*','contact','lang','语言','text','[]','public','builtin','active',0);
+INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_call','*','contact','call','偏好的称呼','text','[]','public','builtin','active',0);
 INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_website','*','org','website','网站','url','[]','public','builtin','active',0);
+INSERT INTO "attr_defs"("id","workspace_id","applies","key","label","type","options","default_level","source","status","created") VALUES('ad_contract','*','org','contract','合同','text','[]','reasoning','builtin','active',0);
 INSERT INTO "diagnostic_stats"("id","dropped") VALUES(1,0);
 INSERT INTO "schema_compat"("min_reader") VALUES(113);
 INSERT INTO "schema_version"("v") VALUES(113);

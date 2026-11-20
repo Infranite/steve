@@ -86,7 +86,8 @@ fn channel_backup_does_not_acquire_the_legacy_writer_mutex() {
 fn daily_backup_off_keeps_the_real_channel_cleanup_backup_capability_active() {
     let home = tempfile::tempdir().unwrap();
     let store =
-        steve_store::Store::open(home.path().join("db.sqlite3"), steve_store::NoPublisher).unwrap();
+        steve_store::Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher)
+            .unwrap();
     std::fs::write(home.path().join("steve.env"), "fixture").unwrap();
     backup::save_daily_settings(
         &store,

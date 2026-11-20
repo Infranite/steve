@@ -153,11 +153,21 @@ mod tests {
         fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o077 == 0)
     }
 
+    fn current_database(path: &Path) -> rusqlite::Connection {
+        let mut connection = rusqlite::Connection::open(path).unwrap();
+        steve_store_sqlite::migrate::initialize(
+            &mut connection,
+            &steve_store_sqlite::layout::Layout::single_file(),
+        )
+        .unwrap();
+        connection
+    }
+
     fn home() -> (tempfile::TempDir, PathBuf) {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("data/steve.sqlite3");
         fs::create_dir_all(t.path().join("data/files/a")).unwrap();
-        let c = rusqlite::Connection::open(&db).unwrap();
+        let c = current_database(&db);
         c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES ('kept');")
             .unwrap();
         (t, db)
@@ -322,8 +332,7 @@ mod tests {
     fn a_home_with_nothing_but_the_database_has_no_tar() {
         let t = tempfile::tempdir().unwrap();
         let db = t.path().join("steve.sqlite3");
-        rusqlite::Connection::open(&db)
-            .unwrap()
+        current_database(&db)
             .execute_batch("CREATE TABLE t(x);")
             .unwrap();
         let m = make(t.path(), &db, "20260102").unwrap();
@@ -336,7 +345,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let e = make(t.path(), &t.path().join("none.sqlite3"), "20260102").unwrap_err();
         assert!(format!("{e:#}").contains("database"), "{e:#}");
-        assert_eq!(fs::read_dir(t.path().join("backups")).unwrap().count(), 0);
+        assert!(!t.path().join("backups").exists());
     }
 
     #[test]

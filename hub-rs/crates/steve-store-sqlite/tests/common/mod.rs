@@ -290,9 +290,17 @@ pub fn seeds(c: &Connection, map: &Domains, domain: &str) -> String {
             .map(|s| format!("quote({})", ident(s)))
             .collect::<Vec<_>>()
             .join(" || ',' || ");
+        let has_rowid: bool = c
+            .query_row(
+                "SELECT wr=0 FROM pragma_table_list WHERE schema='main' AND name=?1",
+                [&o.name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let order = if has_rowid { "rowid" } else { &expr };
         for row in strings(
             c,
-            &format!("SELECT {expr} FROM {} ORDER BY {expr}", ident(&o.name)),
+            &format!("SELECT {expr} FROM {} ORDER BY {order}", ident(&o.name)),
         ) {
             sql.push_str(&format!("INSERT INTO {} VALUES ({row});\n", ident(&o.name)));
         }
