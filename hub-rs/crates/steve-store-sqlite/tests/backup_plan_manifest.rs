@@ -11,9 +11,7 @@ fn db(root: &Path) -> PathBuf {
     p
 }
 fn plan(root: &Path, reason: Reason) -> BackupPlan {
-    let mut p = BackupPlan::new(root.join("backups"), reason);
-    p.keep = Keep::All;
-    p
+    BackupPlan::new(root.join("backups"), reason)
 }
 fn failed_files(_: &Path, _: &Path) -> io::Result<Option<PathBuf>> {
     Err(io::Error::other("attachment disappeared"))
@@ -130,6 +128,19 @@ fn retention_is_scoped_to_completed_owned_directories_and_the_correct_purpose() 
     fs::write(out.join("daily-notes.txt"), "foreign").unwrap();
     fs::create_dir(out.join("daily-interrupted.partial")).unwrap();
     fs::create_dir(out.join("daily-foreign")).unwrap();
+    let mut newest_daily = backup(
+        &source,
+        &plan(root.path(), Reason::Daily),
+        &|_| {},
+        &CancelFlag::default(),
+    )
+    .unwrap();
+    newest_daily.created_ms = daily.created_ms + 1;
+    fs::write(
+        newest_daily.directory.join("manifest.json"),
+        serde_json::to_vec(&newest_daily).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         prune_at(&out, &Reason::Daily, daily.created_ms + 14 * 86400000).unwrap(),
         0
@@ -139,6 +150,7 @@ fn retention_is_scoped_to_completed_owned_directories_and_the_correct_purpose() 
         1
     );
     assert!(!daily.database_path().exists());
+    assert!(newest_daily.database_path().exists());
     assert!(diagnostic.database_path().exists());
     assert_eq!(
         prune(
@@ -184,7 +196,7 @@ fn database_failure_cancel_and_deadline_do_not_publish_directories() {
 }
 
 #[test]
-fn default_retention_keeps_the_current_upgrade_copy_after_a_clock_correction() {
+fn backup_publication_never_runs_retention_even_after_a_clock_correction() {
     let root = tempfile::tempdir().unwrap();
     let source = db(root.path());
     let reason = Reason::PreUpgrade {
@@ -209,7 +221,7 @@ fn default_retention_keeps_the_current_upgrade_copy_after_a_clock_correction() {
     let p = BackupPlan::new(root.path().join("backups"), reason);
     let current = backup(&source, &p, &|_| {}, &CancelFlag::default()).unwrap();
     assert!(current.database_path().exists());
-    assert_eq!(list(&p.dest_root).unwrap().len(), 8);
+    assert_eq!(list(&p.dest_root).unwrap().len(), 11);
 }
 
 #[test]
@@ -235,4 +247,37 @@ fn unfamiliar_application_schema_metadata_does_not_prevent_a_verified_copy() {
             .unwrap(),
         "keep"
     );
+}
+
+#[test]
+fn explicit_keep_all_is_persisted_and_respected_by_scheduled_retention() {
+    let root = tempfile::tempdir().unwrap();
+    let source = db(root.path());
+    let mut manual = plan(root.path(), Reason::Diagnostic);
+    manual.keep = Keep::All;
+    let mut first = backup(&source, &manual, &|_| {}, &CancelFlag::default()).unwrap();
+    assert!(first.keep_all);
+    first.created_ms = 0;
+    fs::write(
+        first.directory.join("manifest.json"),
+        serde_json::to_vec(&first).unwrap(),
+    )
+    .unwrap();
+    let latest = backup(
+        &source,
+        &plan(root.path(), Reason::Diagnostic),
+        &|_| {},
+        &CancelFlag::default(),
+    )
+    .unwrap();
+    assert!(
+        list(&manual.dest_root)
+            .unwrap()
+            .iter()
+            .find(|m| m.id == first.id)
+            .unwrap()
+            .keep_all
+    );
+    assert_eq!(retain_at(&manual.dest_root, u64::MAX).unwrap().removed, 0);
+    assert!(first.database_path().exists() && latest.database_path().exists());
 }

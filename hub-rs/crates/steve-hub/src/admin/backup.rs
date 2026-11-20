@@ -55,7 +55,7 @@ pub(crate) fn reason(args: &[String]) -> Result<Reason> {
 pub(crate) fn run(home: &Path, db: &Path, reason: Reason) -> Result<Manifest> {
     let mut plan = crate::backup::plan(home, reason);
     plan.deadline = Some(std::time::Duration::from_secs(25));
-    plan.with_files = Some(files(home));
+    plan.with_files = plan.reason.rule().with_files.then(|| files(home));
     Ok(backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?)
 }
 pub(crate) fn command(home: &Path, db: &Path, args: &[String]) -> Result<String> {
@@ -164,6 +164,33 @@ mod tests {
         );
     }
     #[test]
+    fn management_backup_uses_the_reason_archive_rule() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("steve.env"), "test fixture").unwrap();
+        let db = home.path().join("db.sqlite3");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE record(v);")
+            .unwrap();
+        for reason in [
+            Reason::Diagnostic,
+            Reason::PreUpgrade {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            Reason::PreDestructive {
+                what: "test".into(),
+            },
+        ] {
+            let manifest = run(home.path(), &db, reason.clone()).unwrap();
+            assert_eq!(
+                !manifest.files.artifacts.is_empty(),
+                reason.rule().with_files
+            );
+            assert!(manifest.files.complete && manifest.files.error.is_none());
+        }
+    }
+    #[test]
     fn a_real_archive_error_marks_files_incomplete_and_keeps_the_database() {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("signing")).unwrap();
@@ -174,7 +201,14 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE record(v);")
             .unwrap();
-        let manifest = run(home.path(), &db, Reason::Diagnostic).unwrap();
+        let manifest = run(
+            home.path(),
+            &db,
+            Reason::PreDestructive {
+                what: "test".into(),
+            },
+        )
+        .unwrap();
         assert!(manifest.completed && manifest.database_path().exists());
         assert!(!manifest.files.complete);
         assert!(manifest.files.error.is_some());

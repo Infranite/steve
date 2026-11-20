@@ -31,6 +31,9 @@ pub struct Manifest {
     pub files: Files,
     /// A verified database and durable manifest were published. Files may be incomplete.
     pub completed: bool,
+    /// Explicit Keep::All copies are never automatically retired.
+    #[serde(default)]
+    pub keep_all: bool,
 }
 impl Manifest {
     pub fn database_path(&self) -> PathBuf {
@@ -41,4 +44,6 @@ impl Manifest {
 pub struct Usage {
     pub count: u64,
     pub bytes: u64,
+    pub over_limit: bool,
+    pub latest_over_limit: bool,
 }

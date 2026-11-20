@@ -562,6 +562,7 @@ async fn bootstrap_owner_uses_the_cli_environment_instead_of_the_services_enviro
 #[tokio::test]
 async fn backup_command_uses_the_live_socket_and_management_inventory() {
     let hub = Hub::start(false);
+    std::fs::write(hub.cfg.home.join("steve.env"), "fixture").unwrap();
     let result = hub.cli(&["backup", "--reason", "diagnostic"]).await;
     assert_eq!(result.code, 0, "{}", result.stderr);
     let manifest: steve_store_sqlite::backup::Manifest =
@@ -571,6 +572,8 @@ async fn backup_command_uses_the_live_socket_and_management_inventory() {
         manifest.reason,
         steve_store_sqlite::backup::Reason::Diagnostic
     ));
+    assert!(manifest.files.artifacts.is_empty());
+    assert!(!manifest.directory.join("files.tar").exists());
     let path = access::admin_socket_path(&hub.cfg.home).unwrap();
     let usage = tokio::task::spawn_blocking(move || {
         let mut socket = UnixStream::connect(path).unwrap();

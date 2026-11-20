@@ -11,8 +11,8 @@ const INTERVAL: Duration = Duration::from_secs(5 * 60);
 const OPTIMIZE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SLICES_PER_POLICY: usize = 4;
 
-install! { install(reg, _cx) [db, mut jobs] => [db, jobs] {
-    jobs.push(Job::new("storage.retention", run(db.clone())));
+install! { install(reg, cx) [db, mut jobs] => [db, jobs] {
+    jobs.push(Job::new("storage.retention", run(db.clone(), cx.cfg.home.join("backups"))));
 }}
 
 struct State {
@@ -20,32 +20,38 @@ struct State {
     optimize_due: i64,
     after: [Option<i64>; ALL.len()],
     done: [bool; ALL.len()],
+    resources_done: bool,
 }
-struct Source<F, O> {
+struct Source<F, O, R> {
     execute: F,
     optimize: O,
+    resources: R,
     state: Mutex<State>,
 }
-impl<F, O> Source<F, O> {
-    fn new(first_due: i64, execute: F, optimize: O) -> Self {
+impl<F, O, R> Source<F, O, R> {
+    fn new(first_due: i64, execute: F, optimize: O, resources: R) -> Self {
         Self {
             execute,
             optimize,
+            resources,
             state: Mutex::new(State {
                 due: first_due,
                 optimize_due: first_due.saturating_add(OPTIMIZE_INTERVAL.as_millis() as i64),
                 after: [None; ALL.len()],
                 done: [false; ALL.len()],
+                resources_done: false,
             }),
         }
     }
 }
-impl<F, O, Fut, Opt> DueSource for Source<F, O>
+impl<F, O, R, Fut, Opt, Res> DueSource for Source<F, O, R>
 where
     F: Fn(Kind, i64, Option<i64>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = steve_store::Result<SliceReport<i64>>> + Send,
     O: Fn() -> Opt + Send + Sync + 'static,
     Opt: Future<Output = steve_store::Result<()>> + Send,
+    R: Fn(i64) -> Res + Send + Sync + 'static,
+    Res: Future<Output = steve_store::Result<bool>> + Send,
 {
     fn name(&self) -> &'static str {
         "storage.retention"
@@ -99,10 +105,29 @@ where
                     }
                 }
             }
+            // Filesystem resources share this Source and its retry/continuation cadence,
+            // but run outside SQLite row policies and all database write grants.
+            let resources_done = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .resources_done;
+            if !resources_done {
+                match (self.resources)(now).await {
+                    Ok(more) => {
+                        self.state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .resources_done = !more
+                    }
+                    Err(e) => error = Some(DueError(e.to_string())),
+                }
+            }
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.done.iter().all(|v| *v) {
+            if state.done.iter().all(|v| *v) && state.resources_done {
                 state.due = now.saturating_add(INTERVAL.as_millis() as i64);
                 state.done.fill(false);
+                state.resources_done = false;
             } else {
                 state.due = now;
             }
@@ -110,7 +135,7 @@ where
         error.map_or(Ok(()), Err)
     }
 }
-async fn run(db: steve_store::Store) {
+async fn run(db: steve_store::Store, backups: std::path::PathBuf) {
     let clock = Arc::new(SystemClock);
     let optimizer = db.clone();
     let source = Arc::new(Source::new(
@@ -131,6 +156,18 @@ async fn run(db: steve_store::Store) {
                 tokio::task::spawn_blocking(move || db.optimize())
                     .await
                     .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
+            }
+        },
+        move |now: i64| {
+            let root = backups.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    steve_store_sqlite::backup::retain_at(&root, now.max(0) as u64)
+                        .map(|report| report.more)
+                        .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))
+                })
+                .await
+                .map_err(|e| steve_store::StoreError::Conflict(e.to_string()))?
             }
         },
     ));
@@ -209,10 +246,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_retries_resources_without_replaying_completed_row_policies() {
+        let rows = Arc::new(AtomicUsize::new(0));
+        let resources = Arc::new(AtomicUsize::new(0));
+        let row_calls = rows.clone();
+        let resource_calls = resources.clone();
+        let source = Source::new(
+            0,
+            move |_: Kind, _: i64, _: Option<i64>| {
+                row_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok(SliceReport {
+                        affected: 0,
+                        inspected: 0,
+                        elapsed_ms: 0,
+                        overruns: 0,
+                        failures: 0,
+                        next: None,
+                    })
+                }
+            },
+            || async { Ok(()) },
+            move |_: i64| {
+                let first = resource_calls.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    if first {
+                        Err(steve_store::StoreError::Conflict(
+                            "retry filesystem I/O".into(),
+                        ))
+                    } else {
+                        Ok(false)
+                    }
+                }
+            },
+        );
+        assert!(source.run_due(0).await.is_err());
+        assert_eq!(source.next_due().await.unwrap(), Some(0));
+        source.run_due(1).await.unwrap();
+        assert_eq!(rows.load(Ordering::SeqCst), ALL.len());
+        assert_eq!(resources.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            source.next_due().await.unwrap(),
+            Some(1 + INTERVAL.as_millis() as i64)
+        );
+    }
+
+    #[tokio::test]
     async fn retention_continues_cursors_and_optimizes_hourly_on_virtual_time() {
         let clock = Arc::new(FakeClock::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let optimized = Arc::new(AtomicUsize::new(0));
+        let resources = Arc::new(AtomicUsize::new(0));
+        let resource_calls = resources.clone();
         let observed = calls.clone();
         let count_opt = optimized.clone();
         let source = Arc::new(Source::new(
@@ -238,6 +323,10 @@ mod tests {
             move || {
                 count_opt.fetch_add(1, Ordering::SeqCst);
                 async { Ok(()) }
+            },
+            move |_: i64| {
+                let n = resource_calls.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(n == 0) }
             },
         ));
         assert_eq!(source.name(), "storage.retention");
@@ -266,6 +355,11 @@ mod tests {
         );
         assert_eq!(optimized.load(Ordering::SeqCst), 0);
         assert_eq!(
+            resources.load(Ordering::SeqCst),
+            2,
+            "resource continuation uses the same Source"
+        );
+        assert_eq!(
             source.next_due().await.unwrap(),
             Some(100 + INTERVAL.as_millis() as i64)
         );
@@ -274,6 +368,7 @@ mod tests {
         settle(&clock, hour).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2 * sweep);
         assert_eq!(optimized.load(Ordering::SeqCst), 1);
+        assert_eq!(resources.load(Ordering::SeqCst), 3);
         clock.advance_to(hour + INTERVAL.as_millis() as i64);
         settle(&clock, hour + INTERVAL.as_millis() as i64).await;
         assert_eq!(

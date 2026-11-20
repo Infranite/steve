@@ -7,7 +7,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use steve_store_sqlite::backup::{self, CancelFlag, Reason};
-pub const KEEP_DAYS: u64 = 14;
 const FROM_MINUTE: u32 = 3 * 60 + 30;
 const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(300);
@@ -53,18 +52,14 @@ pub fn due(home: &Path, day: &str, minute: u32) -> bool {
 pub struct Made {
     pub database: PathBuf,
     pub files: Option<PathBuf>,
-    pub removed: usize,
 }
 pub fn make(home: &Path, db: &Path, _day: &str) -> Result<Made> {
     let mut plan = crate::backup::plan(home, Reason::Daily);
-    plan.keep = backup::Keep::All;
-    plan.with_files = Some(crate::admin::client::backup::files(home));
+    plan.with_files = plan.reason.rule().with_files.then(|| crate::admin::client::backup::files(home));
     let m = backup::backup(db, &plan, &|_| {}, &CancelFlag::default())?;
-    let removed = backup::prune(&plan.dest_root, &Reason::Daily)?;
     Ok(Made {
         database: m.database_path(),
         files: m.files.artifacts.first().map(|a| m.directory.join(&a.name)),
-        removed,
     })
 }
 pub fn status(home: &Path, db: &Path, on: bool) -> Value {
@@ -75,7 +70,8 @@ pub fn status(home: &Path, db: &Path, on: bool) -> Value {
         .rev()
         .find(|m| m.reason == Reason::Daily)
         .map(|m| json!({"name":m.id,"at":m.created_ms,"bytes":m.database.bytes}));
-    json!({"database":db,"dir":out,"daily":on,"keep_days":KEEP_DAYS,"last":last,"purposes":backup::usage(&out).unwrap_or_default()})
+    let retention = backup::retention_status(&out).unwrap_or_default();
+    json!({"database":db,"dir":out,"daily":on,"keep_days":Reason::Daily.rule().days,"last":last,"purposes":retention.purposes,"retention":{"bytes":retention.bytes,"max_bytes":retention.max_bytes,"over_limit":retention.over_limit,"rules":backup::RULES}})
 }
 /// The background loop (a Hub job): looks every ten minutes whether the day's copy is due.
 pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
@@ -93,14 +89,13 @@ pub async fn run(home: PathBuf, db: PathBuf, on: bool) {
             let (h, d) = (home.clone(), db.clone());
             match tokio::task::spawn_blocking(move || make(&h, &d, &day)).await {
                 Ok(Ok(m)) => tracing::info!(
-                    "daily backup: {}{}, {} old removed",
+                    "daily backup: {}{}",
                     m.database.display(),
                     if m.files.is_some() {
                         " and its files"
                     } else {
                         ""
-                    },
-                    m.removed
+                    }
                 ),
                 Ok(Err(e)) => {
                     tracing::warn!("daily backup: {e:#}; trying again in an hour");
@@ -192,7 +187,6 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("daily-")
         );
-        assert_eq!(m.removed, 0);
         let c = rusqlite::Connection::open(&m.database).unwrap();
         let x: String = c.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(x, "kept");
@@ -318,17 +312,42 @@ mod tests {
     fn only_completed_directories_participate_in_retention() {
         let (t, db) = home();
         let made = make(t.path(), &db, "today").unwrap();
+        let path = made.database.parent().unwrap().join("manifest.json");
+        let mut manifest: backup::Manifest =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.created_ms = 0;
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        make(t.path(), &db, "newest").unwrap();
         let root = dir(t.path());
         fs::write(root.join("daily-notes.txt"), "foreign").unwrap();
         let removed = backup::prune_at(
             &root,
             &Reason::Daily,
-            backup::plan::now_ms() + (KEEP_DAYS + 1) * 86400000,
+            backup::plan::now_ms() + (Reason::Daily.rule().days + 1) * 86400000,
         )
         .unwrap();
         assert_eq!(removed, 1);
         assert!(!made.database.exists());
         assert!(root.join("daily-notes.txt").exists());
+    }
+    #[test]
+    fn daily_backup_only_publishes_and_the_retention_runner_cleans_later() {
+        let (t, db) = home();
+        let first = make(t.path(), &db, "first").unwrap();
+        let path = first.database.parent().unwrap().join("manifest.json");
+        let mut manifest: backup::Manifest =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.created_ms = 0;
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let latest = make(t.path(), &db, "latest").unwrap();
+        assert!(first.database.exists());
+        assert_eq!(
+            backup::retain_at(&dir(t.path()), backup::plan::now_ms())
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(!first.database.exists() && latest.database.exists());
     }
     #[test]
     fn status_names_the_places_and_the_newest_copy() {
@@ -344,6 +363,9 @@ mod tests {
         make(t.path(), &db, "20260103").unwrap();
         let v = status(t.path(), &db, false);
         assert_eq!(v["daily"], false);
+        assert_eq!(v["keep_days"], Reason::Daily.rule().days);
+        assert_eq!(v["retention"]["max_bytes"], backup::TOTAL_BYTES);
+        assert_eq!(v["retention"]["over_limit"], false);
         assert!(v["last"]["name"].as_str().unwrap().starts_with("daily-"));
         assert!(v["last"]["bytes"].as_u64().unwrap() > 0 && v["last"]["at"].as_u64().unwrap() > 0);
     }
