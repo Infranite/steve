@@ -1,0 +1,1 @@
+Digest queue-triggered schedules stop retrying after three startup failures in the same configuration. Editing the bound schedule or Bot opens a new retry budget. A bad schedule is isolated from other workspaces, and ordinary scheduled or manual runs stay enabled.

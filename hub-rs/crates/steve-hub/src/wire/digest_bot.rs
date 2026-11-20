@@ -66,6 +66,8 @@ async fn bind(
 
 /// The ordinary flow scheduler remains the Bot's execution and policy boundary.
 struct Runner(Arc<FlowCx>);
+const BOT_SOURCE: &str = "digest.bot";
+const START_LIMIT: i64 = 3;
 
 fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64)>> {
     let Some(id) = bot::schedule(c, ws)? else {
@@ -99,6 +101,14 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
     if busy {
         return Ok(None);
     }
+    let Some(revision) = steve_flow::scheduler::startup_revision(c, ws, &id)? else {
+        return Ok(None);
+    };
+    if runs::startup_state(c, ws, &id, BOT_SOURCE, &revision)?
+        .is_some_and(|state| state.state == runs::StartupStatus::Dead)
+    {
+        return Ok(None);
+    }
     // A skipped/failed/empty run must not immediately start again while packets still wait.
     // All runs (including cron/manual starts) share this minute, using durable run history.
     let last: Option<i64> = c.query_row(
@@ -113,6 +123,8 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
 }
 
 impl Runner {
+    // Storage-history probes use a larger budget; production starts always use START_LIMIT.
+    #[cfg(test)]
     fn failed_start(
         &self,
         ws: &str,
@@ -120,10 +132,6 @@ impl Runner {
         now: i64,
         error: ApiError,
     ) -> Result<(), steve_store::StoreError> {
-        // ApiError::Internal is the flow API's storage/bug boundary, not a row rejection.
-        if let ApiError::Internal(reason) = error {
-            return Err(steve_store::StoreError::Hook(reason));
-        }
         let reason = error.to_string();
         self.0
             .store()
@@ -132,13 +140,17 @@ impl Runner {
                 let Some(schedule) = schedules::get(tx, ws, id)? else {
                     return Ok(());
                 };
+                let revision =
+                    steve_flow::scheduler::startup_revision(tx, ws, id)?.expect("test schedule");
                 runs::record_start_failure(
                     tx,
                     &runs::FailedStart {
                         ws,
                         flow_id: &schedule.id,
                         flow_version: schedule.version,
-                        source: "digest.bot",
+                        source: BOT_SOURCE,
+                        revision: &revision,
+                        limit: 10_000,
                         error: &reason,
                         now,
                     },
@@ -166,21 +178,20 @@ impl queue::BotRunner for Runner {
             .map_err(|e| steve_store::StoreError::Hook(e.to_string()))
     }
     fn start(&self, ws: &str, now: i64) -> Result<(), steve_store::StoreError> {
-        let due = self
-            .0
-            .store()
-            .reader(|c| runnable(c, ws))
-            .map_err(|e| steve_store::StoreError::Hook(e.to_string()))?;
-        if let Some((id, at)) = due
-            && at <= now
-        {
-            match steve_flow::scheduler::start_manual(&self.0, ws, &id) {
-                Ok((run, true)) => {
-                    drop(steve_flow::scheduler::spawn_drive(self.0.clone(), run));
-                }
-                Ok((_, false)) => {}
-                Err(error) => self.failed_start(ws, &id, now, error)?,
-            }
+        let Some(id) = self.0.store().reader(|c| bot::schedule(c, ws))? else {
+            return Ok(());
+        };
+        let outcome = steve_flow::scheduler::start_from_source(
+            &self.0,
+            ws,
+            &id,
+            BOT_SOURCE,
+            START_LIMIT,
+            now,
+            |c| Ok(runnable(c, ws)?.is_some_and(|(bound, at)| bound == id && at <= now)),
+        )?;
+        if let Some((run, true)) = outcome {
+            drop(steve_flow::scheduler::spawn_drive(self.0.clone(), run));
         }
         Ok(())
     }
@@ -416,24 +427,27 @@ mod tests {
         );
         let last = &rows[0];
         assert_eq!(last.id, first.id);
-        assert_eq!(last.context["start_failures"], 1440);
+        assert_eq!(last.context["start_failures"], START_LIMIT);
         assert_eq!(last.context["first_at"], now);
         let view = last.view();
-        assert_eq!(view.start_failures, Some(1440));
-        assert_eq!(serde_json::to_value(&view).unwrap()["start_failures"], 1440);
+        assert_eq!(view.start_failures, Some(START_LIMIT));
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["start_failures"],
+            START_LIMIT
+        );
         assert_eq!(view.error, last.error);
         assert_eq!(
             last.attempts, 0,
             "flow action retry attempts are independent"
         );
-        assert_eq!(last.started, now + 1439 * 60_000);
+        assert_eq!(last.started, now + (START_LIMIT - 1) * 60_000);
         assert_eq!(last.ended, Some(last.started));
         assert_eq!(
             last.view().at,
             last.started,
             "the run list shows the latest failure time"
         );
-        assert_eq!(source.next_due().await.unwrap(), Some(now + 1440 * 60_000));
+        assert_eq!(source.next_due().await.unwrap(), None);
         source.run_due(e.env.clock.now()).await.unwrap();
         assert_eq!(
             history(),
@@ -618,6 +632,200 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    struct StartupRequests {
+        env: FlowEnv,
+        source: Arc<queue::BotSource<Runner>>,
+    }
+    impl StartupRequests {
+        fn new() -> Self {
+            let env = FlowEnv::new();
+            env.env.clock.set(1_800_000_000_000);
+            let source = Arc::new(queue::BotSource::new(
+                &env.env.modules,
+                Runner(env.flow.clone()),
+            ));
+            Self { env, source }
+        }
+        fn recorded(&self, state: &str) -> Vec<String> {
+            self.env.env.store().reader(|c| -> Result<_,steve_store::StoreError> {
+                Ok(c.prepare("SELECT DISTINCT workspace_id FROM flow_runs WHERE json_extract(context,'$.source')='digest.bot' AND json_extract(context,'$.startup.state')=?")?
+                    .query_map([state],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+            }).unwrap()
+        }
+    }
+    impl steve_runtime::due::contract::Fixture for StartupRequests {
+        type Source = queue::BotSource<Runner>;
+        fn source(&self) -> &Self::Source {
+            &self.source
+        }
+        fn batch(&self) -> usize {
+            queue::BOT_BATCH
+        }
+        fn add(&self, at: i64, poison: bool) -> String {
+            let ws = steve_store::uid("ws");
+            self.env.env.store().transaction(|tx| -> ApiResult<()> {
+                tx.execute("INSERT INTO workspaces (id,name,created) VALUES (?,'startup contract',1)",[&ws])?;
+                tx.execute("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES (?,?,'owner',1)",params![ws,ME])?;
+                tx.execute("INSERT INTO bot_workspaces (bot_id,workspace_id,created) VALUES ('steve',?,1)",[&ws])?;
+                let spec: schedules::Spec=serde_json::from_value(json!({"when":"fixture","cron":"*/30 * * * *","tz":"UTC","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME})).unwrap();
+                let id=schedules::insert(tx,&ws,ME,&schedules::Fields{name:"startup contract",spec:&spec,enabled:true},&schedules::Origin::default(),at-60_000)?;
+                tx.execute("INSERT INTO settings (workspace_id,key,value,updated) VALUES (?, ?, ?, 1)",params![ws,bot::SCHEDULE,id])?;
+                if poison {tx.execute("UPDATE flows SET graph='broken json' WHERE id=?",[&id])?;}
+                Ok(())
+            }).unwrap();
+            packet(&self.env, &ws, at);
+            ws
+        }
+        fn done(&self) -> Vec<String> {
+            self.recorded("started")
+        }
+        fn dead(&self) -> Vec<String> {
+            self.recorded("dead")
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_failures_pass_the_bounded_due_contract_with_real_flow_history() {
+        steve_runtime::due::contract::check(
+            StartupRequests::new,
+            1_800_000_000_000,
+            START_LIMIT as u32,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_startups_revive_only_after_schedule_or_bot_edits() {
+        use steve_runtime::{Clock, due::DueSource};
+        for repair in ["schedule", "name", "bot", "binding"] {
+            let (e, id) = bound().await;
+            let now = e.env.clock.now();
+            let original = e
+                .env
+                .store()
+                .reader(|c| -> Result<String, steve_store::StoreError> {
+                    Ok(c.query_row("SELECT graph FROM flows WHERE id=?", [&id], |r| r.get(0))?)
+                })
+                .unwrap();
+            packet(&e, WS, now);
+            e.env
+                .store()
+                .with_conn(|c| {
+                    c.execute("UPDATE flows SET graph=x'01' WHERE id=?", [&id])?;
+                    Ok(())
+                })
+                .unwrap();
+            let source = queue::BotSource::new(&e.env.modules, Runner(e.flow.clone()));
+            for _ in 0..START_LIMIT {
+                source
+                    .run_due(e.env.clock.now())
+                    .await
+                    .expect("a corrupt graph column is a row failure");
+                e.env.clock.advance(60_000);
+            }
+            assert_eq!(source.next_due().await.unwrap(), None);
+            let history = || {
+                e.env
+                    .store()
+                    .reader(|c| runs::page(c, WS, &id, None, 50))
+                    .unwrap()
+            };
+            let before = history();
+            assert_eq!(before[0].context["startup"]["attempts"], START_LIMIT);
+            assert_eq!(before[0].context["startup"]["state"], "dead");
+            source
+                .run_due(e.env.clock.now() + 86_400_000)
+                .await
+                .unwrap();
+            assert_eq!(
+                history(),
+                before,
+                "elapsed time and direct calls do not revive dead starts"
+            );
+            e.env
+                .store()
+                .with_conn(|c| {
+                    c.execute("UPDATE flows SET graph=? WHERE id=?", params![original, id])?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                source.next_due().await.unwrap(),
+                None,
+                "an unversioned write is not an owner revision"
+            );
+            match repair {
+                "schedule" | "name" => {
+                    e.env
+                        .store()
+                        .transaction(|tx| -> ApiResult<()> {
+                            let old = schedules::own(tx, WS, &id)?;
+                            let mut spec = old.spec.clone();
+                            if repair == "schedule" {
+                                spec.what = "Repaired digest".into();
+                            }
+                            let name = if repair == "name" {
+                                "Renamed digest"
+                            } else {
+                                &old.name
+                            };
+                            schedules::update(
+                                tx,
+                                &old,
+                                &schedules::Fields {
+                                    name,
+                                    spec: &spec,
+                                    enabled: true,
+                                },
+                                ME,
+                                "owner repair",
+                                e.env.clock.now(),
+                            )?;
+                            if repair == "name" {
+                                let changed = schedules::own(tx, WS, &id)?;
+                                assert_eq!(
+                                    changed.version, old.version,
+                                    "name-only edit keeps the graph version"
+                                );
+                                assert!(changed.updated > old.updated);
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                "bot" => {
+                    let patch =
+                        serde_json::from_value(json!({"role":"Repaired organizer"})).unwrap();
+                    e.env.store().bots().patch("steve", &patch, ME).unwrap();
+                }
+                _ => {
+                    let (status,schedule)=call(&e.router(),Some(&caller(WS,ME)),"POST","/schedules",Some(&json!({"name":"replacement","cron":"*/30 * * * *","what":"Organize","bot":"steve","mode":"item_auto","overlap":"skip","requester":ME}))).await;
+                    assert_eq!(status, 200, "{schedule}");
+                    let api = routes(e.flow.clone()).with_state(e.env.modules.clone());
+                    let (status, value) = call(
+                        &api,
+                        Some(&caller(WS, ME)),
+                        "PUT",
+                        "/digest/bot",
+                        Some(&json!({"schedule_id":schedule["id"]})),
+                    )
+                    .await;
+                    assert_eq!(status, 200, "{value}");
+                }
+            }
+            assert!(
+                source.next_due().await.unwrap().is_some(),
+                "{repair}: new configuration is eligible"
+            );
+            source.run_due(e.env.clock.now()).await.unwrap();
+            let started:i64=e.env.store().reader(|c| -> Result<_,steve_store::StoreError> {Ok(c.query_row("SELECT count(*) FROM flow_runs WHERE workspace_id=? AND json_extract(context,'$.startup.state')='started'",[WS],|r|r.get(0))?)}).unwrap();
+            assert_eq!(
+                started, 1,
+                "{repair}: a real ordinary schedule start is persisted"
+            );
+        }
     }
 
     #[tokio::test]

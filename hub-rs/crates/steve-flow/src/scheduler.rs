@@ -25,6 +25,53 @@ pub const BATCH: usize = 200;
 /// Error of a run that was in the middle of its action when the Hub stopped.
 pub const INTERRUPTED: &str = "Hub 重启时这一步可能没有完成";
 
+/// Keep row decoding failures distinct from a failing storage engine until the source boundary.
+#[derive(Debug, thiserror::Error)]
+enum StartError {
+    #[error("{0}")]
+    Row(crate::FlowError),
+    #[error("{0}")]
+    Storage(steve_store::StoreError),
+}
+type StartResult<T> = Result<T, StartError>;
+impl From<rusqlite::Error> for StartError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e {
+            rusqlite::Error::InvalidColumnType(..)
+            | rusqlite::Error::FromSqlConversionFailure(..)
+            | rusqlite::Error::IntegralValueOutOfRange(..) => Self::Row(e.into()),
+            _ => Self::Storage(e.into()),
+        }
+    }
+}
+impl From<steve_store::StoreError> for StartError {
+    fn from(e: steve_store::StoreError) -> Self {
+        match e {
+            steve_store::StoreError::Sqlite(e) => e.into(),
+            _ => Self::Storage(e),
+        }
+    }
+}
+impl From<crate::FlowError> for StartError {
+    fn from(e: crate::FlowError) -> Self {
+        match e {
+            ApiError::Internal(reason) => Self::Storage(steve_store::StoreError::Hook(reason)),
+            _ => Self::Row(e),
+        }
+    }
+}
+impl From<StartError> for crate::FlowError {
+    fn from(e: StartError) -> Self {
+        match e {
+            StartError::Row(e) => e,
+            StartError::Storage(e) => e.into(),
+        }
+    }
+}
+fn source_error(e: crate::FlowError) -> steve_store::StoreError {
+    steve_store::StoreError::Hook(e.to_string())
+}
+
 /// What the scheduler needs to know about a flow to start a run of it.
 #[derive(Debug, Clone)]
 struct FlowInfo {
@@ -38,7 +85,7 @@ struct FlowInfo {
     tz: Option<String>,
 }
 
-fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
+fn flow_info(c: &Connection, flow_id: &str) -> StartResult<Option<FlowInfo>> {
     let row: Option<(String, String, i64, String, Option<String>)> = c
         .query_row(
             "SELECT id, workspace_id, version, graph, schedule FROM flows WHERE id = ? AND deleted = 0",
@@ -56,8 +103,9 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
         id,
         ws,
         version,
-        graph: serde_json::from_str(&graph)
-            .map_err(|e| ApiError::rule(format!("Invalid stored flow graph: {e}")))?,
+        graph: serde_json::from_str(&graph).map_err(|e| {
+            StartError::Row(ApiError::rule(format!("Invalid stored flow graph: {e}")))
+        })?,
         overlap: OverlapPolicy::from_db(schedule["overlap"].as_str()),
         budget_usd: schedule["budget_usd"].as_f64().unwrap_or(0.0),
         tz: schedule["tz"].as_str().map(String::from),
@@ -67,7 +115,7 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
 /// The item a run of `flow_id` made that is not closed yet, newest first (#223): one open run per
 /// schedule. Found by the run's own record or by the `from` link its item carries, so it holds
 /// across restarts; an archived or removed item counts as over.
-fn open_item(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<Option<String>> {
+fn open_item(c: &Connection, ws: &str, flow_id: &str) -> StartResult<Option<String>> {
     Ok(c.query_row(
         "SELECT x.item FROM (
              SELECT r.work_item_id AS item, r.started AS at FROM flow_runs r
@@ -118,7 +166,7 @@ struct Start<'a> {
 
 /// Inserts the run row (and the trigger step), or a `skipped` row when the previous run is still
 /// going and the overlap rule says skip. Returns the run id and whether it should be driven.
-fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool)> {
+fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> StartResult<(String, bool)> {
     let mut context =
         json!({ "at": s.at, "trigger": s.kind.as_str(), "budget_limit": f.budget_usd });
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
@@ -132,7 +180,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
         if let Some(ctx) = context.as_object_mut() {
             ctx.insert("open_item".into(), json!(item));
         }
-        let id = runs::insert(
+        let id = runs::insert_stored(
             tx,
             &NewRun {
                 ws: &f.ws,
@@ -152,7 +200,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
     }
     let active = runs::active_exists(tx, &f.ws, &f.id)?;
     if overlap_blocks(f.overlap, active.then_some("running")) {
-        let id = runs::insert(
+        let id = runs::insert_stored(
             tx,
             &NewRun {
                 ws: &f.ws,
@@ -170,7 +218,7 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
         return Ok((id, false));
     }
     let cursor = after_trigger(&f.graph, s.trigger_node);
-    let id = runs::insert(
+    let id = runs::insert_stored(
         tx,
         &NewRun {
             ws: &f.ws,
@@ -234,7 +282,7 @@ fn claim(tx: &Tx, d: &Due, now: i64) -> FlowResult<Option<(String, bool)>> {
         return Ok(None);
     };
     let plan = plan_claim(&expr, tz, d.next_at, now, d.missed);
-    let f = match flow_info(tx, &d.flow_id) {
+    let f = match flow_info(tx, &d.flow_id).map_err(crate::FlowError::from) {
         Ok(Some(f)) => f,
         Ok(None) => return Ok(None),
         Err(e) if e.status() < 500 => {
@@ -373,30 +421,113 @@ pub(crate) fn claim_retries(cx: &FlowCx, now: i64) -> FlowResult<Claims> {
 /// `POST /schedules/:id/run`: a manual run now. Leaves `next_at` alone; the overlap rule applies.
 /// Returns the run id and whether it was started (`false` = written as skipped).
 pub fn start_manual(cx: &FlowCx, ws: &str, flow_id: &str) -> FlowResult<(String, bool)> {
-    let now = cx.now();
-    cx.store().transaction(|tx| {
-        let f = flow_info(tx, flow_id)?
-            .filter(|f| f.ws == ws)
-            .ok_or_else(|| ApiError::not_found("定时任务"))?;
-        let trigger: String = tx
-            .query_row(
-                "SELECT node_id FROM flow_triggers WHERE flow_id = ? AND kind = 'time' LIMIT 1",
-                [flow_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or_else(|| "t".into());
-        start(
-            tx,
-            &f,
-            &Start {
-                kind: TriggerKind::Manual,
-                at: now,
-                extra: json!({}),
-                trigger_node: &trigger,
-            },
-            now,
+    cx.store()
+        .transaction(|tx| start_manual_in(tx, ws, flow_id, cx.now()).map_err(Into::into))
+}
+
+fn start_manual_in(tx: &Tx, ws: &str, flow_id: &str, now: i64) -> StartResult<(String, bool)> {
+    let f = flow_info(tx, flow_id)?
+        .filter(|f| f.ws == ws)
+        .ok_or_else(|| StartError::Row(ApiError::not_found("定时任务")))?;
+    let trigger: String = tx
+        .query_row(
+            "SELECT node_id FROM flow_triggers WHERE flow_id = ? AND kind = 'time' LIMIT 1",
+            [flow_id],
+            |r| r.get(0),
         )
+        .optional()?
+        .unwrap_or_else(|| "t".into());
+    start(
+        tx,
+        &f,
+        &Start {
+            kind: TriggerKind::Manual,
+            at: now,
+            extra: json!({}),
+            trigger_node: &trigger,
+        },
+        now,
+    )
+}
+
+/// Schedule.updated is an existing strictly increasing edit revision, not wall-clock precision.
+/// Notification contents and ordinary run history never change this configuration identity.
+pub fn startup_revision(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<Value>> {
+    let Some(s) = crate::schedules::get(c, ws, id)? else {
+        return Ok(None);
+    };
+    let bot_revision: Option<i64> = c
+        .query_row(
+            "SELECT revision FROM bots WHERE id=? AND deleted=0",
+            [&s.spec.bot],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(Some(
+        json!({"workspace":ws,"flow":id,"flow_version":s.version,"flow_updated":s.updated,
+        "bot":s.spec.bot,"bot_revision":bot_revision}),
+    ))
+}
+
+/// Queue-driven starts share ordinary manual execution. Recheck authorization and configuration
+/// under the same outer transaction; reject row data locally and preserve genuine storage faults.
+pub fn start_from_source(
+    cx: &FlowCx,
+    ws: &str,
+    id: &str,
+    source: &str,
+    limit: i64,
+    now: i64,
+    ready: impl FnOnce(&Connection) -> FlowResult<bool>,
+) -> steve_store::Result<Option<(String, bool)>> {
+    cx.store().transaction(|tx| {
+        if !ready(tx).map_err(source_error)? {
+            return Ok(None);
+        }
+        let Some(revision) = startup_revision(tx, ws, id).map_err(source_error)? else {
+            return Ok(None);
+        };
+        let state = runs::startup_state(tx, ws, id, source, &revision).map_err(source_error)?;
+        if state.is_some_and(|s| s.state == runs::StartupStatus::Dead) {
+            return Ok(None);
+        }
+        // Store's nested transaction is a savepoint: no partial attempt/events survive rejection.
+        match cx
+            .store()
+            .transaction(|attempt| start_manual_in(attempt, ws, id, now))
+        {
+            Ok((run, go)) => {
+                if go {
+                    runs::record_started(tx, &run, source, &revision, limit)
+                        .map_err(source_error)?;
+                }
+                Ok(Some((run, go)))
+            }
+            Err(StartError::Row(error)) => {
+                runs::record_start_failure(
+                    tx,
+                    &runs::FailedStart {
+                        ws,
+                        flow_id: id,
+                        flow_version: revision["flow_version"].as_i64().expect("flow revision"),
+                        source,
+                        error: &error.to_string(),
+                        now,
+                        revision: &revision,
+                        limit,
+                    },
+                )
+                .map_err(source_error)?;
+                tracing::warn!(
+                    workspace = ws,
+                    flow = id,
+                    source,
+                    "schedule startup rejected: {error}"
+                );
+                Ok(None)
+            }
+            Err(StartError::Storage(error)) => Err(error),
+        }
     })
 }
 

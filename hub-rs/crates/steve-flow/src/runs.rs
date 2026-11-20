@@ -9,7 +9,10 @@ use steve_store::{Tx, uid};
 use crate::FlowResult;
 
 mod start_failures;
-pub use start_failures::{FailedStart, record_start_failure};
+pub use start_failures::{
+    FailedStart, StartupState, StartupStatus, StartupSummary, record_start_failure, record_started,
+    startup_state,
+};
 
 /// Runs kept per schedule regardless of age, and the age below which every run is kept.
 pub const KEEP_RUNS: i64 = 200;
@@ -96,6 +99,8 @@ impl RunRow {
             cost_usd: self.cost,
             error: self.error.clone(),
             start_failures: self.context.get("start_failures").and_then(Value::as_i64),
+            first_at: self.context.get("first_at").and_then(Value::as_i64),
+            startup: start_failures::summary(&self.context),
         }
     }
 }
@@ -116,6 +121,12 @@ pub struct RunView {
     /// Consecutive startup rejections represented by this entry, when counted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_failures: Option<i64>,
+    /// First rejection represented by this entry; started/ended describe its latest occurrence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_at: Option<i64>,
+    /// Historical budget at this run, not the current configuration's liveness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup: Option<StartupSummary>,
 }
 
 /// Connector-facing projection of canonical flow runs. A connector stores an event reference
@@ -177,6 +188,10 @@ pub struct NewRun<'a> {
 }
 
 pub fn insert(tx: &Tx, n: &NewRun) -> FlowResult<String> {
+    insert_stored(tx, n).map_err(Into::into)
+}
+
+pub(crate) fn insert_stored(tx: &Tx, n: &NewRun) -> steve_store::Result<String> {
     let id = uid("run");
     let ended = (n.status != "running").then_some(n.now);
     tx.execute(
@@ -410,14 +425,17 @@ pub(crate) fn fail_due(tx: &Tx, id: &str, now: i64, reason: &str) -> FlowResult<
 /// Schedule runs past retention: older than 90 days and beyond the latest 200 of their
 /// schedule; never one that is still going. Steps go with them. Returns the number of runs deleted.
 pub fn prune(tx: &Tx, now: i64) -> FlowResult<usize> {
-    const OLD: &str = "SELECT id FROM (SELECT r.id, r.started, r.status, ROW_NUMBER() OVER (PARTITION BY r.flow_id ORDER BY r.started DESC, r.rowid DESC) AS rn FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule') WHERE rn > ?1 AND started < ?2 AND status NOT IN ('running', 'waiting')";
+    let old = format!(
+        "SELECT id FROM (SELECT r.id, r.rowid AS rid, r.started, r.status, ROW_NUMBER() OVER (PARTITION BY r.flow_id ORDER BY r.started DESC, r.rowid DESC) AS rn FROM flow_runs r JOIN flows f ON f.id = r.flow_id WHERE f.kind = 'schedule') WHERE rn > ?1 AND started < ?2 AND status NOT IN ('running', 'waiting') AND rid NOT IN ({})",
+        start_failures::ANCHORS
+    );
     let cut = now - KEEP_MS;
     tx.execute(
-        &format!("DELETE FROM flow_run_steps WHERE run_id IN ({OLD})"),
+        &format!("DELETE FROM flow_run_steps WHERE run_id IN ({old})"),
         params![KEEP_RUNS, cut],
     )?;
     Ok(tx.execute(
-        &format!("DELETE FROM flow_runs WHERE id IN ({OLD})"),
+        &format!("DELETE FROM flow_runs WHERE id IN ({old})"),
         params![KEEP_RUNS, cut],
     )?)
 }
