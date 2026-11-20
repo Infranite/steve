@@ -410,40 +410,7 @@ pub(crate) fn store_in(
             }
         }
 
-        let on_behalf = info.as_ref().map(|i| i.created_by.as_str());
-        let (actor_account, actor_party) = identify_actor(tx, ws, on_behalf, ev.actor.as_ref());
-        let visibility = match &info {
-            Some(i) if i.owner_user.is_some() => "private",
-            _ => "workspace",
-        };
-        let id = uid("evt");
-        let payload = (!ev.payload.is_null()).then(|| ev.payload.to_string());
-        tx.execute(
-            "INSERT INTO ext_events (id, workspace_id, connection_id, source, type, external_id, dedupe_key, thread_key, group_key,
-                scope_ext_id, space_id, message_id, actor_account_id, actor_party_id, occurred, received, summary, payload, visibility)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                id,
-                ws,
-                conn,
-                ev.source,
-                ev.type_key,
-                ev.external_id,
-                dedupe,
-                ev.thread_key,
-                ev.group_key,
-                ev.scope_ext_id,
-                ev.space_id,
-                ev.message_id,
-                actor_account,
-                actor_party,
-                ev.occurred,
-                now,
-                cut(&ev.summary, SUMMARY_MAX),
-                payload,
-                visibility
-            ],
-        )?;
+        let id = store_event_row(tx, ws, conn, ev, info.as_ref(), &dedupe, now)?;
 
         let mut runs_opened = Vec::new();
         if recorded.is_none() {
@@ -505,6 +472,53 @@ pub(crate) fn store_in(
             woken,
         }))
     }
+}
+
+/// Snapshot event identity, visibility and payload in the caller's transaction.
+fn store_event_row(
+    tx: &Tx,
+    ws: &str,
+    conn: Option<&str>,
+    ev: &RawEvent,
+    info: Option<&ConnInfo>,
+    dedupe: &str,
+    now: i64,
+) -> FlowResult<String> {
+    let on_behalf = info.map(|i| i.created_by.as_str());
+    let (actor_account, actor_party) = identify_actor(tx, ws, on_behalf, ev.actor.as_ref());
+    let visibility = match &info {
+        Some(i) if i.owner_user.is_some() => "private",
+        _ => "workspace",
+    };
+    let id = uid("evt");
+    let payload = (!ev.payload.is_null()).then(|| ev.payload.to_string());
+    tx.execute(
+        "INSERT INTO ext_events (id, workspace_id, connection_id, source, type, external_id, dedupe_key, thread_key, group_key,
+                scope_ext_id, space_id, message_id, actor_account_id, actor_party_id, occurred, received, summary, payload, visibility)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            id,
+            ws,
+            conn,
+            ev.source,
+            ev.type_key,
+            ev.external_id,
+            dedupe,
+            ev.thread_key,
+            ev.group_key,
+            ev.scope_ext_id,
+            ev.space_id,
+            ev.message_id,
+            actor_account,
+            actor_party,
+            ev.occurred,
+            now,
+            cut(&ev.summary, SUMMARY_MAX),
+            payload,
+            visibility
+        ],
+    )?;
+    Ok(id)
 }
 
 /// After the commit of [`store_in`]: the signal, the runs driven, the waits resumed.

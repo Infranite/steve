@@ -58,12 +58,6 @@ steve-core	crates/steve-core/src/work.rs	cognitive_complexity	30
 steve-core	crates/steve-core/src/work.rs	too_many_lines	134
 steve-core	crates/steve-core/src/workflow.rs	cognitive_complexity	35,26
 steve-core	crates/steve-core/src/workflow.rs	too_many_lines	253,172,160,117
-steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29
-steve-flow	crates/steve-flow/src/exec.rs	too_many_lines	121
-steve-flow	crates/steve-flow/src/expr.rs	too_many_lines	115
-steve-flow	crates/steve-flow/src/ingest.rs	too_many_lines	130
-steve-flow	crates/steve-flow/src/nodes/action.rs	too_many_lines	116
-steve-flow	crates/steve-flow/src/nodes/http.rs	too_many_lines	104
 steve-github	crates/steve-github/src/accept.rs	cognitive_complexity	38,37,27
 steve-github	crates/steve-github/src/accept.rs	too_many_lines	165,152,126
 steve-github	crates/steve-github/src/sync.rs	too_many_lines	185,119,117,109

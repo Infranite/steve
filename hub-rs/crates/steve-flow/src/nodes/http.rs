@@ -876,20 +876,7 @@ impl Http {
             .map_err(|e| format!("请求失败：{e}"))?;
         let method =
             Method::from_bytes(method.as_bytes()).map_err(|_| "请求方法不对".to_string())?;
-        let mut hm = HeaderMap::new();
-        for (k, v) in headers {
-            let name =
-                HeaderName::from_bytes(k.as_bytes()).map_err(|_| format!("请求头名字不对：{k}"))?;
-            let secret = refs.iter().any(|r| v.contains(&r.placeholder));
-            let v = fill(v, refs, values, false);
-            let mut hv = HeaderValue::from_str(&v)
-                .map_err(|_| format!("请求头「{k}」的值不合法（不能有换行等控制字符）"))?;
-            hv.set_sensitive(secret);
-            hm.append(name, hv);
-        }
-        if body_json && !hm.contains_key(CONTENT_TYPE) {
-            hm.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
+        let hm = request_headers(headers, body_json, refs, values)?;
         let mut req = client.request(method, url).headers(hm);
         if let Some(b) = body {
             let b = fill(b, refs, values, body_json);
@@ -937,6 +924,30 @@ impl Http {
         }
         Ok((status, content_type, buf))
     }
+}
+
+/// Validate and append rendered headers, preserving secret sensitivity and explicit content type.
+fn request_headers(
+    headers: &[(String, String)],
+    body_json: bool,
+    refs: &[SecretRef],
+    values: &[(String, Zeroizing<String>)],
+) -> Result<HeaderMap, String> {
+    let mut hm = HeaderMap::new();
+    for (k, v) in headers {
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|_| format!("请求头名字不对：{k}"))?;
+        let secret = refs.iter().any(|r| v.contains(&r.placeholder));
+        let v = fill(v, refs, values, false);
+        let mut hv = HeaderValue::from_str(&v)
+            .map_err(|_| format!("请求头「{k}」的值不合法（不能有换行等控制字符）"))?;
+        hv.set_sensitive(secret);
+        hm.append(name, hv);
+    }
+    if body_json && !hm.contains_key(CONTENT_TYPE) {
+        hm.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    Ok(hm)
 }
 
 /// An error and its sources, one line.

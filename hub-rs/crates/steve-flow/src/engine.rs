@@ -154,6 +154,12 @@ async fn after(cx: &FlowCx, run_id: &str) {
     let Ok(Some(run)) = cx.store().reader(|c| runs::get(c, run_id)) else {
         return;
     };
+    settle_run_event(cx, run_id, &run);
+    resume_waiting_parent(cx, &run).await;
+}
+
+/// Reconcile the real event before a parent can observe its child's result.
+fn settle_run_event(cx: &FlowCx, run_id: &str, run: &RunRow) {
     if !run.dry_run
         && let Some(evt) = &run.event_id
     {
@@ -163,6 +169,10 @@ async fn after(cx: &FlowCx, run_id: &str) {
             Err(e) => tracing::warn!(run = run_id, "settling the event failed: {e}"),
         }
     }
+}
+
+/// Resume only the persisted wait for this finished child, then drive its parent.
+async fn resume_waiting_parent(cx: &FlowCx, run: &RunRow) {
     let ended = matches!(run.status.as_str(), "done" | "failed" | "cancelled");
     if let (true, Some(parent)) = (ended, &run.parent_run) {
         let resumed = cx.store().transaction(|tx| -> FlowResult<bool> {
