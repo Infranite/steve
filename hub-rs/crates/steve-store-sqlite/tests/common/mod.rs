@@ -72,11 +72,32 @@ pub fn objects(c: &Connection) -> Vec<Object> {
         .filter(|o| !shadows.contains(&o.table) && !LEGACY_TABLES.contains(&o.table.as_str())).collect()
 }
 
-mod legacy_input;
+pub(crate) mod legacy_input;
+
+/// Fresh legacy installations and upgraded legacy installations have two supported
+/// physical column orders. The history fixture keeps the latter; baseline export
+/// uses the former, without replaying any archived pre-113 migration.
+fn fresh_legacy(conn: &Connection, version: i64) {
+    const FACTS: &str = "phase TEXT NOT NULL DEFAULT 'active', cycle INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 0, outcome TEXT, acceptance TEXT, closing TEXT, closed_at INTEGER, closed_reason TEXT";
+    let fixture = include_str!("../../legacy/113_fixture.sql");
+    let old = format!("{FACTS}, design_gate INTEGER NOT NULL DEFAULT 0");
+    assert_eq!(fixture.matches(&old).count(), 1);
+    let fixture = fixture.replace(
+        &old,
+        &format!("design_gate INTEGER NOT NULL DEFAULT 0, {FACTS}"),
+    );
+    let old = "import_key TEXT, reasoning_effort TEXT, first_tool_at INTEGER";
+    assert_eq!(fixture.matches(old).count(), 1);
+    let fixture = fixture.replace(
+        old,
+        "import_key TEXT, first_tool_at INTEGER, reasoning_effort TEXT",
+    );
+    legacy_input::load(conn, &fixture, version);
+}
 
 pub fn legacy() -> Connection {
     let c = Connection::open_in_memory().unwrap();
-    legacy_input::at(&c, 114);
+    fresh_legacy(&c, 114);
     c
 }
 

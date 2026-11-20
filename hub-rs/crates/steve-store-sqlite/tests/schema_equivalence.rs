@@ -1,6 +1,4 @@
 mod common;
-#[path = "common/legacy_input.rs"]
-mod legacy_input;
 
 use common::*;
 use rusqlite::{Connection, types::Value};

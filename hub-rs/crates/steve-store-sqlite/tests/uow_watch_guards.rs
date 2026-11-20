@@ -500,7 +500,9 @@ fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
 // with queue), YOLO (1), Digest Bot (11). Union = 18. Update with those sources
 // when introducing a new subscriber; entity subscriptions also map to these tables.
 const SUBSCRIBED: &[&str] = &[
-    "chan_messages",
+    steve_store_sqlite::digest::Source::ChanMessage
+        .shape()
+        .table,
     "decisions",
     "chan_send_state",
     "personal_notifications",
