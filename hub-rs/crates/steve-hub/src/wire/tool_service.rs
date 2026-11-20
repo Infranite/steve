@@ -196,32 +196,7 @@ impl ToolService {
             tool_registry::search_tool(),
             tool_registry::call_tool(),
         ]));
-        let (store, sid, bot) = (
-            self.mcp.store.clone(),
-            s.id.clone(),
-            s.bot_id.clone().unwrap_or_default(),
-        );
-        let found = tokio::task::spawn_blocking(move || {
-            store.reader(|c| {
-                Ok::<_, steve_store::StoreError>((
-                    steve_store::caps::tools::pins(c, &bot)?,
-                    steve_store::caps::a2a::enabled_for_session(c, &sid)?,
-                    steve_store::caps::mcp::enabled_for_session(c, &sid)?,
-                ))
-            })
-        })
-        .await;
-        let (pins, agents, servers) = match found {
-            Ok(Ok(x)) => x,
-            Ok(Err(e)) => {
-                tracing::warn!(session = %s.id, "tool registry: {e}");
-                Default::default()
-            }
-            Err(e) => {
-                tracing::warn!(session = %s.id, "tool registry: {e}");
-                Default::default()
-            }
-        };
+        let (pins, agents, servers) = self.registry_bindings(s).await;
         if let Ok(caller) = self.connector_caller(s).await {
             match self.extra.tools.channels.connector_tools(&caller).await {
                 Ok(tools) => entries.extend(tools.into_iter().map(tool_registry::connector_entry)),
@@ -236,18 +211,7 @@ impl ToolService {
             ));
         }
         let who = s.bot_id.clone().unwrap_or_else(|| "agent".into());
-        let wanted: Vec<&steve_store::caps::mcp::Server> = servers
-            .iter()
-            .filter(|x| match reach {
-                Reach::All => true,
-                Reach::Tool(name) => tool_registry::pin_may_use_server(&x.name, name),
-                Reach::Listed => pins.iter().any(|p| {
-                    (p.kind == "mcp" && p.target == x.id)
-                        || (p.kind == "tool"
-                            && tool_registry::pin_may_use_server(&x.name, &p.target))
-                }),
-            })
-            .collect();
+        let wanted = registry_servers(&servers, &pins, reach);
         let wait = if reach == Reach::Listed {
             LIST_WAIT
         } else {
@@ -277,6 +241,43 @@ impl ToolService {
         };
         r.list(&pins);
         r
+    }
+
+    /// Read the Bot's session capabilities, retaining the same logged empty fallback on failure.
+    async fn registry_bindings(
+        &self,
+        s: &steve_store::Session,
+    ) -> (
+        Vec<steve_store::caps::tools::Pin>,
+        Vec<steve_store::caps::a2a::Agent>,
+        Vec<steve_store::caps::mcp::Server>,
+    ) {
+        let (store, sid, bot) = (
+            self.mcp.store.clone(),
+            s.id.clone(),
+            s.bot_id.clone().unwrap_or_default(),
+        );
+        let found = tokio::task::spawn_blocking(move || {
+            store.reader(|c| {
+                Ok::<_, steve_store::StoreError>((
+                    steve_store::caps::tools::pins(c, &bot)?,
+                    steve_store::caps::a2a::enabled_for_session(c, &sid)?,
+                    steve_store::caps::mcp::enabled_for_session(c, &sid)?,
+                ))
+            })
+        })
+        .await;
+        match found {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => {
+                tracing::warn!(session = %s.id, "tool registry: {e}");
+                Default::default()
+            }
+            Err(e) => {
+                tracing::warn!(session = %s.id, "tool registry: {e}");
+                Default::default()
+            }
+        }
     }
 
     /// What session `s`'s harness lists: the core tools and its Bot's pins.
@@ -482,6 +483,33 @@ impl ToolService {
         }
         Err(format!("MCP error -32602: Tool {name} not found"))
     }
+}
+
+/// Select the enabled library servers needed by this discovery scope and the Bot's pins.
+fn registry_servers<'a>(
+    servers: &'a [steve_store::caps::mcp::Server],
+    pins: &[steve_store::caps::tools::Pin],
+    reach: Reach<'_>,
+) -> Vec<&'a steve_store::caps::mcp::Server> {
+    servers
+        .iter()
+        .filter(|x| match reach {
+            Reach::All => true,
+            Reach::Tool(name) => tool_registry::pin_may_use_server(&x.name, name),
+            Reach::Listed => server_is_pinned(x, pins),
+        })
+        .collect()
+}
+
+/// A whole-server pin or one of its tool-name pins makes this server part of the listed scope.
+fn server_is_pinned(
+    server: &steve_store::caps::mcp::Server,
+    pins: &[steve_store::caps::tools::Pin],
+) -> bool {
+    pins.iter().any(|p| {
+        (p.kind == "mcp" && p.target == server.id)
+            || (p.kind == "tool" && tool_registry::pin_may_use_server(&server.name, &p.target))
+    })
 }
 
 /// `args` against `name`'s schema: `Err` is what the agent reads to fix the call.

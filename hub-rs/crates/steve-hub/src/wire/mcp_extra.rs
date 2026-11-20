@@ -350,57 +350,11 @@ pub async fn layer(
         .clone()
         .filter(|t| t.starts_with(steve_store::access::TOKEN_PREFIX))
     {
-        let ws = parts
-            .headers
-            .get("x-steve-ws")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .or_else(|| {
-                parts.uri.query().and_then(|q| {
-                    q.split('&')
-                        .find_map(|kv| kv.strip_prefix("ws="))
-                        .map(str::to_string)
-                })
-            });
-        let store = x.store.clone();
-        let who = tokio::task::spawn_blocking(move || {
-            super::outside_mcp::identify(&store, &t, ws.as_deref())
-        })
-        .await
-        .ok()
-        .flatten();
-        let Some(who) = who else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-        if parts.method != axum::http::Method::POST {
-            return StatusCode::METHOD_NOT_ALLOWED.into_response();
-        }
-        let Some(m) = msg.clone() else {
-            return StatusCode::BAD_REQUEST.into_response();
-        };
-        return super::outside_mcp::handle(&x, who, m).await;
+        return user_token_response(x, &parts, &msg, t).await;
     }
     if let Some(t) = bearer.clone() {
-        let store = x.store.clone();
-        let run =
-            tokio::task::spawn_blocking(move || store.thread().run_by_token(&t).ok().flatten())
-                .await
-                .ok()
-                .flatten();
-        if let Some(run) = run {
-            if parts.method != axum::http::Method::POST {
-                return StatusCode::METHOD_NOT_ALLOWED.into_response();
-            }
-            let Some(m) = msg.clone() else {
-                return StatusCode::BAD_REQUEST.into_response();
-            };
-            let (store, ws) = (x.store.clone(), run.workspace_id.clone());
-            let owner = tokio::task::spawn_blocking(move || owner(&store, &ws))
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            return super::research_mcp::handle(&x, run, m, owner).await;
+        if let Some(response) = research_token_response(x, &parts, &msg, t).await {
+            return response;
         }
     }
 
@@ -476,6 +430,72 @@ pub async fn layer(
     next.run(rebuild(bytes)).await
 }
 
+/// Authenticate an outside access token before validating its HTTP request.
+async fn user_token_response(
+    x: &Extra,
+    parts: &axum::http::request::Parts,
+    msg: &Option<Value>,
+    t: String,
+) -> Response {
+    let ws = parts
+        .headers
+        .get("x-steve-ws")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            parts.uri.query().and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("ws="))
+                    .map(str::to_string)
+            })
+        });
+    let store = x.store.clone();
+    let who = tokio::task::spawn_blocking(move || {
+        super::outside_mcp::identify(&store, &t, ws.as_deref())
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(who) = who else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if parts.method != axum::http::Method::POST {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let Some(m) = msg.clone() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    super::outside_mcp::handle(&x, who, m).await
+}
+
+/// A research token selects its read-only catalog; other bearers continue to session routing.
+async fn research_token_response(
+    x: &Extra,
+    parts: &axum::http::request::Parts,
+    msg: &Option<Value>,
+    t: String,
+) -> Option<Response> {
+    let store = x.store.clone();
+    let run = tokio::task::spawn_blocking(move || store.thread().run_by_token(&t).ok().flatten())
+        .await
+        .ok()
+        .flatten();
+    let run = run?;
+    if parts.method != axum::http::Method::POST {
+        return Some(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let Some(m) = msg.clone() else {
+        return Some(StatusCode::BAD_REQUEST.into_response());
+    };
+    let (store, ws) = (x.store.clone(), run.workspace_id.clone());
+    let owner = tokio::task::spawn_blocking(move || owner(&store, &ws))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    Some(super::research_mcp::handle(&x, run, m, owner).await)
+}
+
 /// A module's tool (`owner`), run for session `s`: the success text or the error text. Independent of
 /// any tool protocol (MCP wraps it below; the Node path's tool service calls it too).
 async fn call_owned(
@@ -545,22 +565,7 @@ async fn call_owned_inner(
         Owner::Items => unreachable!("item management preserves the session above"),
         Owner::Workflow => unreachable!("workflow preserves the session above"),
         Owner::A2a => unreachable!("remote agents are answered above"),
-        Owner::Upgrade => {
-            let ws = cx.ws.clone();
-            let store = x.store.clone();
-            let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
-            if args["action"] == "request" && !may_request {
-                Err("共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级".into())
-            } else {
-                match crate::upgrades::Updates::new(&x.cfg).map_err(|e| e.to_string()) {
-                    Ok(u) => u
-                        .agent(cx.session_id.as_deref().unwrap_or_default(), &args)
-                        .await
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e),
-                }
-            }
-        }
+        Owner::Upgrade => call_upgrade(x, &cx, &args).await,
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,
         Owner::Digest => steve_digest::tools::call(&x.modules, &cx, name, &args).await,
         // the person's own todos: refused for a service session, applied at once and undoable
@@ -587,53 +592,7 @@ async fn call_owned_inner(
                 .await
                 .map_err(|e| e.to_string())?
         }
-        Owner::ReplySource => match (
-            args.get("text").and_then(Value::as_str),
-            cx.item_id.as_deref(),
-        ) {
-            (None, _) => Err(format!(
-                "MCP error -32602: Input validation error: Invalid arguments for tool {REPLY_SOURCE}: Invalid input: expected string, received {} at text",
-                if args.get("text").is_none() {
-                    "undefined"
-                } else {
-                    "other"
-                }
-            )),
-            (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
-            (Some(text), Some(item)) => {
-                let who = steve_modules::Caller {
-                    ws: cx.ws.clone(),
-                    me: cx.user.clone(),
-                };
-                // Old clients need no new argument: the same update from this session has the
-                // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
-                let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
-                    format!(
-                        "source:{}:{}:{}",
-                        cx.session_id.as_deref().unwrap_or("none"),
-                        item,
-                        steve_channels::outbound::text_hash(text),
-                    )
-                });
-                x.tools
-                    .outbox
-                    .reply_source_as(
-                        &x.tools.channels,
-                        &who,
-                        item,
-                        text,
-                        &key,
-                        args["space_id"].as_str().map(str::to_string),
-                        args["party_id"].as_str().map(str::to_string),
-                    )
-                    .await
-                    .map(|d| match d {
-                        Some(d) => serde_json::to_string(&d).unwrap_or_default(),
-                        None => steve_channels::outbound::SRC_NO_SOURCE.to_string(),
-                    })
-                    .map_err(|e| e.to_string())
-            }
-        },
+        Owner::ReplySource => reply_source(x, &cx, &args).await,
         Owner::Remember => {
             let m = x.modules.clone();
             tokio::task::spawn_blocking(move || {
@@ -644,6 +603,78 @@ async fn call_owned_inner(
         }
     };
     out
+}
+
+/// Enforce the workspace's upgrade authority before consulting the assembled updater.
+async fn call_upgrade(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String, String> {
+    let ws = cx.ws.clone();
+    let store = x.store.clone();
+    let may_request=tokio::task::spawn_blocking(move||store.reader(|c|{let (members,owners):(i64,i64)=c.query_row("SELECT COUNT(*),COALESCE(SUM(CASE WHEN u.role='owner' THEN 1 ELSE 0 END),0) FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=?",[ws],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok::<_,steve_store::StoreError>(members==1&&owners==1)}).unwrap_or(false)).await.unwrap_or(false);
+    if args["action"] == "request" && !may_request {
+        Err(
+            "共享工作空间或非实例管理员的工作空间目前只能检查/查看升级；请实例管理员从设置发起升级"
+                .into(),
+        )
+    } else {
+        match crate::upgrades::Updates::new(&x.cfg).map_err(|e| e.to_string()) {
+            Ok(u) => u
+                .agent(cx.session_id.as_deref().unwrap_or_default(), &args)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Validate and route the item's source update with the original stable intent identity.
+async fn reply_source(x: &Extra, cx: &mcp::McpCx, args: &Value) -> Result<String, String> {
+    match (
+        args.get("text").and_then(Value::as_str),
+        cx.item_id.as_deref(),
+    ) {
+        (None, _) => Err(format!(
+            "MCP error -32602: Input validation error: Invalid arguments for tool {REPLY_SOURCE}: Invalid input: expected string, received {} at text",
+            if args.get("text").is_none() {
+                "undefined"
+            } else {
+                "other"
+            }
+        )),
+        (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
+        (Some(text), Some(item)) => {
+            let who = steve_modules::Caller {
+                ws: cx.ws.clone(),
+                me: cx.user.clone(),
+            };
+            // Old clients need no new argument: the same update from this session has the
+            // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
+            let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
+                format!(
+                    "source:{}:{}:{}",
+                    cx.session_id.as_deref().unwrap_or("none"),
+                    item,
+                    steve_channels::outbound::text_hash(text),
+                )
+            });
+            x.tools
+                .outbox
+                .reply_source_as(
+                    &x.tools.channels,
+                    &who,
+                    item,
+                    text,
+                    &key,
+                    args["space_id"].as_str().map(str::to_string),
+                    args["party_id"].as_str().map(str::to_string),
+                )
+                .await
+                .map(|d| match d {
+                    Some(d) => serde_json::to_string(&d).unwrap_or_default(),
+                    None => steve_channels::outbound::SRC_NO_SOURCE.to_string(),
+                })
+                .map_err(|e| e.to_string())
+        }
+    }
 }
 
 /// A module's tool by name; `None`: no module serves it.

@@ -74,11 +74,8 @@ steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	cognitive_complexity	32
 steve-hub	crates/steve-hub/src/upgrades/supervisor.rs	too_many_lines	127,105
 steve-hub	crates/steve-hub/src/wire/core.rs	cognitive_complexity	46
 steve-hub	crates/steve-hub/src/wire/core.rs	too_many_lines	129,109
-steve-hub	crates/steve-hub/src/wire/mcp_extra.rs	cognitive_complexity	30
-steve-hub	crates/steve-hub/src/wire/mcp_extra.rs	too_many_lines	146,141
 steve-hub	crates/steve-hub/src/wire/mod.rs	cognitive_complexity	31
 steve-hub	crates/steve-hub/src/wire/node_binding.rs	too_many_lines	139
-steve-hub	crates/steve-hub/src/wire/node_jobs.rs	too_many_lines	133,119,104
 steve-hub	crates/steve-hub/src/wire/node_runtime.rs	too_many_lines	115
 steve-hub	crates/steve-hub/src/wire/node_runtime/apply.rs	cognitive_complexity	33
 steve-hub	crates/steve-hub/src/wire/node_runtime/apply.rs	too_many_lines	174,163,151
@@ -90,7 +87,6 @@ steve-hub	crates/steve-hub/src/wire/node_runtime/send.rs	too_many_lines	152,136,
 steve-hub	crates/steve-hub/src/wire/node_tools.rs	too_many_lines	207
 steve-hub	crates/steve-hub/src/wire/outbox.rs	cognitive_complexity	31
 steve-hub	crates/steve-hub/src/wire/research.rs	too_many_lines	147,113
-steve-hub	crates/steve-hub/src/wire/tool_service.rs	cognitive_complexity	33
 steve-install	crates/steve-install/src/release.rs	too_many_lines	149
 steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	34,28
 steve-install	crates/steve-install/src/setup.rs	too_many_lines	143,114
