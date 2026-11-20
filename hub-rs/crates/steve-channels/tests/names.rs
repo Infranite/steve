@@ -1188,3 +1188,438 @@ async fn cancelling_the_name_job_keeps_its_cooldown_but_a_new_channels_does_not(
     task.stop();
     task.await;
 }
+
+// Script only profile answers; use the real candidate queries, identity order, caches and enrichment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LookupKind {
+    Tenant,
+    Members,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LookupCall {
+    side: &'static str,
+    kind: LookupKind,
+    handles: Vec<String>,
+}
+
+#[derive(Default)]
+struct LookupScript {
+    answers: std::sync::Mutex<
+        std::collections::HashMap<
+            (&'static str, LookupKind),
+            Result<steve_channels::ProfileAnswer, steve_flow::AdapterError>,
+        >,
+    >,
+    calls: std::sync::Mutex<Vec<LookupCall>>,
+}
+
+impl LookupScript {
+    fn answer(
+        &self,
+        side: &'static str,
+        kind: LookupKind,
+        answer: Result<steve_channels::ProfileAnswer, steve_flow::AdapterError>,
+    ) {
+        self.answers.lock().unwrap().insert((side, kind), answer);
+    }
+    fn take(&self) -> Vec<LookupCall> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+}
+
+struct ScriptedProfiles {
+    adapter: &'static str,
+    side: &'static str,
+    script: Arc<LookupScript>,
+}
+
+#[async_trait::async_trait]
+impl steve_channels::ProfileAdapter for ScriptedProfiles {
+    fn adapter_id(&self) -> &str {
+        self.adapter
+    }
+    async fn resolve_profiles(
+        &self,
+        _cx: &steve_modules::accounts::connections::ConnCx,
+        query: &steve_channels::ProfileQuery,
+    ) -> Result<steve_channels::ProfileAnswer, steve_flow::AdapterError> {
+        let kind = if query.want_tenant {
+            LookupKind::Tenant
+        } else if query.space_ext_id.is_some() {
+            LookupKind::Members
+        } else {
+            LookupKind::Directory
+        };
+        self.script.calls.lock().unwrap().push(LookupCall {
+            side: self.side,
+            kind,
+            handles: query.handles.iter().map(|h| h.handle.clone()).collect(),
+        });
+        self.script
+            .answers
+            .lock()
+            .unwrap()
+            .get(&(self.side, kind))
+            .cloned()
+            .unwrap_or_else(|| Ok(steve_channels::ProfileAnswer::default()))
+    }
+}
+
+fn scripted_names(h: &H, script: Arc<LookupScript>) -> Channels {
+    // The production tenant scan follows created/id, while each installation's member/directory
+    // scan orders the personal identity first. Make those two distinct orders deterministic.
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute("UPDATE connections SET created=10 WHERE id=?", [&h.bot_con])?;
+            tx.execute(
+                "UPDATE connections SET created=20 WHERE id=?",
+                [&h.self_con],
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    let app = Arc::new(FeishuApp::new());
+    Channels::builder(h.env.modules.clone(), h.conns.clone(), h.sink.clone())
+        .adapter(app.clone())
+        .decl(steve_channels::adapters::feishu::user_decl())
+        .decl(steve_channels::adapters::feishu::app_decl(&app))
+        .profiles(Arc::new(ScriptedProfiles {
+            adapter: "feishu_user",
+            side: "user",
+            script: script.clone(),
+        }))
+        .profiles(Arc::new(ScriptedProfiles {
+            adapter: "feishu_app",
+            side: "bot",
+            script,
+        }))
+        .build()
+}
+
+fn tenant_answer(known: bool) -> steve_channels::ProfileAnswer {
+    steve_channels::ProfileAnswer {
+        tenant: known.then(|| steve_channels::TenantInfo {
+            key: ids::TENANT_KEY.into(),
+            name: Some("Scripted Organization".into()),
+        }),
+        ..Default::default()
+    }
+}
+
+fn profile_answer(
+    name: &str,
+    directory: bool,
+    tenant: Option<&str>,
+) -> steve_channels::ProfileAnswer {
+    steve_channels::ProfileAnswer {
+        profiles: vec![steve_channels::Profile {
+            handle: Some(HandleRef::new("feishu", ids::BOB.open_id)),
+            name: name.into(),
+            directory,
+            tenant_key: tenant.map(String::from),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn call_order(calls: &[LookupCall]) -> Vec<(&'static str, LookupKind)> {
+    calls.iter().map(|c| (c.side, c.kind)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolution_query_order_and_directory_selection_table() {
+    use LookupKind::{Directory as D, Members as M, Tenant as T};
+    struct Case {
+        label: &'static str,
+        name: &'static str,
+        directory: bool,
+        tenant: Option<&'static str>,
+        known_own: bool,
+        bot_fallback: bool,
+        expected: Vec<(&'static str, LookupKind)>,
+        final_name: &'static str,
+        source: &'static str,
+    }
+    let cases = [
+        Case {
+            label: "own member still needs directory",
+            name: "Member Name",
+            directory: false,
+            tenant: Some(ids::TENANT_KEY),
+            known_own: true,
+            bot_fallback: false,
+            expected: vec![("bot", T), ("user", T), ("user", M), ("user", D)],
+            final_name: "Directory Name",
+            source: "directory",
+        },
+        Case {
+            label: "external member skips our directory",
+            name: "Member Name",
+            directory: false,
+            tenant: Some(ids::EXTERNAL_TENANT_KEY),
+            known_own: true,
+            bot_fallback: false,
+            expected: vec![("bot", T), ("user", T), ("user", M)],
+            final_name: "Member Name",
+            source: "chat",
+        },
+        Case {
+            label: "directory result from member query skips another lookup",
+            name: "Directory Member",
+            directory: true,
+            tenant: None,
+            known_own: true,
+            bot_fallback: false,
+            expected: vec![("bot", T), ("user", T), ("user", M)],
+            final_name: "Directory Member",
+            source: "directory",
+        },
+        Case {
+            label: "empty member name tries bot members then both directories",
+            name: "",
+            directory: false,
+            tenant: Some(ids::TENANT_KEY),
+            known_own: true,
+            bot_fallback: true,
+            expected: vec![
+                ("bot", T),
+                ("user", T),
+                ("user", M),
+                ("bot", M),
+                ("user", D),
+                ("bot", D),
+            ],
+            final_name: "Directory Name",
+            source: "directory",
+        },
+        Case {
+            label: "unknown own tenant must not classify a member as external",
+            name: "Member Name",
+            directory: false,
+            tenant: Some(ids::EXTERNAL_TENANT_KEY),
+            known_own: false,
+            bot_fallback: false,
+            expected: vec![("bot", T), ("user", T), ("user", M), ("user", D)],
+            final_name: "Directory Name",
+            source: "directory",
+        },
+    ];
+    for case in cases {
+        let h = setup().await;
+        hear(
+            &h,
+            ids::GROUP_CHAT,
+            SpaceKind::Group,
+            "Scripted Group",
+            case.label,
+            ids::BOB.open_id,
+            "hello",
+        )
+        .await;
+        let script = Arc::new(LookupScript::default());
+        for side in ["user", "bot"] {
+            script.answer(side, T, Ok(tenant_answer(case.known_own)));
+        }
+        script.answer(
+            "user",
+            M,
+            Ok(profile_answer(case.name, case.directory, case.tenant)),
+        );
+        script.answer(
+            if case.bot_fallback { "bot" } else { "user" },
+            D,
+            Ok(profile_answer(
+                "Directory Name",
+                true,
+                Some(ids::TENANT_KEY),
+            )),
+        );
+        let ch = scripted_names(&h, script.clone());
+        let report = ch.resolve_names(WS).await.unwrap();
+        let calls = script.take();
+        assert_eq!(call_order(&calls), case.expected, "{}", case.label);
+        assert!(
+            calls
+                .iter()
+                .filter(|c| c.kind != T)
+                .all(|c| c.handles == [ids::BOB.open_id]),
+            "{}: {calls:?}",
+            case.label
+        );
+        assert_eq!(
+            (
+                report.candidates,
+                report.named_remote,
+                report.nameless,
+                report.failed
+            ),
+            (1, 1, 0, 0),
+            "{}: {report:?}",
+            case.label
+        );
+        let (_, name, _, party) = person(&h, ids::BOB.open_id);
+        assert_eq!(name, case.final_name, "{}", case.label);
+        assert_eq!(
+            q(
+                &h.env,
+                "SELECT source FROM account_profiles WHERE account_id=(SELECT id FROM accounts WHERE party_id=? AND system_id='feishu')",
+                &party
+            )[0][0],
+            case.source,
+            "{}",
+            case.label
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lookup_cache_success_failure_and_freshness_table() {
+    use LookupKind::{Directory as D, Members as M, Tenant as T};
+    // Failed tenant answers are cached as None; failed members are deliberately not cached.
+    for (label, fail_tenants, fail_members, second) in [
+        ("successful empty answers", false, false, vec![]),
+        ("failed tenants", true, false, vec![]),
+        (
+            "failed member calls",
+            false,
+            true,
+            vec![("user", M), ("bot", M)],
+        ),
+    ] {
+        let h = setup().await;
+        hear(
+            &h,
+            ids::GROUP_CHAT,
+            SpaceKind::Group,
+            "Scripted Group",
+            label,
+            ids::BOB.open_id,
+            "hello",
+        )
+        .await;
+        let script = Arc::new(LookupScript::default());
+        for side in ["user", "bot"] {
+            let fail = || {
+                Err(
+                    steve_modules::accounts::connections::ProviderError::Transient(
+                        "scripted lookup failure".into(),
+                    )
+                    .into(),
+                )
+            };
+            script.answer(
+                side,
+                T,
+                if fail_tenants {
+                    fail()
+                } else {
+                    Ok(tenant_answer(true))
+                },
+            );
+            script.answer(
+                side,
+                M,
+                if fail_members {
+                    fail()
+                } else {
+                    Ok(Default::default())
+                },
+            );
+            let mut searched = steve_channels::ProfileAnswer::default();
+            searched.granted(CONTACT);
+            script.answer(side, D, Ok(searched));
+        }
+        let ch = scripted_names(&h, script.clone());
+        let first = ch.resolve_names(WS).await.unwrap();
+        assert_eq!(
+            call_order(&script.take()),
+            vec![
+                ("bot", T),
+                ("user", T),
+                ("user", M),
+                ("bot", M),
+                ("user", D),
+                ("bot", D)
+            ],
+            "{label}"
+        );
+        assert_eq!(
+            first.failed,
+            usize::from(fail_tenants) * 2 + usize::from(fail_members) * 2,
+            "{label}"
+        );
+        assert_eq!(
+            first.failed_conns.len(),
+            if fail_tenants || fail_members { 2 } else { 0 },
+            "{label}"
+        );
+        let (_, _, _, party) = person(&h, ids::BOB.open_id);
+        let checked = || {
+            q(&h.env,"SELECT checked FROM account_profiles WHERE account_id=(SELECT id FROM accounts WHERE party_id=? AND system_id='feishu')",&party)[0][0].clone()
+        };
+        let before = checked();
+        h.env.clock.advance(1);
+        ch.resolve_names(WS).await.unwrap();
+        assert_eq!(call_order(&script.take()), second, "{label}");
+        if fail_members {
+            assert_ne!(checked(), before, "{label}");
+        } else {
+            assert_eq!(
+                checked(),
+                before,
+                "cached calls are not new evidence: {label}"
+            );
+        }
+        ch.kick_names(WS, true);
+        ch.resolve_names(WS).await.unwrap();
+        assert_eq!(
+            call_order(&script.take()),
+            vec![
+                ("bot", T),
+                ("user", T),
+                ("user", M),
+                ("bot", M),
+                ("user", D),
+                ("bot", D)
+            ],
+            "fresh kick: {label}"
+        );
+        // Keep a due persistent retry from overriding the TTLs being tested here.
+        h.env
+            .store()
+            .transaction(|tx| {
+                tx.execute("UPDATE account_profiles SET next_check=NULL", [])?;
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
+        h.env.clock.advance(steve_channels::names::MEMBERS_TTL_MS);
+        ch.resolve_names(WS).await.unwrap();
+        assert_eq!(
+            call_order(&script.take()),
+            vec![("bot", T), ("user", T), ("user", M), ("bot", M)],
+            "member/tenant expiry, directory still cached: {label}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_workspace_still_refreshes_identity_tenants_table() {
+    use LookupKind::Tenant as T;
+    for known in [false, true] {
+        let h = setup().await;
+        let script = Arc::new(LookupScript::default());
+        for side in ["bot", "user"] {
+            script.answer(side, T, Ok(tenant_answer(known)));
+        }
+        let ch = scripted_names(&h, script.clone());
+        let report = ch.resolve_names(WS).await.unwrap();
+        assert_eq!((report.candidates, report.nameless), (0, 0));
+        assert_eq!(call_order(&script.take()), vec![("bot", T), ("user", T)]);
+        ch.resolve_names(WS).await.unwrap();
+        assert!(script.take().is_empty());
+    }
+}
