@@ -1,6 +1,9 @@
 //! Attempts on the database and their background work (poll, save, check and bind). The rules are
 //! in the module docs.
 
+mod polling;
+use polling::{PollControl, PollReply};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -730,76 +733,15 @@ impl Registrations {
                     continue;
                 }
             };
-            // never poll past the deadline: the request may take at most what is left
-            let left = r.expires_at - self.now();
-            if left <= 0 {
-                let kind = if resumed {
-                    Kind::CredentialsLost
-                } else {
-                    Kind::Expired
-                };
-                return self.end(id, state::EXPIRED, kind, resumed);
-            }
-            let url = format!("{}{PATH}", self.bases.accounts(r.brand()));
-            let timeout = POLL_TIMEOUT.min(Duration::from_millis(left as u64));
-            // a credential issued by a poll sent in time is kept even if it arrives late: the app
-            // exists at the provider either way, dropping it would only orphan it
-            let v = match self
-                .post(
-                    &url,
-                    &[("action", "poll"), ("device_code", code.as_str())],
-                    timeout,
-                )
-                .await
-            {
-                Ok((_, v)) => v,
-                Err(_) => {
-                    self.set_interval(id, (r.interval_s + 1).min(MAX_INTERVAL_S))?;
-                    continue;
-                }
+            let v = match self.request_poll(id, &r, code.as_str(), resumed).await? {
+                PollReply::Answer(v) => v,
+                PollReply::Retry => continue,
+                PollReply::Finished => return Ok(()),
             };
-            match classify(&v, r.brand(), r.switched) {
-                Poll::Pending => {}
-                Poll::SlowDown => self.set_interval(id, (r.interval_s + 5).min(MAX_INTERVAL_S))?,
-                Poll::Switch(b) => {
-                    let now = self.now();
-                    self.tx(|tx| {
-                        tx.execute(
-                            "UPDATE chan_app_registrations SET brand = ?, switched = 1, updated = ? WHERE id = ? AND state = ?",
-                            params![b.code(), now, id, state::PENDING],
-                        )?;
-                        Ok(())
-                    })?;
-                    tracing::info!(registration = %id, brand = b.code(), "feishu app registration: tenant on another brand");
-                    first = true;
-                }
-                Poll::Denied => return self.end(id, state::DENIED, Kind::Denied, false),
-                Poll::Expired => {
-                    let kind = if resumed {
-                        Kind::CredentialsLost
-                    } else {
-                        Kind::Expired
-                    };
-                    return self.end(id, state::EXPIRED, kind, resumed);
-                }
-                Poll::Failed => {
-                    tracing::warn!(registration = %id, "feishu app registration failed (provider error)");
-                    return self.end(id, state::FAILED, Kind::Provider, false);
-                }
-                Poll::Issued {
-                    client_id,
-                    client_secret,
-                    tenant_brand,
-                } => {
-                    // the issuing host is authoritative: a contradicting final report is a violation
-                    if tenant_brand.is_some_and(|t| t != r.brand()) {
-                        tracing::warn!(registration = %id, "feishu app registration: contradictory tenant brand");
-                        return self.end(id, state::FAILED, Kind::Provider, true);
-                    }
-                    self.save(&r, &client_id, client_secret).await?;
-                    self.spawn_verify(id.to_string());
-                    return Ok(());
-                }
+            match self.apply_poll_response(id, &r, &v, resumed).await? {
+                PollControl::Wait => {}
+                PollControl::Switched => first = true,
+                PollControl::Finished => return Ok(()),
             }
         }
     }
