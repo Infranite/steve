@@ -983,7 +983,11 @@ fn run_with(
     check(&snapshot.runtime, &home, values.values())?;
     snapshot.verify()?;
     let pending = Pending::prepare(&snapshot, &candidate, &candidate_receipt)?;
-    let archive = match apply(pending, |_| Ok(())) {
+    let archive = match apply(pending, |_| {
+        #[cfg(test)]
+        tests::sg18_after_write()?;
+        Ok(())
+    }) {
         Ok(archive) => archive,
         Err(error) => {
             return match recover(&home) {
@@ -1539,4 +1543,8 @@ mod tests {
             );
         }
     }
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/sg18/reconfigure.rs"
+    ));
 }

@@ -2285,4 +2285,8 @@ esac
         assert_eq!(report["pairing"]["identity_present"], false);
         assert!(!f.home.join("node/node.json").exists());
     }
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/sg18/service.rs"
+    ));
 }
