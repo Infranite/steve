@@ -352,6 +352,9 @@ pub fn ingest_in(
     Ok(IngestCommit(store_in(tx, cx, ws, Some(conn), ev, now)?))
 }
 
+/// Links a run opened by an event to that event.
+const SET_RUN_EVENT: &str = "UPDATE flow_runs SET event_id = ? WHERE id = ?";
+
 /// The stored part of [`ingest`], in the caller's transaction: dedupe, the `ext_events` row, the runs it
 /// opens (`running` at their trigger, so `engine::recover` drives them if the Hub stops before
 /// [`after_store`]), the waits it matches. `ev` passed [`check`].
@@ -463,10 +466,7 @@ pub(crate) fn store_in(
                             now,
                         },
                     )?;
-                    tx.execute(
-                        "UPDATE flow_runs SET event_id = ? WHERE id = ?",
-                        params![id, run],
-                    )?;
+                    tx.execute(SET_RUN_EVENT, params![id, run])?;
                     runs_opened.push(run);
                 }
             }
