@@ -5581,6 +5581,7 @@ dependencies = [
  "steve-flow",
  "steve-i18n",
  "steve-knowledge",
+ "steve-mail",
  "steve-modules",
  "steve-runtime",
  "steve-store",
