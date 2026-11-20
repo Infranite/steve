@@ -168,9 +168,11 @@ pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
             Tag::from_row,
         )?;
         if let Some(tag) = existing.as_ref().filter(|tag| tag.cat != KIND_CAT) {
-            return Err(StoreError::Conflict(format!(
-                "分类初始化冲突：标签 id={:?}，名字={:?}，当前类别={:?} 占用了保留的分类名称；请离线改名后重启",
-                tag.id, tag.name, tag.cat
+            return Err(StoreError::Conflict(steve_i18n::t!(
+                "store.kinds.seed_conflict",
+                id = format!("{:?}", tag.id),
+                name = format!("{:?}", tag.name),
+                cat = format!("{:?}", tag.cat)
             )));
         }
         pending.push((name, desc, existing));

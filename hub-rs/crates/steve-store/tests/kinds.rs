@@ -201,11 +201,27 @@ fn a_conflicting_workspace_refuses_item_writes_without_side_effects() {
         assert!(t.events.take().is_empty(), "a refusal publishes no event");
     };
     let diagnostic = conflict(s.ensure_workspace());
-    for field in [chore.as_str(), "chore", "领域", "改名后重启"] {
+    for field in [
+        chore.as_str(),
+        "chore",
+        "领域",
+        "改名后重试",
+        "离线改名后重启",
+    ] {
         assert!(
             diagnostic.contains(field),
             "missing {field:?}: {diagnostic}"
         );
+    }
+    let english = steve_i18n::with(steve_i18n::EN, || conflict(s.ensure_workspace()));
+    for field in [
+        chore.as_str(),
+        "chore",
+        "领域",
+        "rename it and retry",
+        "offline and restart",
+    ] {
+        assert!(english.contains(field), "missing {field:?}: {english}");
     }
     unchanged();
     assert_eq!(conflict(item(s, vec![feat.clone()])), diagnostic);

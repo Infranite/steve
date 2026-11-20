@@ -1,5 +1,6 @@
 {
   "store.list_sep": ", ",
+  "store.kinds.seed_conflict": "Category initialization conflict: tag id=%{id}, name=%{name}, current category=%{cat} uses a reserved category name; rename it and retry. If the Hub cannot start, rename the tag offline and restart.",
   "store.kinds.missing": "An item needs one category tag (pick one of %{names})",
   "store.kinds.several": "An item can have only one category tag, but it has %{tags}; to change the category, just pick the new one",
   "store.kinds.desc.bug": "Fixing errors, failures or unexpected behavior",
