@@ -54,6 +54,7 @@ jobs:
           python3 scripts/test-affected.py
           python3 scripts/test_structure_guard.py
           python3 scripts/test-check-inventory-growth.py
+          python3 scripts/test-inventory-import-markers.py
       - name: Compare guarded inventories with the merge baseline
         if: runner.os == 'Linux'
         run: python3 scripts/check-inventory-growth.py --event-file "$GITHUB_EVENT_PATH"

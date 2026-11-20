@@ -19,6 +19,9 @@ HUB_TESTS = "hub-rs/crates/steve-hub/tests"
 SQLITE_TESTS = "hub-rs/crates/steve-store-sqlite/tests"
 SCHEMA = "hub-rs/crates/steve-store-sqlite/schema"
 STRUCTURE = "hub-rs/structure.txt"
+DIGEST_WRITES = f"{SQLITE_TESTS}/digest_write_sites.txt"
+RUN_OWNERSHIP = "hub-rs/crates/steve-flow/tests/run_write_ownership.txt"
+DUE_WAKE = f"{HUB_TESTS}/due_wake_sites.txt"
 I18N_REMAINING = f"{HUB_TESTS}/i18n_remaining.txt"
 WEB = {"web/test/guard-zh-compare.txt", "web/test/harness-parity.txt"}
 
@@ -30,7 +33,7 @@ class InventoryError(ValueError):
 def is_inventory(path):
     file = PurePosixPath(path)
     parent = file.parent.as_posix()
-    return (path == STRUCTURE or path in WEB
+    return (path in (STRUCTURE, DIGEST_WRITES, RUN_OWNERSHIP) or path in WEB
             or (parent == HUB_TESTS and file.suffix == ".txt" and file.name != "layering.txt")
             or (parent == SQLITE_TESTS and file.name.startswith("inventory_") and file.suffix == ".txt")
             or (parent == SCHEMA and (file.name == "triggers.tsv"
@@ -41,6 +44,18 @@ def positive(text):
     if not re.fullmatch(r"[0-9]+", text) or int(text) <= 0:
         raise InventoryError(f"expected a positive decimal integer, found {text!r}")
     return int(text)
+
+
+def nonnegative(text):
+    if not re.fullmatch(r"[0-9]+", text):
+        raise InventoryError(f"expected a nonnegative decimal integer, found {text!r}")
+    return int(text)
+
+
+def run_columns(text):
+    """A missing legacy bare column is unknown, never an implicit zero budget."""
+    return next((len(line.removesuffix("\r").split("\t")) for line in text.split("\n")
+                 if line and not line.startswith("#")), None)
 
 
 def parse(path, text):
@@ -59,7 +74,31 @@ def parse(path, text):
             if arity is not None and len(fields) != arity:
                 raise InventoryError("inconsistent number of key fields")
             arity = len(fields)
-            if path == STRUCTURE:
+            if path == RUN_OWNERSHIP:
+                if len(fields) not in (2, 3):
+                    raise InventoryError("expected path, total and optional explicit bare column")
+                total = positive(fields[1])
+                columns = [("total", total)]
+                if len(fields) == 3:
+                    bare = nonnegative(fields[2])
+                    if bare > total:
+                        raise InventoryError("bare count exceeds total")
+                    columns.append(("bare", bare))
+                for column, value in columns:
+                    key = (fields[0], column)
+                    if key in entries:
+                        raise InventoryError(f"duplicate key: {' '.join(key)}")
+                    entries[key] = [value]
+                continue
+            elif path == DIGEST_WRITES:
+                if len(fields) != 3:
+                    raise InventoryError("expected kind, path and count")
+                key, values = tuple(fields[:2]), [positive(fields[2])]
+            elif path == DUE_WAKE:
+                if len(fields) != 2:
+                    raise InventoryError("expected file and count")
+                key, values = (fields[0],), [positive(fields[1])]
+            elif path == STRUCTURE:
                 if len(fields) != 4 or fields[2] not in VALUE:
                     raise InventoryError("expected crate, file, known lint and comma-separated values")
                 key = tuple(fields[:3])
@@ -105,6 +144,9 @@ def value_text(values):
 def describe(change):
     if change["kind"] == "removed":
         return "inventory file removed; retain an empty list or name its removal"
+    if change["kind"] == "format":
+        return (f"inventory format changed {change['before_format']}->{change['head_format']}; "
+                "explicit human format review required; a missing bare column has no baseline")
     return (f"{key_text(change['key'])} = {value_text(change['head'])} "
             f"(baseline {value_text(change['before']) or 'absent'})")
 
@@ -115,6 +157,10 @@ def compare_snapshots(before, after):
     for path in paths:
         listed, current = parse(path, before.get(path, "")), parse(path, after.get(path, ""))
         problems = []
+        if path == RUN_OWNERSHIP and path in before and path in after:
+            old_format, new_format = run_columns(before[path]), run_columns(after[path])
+            if old_format is not None and new_format is not None and old_format != new_format:
+                problems.append({"kind": "format", "before_format": old_format, "head_format": new_format})
         for key in sorted(listed.keys() | current.keys()):
             was = {key: listed[key]} if key in listed else {}
             now = {key: current[key]} if key in current else {}
@@ -217,11 +263,14 @@ def authorize(changes, markers):
         for path, index, change in required:
             if change["kind"] == "removed":
                 prefix = f"{path}:"
+            elif change["kind"] == "format":
+                prefix = f"{path}: format {change['before_format']}->{change['head_format']}:"
             else:
                 prefix = f"{path} {key_text(change['key'])} = {value_text(change['head'])}:"
             if marker["text"].startswith(prefix):
                 reason = marker["text"][len(prefix):].strip()
-                if reason and not (change["kind"] == "removed" and reason.startswith("import ")):
+                structured_import_or_format = reason.startswith("import ") or re.match(r"format [0-9]+->[0-9]+:", reason)
+                if reason and not (change["kind"] == "removed" and structured_import_or_format):
                     matches.append((len(prefix), path, index, change, reason))
         if not matches:
             continue
@@ -231,8 +280,11 @@ def authorize(changes, markers):
             raise InventoryError("ambiguous inventory review key; use the exact result printed by the comparator")
         _, path, index, change, reason = matches[0]
         covered.add((path, index))
-        applied.append({"kind": change["kind"], "commit": marker["commit"], "path": path,
-                        "reason": reason, "key": change.get("key"), "head": change.get("head")})
+        review = {"kind": change["kind"], "commit": marker["commit"], "path": path,
+                  "reason": reason, "key": change.get("key"), "head": change.get("head")}
+        if change["kind"] == "format":
+            review.update(before_format=change["before_format"], head_format=change["head_format"])
+        applied.append(review)
     missing = [(path, change) for path, index, change in required if (path, index) not in covered]
     return applied, missing
 
@@ -298,7 +350,13 @@ def check(repo, base, head="HEAD"):
     for path in paths:
         was, now = parse(path, effective.get(path, "")), parse(path, after.get(path, ""))
         total = (lambda rows: sum(map(len, rows.values()))) if path == STRUCTURE else (lambda rows: sum(v[0] for v in rows.values()))
-        totals[path] = {"baseline": total(was), "head": total(now)}
+        if path == RUN_OWNERSHIP:
+            axis = lambda rows, name: sum(v[0] for key, v in rows.items() if key[-1] == name)
+            totals[path] = {"baseline": axis(was, "total"), "head": axis(now, "total"),
+                            "bare_baseline": axis(was, "bare") if run_columns(effective.get(path, "")) == 3 else None,
+                            "bare_head": axis(now, "bare") if run_columns(after.get(path, "")) == 3 else None}
+        else:
+            totals[path] = {"baseline": total(was), "head": total(now)}
     return {"base": base, "head": head, "paths": paths, "changes": changes,
             "growth": [f"{path}: {describe(change)}" for path, items in changes.items() for change in items],
             "markers": imports + markers, "notes": notes, "totals": totals,
@@ -334,13 +392,21 @@ def main(argv=None):
             detail = f"{marker['path']}: import {marker['blob']}"
         elif marker["kind"] == "removed":
             detail = f"{marker['path']}: removal"
+        elif marker["kind"] == "format":
+            detail = f"{marker['path']}: format {marker['before_format']}->{marker['head_format']}"
         else:
             detail = f"{marker['path']} {key_text(marker['key'])} = {value_text(marker['head'])}"
         print(f"explicit Inventory-Growth marker {marker['commit']}: {detail}: {marker['reason']}")
     for path, counts in report["totals"].items():
-        print(f"reference totals {path}: {counts['baseline']} -> {counts['head']}; counts can cancel, key budgets decide")
+        if path == RUN_OWNERSHIP:
+            old_bare = "unknown" if counts["bare_baseline"] is None else counts["bare_baseline"]
+            new_bare = "unknown" if counts["bare_head"] is None else counts["bare_head"]
+            print(f"reference columns {path}: total {counts['baseline']} -> {counts['head']}; "
+                  f"bare {old_bare} -> {new_bare}; columns never offset one another")
+        else:
+            print(f"reference totals {path}: {counts['baseline']} -> {counts['head']}; counts can cancel, key budgets decide")
     if report["unreviewed"]:
-        print("inventory changes require a reviewed Inventory-Growth key/result (or named removal):\n"
+        print("inventory changes require a reviewed Inventory-Growth key/result (or explicit format review / named removal):\n"
               + "\n".join(report["unreviewed_changes"]), file=sys.stderr)
         return 1
     print("inventory comparison passed" + (" with exact-result review markers" if report["changes"] else "; no growth"))

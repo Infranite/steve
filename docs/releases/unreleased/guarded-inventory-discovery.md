@@ -1,0 +1,3 @@
+The inventory comparator now includes the digest write-site and Flow run-ownership inventories. Run ownership retains separate `total` and `bare` budgets, including a valid zero `bare` count; reductions in one column cannot hide growth in the other. Switching an existing inventory between its two- and three-column formats requires an explicit human format review and exact-result reasons for newly introduced or growing column budgets, rather than an import anchor.
+
+The Hub due-wake inventory is checked as `(file, count)` rows through the same discovery entry point. CI now runs the import-marker generator's tests. The generator inherits this coverage without a second path list and still prints no markers when existing growth or a format switch requires human review.

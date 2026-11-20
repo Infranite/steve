@@ -153,17 +153,22 @@ class ImportMarkers(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
 
     def test_discovery_uses_exactly_the_existing_comparators_domain(self):
-        for path in [f"{guard.HUB_TESTS}/layering.txt",
-                     "hub-rs/crates/steve-store-sqlite/tests/digest_write_sites.txt",
-                     "hub-rs/crates/steve-flow/tests/run_write_ownership.txt",
-                     "README-other.txt"]:
+        for path in [f"{guard.HUB_TESTS}/layering.txt", "README-other.txt"]:
             self.put(path, "not a registered RG4 inventory\n")
-        self.put(COUNT, "a.rs\t1\n")
+        expected = {
+            COUNT: "a.rs\t1\n",
+            "hub-rs/crates/steve-store-sqlite/tests/digest_write_sites.txt": "table\tsrc/a.rs\t1\n",
+            "hub-rs/crates/steve-flow/tests/run_write_ownership.txt": "src/a.rs\t2\t0\n",
+            f"{guard.HUB_TESTS}/due_wake_sites.txt": "src/a.rs\t1\n",
+        }
+        for path, text in expected.items():
+            self.put(path, text)
         self.commit("Recognized and unrecognized files")
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(result.stdout.splitlines()), 1)
-        self.assertIn(COUNT, result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), len(expected))
+        for path in expected:
+            self.assertIn(path, result.stdout)
 
     def test_new_empty_inventory_needs_no_anchor(self):
         self.put(COUNT, "# empty first snapshot\n")
@@ -224,6 +229,64 @@ class ImportMarkers(unittest.TestCase):
         with patch.object(guard, "git", return_value="100644 blob " + "a" * 64 + "\t" + COUNT + "\0"):
             with self.assertRaisesRegex(guard.InventoryError, "40-character blob"):
                 imports.head_blob(self.repo, "HEAD", COUNT)
+
+    def family_import(self, path, text):
+        self.put(path, text)
+        self.commit("First family snapshot")
+        self.assertIn(path, guard.check(self.repo, self.base)["unreviewed"])
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        blob = self.git("rev-parse", f"HEAD:{path}")
+        self.assertEqual(result.stdout, f"Inventory-Growth: {path}: import {blob}: initial inventory snapshot\n")
+        self.commit("Initial import review\n\n" + result.stdout)
+        self.assertEqual(guard.check(self.repo, self.base)["unreviewed"], [])
+        command = [sys.executable, str(Path(guard.__file__)), "--repo", str(self.repo), "--base", self.base]
+        self.assertEqual(subprocess.run(command, env=self.env, capture_output=True).returncode, 0)
+
+    def test_rg4b_digest_first_import_round_trips(self):
+        self.family_import("hub-rs/crates/steve-store-sqlite/tests/digest_write_sites.txt", "table\tsrc/a.rs\t2\n")
+
+    def test_rg4b_run_first_import_with_bare_zero_round_trips(self):
+        self.family_import("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\t0\n")
+
+    def test_rg4b_due_first_import_round_trips(self):
+        self.family_import(f"{guard.HUB_TESTS}/due_wake_sites.txt", "src/a.rs\t2\n")
+
+    def mixed_growth(self, path, before, after):
+        self.put(path, before)
+        self.base = self.commit("Already present family inventory")
+        self.put(path, after)
+        self.commit("Existing growth or layout switch")
+        self.assertIn(path, guard.check(self.repo, self.base)["unreviewed"])
+        self.put(STRUCTURE, "crate\tsrc/f.rs\ttoo_many_lines\t120\n")
+        self.commit("New first import alongside existing review requirement")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn(path, result.stderr)
+        self.assertIn("需要人写理由", result.stderr)
+
+    def test_rg4b_digest_growth_among_imports_prints_no_markers(self):
+        self.mixed_growth("hub-rs/crates/steve-store-sqlite/tests/digest_write_sites.txt", "table\tsrc/a.rs\t2\n", "table\tsrc/a.rs\t3\n")
+
+    def test_rg4b_run_bare_zero_to_one_among_imports_prints_no_markers(self):
+        self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\t0\n", "src/a.rs\t2\t1\n")
+
+    def test_rg4b_run_total_decrease_cannot_cancel_bare_growth_among_imports(self):
+        self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\t0\n", "src/a.rs\t1\t1\n")
+
+    def test_rg4b_run_two_to_three_columns_among_imports_prints_no_markers(self):
+        self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\n", "src/a.rs\t2\t0\n")
+
+    def test_rg4b_run_three_to_two_columns_among_imports_prints_no_markers(self):
+        self.mixed_growth("hub-rs/crates/steve-flow/tests/run_write_ownership.txt", "src/a.rs\t2\t0\n", "src/a.rs\t2\n")
+
+    def test_rg4b_due_growth_among_imports_prints_no_markers(self):
+        self.mixed_growth(f"{guard.HUB_TESTS}/due_wake_sites.txt", "src/a.rs\t2\n", "src/a.rs\t3\n")
+
+    def test_rg4b_due_added_row_among_imports_prints_no_markers(self):
+        self.mixed_growth(f"{guard.HUB_TESTS}/due_wake_sites.txt", "src/a.rs\t2\n", "src/a.rs\t2\nsrc/b.rs\t1\n")
+
 
 
 if __name__ == "__main__":
