@@ -135,6 +135,45 @@ impl GitHub {
 
         let (scan, newest, new_etag) = self.poll_pulls(&r, &conn, &repository, &mut rep).await?;
 
+        self.poll_checks(&r, &conn, &repository, &mut rep).await?;
+        let (issues_due, since) = self
+            .poll_issues(&r, &conn, &repository, &mut rep, now)
+            .await?;
+
+        // 4. Remember where we are (re-read: the row may have changed meanwhile).
+        self.store()
+            .transaction(|tx| {
+                if let Some(cur) = repo::repo_get(tx, &r.id)? {
+                    let mut st = cur.poll_state.clone();
+                    if !st.is_object() {
+                        st = json!({});
+                    }
+                    st["last_poll"] = json!(now);
+                    st["pulls_scan"] = scan.clone();
+                    if scan.is_null() {
+                        st["pulls_since"] = json!(newest);
+                        st["pulls_etag"] = json!(new_etag);
+                    }
+                    if issues_due {
+                        st["last_issues_poll"] = json!(now);
+                        st["issues_since"] = json!(since);
+                    }
+                    repo::set_poll_state(tx, &r.id, &st)?;
+                }
+                Ok::<_, ApiError>(())
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(rep)
+    }
+
+    /// Poll each unsettled SHA once, preserving check/status digest and receipt identity.
+    async fn poll_checks(
+        &self,
+        r: &RepoRow,
+        conn: &crate::GhConn,
+        repository: &Value,
+        rep: &mut PollReport,
+    ) -> Result<(), String> {
         // 2. Checks of open PRs that have not passed.
         let shas: Vec<String> = self
             .store()
@@ -176,10 +215,22 @@ impl GitHub {
             let digest = hex::encode(h.finalize());
             let key = format!("poll:{}:checks:{sha}:{}", r.id, &digest[..16]);
             let payload = json!({"sha": sha, "check_runs": runs, "statuses": statuses, "repository": repository});
-            self.poll_change(&r, &key, "poll_checks", &payload, &mut rep)
+            self.poll_change(r, &key, "poll_checks", &payload, rep)
                 .await?;
         }
 
+        Ok(())
+    }
+
+    /// Poll due Issues, filtering PR-shaped entries and returning the watermark to commit.
+    async fn poll_issues(
+        &self,
+        r: &RepoRow,
+        conn: &crate::GhConn,
+        repository: &Value,
+        rep: &mut PollReport,
+        now: i64,
+    ) -> Result<(bool, i64), String> {
         // 3. Issues, every 10 minutes.
         let last_issues = r.poll_state["last_issues_poll"].as_i64().unwrap_or(0);
         let mut since = r.poll_state["issues_since"].as_i64().unwrap_or(0);
@@ -212,35 +263,11 @@ impl GitHub {
                 }
                 let key = format!("poll:{}:issue:{n}:{u}", r.id);
                 let payload = json!({"action": "poll", "issue": i, "repository": repository});
-                self.poll_change(&r, &key, "issues", &payload, &mut rep)
-                    .await?;
+                self.poll_change(r, &key, "issues", &payload, rep).await?;
             }
         }
 
-        // 4. Remember where we are (re-read: the row may have changed meanwhile).
-        self.store()
-            .transaction(|tx| {
-                if let Some(cur) = repo::repo_get(tx, &r.id)? {
-                    let mut st = cur.poll_state.clone();
-                    if !st.is_object() {
-                        st = json!({});
-                    }
-                    st["last_poll"] = json!(now);
-                    st["pulls_scan"] = scan.clone();
-                    if scan.is_null() {
-                        st["pulls_since"] = json!(newest);
-                        st["pulls_etag"] = json!(new_etag);
-                    }
-                    if issues_due {
-                        st["last_issues_poll"] = json!(now);
-                        st["issues_since"] = json!(since);
-                    }
-                    repo::set_poll_state(tx, &r.id, &st)?;
-                }
-                Ok::<_, ApiError>(())
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(rep)
+        Ok((issues_due, since))
     }
 
     async fn poll_pulls(

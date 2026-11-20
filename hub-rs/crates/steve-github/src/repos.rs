@@ -438,36 +438,8 @@ impl GitHub {
     ) -> VaultResult<Value> {
         let adapter = self.own_connection(who, connection)?;
         let ws = who.ws.clone();
-        let pre = |gh: &GitHub| {
-            gh.store().reader(|c| {
-                if let Some(p) = project {
-                    check_project(c, &ws, p, None)?;
-                }
-                if repo::repo_by_gh(c, &ws, gh_id)
-                    .map_err(ApiError::from)?
-                    .is_some()
-                {
-                    return Err(
-                        ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into(),
-                    );
-                }
-                Ok::<_, steve_modules::vault::VaultError>(())
-            })
-        };
-        pre(self)?;
-        let mut a = self
-            .available(&ws, connection, false)
-            .await?
-            .into_iter()
-            .find(|a| a.gh_id == gh_id);
-        if a.is_none() {
-            a = self
-                .available(&ws, connection, true)
-                .await?
-                .into_iter()
-                .find(|a| a.gh_id == gh_id);
-        }
-        let a = a.ok_or_else(|| ApiError::not_found("仓库"))?;
+        self.validate_repo_link(&ws, gh_id, project)?;
+        let a = self.available_repo_for_link(&ws, connection, gh_id).await?;
         let now = self.now();
         let mut row = RepoRow {
             id: uid("ghr"),
@@ -492,27 +464,103 @@ impl GitHub {
         };
         let mut hook_item = None;
         if adapter == github_pat::ID {
-            match self.create_hook(&ws, &who.me, connection, &a).await {
-                Ok((hook, item)) => {
-                    row.ingest = "repo_hook".into();
-                    row.hook_id = Some(hook);
-                    row.poll_state = json!({"hook_item": item});
-                    hook_item = Some(item);
-                }
-                Err(e) => {
-                    tracing::info!(repo = %a.full_name, error = %e, "no repository hook, polling");
-                    row.ingest = "poll".into();
-                }
+            hook_item = self
+                .attach_pat_hook(&ws, &who.me, connection, &a, &mut row)
+                .await;
+        }
+        let res = self.persist_repo_link(who, &row, project);
+        if res.is_err() {
+            // Lost a race: undo the hook.
+            self.remove_hook(&ws, &who.me, &row, hook_item.as_deref())
+                .await;
+        }
+        let out = res?;
+        self.announce_repo_link(who, &row);
+        Ok(out)
+    }
+
+    /// Validate before any remote work; persistence repeats the check to close the race.
+    fn validate_repo_link(&self, ws: &str, gh_id: i64, project: Option<&str>) -> VaultResult<()> {
+        self.store().reader(|c| {
+            if let Some(p) = project {
+                check_project(c, &ws, p, None)?;
+            }
+            if repo::repo_by_gh(c, &ws, gh_id)
+                .map_err(ApiError::from)?
+                .is_some()
+            {
+                return Err(
+                    ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into(),
+                );
+            }
+            Ok::<_, steve_modules::vault::VaultError>(())
+        })
+    }
+
+    /// Refresh a cached miss once before declaring the GitHub repository unavailable.
+    async fn available_repo_for_link(
+        &self,
+        ws: &str,
+        connection: &str,
+        gh_id: i64,
+    ) -> VaultResult<Available> {
+        let mut a = self
+            .available(&ws, connection, false)
+            .await?
+            .into_iter()
+            .find(|a| a.gh_id == gh_id);
+        if a.is_none() {
+            a = self
+                .available(&ws, connection, true)
+                .await?
+                .into_iter()
+                .find(|a| a.gh_id == gh_id);
+        }
+        Ok(a.ok_or_else(|| ApiError::not_found("仓库"))?)
+    }
+
+    /// Try the PAT hook and retain its secret identity for cleanup if persistence later fails.
+    async fn attach_pat_hook(
+        &self,
+        ws: &str,
+        me: &str,
+        connection: &str,
+        a: &Available,
+        row: &mut RepoRow,
+    ) -> Option<String> {
+        match self.create_hook(ws, me, connection, a).await {
+            Ok((hook, item)) => {
+                row.ingest = "repo_hook".into();
+                row.hook_id = Some(hook);
+                row.poll_state = json!({"hook_item": item});
+                Some(item)
+            }
+            Err(e) => {
+                tracing::info!(repo = %a.full_name, error = %e, "no repository hook, polling");
+                row.ingest = "poll".into();
+                None
             }
         }
-        let res = self.store().transaction(|tx| {
+    }
+
+    /// Commit the row, audit and response atomically after repeating project/repo validation.
+    fn persist_repo_link(
+        &self,
+        who: &Caller,
+        row: &RepoRow,
+        project: Option<&str>,
+    ) -> VaultResult<Value> {
+        let ws = &row.workspace_id;
+        let gh_id = row.gh_id;
+        let connection = &row.connection_id;
+        self.store().transaction(|tx| {
             if let Some(p) = project {
                 check_project(tx, &ws, p, None)?;
             }
             if repo::repo_by_gh(tx, &ws, gh_id).map_err(ApiError::from)?.is_some() {
                 return Err(ApiError::conflict(steve_i18n::t!("github.repo.already_linked")).into());
             }
-            repo::insert_repo(tx, &row).map_err(ApiError::from)?;
+            repo::insert_repo(tx, row).map_err(ApiError::from)?;
             base::audit(
                 tx,
                 &ws,
@@ -522,14 +570,13 @@ impl GitHub {
                 &json!({"full_name": row.full_name, "connection": connection, "project": project, "ingest": row.ingest}),
             )
             .map_err(ApiError::from)?;
-            Ok::<_, steve_modules::vault::VaultError>(repo_out(tx, &row).map_err(ApiError::from)?)
-        });
-        if res.is_err() {
-            // Lost a race: undo the hook.
-            self.remove_hook(&ws, &who.me, &row, hook_item.as_deref())
-                .await;
-        }
-        let out = res?;
+            Ok::<_, steve_modules::vault::VaultError>(repo_out(tx, row).map_err(ApiError::from)?)
+        })
+    }
+
+    /// Publish the committed repository, then install the workspace's first-repo templates.
+    fn announce_repo_link(&self, who: &Caller, row: &RepoRow) {
+        let ws = &row.workspace_id;
         self.notifier().gh(&ws, &row.id);
         // The first repo of the workspace brings the “PR 检查失败” flow.
         match self.install_template(&ws, &who.me) {
@@ -538,7 +585,6 @@ impl GitHub {
             Err(e) => tracing::warn!(error = %e, "github flow template not installed"),
         }
         tracing::info!(repo = %row.full_name, ingest = %row.ingest, "github repo linked");
-        Ok(out)
     }
 
     /// Creates the PAT repository hook and its secret item: `(hook id, vault item)`.

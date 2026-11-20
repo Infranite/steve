@@ -497,44 +497,11 @@ impl GitHub {
                 serde_json::from_str::<Source>(&source),
                 serde_json::from_str::<Value>(&payload),
             ) else {
-                // never readable: recorded as failed rather than tried forever
-                let r = self.store().transaction(|tx| {
-                    repo::set_delivery_result(
-                        tx,
-                        &delivery_id,
-                        None,
-                        None,
-                        "failed",
-                        Some("存下的内容读不出来"),
-                    )
-                    .map_err(ApiError::from)
-                });
-                if let Err(e) = r {
-                    tracing::error!(error = %e, "github: unreadable delivery not recorded");
-                }
+                self.reject_unreadable_delivery(&delivery_id);
                 continue;
             };
-            if !lock(&self.0.queue.queued).insert(delivery_id.clone()) {
+            if self.claim_recovered_delivery(&delivery_id).is_none() {
                 continue;
-            }
-            // A worker commits `delivered` (changing status or advancing `next_at`) BEFORE
-            // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
-            // `queued` closes the window where `received_deliveries` read the row right before
-            // the worker finished and released `queued`.
-            match self
-                .store()
-                .reader(|c| repo::delivery_due(c, &delivery_id, self.now()).map_err(ApiError::from))
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    lock(&self.0.queue.queued).remove(&delivery_id);
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, delivery = %delivery_id, "github: delivery due check failed");
-                    lock(&self.0.queue.queued).remove(&delivery_id);
-                    continue;
-                }
             }
             self.enqueue_claimed(Job {
                 source,
@@ -546,6 +513,52 @@ impl GitHub {
             n += 1;
         }
         n
+    }
+
+    /// Mark an input that cannot be decoded failed rather than retrying it forever.
+    fn reject_unreadable_delivery(&self, delivery_id: &str) {
+        // never readable: recorded as failed rather than tried forever
+        let r = self.store().transaction(|tx| {
+            repo::set_delivery_result(
+                tx,
+                delivery_id,
+                None,
+                None,
+                "failed",
+                Some("存下的内容读不出来"),
+            )
+            .map_err(ApiError::from)
+        });
+        if let Err(e) = r {
+            tracing::error!(error = %e, "github: unreadable delivery not recorded");
+        }
+    }
+
+    /// Claim in memory, then recheck SQLite so a just-finished delivery cannot be queued again.
+    fn claim_recovered_delivery(&self, delivery_id: &str) -> Option<()> {
+        if !lock(&self.0.queue.queued).insert(delivery_id.to_string()) {
+            return None;
+        }
+        // A worker commits `delivered` (changing status or advancing `next_at`) BEFORE
+        // `done_one` removes `delivery_id` from `queued`. Re-checking SQLite after claiming
+        // `queued` closes the window where `received_deliveries` read the row right before
+        // the worker finished and released `queued`.
+        match self
+            .store()
+            .reader(|c| repo::delivery_due(c, delivery_id, self.now()).map_err(ApiError::from))
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                lock(&self.0.queue.queued).remove(delivery_id);
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, delivery = %delivery_id, "github: delivery due check failed");
+                lock(&self.0.queue.queued).remove(delivery_id);
+                return None;
+            }
+        }
+        Some(())
     }
 
     /// Waits until every accepted delivery has been processed, runs the due effects (opening,
