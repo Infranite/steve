@@ -96,8 +96,6 @@ steve-digest	crates/steve-digest/src/brief.rs	too_many_lines	140
 steve-digest	crates/steve-digest/src/candidates.rs	too_many_lines	162
 steve-digest	crates/steve-digest/src/changes.rs	too_many_lines	166
 steve-digest	crates/steve-digest/src/conv.rs	too_many_lines	118,102
-steve-digest	crates/steve-digest/src/facts.rs	cognitive_complexity	33
-steve-digest	crates/steve-digest/src/facts.rs	too_many_lines	251
 steve-digest	crates/steve-digest/src/todo_tools.rs	too_many_lines	162
 steve-flow	crates/steve-flow/src/corrections.rs	too_many_lines	139
 steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29
