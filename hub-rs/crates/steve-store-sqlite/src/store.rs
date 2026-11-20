@@ -335,12 +335,19 @@ impl<E: Send + 'static> SqliteStore<E> {
         let session = session.clone();
         blocking(self.runtime.clone(), move || reads.end_export(&session)).await
     }
-    fn register_tables(writer: &Writer<E>, tables: &[String], watch: &CommitWatch) {
-        if !tables.is_empty()
-            && let Ok(_grant) = writer.executor.grant(Lane::Interactive)
-        {
-            writer.runner.watches.subscribe_into(tables, watch);
-            crate::exec::watch::Capture::subscribed(&writer.runner.watches, tables);
+    /// Backend subscription entry keyed by physical table names in one writer
+    /// file. No entity/descriptor lookup occurs here. Entity watches and the
+    /// legacy Notify facade both attach weak consumer adapters to this registry.
+    /// A registration inside its root grant is conservative until root release.
+    pub fn subscribe_tables(&self, domain: Domain, tables: &[&str], hint: Arc<dyn CommitHint>) {
+        if tables.is_empty() {
+            return;
+        }
+        let writer = &self.writers[&domain];
+        let tables: Vec<_> = tables.iter().map(|s| (*s).to_owned()).collect();
+        if let Ok(_grant) = writer.executor.grant(Lane::Interactive) {
+            writer.runner.watches.subscribe_hint(&tables, hint);
+            crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
         }
     }
     /// Backend-only table-key bridge for the legacy Store::commit_wake facade.
@@ -360,23 +367,13 @@ impl<E: Send + 'static> SqliteStore<E> {
             }
         }
         let wake = Arc::new(tokio::sync::Notify::new());
-        let writer = &self.writers[&domain];
-        let tables: Vec<_> = tables.iter().map(|s| (*s).to_owned()).collect();
-        if !tables.is_empty()
-            && let Ok(_grant) = writer.executor.grant(Lane::Interactive)
-        {
-            writer
-                .runner
-                .watches
-                .subscribe_hint(&tables, Arc::new(NotifyHint(Arc::downgrade(&wake))));
-            crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
-        }
+        self.subscribe_tables(domain, tables, Arc::new(NotifyHint(Arc::downgrade(&wake))));
         wake
     }
     fn watch_across_files(&self, entities: &[EntityName]) -> CommitWatch {
         let watch = CommitWatch::new();
         let mut files = BTreeSet::new();
-        for writer in self.writers.values() {
+        for (domain, writer) in &self.writers {
             if !files.insert(writer.engine.path()) {
                 continue;
             }
@@ -387,9 +384,9 @@ impl<E: Send + 'static> SqliteStore<E> {
                     entities.contains(&e.desc.name)
                         && Arc::ptr_eq(&self.writers[&e.desc.domain], writer)
                 })
-                .map(|e| e.table.clone())
+                .map(|e| e.table.as_str())
                 .collect();
-            Self::register_tables(writer, &physical, &watch);
+            self.subscribe_tables(*domain, &physical, watch.hint());
         }
         watch
     }

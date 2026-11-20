@@ -117,6 +117,11 @@ impl CommitWatch {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Weak consumer adapter for backend table registries. Holding this adapter
+    /// does not keep the subscription alive after the consumer drops its watch.
+    pub fn hint(&self) -> std::sync::Arc<dyn CommitHint> {
+        std::sync::Arc::new(WatchHint(std::sync::Arc::downgrade(&self.0)))
+    }
     /// Wait for a hint; a commit before this call retains one permit.
     pub async fn changed(&self) {
         std::future::poll_fn(|cx| {
@@ -169,10 +174,7 @@ impl CommitWatches {
     }
     /// Attach another backend partition to the same data-free subscription.
     pub fn subscribe_into(&self, entities: &[EntityName], watch: &CommitWatch) {
-        self.subscribe_hint(
-            entities,
-            std::sync::Arc::new(WatchHint(std::sync::Arc::downgrade(&watch.0))),
-        );
+        self.subscribe_hint(entities, watch.hint());
     }
     pub fn subscribe_hint(&self, keys: &[String], hint: std::sync::Arc<dyn CommitHint>) {
         let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
