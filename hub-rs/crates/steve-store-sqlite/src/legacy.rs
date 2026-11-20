@@ -54,32 +54,19 @@ pub fn version(conn: &Connection) -> Result<i64> {
 }
 
 fn minimum_reader(c: &Connection, fallback: i64) -> Result<i64> {
-    let kind: Option<String> = c
-        .query_row(
-            "SELECT type FROM sqlite_schema WHERE name='schema_compat' COLLATE NOCASE",
-            [],
-            |r| r.get(0),
+    let present: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_compat')",
+        [],
+        |r| r.get(0),
+    )?;
+    if present {
+        Ok(
+            c.query_row("SELECT min_reader FROM schema_compat", [], |r| r.get(0))
+                .optional()?
+                .unwrap_or(fallback),
         )
-        .optional()?;
-    let Some(kind) = kind else {
-        return Ok(fallback);
-    };
-    if kind != "table" {
-        return Err(rusqlite::Error::InvalidParameterName(
-            "invalid legacy reader object".into(),
-        ));
-    }
-    let rows = c
-        .prepare("SELECT min_reader FROM schema_compat")?
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>>>()?;
-    match rows.as_slice() {
-        // The final hook also reads the permanent current fence. The legacy
-        // version discriminator above enforces its own compiled upper bound.
-        [minimum] if *minimum >= 0 => Ok(*minimum),
-        _ => Err(rusqlite::Error::InvalidParameterName(
-            "invalid legacy minimum reader".into(),
-        )),
+    } else {
+        Ok(fallback)
     }
 }
 
@@ -117,8 +104,6 @@ fn run_pending<E: From<rusqlite::Error>>(
     check: impl FnOnce(&Connection) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E> {
     let tx = Transaction::new_unchecked(c, TransactionBehavior::Immediate)?;
-    // Inspect an optional old reader header before creating the missing table.
-    let stamp = minimum_reader(&tx, cur)?.max(SCHEMA_VERSION);
     // Metadata belongs to the same transaction as migrations, including on an empty DB.
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
@@ -145,6 +130,7 @@ fn run_pending<E: From<rusqlite::Error>>(
     tx.execute("UPDATE schema_version SET v = ?", [SCHEMA_VERSION])?;
     // every migration needs a build that knows it (letting older builds use one would also need a record
     // of what they wrote since, which nothing keeps); the stamp only ever rises
+    let stamp = minimum_reader(&tx, cur)?.max(SCHEMA_VERSION);
     tx.execute("DELETE FROM schema_compat", [])?;
     tx.execute("INSERT INTO schema_compat (min_reader) VALUES (?)", [stamp])?;
     // Final hook sees the stamped head and may replace legacy metadata with
