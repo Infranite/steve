@@ -9,7 +9,7 @@ fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
     current::migrate(&mut c).unwrap();
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);")
         .unwrap();
-    let insert = |id: &str, state: &str, local: bool| {
+    let insert = |c: &Connection, id: &str, state: &str, local: bool| {
         c.execute(
             "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,local,created)
              VALUES (?1,'owner',?1,zeroblob(32),?1,?2,?3,1)",
@@ -17,11 +17,11 @@ fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
         )
         .unwrap();
     };
-    insert("existing", "active", false);
-    insert("paused", "paused", false);
-    insert("pending", "pending", false);
-    insert("revoked", "revoked", false);
-    insert("local", "active", true);
+    insert(&c, "existing", "active", false);
+    insert(&c, "paused", "paused", false);
+    insert(&c, "pending", "pending", false);
+    insert(&c, "revoked", "revoked", false);
+    insert(&c, "local", "active", true);
     c.execute(
         "INSERT INTO node_removals
          (operation_id,node_id,requested_by,grace_secs,phase,created,updated)
@@ -55,7 +55,7 @@ fn new_nodes_and_state_changes_do_not_grant_legacy_dispatch() {
         )
         .unwrap();
     assert_eq!(removal, ("existing".into(), "requested".into()));
-    insert("new", "active", false);
+    insert(&c, "new", "active", false);
     c.execute(
         "UPDATE nodes SET state='active' WHERE node_id='pending'",
         [],
