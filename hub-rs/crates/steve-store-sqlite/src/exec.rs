@@ -463,29 +463,7 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
         let now = shared.clock.now();
         let maintenance_due = s.maintenance_at.is_some_and(|at| at <= now);
         if s.maintenance_requested || maintenance_due {
-            s.maintenance_requested = false;
-            // A momentarily empty queue after a commit is not an idle deadline.
-            let idle = maintenance_due && s.queues.iter().all(VecDeque::is_empty);
-            let connection = s.connection.take().unwrap();
-            s.busy = true;
-            drop(s);
-            let next = catch_unwind(AssertUnwindSafe(|| {
-                shared.runner.maintenance(&connection, now, idle)
-            }));
-            let mut s = lock(&shared.state);
-            s.connection = Some(connection);
-            s.busy = false;
-            s.scheduler
-                .charge(Lane::Background, shared.clock.now().saturating_sub(now));
-            s.maintenance_at = match next {
-                Ok(next) => next.map(|at| at.max(now.saturating_add(Duration::from_millis(1)))),
-                Err(_) => {
-                    tracing::warn!(file=%shared.file, "storage maintenance panicked; retrying");
-                    Some(now.saturating_add(crate::checkpoint::RETRY_INTERVAL))
-                }
-            };
-            drop(s);
-            shared.changed.notify_all();
+            run_maintenance(&shared, s, now, maintenance_due);
             continue;
         }
         let heads = heads(&s);
@@ -538,64 +516,105 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
         }
         shared.depth(&s, lane);
         drop(s);
-        for q in &batch {
-            shared.wait(lane, q.enqueued);
-        }
-        let site = batch[0].site;
-        let lease = Lease::enter(shared.clone(), connection, lane, site);
-        if matches!(batch[0].work, Work::Unit(..)) {
-            let (jobs, senders): (Vec<_>, Vec<_>) = batch
-                .into_iter()
-                .map(|q| match q.work {
-                    Work::Unit(j, tx) => (j, tx),
-                    _ => unreachable!(),
-                })
-                .unzip();
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                shared.runner.run(lease.connection.as_ref().unwrap(), jobs)
-            }));
-            match result {
-                Ok(outcomes) if outcomes.len() == senders.len() => {
-                    for (tx, result) in senders.into_iter().zip(outcomes) {
-                        let _ = tx.send(result);
-                    }
-                }
-                _ => {
-                    for tx in senders {
-                        let _ = tx.send(Err(fatal(
-                            "batch runner panicked or returned an invalid result count",
-                        )));
-                    }
-                }
-            }
-        } else {
-            let q = batch.pop().unwrap();
-            let Work::Slice(mut job, tx) = q.work else {
-                unreachable!()
-            };
-            let start = shared.clock.now();
-            let step = catch_unwind(AssertUnwindSafe(|| job(lease.connection.as_ref().unwrap())));
-            if shared.clock.now().saturating_sub(start) > SLICE_TARGET {
-                metrics::counter!("steve_store_slice_overruns_total", "file"=>shared.file.clone())
-                    .increment(1);
-            }
-            let mut s = lock(&shared.state);
-            if matches!(step, Ok(Step::More)) && !s.closing {
-                s.queues[i].push_back(Queued {
-                    enqueued: shared.clock.now(),
-                    site: q.site,
-                    work: Work::Slice(job, tx),
-                });
-            } else {
-                s.admitted[i] -= 1;
-                let _ = tx.send(if matches!(step, Ok(Step::Done)) {
-                    Ok(())
-                } else {
-                    Err(fatal("slice stopped or panicked"))
-                });
-            }
-            shared.depth(&s, lane);
-        }
-        drop(lease); // charge actual time and release before choosing another lane
+        execute_batch(&shared, lane, connection, batch);
     }
+}
+
+fn run_maintenance<C: Send + 'static, R: BatchRunner<C>>(
+    shared: &Shared<C, R>,
+    mut s: MutexGuard<'_, State<C, R>>,
+    now: Duration,
+    maintenance_due: bool,
+) {
+    s.maintenance_requested = false;
+    // A momentarily empty queue after a commit is not an idle deadline.
+    let idle = maintenance_due && s.queues.iter().all(VecDeque::is_empty);
+    let connection = s.connection.take().unwrap();
+    s.busy = true;
+    drop(s);
+    let next = catch_unwind(AssertUnwindSafe(|| {
+        shared.runner.maintenance(&connection, now, idle)
+    }));
+    let mut s = lock(&shared.state);
+    s.connection = Some(connection);
+    s.busy = false;
+    s.scheduler
+        .charge(Lane::Background, shared.clock.now().saturating_sub(now));
+    s.maintenance_at = match next {
+        Ok(next) => next.map(|at| at.max(now.saturating_add(Duration::from_millis(1)))),
+        Err(_) => {
+            tracing::warn!(file=%shared.file, "storage maintenance panicked; retrying");
+            Some(now.saturating_add(crate::checkpoint::RETRY_INTERVAL))
+        }
+    };
+    drop(s);
+    shared.changed.notify_all();
+}
+
+fn execute_batch<C: Send + 'static, R: BatchRunner<C>>(
+    shared: &Arc<Shared<C, R>>,
+    lane: Lane,
+    connection: C,
+    mut batch: Vec<Queued<C, R>>,
+) {
+    let i = index(lane);
+    for q in &batch {
+        shared.wait(lane, q.enqueued);
+    }
+    let site = batch[0].site;
+    let lease = Lease::enter(shared.clone(), connection, lane, site);
+    if matches!(batch[0].work, Work::Unit(..)) {
+        let (jobs, senders): (Vec<_>, Vec<_>) = batch
+            .into_iter()
+            .map(|q| match q.work {
+                Work::Unit(j, tx) => (j, tx),
+                _ => unreachable!(),
+            })
+            .unzip();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            shared.runner.run(lease.connection.as_ref().unwrap(), jobs)
+        }));
+        match result {
+            Ok(outcomes) if outcomes.len() == senders.len() => {
+                for (tx, result) in senders.into_iter().zip(outcomes) {
+                    let _ = tx.send(result);
+                }
+            }
+            _ => {
+                for tx in senders {
+                    let _ = tx.send(Err(fatal(
+                        "batch runner panicked or returned an invalid result count",
+                    )));
+                }
+            }
+        }
+    } else {
+        let q = batch.pop().unwrap();
+        let Work::Slice(mut job, tx) = q.work else {
+            unreachable!()
+        };
+        let start = shared.clock.now();
+        let step = catch_unwind(AssertUnwindSafe(|| job(lease.connection.as_ref().unwrap())));
+        if shared.clock.now().saturating_sub(start) > SLICE_TARGET {
+            metrics::counter!("steve_store_slice_overruns_total", "file"=>shared.file.clone())
+                .increment(1);
+        }
+        let mut s = lock(&shared.state);
+        if matches!(step, Ok(Step::More)) && !s.closing {
+            s.queues[i].push_back(Queued {
+                enqueued: shared.clock.now(),
+                site: q.site,
+                work: Work::Slice(job, tx),
+            });
+        } else {
+            s.admitted[i] -= 1;
+            let _ = tx.send(if matches!(step, Ok(Step::Done)) {
+                Ok(())
+            } else {
+                Err(fatal("slice stopped or panicked"))
+            });
+        }
+        shared.depth(&s, lane);
+    }
+    drop(lease); // charge actual time and release before choosing another lane
 }

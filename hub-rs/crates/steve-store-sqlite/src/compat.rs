@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use steve_types::Error;
 
-pub const LEGACY_INPUT: i64 = 113;
+pub const LEGACY_MIN: i64 = 113;
+/// Frozen replay head, derived from the embedded legacy migration catalog.
+pub const LEGACY_MAX: i64 = crate::legacy::SCHEMA_VERSION;
 /// Old-reader rejection signal, not a migration or physical reader generation.
 pub const LEGACY_READER_FENCE: i64 = 1000;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +76,8 @@ pub(crate) fn legacy_refusal(version: i64, maximum: i64) -> Error {
 }
 impl StorageCapabilities {
     /// Domain bounds come from the first/last embedded migrations, legacy from
-    /// its compiled head, physical layout from the compiled layout catalog.
+    /// its supported input floor and compiled replay head, and physical layout
+    /// from the compiled layout catalog.
     /// No release version or separately hand-maintained JSON numbers are used.
     pub fn compiled() -> Self {
         let range = |domain| {
@@ -88,7 +91,7 @@ impl StorageCapabilities {
                     .map_or(0, |m| m.version),
             }
         };
-        let legacy_head = crate::legacy::SCHEMA_VERSION as u32;
+        let legacy_head = LEGACY_MAX as u32;
         Self {
             layout: SchemaRange {
                 min_read: layout::LAYOUT_GENERATION,
@@ -99,7 +102,7 @@ impl StorageCapabilities {
             stream: range("stream"),
             comms: range("comms"),
             legacy: Some(SchemaRange {
-                min_read: legacy_head,
+                min_read: LEGACY_MIN as u32,
                 target: legacy_head,
             }),
         }

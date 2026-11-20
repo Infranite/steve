@@ -9,7 +9,10 @@ fn candidate_matrix_is_the_same_rule_used_by_opens() {
     let caps = StorageCapabilities::compiled();
     let encoded = caps.encode_build_info_draft().unwrap();
     assert_eq!(encoded["layout"]["target"], 2);
-    assert_eq!(encoded["legacy"]["min_read"], 113);
+    assert_eq!(
+        encoded["legacy"],
+        serde_json::json!({"min_read":113,"target":114})
+    );
     assert_eq!(
         serde_json::from_value::<StorageCapabilities>(encoded.clone()).unwrap(),
         caps
@@ -39,6 +42,13 @@ fn candidate_matrix_is_the_same_rule_used_by_opens() {
         (
             StorageState::Legacy {
                 schema_version: 114,
+            },
+            true,
+            false,
+        ),
+        (
+            StorageState::Legacy {
+                schema_version: 115,
             },
             false,
             false,
@@ -180,7 +190,7 @@ fn candidate_declarations_are_independent_of_the_inspecting_binary() {
 #[test]
 fn future_legacy_version_and_reader_request_a_newer_program_without_writing() {
     for sql in [
-        "UPDATE schema_version SET v=114",
+        "UPDATE schema_version SET v=115",
         "UPDATE schema_compat SET min_reader=1000",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -244,7 +254,7 @@ fn encoded_storage_is_flat_uniform_strict_and_matches_the_embedded_catalog() {
         })
         .max()
         .unwrap();
-    assert_eq!(json["legacy"]["min_read"], legacy_head);
+    assert_eq!(json["legacy"]["min_read"], 113);
     assert_eq!(json["legacy"]["target"], legacy_head);
     assert_eq!(
         json["layout"]["target"],
@@ -326,4 +336,69 @@ fn every_item_uses_the_same_inclusive_bounds_and_exact_target_rule() {
             _ => &mut c.comms,
         }
     }
+}
+
+#[path = "common/legacy_input.rs"]
+mod legacy_input;
+
+fn legacy_window(version: i64, accepted: bool, detail: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CORE_FILE);
+    let c = Connection::open(&path).unwrap();
+    legacy_input::at(&c, version.min(114));
+    c.execute("UPDATE schema_version SET v=?1", [version])
+        .unwrap();
+    c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','fixture','fixture','owner',0)").unwrap();
+    // Candidate declarations can be tested even when this binary refuses observation.
+    let state = StorageState::Legacy { schema_version: version };
+    assert_eq!(
+        StorageCapabilities::compiled()
+            .can_open(&state, false)
+            .is_ok(),
+        accepted
+    );
+    drop(c);
+    let before = std::fs::read(&path).unwrap();
+    let opened = open::open_runtime(dir.path());
+    if accepted {
+        let engine = opened.unwrap();
+        let c = engine.read_conn().unwrap();
+        assert!(matches!(
+            open::inspect(&c).unwrap(),
+            StorageState::Current { .. }
+        ));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM users WHERE role='owner'", [], |r| r
+                .get::<_, u32>(
+                0
+            ))
+            .unwrap(),
+            1
+        );
+    } else {
+        let error = opened.err().unwrap();
+        assert!(error.safe_detail.contains(detail), "{}", error.safe_detail);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut c = Connection::open(&path).unwrap();
+        let error = steve_store_sqlite::convert::convert(&mut c).unwrap_err();
+        assert!(error.safe_detail.contains(detail), "{}", error.safe_detail);
+        drop(c);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+#[test]
+fn legacy_113_replays_114_then_becomes_current() {
+    legacy_window(113, true, "");
+}
+#[test]
+fn legacy_114_becomes_current_without_replaying_114() {
+    legacy_window(114, true, "");
+}
+#[test]
+fn legacy_112_is_refused_without_changing_file_bytes() {
+    legacy_window(112, false, "先升级到上一个发布版");
+}
+#[test]
+fn legacy_115_requires_newer_program_without_changing_file_bytes() {
+    legacy_window(115, false, "需要更新的程序");
 }
