@@ -292,14 +292,41 @@ pub struct LocalAcp {
 
 // Usage bookkeeping is synchronous SQL; model and transport awaits stay with
 // their caller, outside these bounded blocking jobs.
-async fn begin_attempt(call: crate::stats::CallAccount, harness: &str, model: &str) -> steve_store::Result<crate::stats::AttemptAccount> {
+async fn begin_attempt(
+    call: crate::stats::CallAccount,
+    harness: &str,
+    model: &str,
+) -> steve_store::Result<crate::stats::AttemptAccount> {
     let (harness, model) = (harness.to_owned(), model.to_owned());
     steve_store::blocking(move || call.attempt(&harness, &model)).await
 }
-async fn finish_attempt(account: crate::stats::AttemptAccount, success: bool, error: Option<String>) -> steve_store::Result<()> {
-    steve_store::blocking(move || account.call.store.stats().gateway_attempt_end(
-        &account.id, success, error.as_deref(), steve_store::now(),
-    )).await
+async fn finish_attempt(
+    account: crate::stats::AttemptAccount,
+    success: bool,
+    error: Option<String>,
+) -> steve_store::Result<()> {
+    steve_store::blocking(move || {
+        account.call.store.stats().gateway_attempt_end(
+            &account.id,
+            success,
+            error.as_deref(),
+            steve_store::now(),
+        )
+    })
+    .await
+}
+
+async fn record_attempt_end(
+    account: Option<crate::stats::AttemptAccount>,
+    success: bool,
+    error: Option<String>,
+    label: &'static str,
+) {
+    if let Some(account) = account
+        && let Err(e) = finish_attempt(account, success, error).await
+    {
+        tracing::warn!("stats: {label}: {e}");
+    }
 }
 
 // The worker owns the adapter until bounded sampler settlement, even if the caller times out or
@@ -388,11 +415,7 @@ impl OneModel for LocalAcp {
                 )
                 .await;
             *worker_pid.lock().unwrap() = None;
-            if let Some(a) = account {
-                if let Err(e) = finish_attempt(a, result.reply.is_ok(), result.reply.as_ref().err().map(ToString::to_string)).await {
-                    tracing::warn!("stats: local completion: {e}");
-                }
-            }
+            record_attempt_end(account, result.reply.is_ok(), result.reply.as_ref().err().map(ToString::to_string), "local completion").await;
             result
         });
         let timer = tokio::time::sleep(timeout);
@@ -760,11 +783,7 @@ impl<M: OneModel> Fallback<M> {
                 Some(a) => a.scope(run).await,
                 None => run.await,
             };
-            if let Some(account) = account {
-                if let Err(e) = finish_attempt(account, r.reply.is_ok(), r.reply.as_ref().err().map(ToString::to_string)).await {
-                    tracing::warn!("stats: attempt end: {e}");
-                }
-            }
+            record_attempt_end(account, r.reply.is_ok(), r.reply.as_ref().err().map(ToString::to_string), "attempt end").await;
             a.attempts += 1;
             // the model asked for: the call is booked under it (who answered is `reported_model`)
             a.model = m.clone();

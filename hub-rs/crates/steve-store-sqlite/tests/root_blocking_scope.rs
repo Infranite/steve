@@ -15,23 +15,50 @@ fn blocking_scope_is_nested_and_restored_after_panic() {
         assert!(exec::in_blocking_scope());
     });
     assert!(!exec::in_blocking_scope());
+    assert!(std::panic::catch_unwind(|| exec::blocking_scope(|| panic!("outer scope"))).is_err());
+    assert!(!exec::in_blocking_scope());
 }
 
 #[test]
 fn explicit_scope_contract_covers_all_runtime_contexts() {
     assert!(!exec::outside_blocking_scope()); // no runtime
-    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .unwrap();
     rt.block_on(async {
-        assert!(tokio::spawn(async { exec::outside_blocking_scope() }).await.unwrap());
-        assert!(tokio::task::spawn_blocking(exec::outside_blocking_scope).await.unwrap());
-        assert!(!tokio::task::spawn_blocking(|| exec::blocking_scope(exec::outside_blocking_scope)).await.unwrap());
-        assert!(!tokio::spawn(async {
-            tokio::task::block_in_place(|| exec::blocking_scope(exec::outside_blocking_scope))
-        }).await.unwrap());
+        assert!(
+            tokio::spawn(async { exec::outside_blocking_scope() })
+                .await
+                .unwrap()
+        );
+        assert!(
+            tokio::task::spawn_blocking(exec::outside_blocking_scope)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !tokio::task::spawn_blocking(|| exec::blocking_scope(exec::outside_blocking_scope))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !tokio::spawn(async {
+                tokio::task::block_in_place(|| exec::blocking_scope(exec::outside_blocking_scope))
+            })
+            .await
+            .unwrap()
+        );
     });
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(async {
-        assert!(tokio::spawn(async { exec::outside_blocking_scope() }).await.unwrap());
+        assert!(
+            tokio::spawn(async { exec::outside_blocking_scope() })
+                .await
+                .unwrap()
+        );
     });
 }
 
@@ -52,8 +79,12 @@ async fn grants_count_each_violation_by_site_without_rejecting() {
 #[derive(Clone, Default)]
 struct Warnings(std::sync::Arc<std::sync::atomic::AtomicU64>);
 impl tracing::Subscriber for Warnings {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
     fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
@@ -70,7 +101,9 @@ async fn outside_scope_warns_once_per_site_across_executors_and_elapsed_minutes(
     let count = warnings.0.clone();
     let (a, time, _) = executor_with_probe(exec::outside_blocking_scope);
     let (b, _, _) = executor_with_probe(exec::outside_blocking_scope);
-    fn same_site(e: &Exec) { drop(e.grant(Lane::Admin).unwrap()); }
+    fn same_site(e: &Exec) {
+        drop(e.grant(Lane::Admin).unwrap());
+    }
     tracing::subscriber::with_default(warnings, || {
         same_site(&a);
         time.advance(120_000);

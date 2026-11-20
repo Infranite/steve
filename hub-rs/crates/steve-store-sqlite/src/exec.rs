@@ -4,9 +4,9 @@
 #[cfg(feature = "conformance")]
 #[path = "access_log.rs"]
 pub mod access_log;
+mod blocking;
 #[cfg(test)]
 mod maintenance_tests;
-mod blocking;
 pub use blocking::{blocking_scope, in_blocking_scope, outside_blocking_scope};
 mod schedule;
 #[cfg(test)]
@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 use steve_storage_api::uow::CommitError;
 use tokio::sync::oneshot;
 
+// Flip only after 6b3 migrates the Node callers; phase 1 counts and warns.
+const ENFORCE_BLOCKING_SCOPE: bool = false;
 pub const QUEUE_LIMIT: usize = 1024;
 pub const INGEST_BATCH: usize = 128;
 pub const SLICE_TARGET: Duration = Duration::from_millis(20);
@@ -71,6 +73,8 @@ pub enum Step {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum GrantError {
+    #[error("storage root grant outside blocking scope at {site}")]
+    OutsideBlockingScope { site: String },
     #[error("cross-engine write: {outer} -> {inner} at {site}")]
     CrossFile {
         outer: u64,
@@ -321,6 +325,12 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
         // keep granting until Node migration (6b3) permits enabling rejection.
         if (shared.runtime_probe)() {
             blocking::record_violation(site);
+            if ENFORCE_BLOCKING_SCOPE {
+                shared.reject(lane, "outside_blocking_scope");
+                return Err(GrantError::OutsideBlockingScope {
+                    site: site.to_string(),
+                });
+            }
         }
         let active = ACTIVE.with(|v| v.borrow().clone());
         if let Some((outer, weak)) = active {

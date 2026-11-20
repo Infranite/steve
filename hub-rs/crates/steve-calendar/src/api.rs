@@ -181,19 +181,21 @@ async fn upload(
         .or(parsed.name.clone())
         .unwrap_or_else(|| "calendar.ics".into());
     let (upload_ws, upload_conn) = (who.ws.clone(), conn.clone());
-    cal.modules().blocking(move |m| {
-    let now = m.clock.now();
-    m.store.transaction(|tx| {
-        repo::put_ics_file(tx, &upload_ws, &conn, &name, &b.text, now)?;
-        // a new file starts the calendar's cursor over
-        tx.execute(
+    cal.modules()
+        .blocking(move |m| {
+            let now = m.clock.now();
+            m.store.transaction(|tx| {
+                repo::put_ics_file(tx, &upload_ws, &upload_conn, &name, &b.text, now)?;
+                // a new file starts the calendar's cursor over
+                tx.execute(
             "UPDATE cal_calendars SET sync_cursor = NULL, synced_at = NULL WHERE connection_id = ?",
             [&upload_conn],
         )?;
-        Ok::<_, ApiError>(())
-    })?;
-        Ok(())
-    }).await?;
+                Ok::<_, ApiError>(())
+            })?;
+            Ok(())
+        })
+        .await?;
     let report = cal.sync_connection(&who.ws, &conn, false).await?;
     let mut v = cal.source_view(&who, &conn, f).await?;
     v["report"] = serde_json::to_value(&report)?;

@@ -102,13 +102,13 @@ async fn patch(
     Body(p): Body<ChannelPatch>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let v = viewer(&a.ch, &who)?;
-    let now = a.ch.now();
-    a.ch.store()
-        .transaction(|tx| accounts::patch(&a.ch, tx, &v, &id, &p, now))?;
-    Ok(Json(account_json(&a.ch, &v, &id, false)?))
-    }).await
-
+        let v = viewer(&a.ch, &who)?;
+        let now = a.ch.now();
+        a.ch.store()
+            .transaction(|tx| accounts::patch(&a.ch, tx, &v, &id, &p, now))?;
+        Ok(Json(account_json(&a.ch, &v, &id, false)?))
+    })
+    .await
 }
 
 /// `POST /channels`. No `Debug`: `fields` holds secrets.
@@ -188,10 +188,11 @@ async fn create_form(
     let ch = a.ch.clone();
     steve_store::blocking(move || {
         let now = ch.now();
-        ch.store().transaction(|tx| accounts::created(tx, &v, &conn.id, mode, persona.as_deref(), now))?;
+        ch.store()
+            .transaction(|tx| accounts::created(tx, &v, &conn.id, mode, persona.as_deref(), now))?;
         Ok(Json(account_json(&ch, &v, &conn.id, false)?))
-    }).await
-
+    })
+    .await
 }
 
 async fn start_oauth(

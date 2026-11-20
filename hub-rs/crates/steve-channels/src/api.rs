@@ -101,25 +101,25 @@ async fn patch(
     Body(p): Body<SpacePatch>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let v = viewer(&ch, &who)?;
-    let now = ch.now();
-    ch.store()
-        .transaction(|tx| spaces::patch(tx, &v, &id, &p, now))?;
-    Ok(Json(space_json(&ch, &v, &id, false)?))
-    }).await
-
+        let v = viewer(&ch, &who)?;
+        let now = ch.now();
+        ch.store()
+            .transaction(|tx| spaces::patch(tx, &v, &id, &p, now))?;
+        Ok(Json(space_json(&ch, &v, &id, false)?))
+    })
+    .await
 }
 
 async fn to_flow(Extension(ch): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let v = viewer(&ch, &who)?;
-    let now = ch.now();
-    let nodes = ch.flow().map(|f| &f.nodes);
-    ch.store()
-        .transaction(|tx| crate::rules::to_flow(tx, &v, &id, nodes, now))?;
-    Ok(Json(space_json(&ch, &v, &id, false)?))
-    }).await
-
+        let v = viewer(&ch, &who)?;
+        let now = ch.now();
+        let nodes = ch.flow().map(|f| &f.nodes);
+        ch.store()
+            .transaction(|tx| crate::rules::to_flow(tx, &v, &id, nodes, now))?;
+        Ok(Json(space_json(&ch, &v, &id, false)?))
+    })
+    .await
 }
 
 async fn back_to_rules(
@@ -128,13 +128,13 @@ async fn back_to_rules(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let v = viewer(&ch, &who)?;
-    let now = ch.now();
-    ch.store()
-        .transaction(|tx| crate::rules::back_to_rules(tx, &v, &id, now))?;
-    Ok(Json(space_json(&ch, &v, &id, false)?))
-    }).await
-
+        let v = viewer(&ch, &who)?;
+        let now = ch.now();
+        ch.store()
+            .transaction(|tx| crate::rules::back_to_rules(tx, &v, &id, now))?;
+        Ok(Json(space_json(&ch, &v, &id, false)?))
+    })
+    .await
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -12,10 +12,10 @@ mod services;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
-    rc::{Rc, Weak},
     future::Future,
+    marker::PhantomData,
     pin::Pin,
+    rc::{Rc, Weak},
     sync::Arc,
 };
 use steve_storage_api::{
@@ -432,6 +432,7 @@ impl<E: Send + 'static> SqliteStore<E> {
     /// Nested operations reuse the revision. Independent writers are outside this registry.
     /// Callbacks must preserve the writer's hooks/trace registration. Subscribe from
     /// the writer callback, outside SQL functions or SQLite hook execution.
+    #[track_caller]
     pub fn with_root<T>(
         &self,
         domain: Domain,
@@ -501,14 +502,13 @@ impl<E: Send + 'static> SqliteStore<E> {
         let state = match active {
             Some(state) => state,
             None if nested => {
-                return Err(crate::domains::invalid("root connection is not available in this executor callback"));
+                return Err(crate::domains::invalid(
+                    "root connection is not available in this executor callback",
+                ));
             }
             None => {
                 let engine = w.engine.clone();
                 let connection = engine.writer_conn().map_err(CommitError::Fatal)?;
-                // Reserve before any facade can open BEGIN; nested DomainStore bridges
-                // must reuse this authority even when the outer entry was a raw guard.
-                let revision = Rc::new(w.runner.reserve_root(&connection)?);
                 // SAFETY: Engine lives at a stable Arc allocation owned by RootConnection.
                 // The private guard is dropped before that Arc and before the executor lease.
                 // Rc/MutexGuard keep the whole state thread-bound; no mutable connection
@@ -523,10 +523,17 @@ impl<E: Send + 'static> SqliteStore<E> {
                 // SAFETY: both pointees live in stable Arc allocations. The shared
                 // state retains Engine and runner, and drops Capture before either.
                 let (captured_connection, captured_watches) = unsafe {
-                    (&*std::ptr::from_ref(&*connection), &*std::ptr::from_ref(&w.runner.watches))
+                    (
+                        &*std::ptr::from_ref(&*connection),
+                        &*std::ptr::from_ref(&w.runner.watches),
+                    )
                 };
-                let capture = crate::exec::watch::Capture::begin(captured_connection, captured_watches)
-                    .map_err(crate::domains::sql_error)?;
+                let capture =
+                    crate::exec::watch::Capture::begin(captured_connection, captured_watches)
+                        .map_err(crate::domains::sql_error)?;
+                // Reserve before any facade can open BEGIN; retain the same revision
+                // for nested bridges, and capture metadata commits as well.
+                let revision = Rc::new(w.runner.reserve_root(&connection)?);
                 let state = Rc::new(RootConnection {
                     capture: Some(capture),
                     connection,
@@ -536,18 +543,31 @@ impl<E: Send + 'static> SqliteStore<E> {
                     engine,
                 });
                 ACTIVE_ROOT.with(|v| *v.borrow_mut() = Rc::downgrade(&state));
-                return Ok(RootGuard { state, nested, _store: PhantomData });
+                return Ok(RootGuard {
+                    state,
+                    nested,
+                    _store: PhantomData,
+                });
             }
         };
-        Ok(RootGuard { state, nested, _store: PhantomData })
+        Ok(RootGuard {
+            state,
+            nested,
+            _store: PhantomData,
+        })
     }
     fn active_root(&self, domain: Domain) -> Option<Rc<RootConnection>> {
-        ACTIVE_ROOT.with(|v| v.borrow().upgrade())
+        ACTIVE_ROOT
+            .with(|v| v.borrow().upgrade())
             .filter(|state| Arc::ptr_eq(&state.engine, self.engine(domain)))
     }
     /// Borrow the authorized connection only inside a synchronous closure. Keeping
     /// the state alive also keeps its executor lease alive if outer guards drop.
-    pub fn with_active_root<T>(&self, domain: Domain, run: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+    pub fn with_active_root<T>(
+        &self,
+        domain: Domain,
+        run: impl FnOnce(&rusqlite::Connection) -> T,
+    ) -> Option<T> {
         let state = self.active_root(domain)?;
         Some(run(&state.connection))
     }
@@ -597,7 +617,6 @@ impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
         &self.state.connection
     }
-
 }
 impl<E: Send + 'static> std::ops::Deref for RootGuard<'_, E> {
     type Target = rusqlite::Connection;
@@ -613,12 +632,23 @@ struct NestedSavepoint<'a> {
 impl<'a> NestedSavepoint<'a> {
     fn begin(connection: &'a rusqlite::Connection) -> Result<Self, CommitError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let name = format!("steve_root_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-        connection.execute_batch(&format!("SAVEPOINT {name}")).map_err(crate::domains::sql_error)?;
-        Ok(Self { connection, name, committed: false })
+        let name = format!(
+            "steve_root_{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        connection
+            .execute_batch(&format!("SAVEPOINT {name}"))
+            .map_err(crate::domains::sql_error)?;
+        Ok(Self {
+            connection,
+            name,
+            committed: false,
+        })
     }
     fn commit(mut self) -> Result<(), CommitError> {
-        self.connection.execute_batch(&format!("RELEASE {}", self.name)).map_err(crate::domains::sql_error)?;
+        self.connection
+            .execute_batch(&format!("RELEASE {}", self.name))
+            .map_err(crate::domains::sql_error)?;
         self.committed = true;
         Ok(())
     }
@@ -626,7 +656,9 @@ impl<'a> NestedSavepoint<'a> {
 impl Drop for NestedSavepoint<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.connection.execute_batch(&format!("ROLLBACK TO {0}; RELEASE {0}", self.name));
+            let _ = self
+                .connection
+                .execute_batch(&format!("ROLLBACK TO {0}; RELEASE {0}", self.name));
         }
     }
 }

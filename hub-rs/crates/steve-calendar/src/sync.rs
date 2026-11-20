@@ -494,53 +494,45 @@ impl Calendar {
             Ok(r) => r,
             Err(e) => {
                 let msg = source_text(&e);
-                self.record_sync_failure(ws, conn, None, msg.clone(), now).await?;
+                self.record_sync_failure(ws, conn, None, msg.clone(), now)
+                    .await?;
                 cx.report(health(&e)).await;
                 report.errors.push((String::new(), msg));
                 return Ok(report);
             }
         };
-        let calendars = self.blocking_sync(ws, conn, move |s, ws, conn| s.upsert_calendars(ws, conn, &remotes)).await?;
+        let calendars = self
+            .blocking_sync(ws, conn, move |s, ws, conn| {
+                s.upsert_calendars(ws, conn, &remotes)
+            })
+            .await?;
         report.calendars = calendars.len();
         let w = self.window();
         let mut worst: Option<SourceError> = None;
         let mut touched = Vec::new();
         for cal in calendars.iter().filter(|c| c.enabled && !c.gone) {
             let busy = cal.detail == "busy" || cal.role == "free_busy";
-            let pulled = if busy && features.has(feature::FREEBUSY) {
-                src.freebusy(&cx, &cal.ext_id, w)
-                    .await
-                    .map(|b| Pulled::Full(b.iter().map(busy_event).collect(), None))
-            } else if features.has(feature::CHANGES) {
-                // a cursor only brings what changed, so what newly enters the window never comes
-                // by it: the whole window is pulled again once it is a day old
-                let cursor = cal.sync_cursor.as_deref().filter(|_| {
-                    cal.full_at
-                        .is_some_and(|t| now - t < self.settings().full_every_ms)
-                });
-                src.changes(&cx, &cal.ext_id, cursor, w).await.map(|c| {
-                    if c.full || cursor.is_none() {
-                        Pulled::Full(c.events, c.cursor)
-                    } else {
-                        Pulled::Delta(c)
-                    }
-                })
-            } else {
-                src.list(&cx, &cal.ext_id, w)
-                    .await
-                    .map(|e| Pulled::Full(e, None))
-            };
+            let pulled = self.pull_calendar(&cx, &features, cal, w, busy, now).await;
             match pulled {
                 Ok(p) => {
                     let pulled_cal = cal.clone();
-                    let (changed, deleted) = self.blocking_sync(ws, conn, move |s, _, _| s.apply(&pulled_cal, busy, p, w)).await?;
+                    let (changed, deleted) = self
+                        .blocking_sync(ws, conn, move |s, _, _| s.apply(&pulled_cal, busy, p, w))
+                        .await?;
                     report.changed += changed;
                     report.deleted += deleted;
                     touched.push(cal.id.clone());
                 }
                 Err(e) => {
                     let msg = source_text(&e);
-                    self.record_sync_failure(ws, conn, Some(cal.id.clone()), msg.clone(), self.now()).await?;
+                    self.record_sync_failure(
+                        ws,
+                        conn,
+                        Some(cal.id.clone()),
+                        msg.clone(),
+                        self.now(),
+                    )
+                    .await?;
                     report.errors.push((cal.name.clone(), msg));
                     worst = Some(match (worst, e) {
                         (Some(SourceError::Auth(a)), _) | (_, SourceError::Auth(a)) => {
@@ -552,19 +544,64 @@ impl Calendar {
             }
         }
         if let Some(owner) = calendars.first().map(|c| c.owner_user.clone()) {
-            self.blocking_sync(ws, conn, move |s, ws, _| s.rematch(ws, &owner)).await?;
+            self.blocking_sync(ws, conn, move |s, ws, _| s.rematch(ws, &owner))
+                .await?;
         }
         cx.report(worst.as_ref().map(health).unwrap_or(Health::Ok))
             .await;
-        if let Err(e) = self.blocking_sync(ws, conn, |s, ws, conn| s.connections().touch_sync(ws, conn).map_err(api)).await {
+        if let Err(e) = self
+            .blocking_sync(ws, conn, |s, ws, conn| {
+                s.connections().touch_sync(ws, conn).map_err(api)
+            })
+            .await
+        {
             tracing::debug!(connection = conn, "last sync not recorded: {e}");
         }
         Ok(report)
     }
 
+    // Provider awaits have no storage authorization. Pulling is separate from
+    // the blocking cache apply step so the writer never spans a network await.
+    async fn pull_calendar(
+        &self,
+        cx: &ConnCx,
+        features: &crate::Features,
+        cal: &CalRow,
+        w: Window,
+        busy: bool,
+        now: i64,
+    ) -> Result<Pulled, SourceError> {
+        let src = self.source(cx.adapter()).expect("is_source checked the adapter");
+if busy && features.has(feature::FREEBUSY) {
+                src.freebusy(cx, &cal.ext_id, w)
+                    .await
+                    .map(|b| Pulled::Full(b.iter().map(busy_event).collect(), None))
+            } else if features.has(feature::CHANGES) {
+                // a cursor only brings what changed, so what newly enters the window never comes
+                // by it: the whole window is pulled again once it is a day old
+                let cursor = cal.sync_cursor.as_deref().filter(|_| {
+                    cal.full_at
+                        .is_some_and(|t| now - t < self.settings().full_every_ms)
+                });
+                src.changes(cx, &cal.ext_id, cursor, w).await.map(|c| {
+                    if c.full || cursor.is_none() {
+                        Pulled::Full(c.events, c.cursor)
+                    } else {
+                        Pulled::Delta(c)
+                    }
+                })
+            } else {
+                src.list(cx, &cal.ext_id, w)
+                    .await
+                    .map(|e| Pulled::Full(e, None))
+            }
+    }
+
     // Only synchronous cache work enters this helper; provider awaits stay above.
     async fn blocking_sync<T: Send + 'static>(
-        &self, ws: &str, conn: &str,
+        &self,
+        ws: &str,
+        conn: &str,
         run: impl FnOnce(&Self, &str, &str) -> ApiResult<T> + Send + 'static,
     ) -> ApiResult<T> {
         let (cal, ws, conn) = (self.clone(), ws.to_owned(), conn.to_owned());
@@ -572,23 +609,35 @@ impl Calendar {
     }
 
     async fn record_sync_failure(
-        &self, ws: &str, conn: &str, calendar: Option<String>, msg: String, now: i64,
+        &self,
+        ws: &str,
+        conn: &str,
+        calendar: Option<String>,
+        msg: String,
+        now: i64,
     ) -> ApiResult<()> {
         self.blocking_sync(ws, conn, move |s, ws, conn| {
             s.modules().store.transaction(|tx| {
                 let ids = match calendar {
                     Some(id) => vec![id],
-                    None => repo::of_connection(tx, conn)?.into_iter().map(|c| c.id).collect(),
+                    None => repo::of_connection(tx, conn)?
+                        .into_iter()
+                        .map(|c| c.id)
+                        .collect(),
                 };
                 for id in ids {
                     repo::set_failed(tx, &id, &msg, now)?;
                     tx.publish(steve_types::DomainEvent::from(
-                        steve_types::AutomationEvent::Calendar { id: id.into(), ws: ws.into() },
+                        steve_types::AutomationEvent::Calendar {
+                            id: id.into(),
+                            ws: ws.into(),
+                        },
                     ));
                 }
                 Ok(())
             })
-        }).await
+        })
+        .await
     }
 
     /// Writes the calendars a source lists; those it no longer lists are marked gone (their events go).

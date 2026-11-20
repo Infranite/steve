@@ -206,52 +206,52 @@ async fn create(
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
     steve_store::blocking(move || {
-    let mode = b.mode.unwrap_or(Mode::ItemAuto);
-    if mode == Mode::Brief {
-        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_mode")));
-    }
-    let spec = Spec {
-        requester: b.requester.clone().flatten(),
-        when,
-        cron: expr.as_str().into(),
-        tz: tz.name().into(),
-        what: b.what.clone().unwrap_or_default(),
-        bot: b.bot.clone().unwrap_or_default(),
-        mode,
-        project_id: b.project_id.clone().flatten(),
-        tags: b.tags.clone().unwrap_or_default(),
-        missed: b.missed.unwrap_or_default(),
-        overlap: b.overlap.unwrap_or_default(),
-        budget_usd: b.budget_usd.unwrap_or(schedules::default_budget_for(mode)),
-    };
-    let name = b.name.clone().unwrap_or_default();
-    let now = cx.now();
-    let id = cx.store().transaction(|tx| -> ApiResult<_> {
-        schedules::check_refs(tx, &who.ws, &spec)?;
-        schedules::check_can_run(
-            cx.core.as_ref(),
-            tx,
-            &who.ws,
-            &spec,
-            b.enabled.unwrap_or(true),
-        )?;
-        schedules::insert(
-            tx,
-            &who.ws,
-            &who.me,
-            &Fields {
-                name: name.trim(),
-                spec: &spec,
-                enabled: b.enabled.unwrap_or(true),
-            },
-            &Origin::default(),
-            now,
-        )
-    })?;
-    cx.wake();
-    view(&cx, &who.ws, &id)
-    }).await
-
+        let mode = b.mode.unwrap_or(Mode::ItemAuto);
+        if mode == Mode::Brief {
+            return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_mode")));
+        }
+        let spec = Spec {
+            requester: b.requester.clone().flatten(),
+            when,
+            cron: expr.as_str().into(),
+            tz: tz.name().into(),
+            what: b.what.clone().unwrap_or_default(),
+            bot: b.bot.clone().unwrap_or_default(),
+            mode,
+            project_id: b.project_id.clone().flatten(),
+            tags: b.tags.clone().unwrap_or_default(),
+            missed: b.missed.unwrap_or_default(),
+            overlap: b.overlap.unwrap_or_default(),
+            budget_usd: b.budget_usd.unwrap_or(schedules::default_budget_for(mode)),
+        };
+        let name = b.name.clone().unwrap_or_default();
+        let now = cx.now();
+        let id = cx.store().transaction(|tx| -> ApiResult<_> {
+            schedules::check_refs(tx, &who.ws, &spec)?;
+            schedules::check_can_run(
+                cx.core.as_ref(),
+                tx,
+                &who.ws,
+                &spec,
+                b.enabled.unwrap_or(true),
+            )?;
+            schedules::insert(
+                tx,
+                &who.ws,
+                &who.me,
+                &Fields {
+                    name: name.trim(),
+                    spec: &spec,
+                    enabled: b.enabled.unwrap_or(true),
+                },
+                &Origin::default(),
+                now,
+            )
+        })?;
+        cx.wake();
+        view(&cx, &who.ws, &id)
+    })
+    .await
 }
 
 /// The new spec of a patched schedule (`None` fields keep their value).
@@ -329,47 +329,47 @@ async fn patch(
     }
     let spec = patched_spec(&cx, &old.spec, &b).await?;
     steve_store::blocking(move || {
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<_> {
-        // Re-read: the row may have changed while the model was thinking.
-        let cur = schedules::own_for(tx, &who.ws, &id, &who.me)?;
-        if cur.updated != old.updated {
-            return Err(ApiError::Conflict(
-                "Schedule changed; reread before editing".into(),
-            ));
-        }
-        schedules::check_refs(tx, &who.ws, &spec)?;
-        schedules::check_can_run(
-            cx.core.as_ref(),
-            tx,
-            &who.ws,
-            &spec,
-            b.enabled.unwrap_or(cur.enabled),
-        )?;
-        let name = b
-            .name
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or(&cur.name)
-            .to_string();
-        schedules::update(
-            tx,
-            &cur,
-            &Fields {
-                name: &name,
-                spec: &spec,
-                enabled: b.enabled.unwrap_or(cur.enabled),
-            },
-            &who.me,
-            "",
-            now,
-        )
-    })?;
-    cx.wake();
-    cx.wake_alarms();
-    view(&cx, &who.ws, &id)
-    }).await
-
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<_> {
+            // Re-read: the row may have changed while the model was thinking.
+            let cur = schedules::own_for(tx, &who.ws, &id, &who.me)?;
+            if cur.updated != old.updated {
+                return Err(ApiError::Conflict(
+                    "Schedule changed; reread before editing".into(),
+                ));
+            }
+            schedules::check_refs(tx, &who.ws, &spec)?;
+            schedules::check_can_run(
+                cx.core.as_ref(),
+                tx,
+                &who.ws,
+                &spec,
+                b.enabled.unwrap_or(cur.enabled),
+            )?;
+            let name = b
+                .name
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or(&cur.name)
+                .to_string();
+            schedules::update(
+                tx,
+                &cur,
+                &Fields {
+                    name: &name,
+                    spec: &spec,
+                    enabled: b.enabled.unwrap_or(cur.enabled),
+                },
+                &who.me,
+                "",
+                now,
+            )
+        })?;
+        cx.wake();
+        cx.wake_alarms();
+        view(&cx, &who.ws, &id)
+    })
+    .await
 }
 
 /// A brief's patch changes only its name, time and switch.
@@ -400,33 +400,33 @@ async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<_> {
-        let s = schedules::own_for(tx, &who.ws, &id, &who.me)?;
-        schedules::delete(tx, &s, now)
-    })?;
-    cx.wake();
-    cx.wake_alarms();
-    Ok(Json(json!({ "ok": true })))
-    }).await
-
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<_> {
+            let s = schedules::own_for(tx, &who.ws, &id, &who.me)?;
+            schedules::delete(tx, &s, now)
+        })?;
+        cx.wake();
+        cx.wake_alarms();
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
 }
 
 async fn run_now(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let s = cx
-        .store()
-        .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
-    if s.spec.mode == Mode::Brief {
-        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_run")));
-    }
-    let (run_id, started) = scheduler::start_manual(&cx, &who.ws, &id)?;
-    if started {
-        scheduler::spawn_drive(cx.clone(), run_id.clone());
-    }
-    Ok(Json(json!({ "run_id": run_id })))
-    }).await
-
+        let s = cx
+            .store()
+            .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
+        if s.spec.mode == Mode::Brief {
+            return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_run")));
+        }
+        let (run_id, started) = scheduler::start_manual(&cx, &who.ws, &id)?;
+        if started {
+            scheduler::spawn_drive(cx.clone(), run_id.clone());
+        }
+        Ok(Json(json!({ "run_id": run_id })))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]

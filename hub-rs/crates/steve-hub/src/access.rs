@@ -15,6 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
@@ -134,8 +135,20 @@ pub fn seen(store: &Store, c: &Client, route: &str, ip: Option<String>) {
 
 // Authentication already left its blocking job when the async handler reaches
 // this tail. Keep the audit and last-seen scheduling behind the same recognized entry.
-async fn audit_sign_in(store: &Store, user: &str, client: &Client, route: &str, ip: Option<String>, pair: Option<&str>) {
-    let (store, user, client, route) = (store.clone(), user.to_owned(), client.clone(), route.to_owned());
+async fn audit_sign_in(
+    store: &Store,
+    user: &str,
+    client: &Client,
+    route: &str,
+    ip: Option<String>,
+    pair: Option<&str>,
+) {
+    let (store, user, client, route) = (
+        store.clone(),
+        user.to_owned(),
+        client.clone(),
+        route.to_owned(),
+    );
     let mut detail = json!({"kind": client.kind, "name": client.name, "route": route});
     let action = if let Some(pair) = pair {
         detail["pair_id"] = json!(pair);
@@ -145,9 +158,12 @@ async fn audit_sign_in(store: &Store, user: &str, client: &Client, route: &str, 
     };
     let _ = steve_store::blocking(move || {
         seen(&store, &client, &route, ip);
-        store.audit(&user, action, &client.id, &detail, steve_store::WS).ok();
+        store
+            .audit(&user, action, &client.id, &detail, steve_store::WS)
+            .ok();
         Ok::<_, steve_store::StoreError>(())
-    }).await;
+    })
+    .await;
 }
 
 /// Failed sign-ins per address: after [`TRIES`] within [`TRIES_WINDOW`], 429 until it passes.

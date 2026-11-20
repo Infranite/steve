@@ -143,7 +143,6 @@ async fn allow_private_put(
     })?;
     Ok(Json(json!({ "hosts": hosts })))
     }).await
-
 }
 
 /// [`flows::own`] for the caller: a schedule they may not see (another member's morning brief) is not found.
@@ -278,44 +277,44 @@ async fn create(
     Body(b): Body<CreateBody>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    check_meta(Some(&b.name), b.description.as_deref())?;
-    let origin = b.origin.unwrap_or_else(|| "me".into());
-    let ok_origin = origin == "me"
-        || origin == "steve"
-        || origin
-            .strip_prefix("template:")
-            .is_some_and(|t| !t.is_empty())
-        || origin
-            .strip_prefix("plugin:")
-            .is_some_and(|t| !t.is_empty());
-    if !ok_origin || origin.len() > 80 {
-        return Err(ApiError::invalid("origin"));
-    }
-    let now = cx.now();
-    let id = cx.store().transaction(|tx| -> ApiResult<String> {
-        let g = match &b.graph {
-            Some(v) => check_graph(tx, &cx, &who.ws, v)?,
-            None => Graph::starter("mail"),
-        };
-        flows::create(
-            tx,
-            &who.ws,
-            &who.me,
-            &NewFlow {
-                kind: "flow",
-                name: b.name.trim(),
-                description: b.description.as_deref().unwrap_or("").trim(),
-                graph: &g,
-                origin: &origin,
-                origin_label: flows::origin_label(&origin),
-                enabled: false,
-            },
-            now,
-        )
-    })?;
-    view(&cx, &who, &id)
-    }).await
-
+        check_meta(Some(&b.name), b.description.as_deref())?;
+        let origin = b.origin.unwrap_or_else(|| "me".into());
+        let ok_origin = origin == "me"
+            || origin == "steve"
+            || origin
+                .strip_prefix("template:")
+                .is_some_and(|t| !t.is_empty())
+            || origin
+                .strip_prefix("plugin:")
+                .is_some_and(|t| !t.is_empty());
+        if !ok_origin || origin.len() > 80 {
+            return Err(ApiError::invalid("origin"));
+        }
+        let now = cx.now();
+        let id = cx.store().transaction(|tx| -> ApiResult<String> {
+            let g = match &b.graph {
+                Some(v) => check_graph(tx, &cx, &who.ws, v)?,
+                None => Graph::starter("mail"),
+            };
+            flows::create(
+                tx,
+                &who.ws,
+                &who.me,
+                &NewFlow {
+                    kind: "flow",
+                    name: b.name.trim(),
+                    description: b.description.as_deref().unwrap_or("").trim(),
+                    graph: &g,
+                    origin: &origin,
+                    origin_label: flows::origin_label(&origin),
+                    enabled: false,
+                },
+                now,
+            )
+        })?;
+        view(&cx, &who, &id)
+    })
+    .await
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -353,28 +352,28 @@ async fn save(
     Body(b): Body<SaveBody>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let mut c = Check::new();
-    c.opt_len("note", b.note.as_deref(), 0, 200);
-    c.done()?;
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = own(tx, &who, &id)?;
-        not_schedule(&f)?;
-        let g = check_graph(tx, &cx, &who.ws, &b.graph)?;
-        flows::save_version(
-            tx,
-            &f,
-            &g,
-            &who.me,
-            b.note.as_deref().unwrap_or("").trim(),
-            now,
-        )?;
-        Ok(())
-    })?;
-    cx.wake();
-    view(&cx, &who, &id)
-    }).await
-
+        let mut c = Check::new();
+        c.opt_len("note", b.note.as_deref(), 0, 200);
+        c.done()?;
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<()> {
+            let f = own(tx, &who, &id)?;
+            not_schedule(&f)?;
+            let g = check_graph(tx, &cx, &who.ws, &b.graph)?;
+            flows::save_version(
+                tx,
+                &f,
+                &g,
+                &who.me,
+                b.note.as_deref().unwrap_or("").trim(),
+                now,
+            )?;
+            Ok(())
+        })?;
+        cx.wake();
+        view(&cx, &who, &id)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,42 +393,42 @@ async fn patch(
     Body(b): Body<PatchBody>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    check_meta(b.name.as_deref(), b.description.as_deref())?;
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = own(tx, &who, &id)?;
-        not_schedule(&f)?;
-        if b.enabled == Some(true) {
-            // a flow that no longer validates (a node kind went away) cannot be switched on
-            check_graph(tx, &cx, &who.ws, &f.graph)?;
-        }
-        flows::patch(
-            tx,
-            &f,
-            &who.me,
-            b.name.as_deref().map(str::trim),
-            b.description.as_deref().map(str::trim),
-            b.enabled,
-            now,
-        )
-    })?;
-    cx.wake();
-    view(&cx, &who, &id)
-    }).await
-
+        check_meta(b.name.as_deref(), b.description.as_deref())?;
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<()> {
+            let f = own(tx, &who, &id)?;
+            not_schedule(&f)?;
+            if b.enabled == Some(true) {
+                // a flow that no longer validates (a node kind went away) cannot be switched on
+                check_graph(tx, &cx, &who.ws, &f.graph)?;
+            }
+            flows::patch(
+                tx,
+                &f,
+                &who.me,
+                b.name.as_deref().map(str::trim),
+                b.description.as_deref().map(str::trim),
+                b.enabled,
+                now,
+            )
+        })?;
+        cx.wake();
+        view(&cx, &who, &id)
+    })
+    .await
 }
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = own(tx, &who, &id)?;
-        not_schedule(&f)?;
-        flows::delete(tx, &f, &who.me, now)
-    })?;
-    Ok(Json(json!({ "ok": true })))
-    }).await
-
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<()> {
+            let f = own(tx, &who, &id)?;
+            not_schedule(&f)?;
+            flows::delete(tx, &f, &who.me, now)
+        })?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
 }
 
 async fn duplicate(
@@ -438,41 +437,41 @@ async fn duplicate(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let now = cx.now();
-    let new_id = cx.store().transaction(|tx| -> ApiResult<String> {
-        let f = own(tx, &who, &id)?;
-        not_schedule(&f)?;
-        let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
-        let mut name = format!("{} 副本", f.name);
-        if name.chars().count() > NAME_MAX {
-            name = name
-                .chars()
-                .rev()
-                .take(NAME_MAX)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-        }
-        flows::create(
-            tx,
-            &who.ws,
-            &who.me,
-            &NewFlow {
-                kind: &f.kind,
-                name: &name,
-                description: &f.description,
-                graph: &g,
-                origin: &f.origin,
-                origin_label: &f.origin_label,
-                enabled: false,
-            },
-            now,
-        )
-    })?;
-    view(&cx, &who, &new_id)
-    }).await
-
+        let now = cx.now();
+        let new_id = cx.store().transaction(|tx| -> ApiResult<String> {
+            let f = own(tx, &who, &id)?;
+            not_schedule(&f)?;
+            let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
+            let mut name = format!("{} 副本", f.name);
+            if name.chars().count() > NAME_MAX {
+                name = name
+                    .chars()
+                    .rev()
+                    .take(NAME_MAX)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+            }
+            flows::create(
+                tx,
+                &who.ws,
+                &who.me,
+                &NewFlow {
+                    kind: &f.kind,
+                    name: &name,
+                    description: &f.description,
+                    graph: &g,
+                    origin: &f.origin,
+                    origin_label: &f.origin_label,
+                    enabled: false,
+                },
+                now,
+            )
+        })?;
+        view(&cx, &who, &new_id)
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,20 +486,20 @@ async fn rollback(
     Body(b): Body<RollbackBody>,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let now = cx.now();
-    cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = own(tx, &who, &id)?;
-        not_schedule(&f)?;
-        let g =
-            flows::version_graph(tx, &id, b.version)?.ok_or_else(|| ApiError::not_found("版本"))?;
-        let g = check_graph(tx, &cx, &who.ws, &g)?;
-        flows::save_version(tx, &f, &g, &who.me, &format!("回到 v{}", b.version), now)?;
-        Ok(())
-    })?;
-    cx.wake();
-    view(&cx, &who, &id)
-    }).await
-
+        let now = cx.now();
+        cx.store().transaction(|tx| -> ApiResult<()> {
+            let f = own(tx, &who, &id)?;
+            not_schedule(&f)?;
+            let g = flows::version_graph(tx, &id, b.version)?
+                .ok_or_else(|| ApiError::not_found("版本"))?;
+            let g = check_graph(tx, &cx, &who.ws, &g)?;
+            flows::save_version(tx, &f, &g, &who.me, &format!("回到 v{}", b.version), now)?;
+            Ok(())
+        })?;
+        cx.wake();
+        view(&cx, &who, &id)
+    })
+    .await
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -622,45 +621,45 @@ async fn run_now(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let b: RunBody = optional(&body)?;
-    let f = cx.store().reader(|c| -> ApiResult<_> {
-        let f = own(c, &who, &id)?;
-        not_brief(c, &who, &f)?;
-        Ok(f)
-    })?;
-    if f.kind == "schedule" {
-        let (run, go) = crate::scheduler::start_manual(&cx, &who.ws, &id)?;
-        if go {
-            crate::scheduler::spawn_drive(cx.clone(), run.clone());
+        let b: RunBody = optional(&body)?;
+        let f = cx.store().reader(|c| -> ApiResult<_> {
+            let f = own(c, &who, &id)?;
+            not_brief(c, &who, &f)?;
+            Ok(f)
+        })?;
+        if f.kind == "schedule" {
+            let (run, go) = crate::scheduler::start_manual(&cx, &who.ws, &id)?;
+            if go {
+                crate::scheduler::spawn_drive(cx.clone(), run.clone());
+            }
+            return Ok(Json(json!({ "run_id": run })));
         }
-        return Ok(Json(json!({ "run_id": run })));
-    }
-    let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
-    let source = g
-        .trigger()
-        .and_then(|t| t.config["source"].as_str())
-        .unwrap_or("");
-    if source != "manual" && source != "time" {
-        return Err(ApiError::rule(steve_i18n::t!("flow.run.not_manual")));
-    }
-    let now = cx.now();
-    let run = cx.store().transaction(|tx| {
-        engine::open_run(
-            tx,
-            &f,
-            "manual",
-            json!({ "input": b.input.unwrap_or_else(|| json!({ "at": now })), "at": now }),
-            None,
-            false,
-            None,
-            0,
-            now,
-        )
-    })?;
-    crate::scheduler::spawn_drive(cx.clone(), run.clone());
-    Ok(Json(json!({ "run_id": run })))
-    }).await
-
+        let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
+        let source = g
+            .trigger()
+            .and_then(|t| t.config["source"].as_str())
+            .unwrap_or("");
+        if source != "manual" && source != "time" {
+            return Err(ApiError::rule(steve_i18n::t!("flow.run.not_manual")));
+        }
+        let now = cx.now();
+        let run = cx.store().transaction(|tx| {
+            engine::open_run(
+                tx,
+                &f,
+                "manual",
+                json!({ "input": b.input.unwrap_or_else(|| json!({ "at": now })), "at": now }),
+                None,
+                false,
+                None,
+                0,
+                now,
+            )
+        })?;
+        crate::scheduler::spawn_drive(cx.clone(), run.clone());
+        Ok(Json(json!({ "run_id": run })))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -731,19 +730,19 @@ async fn run_detail(
 
 async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     steve_store::blocking(move || {
-    let now = cx.now();
-    let evt = cx.store().transaction(|tx| -> ApiResult<Option<String>> {
-        let r = own_run(tx, &who, &id)?;
-        if !engine::cancel(tx, &r, now)? {
-            return Err(ApiError::conflict(steve_i18n::t!("flow.run.already_ended")));
+        let now = cx.now();
+        let evt = cx.store().transaction(|tx| -> ApiResult<Option<String>> {
+            let r = own_run(tx, &who, &id)?;
+            if !engine::cancel(tx, &r, now)? {
+                return Err(ApiError::conflict(steve_i18n::t!("flow.run.already_ended")));
+            }
+            steve_store::base::audit(tx, &who.ws, &who.me, "run.cancel", &id, &json!({}))?;
+            Ok(r.event_id.filter(|_| !r.dry_run))
+        })?;
+        if let Some(e) = evt {
+            cx.signals.signal(cx.store(), &who.ws, &e);
         }
-        steve_store::base::audit(tx, &who.ws, &who.me, "run.cancel", &id, &json!({}))?;
-        Ok(r.event_id.filter(|_| !r.dry_run))
-    })?;
-    if let Some(e) = evt {
-        cx.signals.signal(cx.store(), &who.ws, &e);
-    }
-    run_json(&cx, &who, &id)
-    }).await
-
+        run_json(&cx, &who, &id)
+    })
+    .await
 }

@@ -335,11 +335,16 @@ impl Store {
         self.read_or_active(f)
     }
 
-    fn read_or_active<T, E: From<StoreError>>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+    fn read_or_active<T, E: From<StoreError>>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut run = Some(f);
-        if let Some(value) = self.inner.engine.with_active_root(Domain::Core, |c| {
-            run.take().expect("reader called once")(c)
-        }) {
+        if let Some(value) = self
+            .inner
+            .engine
+            .with_active_root(Domain::Core, |c| run.take().expect("reader called once")(c))
+        {
             return value;
         }
         let c = self.inner.readers.get().map_err(StoreError::from)?;
@@ -379,14 +384,19 @@ where
     T: Send + 'static,
     E: From<StoreError> + Send + 'static,
 {
-    spawn_blocking(run)
-        .await
-        .map_err(|e| StoreError::Conflict(format!("storage blocking task failed: {e}")))?
+    spawn_blocking(run).await.map_err(|_| {
+        StoreError::Storage(steve_storage_api::error(
+            steve_types::Code::Internal,
+            "storage blocking task failed",
+        ))
+    })?
 }
 
 /// Recognized entry when a caller needs Tokio's original JoinHandle/result shape.
 /// Context is captured here and the scope is entered inside the blocking job.
-pub fn spawn_blocking<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> tokio::task::JoinHandle<T> {
+pub fn spawn_blocking<T: Send + 'static>(
+    run: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
     tokio::task::spawn_blocking(for_block_in_place(run))
 }
 

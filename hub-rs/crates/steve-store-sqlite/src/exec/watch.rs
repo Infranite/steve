@@ -77,7 +77,7 @@ fn install(connection: &Connection, changes: &Arc<Mutex<Changes>>) -> rusqlite::
     }))?;
     // SQLite invokes PROFILE after sqlite3_step finishes, including after rollback
     // callbacks on failed commits. Confirm here, never notify from any callback.
-    // Captures do not nest: nested roots are rejected; apply_in reuses its root.
+    // Captures do not nest: same-Engine guards and apply_in reuse their root.
     connection.trace_v2(
         TraceEventCodes::SQLITE_TRACE_PROFILE,
         Some(statement_finished),
