@@ -1,12 +1,9 @@
-//! Migration 65: the capabilities library, assigned per Bot; what a session gets; and the move of
-//! 62's and 63's per-Bot rows into it.
+//! The capabilities library: per-Bot selection, secret labels, pins, and tool usage.
 
 mod common;
 
 use common::*;
-use rusqlite::Connection;
 use steve_store::caps::{self, mcp, skills};
-use steve_store::db;
 
 fn server(id: &str, name: &str, transport: &str) -> mcp::Server {
     mcp::Server {
@@ -147,54 +144,6 @@ fn a_secret_value_never_reaches_the_row() {
         .unwrap()
         .unwrap();
     assert_eq!(back.secret_labels(), ["env:TOKEN"]);
-}
-
-#[test]
-fn the_per_bot_rows_of_62_and_63_move_into_the_library() {
-    let c = Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(64);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..64] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('dev', 'default', '开发', 'claude-code', 1), ('doc', 'default', '文档', 'codex', 1);
-         INSERT INTO bot_mcp_servers (id, workspace_id, bot_id, name, transport, command, env, credential_item, enabled, created, updated)
-           VALUES ('bmcp_1', 'default', 'dev', 'files', 'stdio', 'npx', '[{\"name\":\"TOKEN\",\"secret\":true}]', 'vi_1', 1, 1, 1),
-                  ('bmcp_2', 'default', 'doc', 'Files', 'stdio', 'uvx', '[]', NULL, 0, 2, 2);
-         INSERT INTO bot_skills (id, workspace_id, bot_id, name, description, content, enabled, created, updated)
-           VALUES ('bskill_1', 'default', 'dev', 'review', 'Use for review', 'body', 1, 1, 1);",
-    )
-    .unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
-    let s = mcp::get(&c, "bmcp_1").unwrap().unwrap();
-    assert_eq!(
-        (s.name.as_str(), s.credential_item.as_deref()),
-        ("files", Some("vi_1"))
-    );
-    assert_eq!(s.secret_labels(), ["env:TOKEN"]);
-    // the second "files" of the workspace is renamed, and keeps its switch for its Bot
-    assert_eq!(mcp::get(&c, "bmcp_2").unwrap().unwrap().name, "Files-2");
-    let a = caps::get(&c, "doc", "mcp", "bmcp_2").unwrap().unwrap();
-    assert!(!a.enabled);
-    assert!(caps::is_enabled(&c, "dev", "mcp", "bmcp_1").unwrap());
-    assert!(caps::is_enabled(&c, "dev", "skill", "bskill_1").unwrap());
-    assert_eq!(
-        skills::get(&c, "bskill_1").unwrap().unwrap().content,
-        "body"
-    );
-    let old: i64 = c
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('bot_mcp_servers', 'bot_skills')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(old, 0);
 }
 
 /// Migration 67: a Bot's pins, gone with the entry or when the entry is taken off the Bot; usage

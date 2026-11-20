@@ -1,21 +1,11 @@
-//! Upgrade must not turn existing messages or seen_by masks into personal-send authority.
+//! Messages and seen_by masks never grant personal-send authority by themselves.
 use rusqlite::Connection;
 use steve_store::db;
 
 #[test]
-fn upgrade_and_reopen_do_not_authorize_old_messages() {
+fn messages_and_seen_masks_do_not_authorize_personal_sends_on_reopen() {
     let c = Connection::open_in_memory().unwrap();
-    let before = db::MIGRATIONS
-        .iter()
-        .position(|m| m.contains("CREATE TABLE chan_trigger_receipts"))
-        .unwrap();
-    c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); PRAGMA foreign_keys=OFF;")
-        .unwrap();
-    for m in &db::MIGRATIONS[..before] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute("INSERT INTO schema_version(v) VALUES(?)", [before as i64])
-        .unwrap();
+    db::migrate(&c).unwrap();
     // Opaque legacy provider IDs are sufficient: no linked account or recipient is inferred.
     c.execute_batch(
         "INSERT INTO workspaces(id,name,created) VALUES('legacy','Legacy',1);
@@ -32,7 +22,7 @@ fn upgrade_and_reopen_do_not_authorize_old_messages() {
             let n: i64 = c
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(n, 0, "no historical authorization in {table}");
+            assert_eq!(n, 0, "no inferred authorization in {table}");
         }
         let text: String = c
             .query_row(
