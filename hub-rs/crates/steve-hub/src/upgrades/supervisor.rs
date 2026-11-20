@@ -153,7 +153,7 @@ fn spawn(cfg: &Config, bundle: &Path, op: Option<&Operation>) -> Result<HubChild
     Ok(HubChild { process, group })
 }
 /// Observe exit without releasing the leader's PID (and therefore its process-group number).
-fn exited_unreaped(pid: u32) -> std::io::Result<bool> {
+fn exited_unreaped(pid: u32, options: i32) -> std::io::Result<bool> {
     loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -161,7 +161,7 @@ fn exited_unreaped(pid: u32) -> std::io::Result<bool> {
                 libc::P_PID,
                 pid as libc::id_t,
                 &mut info,
-                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                libc::WEXITED | libc::WNOWAIT | options,
             )
         };
         if result == 0 {
@@ -183,21 +183,24 @@ async fn stop(child: &mut HubChild) -> Result<()> {
         return Ok(());
     };
     let group = child.group as i32;
-    if !exited_unreaped(pid)? {
+    if !exited_unreaped(pid, libc::WNOHANG)? {
         unsafe {
             libc::kill(-group, libc::SIGTERM);
         }
-        let observed = tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if exited_unreaped(pid)? {
-                    return Ok::<_, std::io::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait in the blocking pool without polling timers or reaping the leader.
+        let mut observed = tokio::task::spawn_blocking(move || exited_unreaped(pid, 0));
+        match tokio::time::timeout(Duration::from_secs(15), &mut observed).await {
+            Ok(result) => {
+                result??;
             }
-        })
-        .await;
-        if let Ok(result) = observed {
-            result?;
+            Err(_) => {
+                // An observation error must not turn a cached group number into a signal.
+                exited_unreaped(pid, libc::WNOHANG)?;
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+                observed.await??;
+            }
         }
     }
     // The live or zombie leader still pins the group. Clear descendants before reaping it.
@@ -732,16 +735,18 @@ server.serve_forever()
             .unwrap();
         let pid = child.id().unwrap();
         steve_runtime::testkit::eventually_sync("leader exited without reaping", || {
-            exited_unreaped(pid).unwrap()
+            exited_unreaped(pid, libc::WNOHANG).unwrap()
         })
         .await;
         assert!(
-            exited_unreaped(pid).unwrap(),
+            exited_unreaped(pid, libc::WNOHANG).unwrap(),
             "a second observation still sees it"
         );
         assert_eq!(child.wait().await.unwrap().code(), Some(23));
         assert_eq!(
-            exited_unreaped(pid).unwrap_err().raw_os_error(),
+            exited_unreaped(pid, libc::WNOHANG)
+                .unwrap_err()
+                .raw_os_error(),
             Some(libc::ECHILD)
         );
     }
@@ -765,7 +770,7 @@ server.serve_forever()
         let group = process.id().unwrap();
         let mut child = HubChild { process, group };
         steve_runtime::testkit::eventually_sync("leader exited with a live descendant", || {
-            ready.exists() && exited_unreaped(group).unwrap()
+            ready.exists() && exited_unreaped(group, libc::WNOHANG).unwrap()
         })
         .await;
         let descendant: i32 = fs::read_to_string(ready).unwrap().parse().unwrap();
@@ -782,6 +787,30 @@ server.serve_forever()
         stop(&mut child).await.unwrap();
         assert!(canary.try_wait().unwrap().is_none());
         canary.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_forces_a_term_ignoring_child_before_reaping() {
+        let home = tempfile::tempdir().unwrap();
+        let ready = home.path().join("ready");
+        let process = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' TERM; printf ready > \"$1\"; exec /bin/sleep 600",
+                "fixture",
+            ])
+            .arg(&ready)
+            .spawn()
+            .unwrap();
+        let group = process.id().unwrap();
+        let mut child = HubChild { process, group };
+        steve_runtime::testkit::eventually_sync("child ignores TERM", || ready.exists()).await;
+        stop(&mut child).await.unwrap();
+        assert!(child.id().is_none());
+        steve_runtime::testkit::eventually_sync("forced shutdown removed the group", || unsafe {
+            libc::kill(-(group as i32), 0) == -1
+        })
+        .await;
     }
 
     #[tokio::test]
