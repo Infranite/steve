@@ -16,7 +16,7 @@ use std::{
     },
 };
 use steve_storage_api::{
-    append::Seq,
+    append::{Seq, StreamName},
     cursor::{CursorKey, CursorName, Position},
     entity::EntityKind,
     uow::*,
@@ -80,6 +80,8 @@ struct Receipt {
     digest: RequestDigest,
     result: Committed,
 }
+type AllocatedSequences = Vec<(StreamName, Vec<Seq>)>;
+
 /// Opaque authority allocated before the outer legacy transaction. A rollback never returns it.
 pub struct RootRevision(Rev, usize);
 impl RootRevision {
@@ -227,56 +229,7 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
                 .map_err(|_| invalid("invalid natural key"))?
         )))
     }
-    fn apply(&self, c: &Connection, u: &UnitOfWork, rev: Rev) -> Result<Committed, CommitError> {
-        self.validate(u)?;
-        let d = domain_name(u.domain);
-        let natural = self.natural(u)?;
-        // The public identity is (domain, issued_at, key). SQL's (domain,key) stores an
-        // injective encoding of (issued_at,key), never a delimiter concatenation.
-        let identity = serde_json::to_string(&(u.id.issued_at.0, &u.id.key))
-            .map_err(|_| invalid("invalid intent identity"))?;
-        let receipt: Option<Receipt> = if let Some(key) = &natural {
-            let text: Option<String> = c
-                .query_row(
-                    "SELECT value FROM meta WHERE domain=? AND key=?",
-                    params![d, key],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(sql_error)?;
-            text.map(|s| serde_json::from_str(&s).map_err(|_| invalid("invalid natural receipt")))
-                .transpose()?
-        } else {
-            let stored: Option<(Vec<u8>, Vec<u8>)> = c
-                .query_row(
-                    "SELECT digest,result FROM uow_applied WHERE domain=? AND key=?",
-                    params![d, identity],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(sql_error)?;
-            stored
-                .map(|(digest, result)| {
-                    Ok(Receipt {
-                        digest: RequestDigest(
-                            digest
-                                .try_into()
-                                .map_err(|_| invalid("invalid stored digest"))?,
-                        ),
-                        result: serde_json::from_slice(&result)
-                            .map_err(|_| invalid("invalid stored result"))?,
-                    })
-                })
-                .transpose()?
-        };
-        if let Some(receipt) = receipt {
-            if receipt.digest != u.digest {
-                return Err(CommitError::IdempotencyMismatch);
-            }
-            let mut result = receipt.result;
-            result.replayed = true;
-            return Ok(result);
-        }
+    fn check_preconditions(&self, c: &Connection, u: &UnitOfWork) -> Result<(), CommitError> {
         let mut failures = Vec::new();
         for p in &u.preconditions {
             let (ok, actual_rev, actual_position) = match p {
@@ -311,6 +264,56 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
         if !failures.is_empty() {
             return Err(CommitError::Conflict(failures));
         }
+        Ok(())
+    }
+    fn apply_update(
+        &self,
+        c: &Connection,
+        u: &UnitOfWork,
+        rev: Rev,
+        mutation: &Mutation,
+        touched: bool,
+    ) -> Result<(), CommitError> {
+        let Mutation::Update { entity, key, set } = mutation else {
+            unreachable!()
+        };
+        let e = self.registry.entity(entity, u.domain)?;
+        if matches!(e.desc.kind, EntityKind::Append { .. }) {
+            return Err(invalid("append entities are immutable"));
+        }
+        let expected = u.preconditions.iter().find_map(|p| match p {
+            Precondition::Rev {
+                entity: n,
+                key: k,
+                rev,
+            } if n == entity && k == key => Some(*rev),
+            _ => None,
+        });
+        // Preconditions describe the initial state. Later mutations in this
+        // same unit may already have replaced its revision (or deleted it).
+        let expected = expected.filter(|_| !touched);
+        let changed = e.update(c, key, set, rev, expected)?;
+        if let Some(expected) = expected
+            && changed != 1
+        {
+            return Err(CommitError::Conflict(vec![FailedPrecondition {
+                condition: Precondition::Rev {
+                    entity: entity.clone(),
+                    key: key.clone(),
+                    rev: expected,
+                },
+                actual_rev: e.get(c, key)?.map(|(_, r)| r),
+                actual_position: None,
+            }]));
+        }
+        Ok(())
+    }
+    fn apply_mutations(
+        &self,
+        c: &Connection,
+        u: &UnitOfWork,
+        rev: Rev,
+    ) -> Result<AllocatedSequences, CommitError> {
         let mut seqs = Vec::new();
         let mut touched = std::collections::BTreeSet::new();
         for mutation in &u.mutations {
@@ -322,36 +325,8 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
                     }
                     e.insert(c, row, rev, matches!(mutation, Mutation::Upsert { .. }))?;
                 }
-                Mutation::Update { entity, key, set } => {
-                    let e = self.registry.entity(entity, u.domain)?;
-                    if matches!(e.desc.kind, EntityKind::Append { .. }) {
-                        return Err(invalid("append entities are immutable"));
-                    }
-                    let expected = u.preconditions.iter().find_map(|p| match p {
-                        Precondition::Rev {
-                            entity: n,
-                            key: k,
-                            rev,
-                        } if n == entity && k == key => Some(*rev),
-                        _ => None,
-                    });
-                    // Preconditions describe the initial state. Later mutations in this
-                    // same unit may already have replaced its revision (or deleted it).
-                    let expected = expected.filter(|_| !touched.contains(entity));
-                    let changed = e.update(c, key, set, rev, expected)?;
-                    if let Some(expected) = expected
-                        && changed != 1
-                    {
-                        return Err(CommitError::Conflict(vec![FailedPrecondition {
-                            condition: Precondition::Rev {
-                                entity: entity.clone(),
-                                key: key.clone(),
-                                rev: expected,
-                            },
-                            actual_rev: e.get(c, key)?.map(|(_, r)| r),
-                            actual_position: None,
-                        }]));
-                    }
+                Mutation::Update { entity, .. } => {
+                    self.apply_update(c, u, rev, mutation, touched.contains(entity))?;
                 }
                 Mutation::Delete { entity, key } => {
                     self.registry.entity(entity, u.domain)?.delete(c, key)?
@@ -403,6 +378,27 @@ impl<E: Send + 'static> SqliteBatchRunner<E> {
                 _ => {}
             }
         }
+        Ok(seqs)
+    }
+    fn apply(&self, c: &Connection, u: &UnitOfWork, rev: Rev) -> Result<Committed, CommitError> {
+        self.validate(u)?;
+        let d = domain_name(u.domain);
+        let natural = self.natural(u)?;
+        // The public identity is (domain, issued_at, key). SQL's (domain,key) stores an
+        // injective encoding of (issued_at,key), never a delimiter concatenation.
+        let identity = serde_json::to_string(&(u.id.issued_at.0, &u.id.key))
+            .map_err(|_| invalid("invalid intent identity"))?;
+        let receipt = read_receipt(c, d, &identity, natural.as_deref())?;
+        if let Some(receipt) = receipt {
+            if receipt.digest != u.digest {
+                return Err(CommitError::IdempotencyMismatch);
+            }
+            let mut result = receipt.result;
+            result.replayed = true;
+            return Ok(result);
+        }
+        self.check_preconditions(c, u)?;
+        let seqs = self.apply_mutations(c, u, rev)?;
         for f in &u.facts {
             self.registry.fact(c, u.domain, f, self.clock.now())?;
         }
@@ -526,4 +522,46 @@ fn advance(
     }
     c.execute("INSERT INTO cursor(domain,name,key,updated) VALUES(?,?,?,?) ON CONFLICT(domain,name) DO UPDATE SET key=excluded.key,updated=excluded.updated",params![domain_name(d),name.0,serde_json::to_string(to).map_err(|_|invalid("invalid cursor"))?,now.0]).map_err(sql_error)?;
     Ok(())
+}
+
+fn read_receipt(
+    c: &Connection,
+    d: &str,
+    identity: &str,
+    natural: Option<&str>,
+) -> Result<Option<Receipt>, CommitError> {
+    Ok(if let Some(key) = natural {
+        let text: Option<String> = c
+            .query_row(
+                "SELECT value FROM meta WHERE domain=? AND key=?",
+                params![d, key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        text.map(|s| serde_json::from_str(&s).map_err(|_| invalid("invalid natural receipt")))
+            .transpose()?
+    } else {
+        let stored: Option<(Vec<u8>, Vec<u8>)> = c
+            .query_row(
+                "SELECT digest,result FROM uow_applied WHERE domain=? AND key=?",
+                params![d, identity],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        stored
+            .map(|(digest, result)| {
+                Ok(Receipt {
+                    digest: RequestDigest(
+                        digest
+                            .try_into()
+                            .map_err(|_| invalid("invalid stored digest"))?,
+                    ),
+                    result: serde_json::from_slice(&result)
+                        .map_err(|_| invalid("invalid stored result"))?,
+                })
+            })
+            .transpose()?
+    })
 }

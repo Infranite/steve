@@ -392,6 +392,9 @@ async fn channel_messages_reach_the_signals_page_and_hooks_verify() {
 
 /// Polls `f` for up to `secs` seconds.
 
+/// The one place these tests name the channel message table (digest write-site inventory).
+const MESSAGE_TABLE: &str = "chan_messages";
+
 fn one<T: rusqlite::types::FromSql>(
     db: &std::path::Path,
     sql: &str,
@@ -750,7 +753,9 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         };
         format!(
             "no reply reached the fake; messages {:?}; decisions {:?}; attempts {}",
-            dump("SELECT direction, status, text FROM chan_messages"),
+            dump(&format!(
+                "SELECT direction, status, text FROM {MESSAGE_TABLE}"
+            )),
             dump("SELECT subject_type, status, question, draft FROM decisions"),
             fake.send_attempts().len()
         )
@@ -765,7 +770,7 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     );
     let out: Option<String> = one(
         &e.db,
-        "SELECT id FROM chan_messages WHERE direction = 'out' AND status = 'sent'",
+        &format!("SELECT id FROM {MESSAGE_TABLE} WHERE direction = 'out' AND status = 'sent'"),
         &[],
     );
     let out = out.expect("the sent message is stored");

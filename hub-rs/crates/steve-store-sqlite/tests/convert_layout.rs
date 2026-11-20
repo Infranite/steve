@@ -10,24 +10,11 @@ use steve_store_sqlite::{
 };
 use steve_types::Code;
 
+#[path = "common/legacy_input.rs"]
+mod legacy_input;
 fn old(conn: &Connection, version: Option<i64>) {
     if let Some(version) = version {
-        conn.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);").unwrap();
-        for n in 1..=version {
-            let sql = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join(format!("legacy/migrations/{n:03}.sql")),
-            )
-            .unwrap();
-            conn.execute_batch(&sql).unwrap();
-        }
-        conn.execute("INSERT INTO schema_version VALUES(?1)", [version])
-            .unwrap();
-        conn.execute("INSERT INTO schema_compat VALUES(?1)", [version])
-            .unwrap();
-        if version == 113 {
-            legacy::migrate_to_head(conn).unwrap();
-        }
+        legacy_input::at(conn, version);
     } else {
         legacy::final_structure(conn).unwrap();
     }
@@ -112,7 +99,7 @@ fn assert_current(conn: &Connection) {
 }
 
 #[test]
-fn converts_released_prefix_and_head_preserving_data_and_all_owners() {
+fn converts_113_and_114_preserving_data_and_all_owners() {
     for version in [Some(113), None] {
         let mut conn = Connection::open_in_memory().unwrap();
         old(&conn, version);
@@ -191,8 +178,13 @@ fn retries_after_readonly_legacy_inspection_without_a_log() {
     let head = legacy::version(&conn).unwrap();
     assert!(head == 113);
     assert!(!has(&conn, "meta"));
-    // A read-only verification phase creates no additional durable restart state.
-    schema::verify_baseline(&conn).unwrap();
+    // Read-only inspection creates no restart state; baseline validation follows 114 replay.
+    assert_eq!(
+        steve_store_sqlite::open::inspect(&conn).unwrap(),
+        steve_store_sqlite::compat::StorageState::Legacy {
+            schema_version: 113
+        }
+    );
     drop(conn);
     let mut conn = Connection::open(&path).unwrap();
     assert_eq!(

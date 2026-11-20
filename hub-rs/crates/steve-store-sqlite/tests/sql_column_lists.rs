@@ -587,19 +587,10 @@ fn production_inserts_name_their_columns() {
         }
     }
     println!(
-        "SQL_COLUMN_LISTS scanned_files={scanned} findings={} temporary_exceptions=1",
+        "SQL_COLUMN_LISTS scanned_files={scanned} findings={} temporary_exceptions=0",
         locations.len()
     );
-    // G2-W2a6q-SQL: group 4 owns this Node-journal fix; remove the entry once fixed.
-    // Exact equality ratchets both ways: new violations and vanished exceptions fail.
-    let expected = BTreeMap::from([(
-        (
-            "crates/steve-node/src/journal.rs".into(),
-            "INSERT INTO command_specs VALUES (?1, ?2)".into(),
-            "insert without column list".into(),
-        ),
-        1,
-    )]);
+    let expected = BTreeMap::new();
     assert_eq!(
         actual,
         expected,
