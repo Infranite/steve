@@ -1,6 +1,9 @@
 //! Transactional digest membership maintenance. Callers own the source transaction.
 use rusqlite::{Connection, OptionalExtension, Result, params};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::LazyLock,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -60,7 +63,7 @@ impl Source {
             "SELECT workspace_id,'{prefix}' || {conv_column} AS conv,id AS message_id,{time_column} AS at,status FROM {table}"
         )
     }
-    pub fn shape(self) -> MessageShape {
+    pub const fn shape(self) -> MessageShape {
         match self {
             Self::ChanMessage => MessageShape {
                 table: "chan_messages",
@@ -102,10 +105,22 @@ fn scope_row(r: &rusqlite::Row<'_>) -> Result<Scope> {
         conv: r.get(1)?,
     })
 }
+/// Closed receipt-table identifier shared by digest SQL and real-schema fixtures.
+pub const RECEIPTS_TABLE: &str = "digest_receipts";
 // Source rows are normalized to these columns. Both intake and audits use this one predicate.
-const ELIGIBLE: &str = "m.status IN ('received','sent') AND NOT EXISTS(
-    SELECT 1 FROM digest_receipts r WHERE r.workspace_id=m.workspace_id
-    AND r.conv=m.conv AND r.message_id=m.message_id)";
+static ELIGIBLE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "m.status IN ('received','sent') AND NOT EXISTS(
+    SELECT 1 FROM {RECEIPTS_TABLE} r WHERE r.workspace_id=m.workspace_id
+    AND r.conv=m.conv AND r.message_id=m.message_id)"
+    )
+});
+static RECEIPT_EXISTS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM {RECEIPTS_TABLE}
+        WHERE workspace_id=?1 AND conv=?2 AND message_id=?3)"
+    )
+});
 const PROJECTION_SELECT: &str = "SELECT workspace_id,conv,count(*) AS messages,min(at) AS oldest,max(at) AS newest FROM digest_pending";
 fn sync_pending_conversation(c: &Connection, scope: &Scope) -> Result<()> {
     c.execute(
@@ -167,9 +182,10 @@ pub(crate) fn sync_message_scopes(
             &format!(
                 "WITH source AS ({source_sql} WHERE id=?1)
         INSERT INTO digest_pending(workspace_id,conv,message_id,at)
-        SELECT m.workspace_id,m.conv,m.message_id,m.at FROM source m WHERE {ELIGIBLE}
+        SELECT m.workspace_id,m.conv,m.message_id,m.at FROM source m WHERE {eligible}
         ON CONFLICT(workspace_id,conv,message_id) DO UPDATE SET at=excluded.at
-        RETURNING workspace_id,conv"
+        RETURNING workspace_id,conv",
+                eligible = ELIGIBLE.as_str()
             ),
             [id],
             scope_row,
@@ -194,8 +210,7 @@ pub(crate) fn sync_message_scopes(
 }
 pub(crate) fn receipt_exists(c: &Connection, scope: &Scope, id: &str) -> Result<bool> {
     c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM digest_receipts
-        WHERE workspace_id=?1 AND conv=?2 AND message_id=?3)",
+        RECEIPT_EXISTS.as_str(),
         params![scope.workspace, scope.conv, id],
         |r| r.get(0),
     )
@@ -284,13 +299,14 @@ fn membership_mismatches(c: &Connection, workspace: &str) -> Result<Vec<Mismatch
         .prepare_cached(&format!(
             "WITH source AS (
            {} WHERE workspace_id=?1 UNION ALL {} WHERE workspace_id=?1)
-         SELECT m.conv,m.message_id,m.at FROM source m WHERE {ELIGIBLE}
+         SELECT m.conv,m.message_id,m.at FROM source m WHERE {eligible}
            AND (EXISTS(SELECT 1 FROM digest_pending p
                   WHERE p.workspace_id=?1 AND p.conv=m.conv AND p.message_id=m.message_id)
              OR NOT EXISTS(SELECT 1 FROM digest_cursors k
                   WHERE k.workspace_id=?1 AND k.conv=m.conv AND m.at<k.since))",
             Source::ChanMessage.select_sql(),
-            Source::MailMessage.select_sql()
+            Source::MailMessage.select_sql(),
+            eligible = ELIGIBLE.as_str()
         ))?
         .query_map([workspace], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
         .collect::<Result<_>>()?;

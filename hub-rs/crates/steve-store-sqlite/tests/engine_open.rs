@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use steve_store_sqlite::{
+    digest::Source,
     layout::{self, CORE_FILE, Layout, META_DOMAIN},
     migrate, open, pragmas,
 };
@@ -21,7 +22,7 @@ fn fresh_database_has_all_domains_and_reopens_without_metadata_writes() {
     for table in [
         "users",
         "events",
-        "chan_messages",
+        Source::ChanMessage.shape().table,
         "meta",
         "uow_applied",
         "cursor",

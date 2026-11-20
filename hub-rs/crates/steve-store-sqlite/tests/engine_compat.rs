@@ -350,7 +350,9 @@ fn legacy_window(version: i64, accepted: bool, detail: &str) {
         .unwrap();
     c.execute_batch("INSERT INTO workspaces(id,name,created) VALUES('w','fixture',0); INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('o','w','fixture','fixture','owner',0)").unwrap();
     // Candidate declarations can be tested even when this binary refuses observation.
-    let state = StorageState::Legacy { schema_version: version };
+    let state = StorageState::Legacy {
+        schema_version: version,
+    };
     assert_eq!(
         StorageCapabilities::compiled()
             .can_open(&state, false)
