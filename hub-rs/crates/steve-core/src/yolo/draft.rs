@@ -170,82 +170,7 @@ impl DraftTarget for Target {
                     }
                     on_now = on;
                 }
-                OP_SCOPE => {
-                    let ty = match op["type"].as_str() {
-                        Some(PROJECT) | Some("项目") => PROJECT,
-                        Some(ITEM) | Some("事项") => ITEM,
-                        _ => {
-                            plan.changes.push(Change::new(
-                                steve_i18n::t!("core.yolo.draft.unrecognized"),
-                                "—",
-                                op.to_string(),
-                            ));
-                            continue;
-                        }
-                    };
-                    let said = op["name"]
-                        .as_str()
-                        .or(op["id"].as_str())
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    let Some(mode) = parse_mode(&op["mode"]) else {
-                        plan.changes.push(Change::new(
-                            steve_i18n::t!("core.yolo.draft.unrecognized"),
-                            "—",
-                            op.to_string(),
-                        ));
-                        continue;
-                    };
-                    let found = if ty == PROJECT {
-                        p.context["projects"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .find(|x| {
-                                x["name"].as_str() == Some(said.as_str())
-                                    || x["id"].as_str() == Some(said.as_str())
-                            })
-                            .map(|x| {
-                                (
-                                    x["id"].as_str().unwrap_or("").to_string(),
-                                    x["name"].as_str().unwrap_or("").to_string(),
-                                )
-                            })
-                    } else {
-                        c.prepare_cached(
-                            "SELECT id, title FROM items WHERE workspace_id = ? AND id = ?",
-                        )?
-                        .query_row([ws, said.as_str()], |r| {
-                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                        })
-                        .ok()
-                    };
-                    let Some((id, label)) = found else {
-                        plan.changes.push(Change::new(
-                            if ty == PROJECT {
-                                steve_i18n::t!("core.yolo.draft.project", name = said)
-                            } else {
-                                steve_i18n::t!("core.yolo.draft.item", name = said)
-                            },
-                            "—",
-                            steve_i18n::t!("core.yolo.draft.unrecognized_value", value = said),
-                        ));
-                        continue;
-                    };
-                    let before = scope_mode(c, ws, ty, &id)?.unwrap_or_else(|| "inherit".into());
-                    plan.changes.push(Change::new(
-                        if ty == PROJECT {
-                            steve_i18n::t!("core.yolo.draft.project_yolo", name = label)
-                        } else {
-                            steve_i18n::t!("core.yolo.draft.item_yolo", name = label)
-                        },
-                        mode_shown(ty, &before),
-                        mode_shown(ty, mode),
-                    ));
-                    plan.ops
-                        .push(json!({ "op": OP_SCOPE, "type": ty, "id": id, "mode": mode }));
-                }
+                OP_SCOPE => plan_scope_override(c, ws, p, &op, &mut plan)?,
                 _ => plan.changes.push(Change::new(
                     steve_i18n::t!("core.yolo.draft.unrecognized"),
                     "—",
@@ -270,6 +195,88 @@ impl DraftTarget for Target {
             label: "YOLO 模式（用户不在时 Steve 替他做决定；开关、哪些项目或事项除外）".into(),
         }])
     }
+}
+
+/// Resolve one scope's type, value and target before adding its preview and operation.
+fn plan_scope_override(
+    c: &Connection,
+    ws: &str,
+    p: &Prepared,
+    op: &Value,
+    plan: &mut Plan,
+) -> ApiResult<()> {
+    let ty = match op["type"].as_str() {
+        Some(PROJECT) | Some("项目") => PROJECT,
+        Some(ITEM) | Some("事项") => ITEM,
+        _ => {
+            plan.changes.push(Change::new(
+                steve_i18n::t!("core.yolo.draft.unrecognized"),
+                "—",
+                op.to_string(),
+            ));
+            return Ok(());
+        }
+    };
+    let said = op["name"]
+        .as_str()
+        .or(op["id"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let Some(mode) = parse_mode(&op["mode"]) else {
+        plan.changes.push(Change::new(
+            steve_i18n::t!("core.yolo.draft.unrecognized"),
+            "—",
+            op.to_string(),
+        ));
+        return Ok(());
+    };
+    let found = if ty == PROJECT {
+        p.context["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| {
+                x["name"].as_str() == Some(said.as_str()) || x["id"].as_str() == Some(said.as_str())
+            })
+            .map(|x| {
+                (
+                    x["id"].as_str().unwrap_or("").to_string(),
+                    x["name"].as_str().unwrap_or("").to_string(),
+                )
+            })
+    } else {
+        c.prepare_cached("SELECT id, title FROM items WHERE workspace_id = ? AND id = ?")?
+            .query_row([ws, said.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .ok()
+    };
+    let Some((id, label)) = found else {
+        plan.changes.push(Change::new(
+            if ty == PROJECT {
+                steve_i18n::t!("core.yolo.draft.project", name = said)
+            } else {
+                steve_i18n::t!("core.yolo.draft.item", name = said)
+            },
+            "—",
+            steve_i18n::t!("core.yolo.draft.unrecognized_value", value = said),
+        ));
+        return Ok(());
+    };
+    let before = scope_mode(c, ws, ty, &id)?.unwrap_or_else(|| "inherit".into());
+    plan.changes.push(Change::new(
+        if ty == PROJECT {
+            steve_i18n::t!("core.yolo.draft.project_yolo", name = label)
+        } else {
+            steve_i18n::t!("core.yolo.draft.item_yolo", name = label)
+        },
+        mode_shown(ty, &before),
+        mode_shown(ty, mode),
+    ));
+    plan.ops
+        .push(json!({ "op": OP_SCOPE, "type": ty, "id": id, "mode": mode }));
+    Ok(())
 }
 
 /// Switches the workspace in `tx` like `PUT /yolo`; returns whether it was on before.

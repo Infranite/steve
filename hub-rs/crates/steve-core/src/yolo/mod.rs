@@ -332,9 +332,30 @@ impl Yolo {
         if !from.yolo() {
             return self.status(ws);
         }
+        let (decided, declined) = self.disable_workspace(ws, me, from)?;
+        let text = steve_i18n::stored(|| {
+            if from == Mode::Full {
+                steve_i18n::t!(
+                    "core.notice.full_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            } else {
+                steve_i18n::t!(
+                    "core.notice.yolo_ended",
+                    decided = decided,
+                    declined = declined
+                )
+            }
+        });
+        self.notice(ws, "info", &text);
+        self.status(ws)
+    }
+
+    /// Close the active window, cancel its scheduled work and record the final counts atomically.
+    fn disable_workspace(&self, ws: &str, me: &str, from: Mode) -> ApiResult<(i64, i64)> {
         let now = self.now();
-        let (decided, declined) = self
-            .store()
+        self.store()
             .transaction(|tx| {
                 repo::scope_put(
                     tx,
@@ -368,24 +389,7 @@ impl Yolo {
                 )?;
                 Ok::<_, steve_store::StoreError>((n.decided, n.declined))
             })
-            .map_err(store_err)?;
-        let text = steve_i18n::stored(|| {
-            if from == Mode::Full {
-                steve_i18n::t!(
-                    "core.notice.full_ended",
-                    decided = decided,
-                    declined = declined
-                )
-            } else {
-                steve_i18n::t!(
-                    "core.notice.yolo_ended",
-                    decided = decided,
-                    declined = declined
-                )
-            }
-        });
-        self.notice(ws, "info", &text);
-        self.status(ws)
+            .map_err(store_err)
     }
 
     fn notice(&self, ws: &str, level: &str, text: &str) {

@@ -238,6 +238,34 @@ fn local_checkout(dir: &Path) -> Option<Checkout> {
     Some(Checkout::from_git(&head, Some(&config)))
 }
 
+/// Acceptance uses only the pinned branch snapshot and the already computed progress streak.
+fn acceptance_subject(
+    d: &Decision,
+    item: Option<&Item>,
+    branch_now: Option<&BranchFacts>,
+    streak: &Streak,
+) -> Subject {
+    match item {
+        Some(i) => Subject::Accept(Accept {
+            checks: parse_checks(&d.draft),
+            unfinished: i
+                .plan
+                .iter()
+                .filter(|p| !p.done)
+                .map(|p| p.step.clone())
+                .collect(),
+            branch: match (&i.branch, branch_now.and_then(|b| b.state)) {
+                (Some(_), Some(state)) => Some(state),
+                (Some(_), None) => Some((false, false)),
+                _ => None,
+            },
+            explicit_manual: i.accept_mode.as_deref() == Some("manual"),
+            no_progress: streak.no_progress,
+        }),
+        None => Subject::Unverified("事项不在了".into()),
+    }
+}
+
 impl Engine {
     /// Everything [`judge::judge`] needs about `d` (open, in scope).
     pub fn gather(&self, d: &Decision, policy: &Policy) -> ApiResult<Gathered> {
@@ -289,107 +317,14 @@ impl Engine {
             None => false,
         };
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
-            ("approve", "tool_call") => match self.tool_input(&d.id) {
-                Some(t) => {
-                    let cwd = t.own_dir.as_deref().map(super::limits::canonical).or(own);
-                    let checkout = item
-                        .as_ref()
-                        .zip(t.raw.get("command"))
-                        .and_then(|(i, c)| checkout(self.core(), i, cwd.as_deref(), c));
-                    Subject::Tool(Tool {
-                        full: self.full_access(d),
-                        own_pids: t.own_pids.clone().unwrap_or_default(),
-                        kind: t.kind,
-                        title: d.question.trim_start_matches("允许执行：").to_string(),
-                        raw: t.raw,
-                        truncated: false,
-                        locations: t.locations,
-                        options: judge::tool_options(&d.options),
-                        cwd,
-                        project_dir,
-                        branch,
-                        checkout,
-                    })
-                }
-                None => judge::subject_from_row(d, own, project_dir, branch),
-            },
-            ("accept", "item") => match &item {
-                Some(i) => Subject::Accept(Accept {
-                    checks: parse_checks(&d.draft),
-                    unfinished: i
-                        .plan
-                        .iter()
-                        .filter(|p| !p.done)
-                        .map(|p| p.step.clone())
-                        .collect(),
-                    branch: match (&i.branch, branch_now.as_ref().and_then(|b| b.state)) {
-                        (Some(_), Some(state)) => Some(state),
-                        (Some(_), None) => Some((false, false)),
-                        _ => None,
-                    },
-                    explicit_manual: i.accept_mode.as_deref() == Some("manual"),
-                    no_progress: streak.no_progress,
-                }),
-                None => Subject::Unverified("事项不在了".into()),
-            },
+            ("approve", "tool_call") => {
+                self.tool_subject(d, item.as_ref(), own, project_dir, branch)
+            }
+            ("accept", "item") => {
+                acceptance_subject(d, item.as_ref(), branch_now.as_ref(), &streak)
+            }
             ("fail", "item") | ("fail", crate::stall::STALL) => {
-                let cause = self.stall_cause(d, item.as_ref())?;
-                // it stopped on a question in plain text: answer it the way `steve_ask` is answered
-                let sid = match d.session_id.clone() {
-                    Some(s) => Some(s),
-                    None => match &item {
-                        Some(i) => self.item_session(&i.id)?,
-                        None => None,
-                    },
-                };
-                let tail = match (&cause, sid.as_deref()) {
-                    (StallCause::Stopped, Some(sid)) => self.session_tail(sid)?,
-                    _ => String::new(),
-                };
-                // its final reply, whole: what it waits for now, not what it did on the way (a
-                // request to scan a code at its start is not lost behind a long explanation)
-                let own_action = match sid.as_deref() {
-                    Some(sid) => super::limits::own_action(
-                        &self.core().store().final_reply(sid).map_err(ce)?,
-                    ),
-                    _ => None,
-                };
-                let asked = match (&cause, sid.as_deref()) {
-                    (StallCause::Stopped, Some(_)) if !present => {
-                        match answer::looks_like_question(&tail) {
-                            Some(q) => Some(self.ask_facts(
-                                d,
-                                item.as_ref(),
-                                &q,
-                                &[],
-                                (None, None),
-                                &d.id,
-                                policy.answer_asks && policy.continue_stalls && !present,
-                            )?),
-                            None => None,
-                        }
-                    }
-                    _ => None,
-                };
-                Subject::Stall(Stall {
-                    cause,
-                    no_progress: streak.no_progress,
-                    attempts: streak.errors,
-                    asked,
-                    own_action,
-                    steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
-                    yours: match sid.as_deref() {
-                        Some(sid) => self
-                            .core()
-                            .store()
-                            .store()
-                            .sessions()
-                            .stop(sid)
-                            .map_err(|e| ce(e.into()))?
-                            .is_some_and(|k| crate::work::held(&k)),
-                        None => false,
-                    },
-                })
+                self.stalled_subject(d, item.as_ref(), present, &streak, policy)?
             }
             ("approve", "release") => {
                 match (&item, project.as_ref().and_then(|p| p.release.clone())) {
@@ -431,6 +366,111 @@ impl Engine {
         let mut facts = judge::facts_of(d, subject);
         facts.present = present;
         Ok(Gathered { facts, progress })
+    }
+
+    /// Prefer the armed, untruncated request and its execution view over the stored draft.
+    fn tool_subject(
+        &self,
+        d: &Decision,
+        item: Option<&Item>,
+        own: Option<PathBuf>,
+        project_dir: Option<PathBuf>,
+        branch: Option<String>,
+    ) -> Subject {
+        match self.tool_input(&d.id) {
+            Some(t) => {
+                let cwd = t.own_dir.as_deref().map(super::limits::canonical).or(own);
+                let checkout = item
+                    .zip(t.raw.get("command"))
+                    .and_then(|(i, c)| checkout(self.core(), i, cwd.as_deref(), c));
+                Subject::Tool(Tool {
+                    full: self.full_access(d),
+                    own_pids: t.own_pids.clone().unwrap_or_default(),
+                    kind: t.kind,
+                    title: d.question.trim_start_matches("允许执行：").to_string(),
+                    raw: t.raw,
+                    truncated: false,
+                    locations: t.locations,
+                    options: judge::tool_options(&d.options),
+                    cwd,
+                    project_dir,
+                    branch,
+                    checkout,
+                })
+            }
+            None => judge::subject_from_row(d, own, project_dir, branch),
+        }
+    }
+
+    /// Read the stopped session's current evidence before deciding whether a question can be answered.
+    fn stalled_subject(
+        &self,
+        d: &Decision,
+        item: Option<&Item>,
+        present: bool,
+        streak: &Streak,
+        policy: &Policy,
+    ) -> ApiResult<Subject> {
+        let subject = {
+            let cause = self.stall_cause(d, item)?;
+            // it stopped on a question in plain text: answer it the way `steve_ask` is answered
+            let sid = match d.session_id.clone() {
+                Some(s) => Some(s),
+                None => match item {
+                    Some(i) => self.item_session(&i.id)?,
+                    None => None,
+                },
+            };
+            let tail = match (&cause, sid.as_deref()) {
+                (StallCause::Stopped, Some(sid)) => self.session_tail(sid)?,
+                _ => String::new(),
+            };
+            // its final reply, whole: what it waits for now, not what it did on the way (a
+            // request to scan a code at its start is not lost behind a long explanation)
+            let own_action = match sid.as_deref() {
+                Some(sid) => {
+                    super::limits::own_action(&self.core().store().final_reply(sid).map_err(ce)?)
+                }
+                _ => None,
+            };
+            let asked = match (&cause, sid.as_deref()) {
+                (StallCause::Stopped, Some(_)) if !present => {
+                    match answer::looks_like_question(&tail) {
+                        Some(q) => Some(self.ask_facts(
+                            d,
+                            item,
+                            &q,
+                            &[],
+                            (None, None),
+                            &d.id,
+                            policy.answer_asks && policy.continue_stalls && !present,
+                        )?),
+                        None => None,
+                    }
+                }
+                _ => None,
+            };
+            Subject::Stall(Stall {
+                cause,
+                no_progress: streak.no_progress,
+                attempts: streak.errors,
+                asked,
+                own_action,
+                steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
+                yours: match sid.as_deref() {
+                    Some(sid) => self
+                        .core()
+                        .store()
+                        .store()
+                        .sessions()
+                        .stop(sid)
+                        .map_err(|e| ce(e.into()))?
+                        .is_some_and(|k| crate::work::held(&k)),
+                    None => false,
+                },
+            })
+        };
+        Ok(subject)
     }
 
     /// The item's session that is not ended, newest.

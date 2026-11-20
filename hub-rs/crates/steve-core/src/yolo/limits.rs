@@ -1069,34 +1069,97 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
     let p = a.program.as_str();
     let args = &a.args;
     let first = args.first().map(String::as_str).unwrap_or("");
-    let push = |what: &str| Some(Limit::new(5, what.to_string()));
-    // writes whose target cannot be read off the text
-    let unknown_targets = || {
-        if (a.xargs || expands) && !pl.full {
-            Some(Limit::new(
-                4,
-                format!("{p} 的目标来自变量或标准输入，看不出在哪"),
-            ))
-        } else {
-            None
-        }
-    };
-    let all_inside = |list: Vec<&String>| list.into_iter().find_map(|w| pl.remove_target(w));
-    let all_writable = |list: Vec<&String>| list.into_iter().find_map(|w| pl.write_target(w));
 
     if let Some(l) = as_user(p) {
         return Some(l);
     }
     if REMOTE_SHELLS.contains(&p) {
-        return push("连到远端主机");
+        return outward_limit("连到远端主机");
     }
     if DEPLOY_TOOLS.contains(&p) {
-        return push("部署或云端工具会改远端");
+        return outward_limit("部署或云端工具会改远端");
+    }
+    if let Some(result) = network_program(p, args, pl) {
+        return result;
+    }
+    if let Some(result) = package_program(p, args, first, pl, own, depth) {
+        return result;
+    }
+    if let Some(result) = publishing_program(p, args) {
+        return result;
+    }
+    if let Some(result) = file_program(a, expands, pl) {
+        return result;
     }
     match p {
         "git" => return git(args, pl, own, depth),
         "gh" => return gh(args, pl, own),
         "curl" => return curl(args),
+        "python" | "python3" | "py" => {
+            if first == "-m" {
+                return sub_argv(words_of(a, 1), pl, own, depth);
+            }
+        }
+        "eval" | "source" | "." => {
+            let joined = args.join(" ");
+            return match shell::parse(&joined) {
+                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
+                Err(_) => Some(Limit::new(4, "eval 的内容看不清")),
+            };
+        }
+        "find" => return find(args, pl, own, depth),
+        _ => {}
+    }
+    if DELETERS.contains(&p) {
+        if let Some(l) = unknown_write_targets(a, expands, pl) {
+            return Some(l);
+        }
+        // creating files may also happen in a temporary directory; removing only in the item's own
+        if matches!(p, "touch" | "mkdir" | "tee") {
+            return all_writable_targets(operands(args), pl);
+        }
+        return all_remove_targets(operands(args), pl);
+    }
+    if SHELLS.contains(&p) {
+        // `bash script.sh` runs a file we cannot read here; `-c` strings are read by `nested`
+        if let Some(i) = args.iter().position(|x| shell::is_dash_c(x)) {
+            let body = args.get(i + 1).cloned().unwrap_or_default();
+            return match shell::parse(&body) {
+                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
+                Err(_) => Some(Limit::new(4, "sh -c 的内容看不清")),
+            };
+        }
+    }
+    None
+}
+
+/// One outward publication reason, kept separate from command-family parsing.
+fn outward_limit(what: &str) -> Option<Limit> {
+    Some(Limit::new(5, what.to_string()))
+}
+
+fn unknown_write_targets(a: &Argv, expands: bool, pl: &Places) -> Option<Limit> {
+    let p = a.program.as_str();
+    if (a.xargs || expands) && !pl.full {
+        Some(Limit::new(
+            4,
+            format!("{p} 的目标来自变量或标准输入，看不出在哪"),
+        ))
+    } else {
+        None
+    }
+}
+
+fn all_remove_targets(list: Vec<&String>, pl: &Places) -> Option<Limit> {
+    list.into_iter().find_map(|w| pl.remove_target(w))
+}
+fn all_writable_targets(list: Vec<&String>, pl: &Places) -> Option<Limit> {
+    list.into_iter().find_map(|w| pl.write_target(w))
+}
+
+/// Preserve early-return precedence for this command family's hard limits.
+fn network_program(p: &str, args: &[String], pl: &Places) -> Option<Option<Limit>> {
+    match p {
         "wget" => {
             if args.iter().any(|x| {
                 x.starts_with("--post-")
@@ -1105,12 +1168,14 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                         && !opt_value(args, "", "--method")
                             .is_some_and(|m| m.eq_ignore_ascii_case("GET"))
             }) {
-                return push("wget 发出数据");
+                return Some(outward_limit("wget 发出数据"));
             }
             if let Some(d) = opt_value(args, "-P", "--directory-prefix") {
-                return pl.write_target(d);
+                return Some(pl.write_target(d));
             }
-            return opt_value(args, "-O", "--output-document").and_then(|o| pl.write_target(o));
+            return Some(
+                opt_value(args, "-O", "--output-document").and_then(|o| pl.write_target(o)),
+            );
         }
         "http" | "https" | "xh" | "xhs" | "httpie" => {
             if args.iter().any(|x| {
@@ -1121,7 +1186,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     || x.contains(":=")
                     || x.starts_with('@')
             }) {
-                return push("HTTP 请求会把数据发出去");
+                return Some(outward_limit("HTTP 请求会把数据发出去"));
             }
         }
         "rsync" => {
@@ -1129,15 +1194,30 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                 x.starts_with("rsync://")
                     || (!x.starts_with('-') && !x.starts_with('/') && x.contains(':'))
             }) {
-                return push("rsync 到远端");
+                return Some(outward_limit("rsync 到远端"));
             }
             let ops = operands(args);
             if let Some(dest) = ops.last()
                 && ops.len() > 1
             {
-                return pl.remove_target(dest);
+                return Some(pl.remove_target(dest));
             }
         }
+        _ => {}
+    }
+    None
+}
+
+/// Preserve early-return precedence for this command family's hard limits.
+fn package_program(
+    p: &str,
+    args: &[String],
+    first: &str,
+    pl: &Places,
+    own: Own<'_>,
+    depth: u8,
+) -> Option<Option<Limit>> {
+    match p {
         "npm" | "pnpm" | "yarn" | "bun" => {
             let sub = operands(args).first().map(|s| s.as_str()).unwrap_or("");
             if matches!(
@@ -1153,7 +1233,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     | "token"
                     | "team"
             ) {
-                return push("发布到包仓库");
+                return Some(outward_limit("发布到包仓库"));
             }
             if matches!(sub, "run" | "run-script") || p == "yarn" && !sub.is_empty() {
                 let script = if matches!(sub, "run" | "run-script") {
@@ -1162,7 +1242,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     sub
                 };
                 if script_is_outward(script) {
-                    return push("运行发布或部署脚本");
+                    return Some(outward_limit("运行发布或部署脚本"));
                 }
             }
             if matches!(sub, "exec" | "dlx" | "x") {
@@ -1171,7 +1251,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     .skip(1)
                     .map(|s| s.to_string())
                     .collect();
-                return sub_argv(rest, pl, own, depth);
+                return Some(sub_argv(rest, pl, own, depth));
             }
         }
         "npx" | "bunx" | "pnpx" | "uvx" | "pipx" => {
@@ -1180,22 +1260,30 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                 .skip(usize::from(p == "pipx" && first == "run"))
                 .map(|s| s.to_string())
                 .collect();
-            return sub_argv(rest, pl, own, depth);
+            return Some(sub_argv(rest, pl, own, depth));
         }
         "cargo" => {
             if matches!(
                 operands(args).first().map(|s| s.as_str()),
                 Some("publish" | "yank" | "owner" | "login")
             ) {
-                return push("发布到 crates.io");
+                return Some(outward_limit("发布到 crates.io"));
             }
         }
+        _ => {}
+    }
+    None
+}
+
+/// Preserve early-return precedence for this command family's hard limits.
+fn publishing_program(p: &str, args: &[String]) -> Option<Option<Limit>> {
+    match p {
         "twine" | "flit" | "poetry" | "uv" | "hatch" | "maturin" | "gem" => {
             if args
                 .iter()
                 .any(|x| matches!(x.as_str(), "upload" | "publish" | "push"))
             {
-                return push("发布到包仓库");
+                return Some(outward_limit("发布到包仓库"));
             }
         }
         "docker" | "podman" | "buildah" | "skopeo" | "crane" => {
@@ -1203,64 +1291,65 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                 .iter()
                 .any(|x| matches!(x.as_str(), "push" | "login" | "copy"))
             {
-                return push("推送镜像");
+                return Some(outward_limit("推送镜像"));
             }
         }
         "make" | "just" | "task" | "rake" => {
             if operands(args).iter().any(|t| script_is_outward(t)) {
-                return push("运行发布或部署目标");
+                return Some(outward_limit("运行发布或部署目标"));
             }
         }
-        "python" | "python3" | "py" => {
-            if first == "-m" {
-                return sub_argv(words_of(a, 1), pl, own, depth);
-            }
-        }
-        "eval" | "source" | "." => {
-            let joined = args.join(" ");
-            return match shell::parse(&joined) {
-                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
-                Err(_) => Some(Limit::new(4, "eval 的内容看不清")),
-            };
-        }
-        "find" => return find(args, pl, own, depth),
+        _ => {}
+    }
+    None
+}
+
+/// Preserve early-return precedence for this command family's hard limits.
+fn file_program(a: &Argv, expands: bool, pl: &Places) -> Option<Option<Limit>> {
+    let p = a.program.as_str();
+    let args = &a.args;
+    match p {
         "mv" => {
-            if let Some(l) = unknown_targets() {
-                return Some(l);
+            if let Some(l) = unknown_write_targets(a, expands, pl) {
+                return Some(Some(l));
             }
             if let Some(t) = opt_value(args, "-t", "--target-directory")
                 && let Some(l) = pl.remove_target(t)
             {
-                return Some(l);
+                return Some(Some(l));
             }
-            return all_inside(operands(args));
+            return Some(all_remove_targets(operands(args), pl));
         }
         "cp" | "install" | "ln" => {
             if let Some(t) = opt_value(args, "-t", "--target-directory") {
-                return pl.write_target(t);
+                return Some(pl.write_target(t));
             }
             if a.xargs {
-                return unknown_targets();
+                return Some(unknown_write_targets(a, expands, pl));
             }
             let ops = operands(args);
             if ops.len() >= 2 || p == "ln" && ops.len() == 1 {
                 if expands {
-                    return unknown_targets();
+                    return Some(unknown_write_targets(a, expands, pl));
                 }
-                return ops.last().and_then(|d| pl.write_target(d));
+                return Some(ops.last().and_then(|d| pl.write_target(d)));
             }
         }
         "dd" => {
-            return args
-                .iter()
-                .filter_map(|x| x.strip_prefix("of="))
-                .find_map(|o| pl.write_target(o));
+            return Some(
+                args.iter()
+                    .filter_map(|x| x.strip_prefix("of="))
+                    .find_map(|o| pl.write_target(o)),
+            );
         }
         "chmod" | "chown" | "chgrp" | "chflags" | "xattr" | "setfacl" => {
-            if let Some(l) = unknown_targets() {
-                return Some(l);
+            if let Some(l) = unknown_write_targets(a, expands, pl) {
+                return Some(Some(l));
             }
-            return all_inside(operands(args).into_iter().skip(1).collect());
+            return Some(all_remove_targets(
+                operands(args).into_iter().skip(1).collect(),
+                pl,
+            ));
         }
         "sed" | "gsed" | "perl" | "ruby" => {
             let in_place = args.iter().any(|x| {
@@ -1269,8 +1358,8 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     || (!p.ends_with("sed") && x.starts_with("-p") && x.contains('i'))
             });
             if in_place {
-                if let Some(l) = unknown_targets() {
-                    return Some(l);
+                if let Some(l) = unknown_write_targets(a, expands, pl) {
+                    return Some(Some(l));
                 }
                 let has_script_opt = args
                     .iter()
@@ -1281,7 +1370,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                 } else {
                     ops.into_iter().skip(1).collect()
                 };
-                return all_writable(files);
+                return Some(all_writable_targets(files, pl));
             }
         }
         "tar" | "bsdtar" | "gtar" => {
@@ -1291,38 +1380,18 @@ fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Opt
                     || (!x.starts_with("--") && x.trim_start_matches('-').contains('x'))
             });
             if extract && let Some(d) = opt_value(args, "-C", "--directory") {
-                return pl.remove_target(d);
+                return Some(pl.remove_target(d));
             }
         }
         "unzip" | "ditto" | "7z" => {
             if let Some(d) = opt_value(args, "-d", "") {
-                return pl.remove_target(d);
+                return Some(pl.remove_target(d));
             }
             if p == "ditto" {
-                return operands(args).last().and_then(|d| pl.remove_target(d));
+                return Some(operands(args).last().and_then(|d| pl.remove_target(d)));
             }
         }
         _ => {}
-    }
-    if DELETERS.contains(&p) {
-        if let Some(l) = unknown_targets() {
-            return Some(l);
-        }
-        // creating files may also happen in a temporary directory; removing only in the item's own
-        if matches!(p, "touch" | "mkdir" | "tee") {
-            return all_writable(operands(args));
-        }
-        return all_inside(operands(args));
-    }
-    if SHELLS.contains(&p) {
-        // `bash script.sh` runs a file we cannot read here; `-c` strings are read by `nested`
-        if let Some(i) = args.iter().position(|x| shell::is_dash_c(x)) {
-            let body = args.get(i + 1).cloned().unwrap_or_default();
-            return match shell::parse(&body) {
-                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
-                Err(_) => Some(Limit::new(4, "sh -c 的内容看不清")),
-            };
-        }
     }
     None
 }
@@ -1344,6 +1413,41 @@ pub(crate) struct CurlLine {
 /// Reads `args` when every word is understood and every URL is this machine (`127.0.0.1`, `localhost`,
 /// `[::1]`); `None` otherwise (an unknown option, a proxy, `--resolve`, a second host…).
 pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
+    let out = curl_arguments(args)?;
+    // without -g, curl expands `[0-9]` and `{a,b}` in a URL: `:844[0-0]` is port 8440
+    let globoff = curl_targets(args).1;
+    let local = |u: &str| {
+        let rest = u
+            .strip_prefix("http://")
+            .or_else(|| u.strip_prefix("https://"))
+            .unwrap_or(u);
+        if rest.contains('@') || rest.contains('\\') {
+            return false;
+        }
+        let (host, after) = match rest.strip_prefix('[') {
+            Some(r) => r.split_once(']').unwrap_or((r, "")),
+            None => {
+                let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+                (&rest[..end], &rest[end..])
+            }
+        };
+        if !globoff && host_port_glob(u) {
+            return false;
+        }
+        // a port is digits, nothing else
+        if let Some(port) = after.strip_prefix(':') {
+            let p = port.split(['/', '?', '#']).next().unwrap_or("");
+            if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
+        matches!(host, "127.0.0.1" | "localhost" | "::1")
+    };
+    (!out.urls.is_empty() && out.urls.iter().all(|u| local(u))).then_some(out)
+}
+
+/// Read only known curl flags and their values, retaining output and URL order.
+fn curl_arguments(args: &[String]) -> Option<CurlLine> {
     const FLAGS: &[&str] = &[
         "silent",
         "show-error",
@@ -1442,36 +1546,7 @@ pub(crate) fn curl_loopback(args: &[String]) -> Option<CurlLine> {
         }
         out.urls.push(x.clone());
     }
-    // without -g, curl expands `[0-9]` and `{a,b}` in a URL: `:844[0-0]` is port 8440
-    let globoff = curl_targets(args).1;
-    let local = |u: &str| {
-        let rest = u
-            .strip_prefix("http://")
-            .or_else(|| u.strip_prefix("https://"))
-            .unwrap_or(u);
-        if rest.contains('@') || rest.contains('\\') {
-            return false;
-        }
-        let (host, after) = match rest.strip_prefix('[') {
-            Some(r) => r.split_once(']').unwrap_or((r, "")),
-            None => {
-                let end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
-                (&rest[..end], &rest[end..])
-            }
-        };
-        if !globoff && host_port_glob(u) {
-            return false;
-        }
-        // a port is digits, nothing else
-        if let Some(port) = after.strip_prefix(':') {
-            let p = port.split(['/', '?', '#']).next().unwrap_or("");
-            if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
-                return false;
-            }
-        }
-        matches!(host, "127.0.0.1" | "localhost" | "::1")
-    };
-    (!out.urls.is_empty() && out.urls.iter().all(|u| local(u))).then_some(out)
+    Some(out)
 }
 
 /// curl's URLs (its operands and `--url` values; any word not known to be an option's value)
@@ -1791,57 +1866,10 @@ const GIT_KNOWN: &[&str] = &[
 
 fn git(args: &[String], pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     let branch = own.branch;
-    let mut i = 0;
-    let mut dir: Option<&str> = None;
-    while let Some(x) = args.get(i) {
-        match x.as_str() {
-            "-C" => {
-                dir = args.get(i + 1).map(String::as_str);
-                i += 2;
-            }
-            // `--config-env=key=VAR` sets `key` from a variable: its value cannot be read
-            s if s == "--config-env" || s.starts_with("--config-env=") => {
-                let kv = match s.strip_prefix("--config-env=") {
-                    Some(kv) => {
-                        i += 1;
-                        kv
-                    }
-                    None => {
-                        i += 2;
-                        args.get(i - 1).map(String::as_str).unwrap_or("")
-                    }
-                };
-                if risky_git_config(kv) {
-                    return Some(Limit::new(
-                        5,
-                        format!("git --config-env {kv} 可能让 git 运行别的命令或推送"),
-                    ));
-                }
-            }
-            "-c" => {
-                let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
-                if risky_git_config(kv) {
-                    return Some(Limit::new(
-                        5,
-                        format!("git -c {kv} 可能让 git 运行别的命令或推送"),
-                    ));
-                }
-                i += 2;
-            }
-            "--git-dir" | "--work-tree" | "--namespace" => {
-                if x != "--namespace" {
-                    dir = args.get(i + 1).map(String::as_str);
-                }
-                i += 2;
-            }
-            s if s.starts_with("--git-dir=") || s.starts_with("--work-tree=") => {
-                dir = s.split_once('=').map(|(_, v)| v);
-                i += 1;
-            }
-            s if s.starts_with('-') => i += 1,
-            _ => break,
-        }
-    }
+    let (i, dir) = match git_global_options(args) {
+        Ok(v) => v,
+        Err(limit) => return Some(limit),
+    };
     let sub = args.get(i).map(String::as_str).unwrap_or("");
     let rest = &args[(i + 1).min(args.len())..];
     let elsewhere = dir.is_some_and(|d| pl.resolve(d).is_none_or(|p| !pl.inside(&p)));
@@ -1922,6 +1950,62 @@ fn git(args: &[String], pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
         "clone" => operands(rest).get(1).and_then(|d| pl.write_target(d)),
         _ => None,
     }
+}
+
+/// Preserve the last explicit Git directory and reject unreadable command-bearing config values.
+fn git_global_options(args: &[String]) -> Result<(usize, Option<&str>), Limit> {
+    let mut i = 0;
+    let mut dir: Option<&str> = None;
+    while let Some(x) = args.get(i) {
+        match x.as_str() {
+            "-C" => {
+                dir = args.get(i + 1).map(String::as_str);
+                i += 2;
+            }
+            // `--config-env=key=VAR` sets `key` from a variable: its value cannot be read
+            s if s == "--config-env" || s.starts_with("--config-env=") => {
+                let kv = match s.strip_prefix("--config-env=") {
+                    Some(kv) => {
+                        i += 1;
+                        kv
+                    }
+                    None => {
+                        i += 2;
+                        args.get(i - 1).map(String::as_str).unwrap_or("")
+                    }
+                };
+                if risky_git_config(kv) {
+                    return Err(Limit::new(
+                        5,
+                        format!("git --config-env {kv} 可能让 git 运行别的命令或推送"),
+                    ));
+                }
+            }
+            "-c" => {
+                let kv = args.get(i + 1).map(String::as_str).unwrap_or("");
+                if risky_git_config(kv) {
+                    return Err(Limit::new(
+                        5,
+                        format!("git -c {kv} 可能让 git 运行别的命令或推送"),
+                    ));
+                }
+                i += 2;
+            }
+            "--git-dir" | "--work-tree" | "--namespace" => {
+                if x != "--namespace" {
+                    dir = args.get(i + 1).map(String::as_str);
+                }
+                i += 2;
+            }
+            s if s.starts_with("--git-dir=") || s.starts_with("--work-tree=") => {
+                dir = s.split_once('=').map(|(_, v)| v);
+                i += 1;
+            }
+            s if s.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    Ok((i, dir))
 }
 
 /// A git setting that redirects pushes, or names a command git runs later (an editor, a pager,

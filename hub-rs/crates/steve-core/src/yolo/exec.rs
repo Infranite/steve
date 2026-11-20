@@ -598,19 +598,6 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
     let p = a.program.as_str();
     let args = &a.args;
     let mut out = vec![];
-    // a script fed on standard input: a here-document is read, a pipe is not
-    let from_stdin = |out: &mut Vec<Body>, lang: Option<Lang>| {
-        if let Some(s) = &feed.stdin {
-            out.push(match lang {
-                Some(l) => Body::Code(l, s.clone()),
-                None => Body::Line(s.clone(), Feed::default()),
-            });
-        } else if feed.piped {
-            out.push(Body::Unseen(format!(
-                "管道把脚本喂给 {p}，看不出会执行什么"
-            )));
-        }
-    };
     if let Some(why) = &a.unclear {
         out.push(Body::Unseen(format!("{why}，看不出它运行的命令从哪开始")));
         return out;
@@ -630,7 +617,7 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
             },
             // `bash script.sh` runs a file, as any program would; `-s`, no script or
             // `/dev/stdin` read the script from standard input
-            None if shell_reads_stdin(args) => from_stdin(&mut out, None),
+            None if shell_reads_stdin(args) => fed_script(&mut out, None, p, feed),
             None => {}
         }
         return out;
@@ -641,107 +628,8 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
         )));
         return out;
     }
-    match p {
-        "eval" => {
-            out.push(if a.xargs {
-                Body::Unseen("eval 的内容来自标准输入".into())
-            } else {
-                Body::Line(args.join(" "), feed.clone())
-            });
-            return out;
-        }
-        "source" | "." => {
-            if operands(args)
-                .first()
-                .is_none_or(|f| STDIN_PATHS.contains(&f.as_str()))
-            {
-                from_stdin(&mut out, None);
-            }
-            return out;
-        }
-        "find" => {
-            let mut i = 0;
-            while i < args.len() {
-                if matches!(args[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
-                    let end = args[i + 1..]
-                        .iter()
-                        .position(|x| x == ";" || x == "+")
-                        .map_or(args.len(), |e| i + 1 + e);
-                    out.push(Body::Argv(args[i + 1..end].to_vec(), feed.clone()));
-                    i = end;
-                }
-                i += 1;
-            }
-            return out;
-        }
-        "git" => return git(args, feed),
-        // GNU sed is `gsed` where the system's is BSD's
-        "sed" | "gsed" => {
-            if let Some(why) = sed_runs(args) {
-                out.push(Body::Unseen(why));
-            }
-            return out;
-        }
-        "awk" | "gawk" | "mawk" | "nawk" => {
-            match awk_parts(args) {
-                Some((progs, _)) => {
-                    out.extend(progs.into_iter().map(|s| Body::Code(Lang::Awk, s.into())));
-                }
-                None => out.push(Body::Unseen("awk 的程序在文件里，看不出会做什么".into())),
-            }
-            return out;
-        }
-        "alias" => {
-            // `alias k=pkill` makes `k` run that line
-            out.extend(
-                operands(args)
-                    .into_iter()
-                    .filter_map(|x| x.split_once('='))
-                    .map(|(_, v)| Body::Line(v.to_string(), feed.clone())),
-            );
-            return out;
-        }
-        "trap" => {
-            if let Some(action) = operands(args).first()
-                && !matches!(action.as_str(), "" | "-")
-                && !args.iter().any(|x| x == "-l" || x == "-p")
-            {
-                out.push(Body::Line(action.to_string(), feed.clone()));
-            }
-            return out;
-        }
-        "function" => {
-            // `function f { …`: what follows the brace is a command of its own
-            if let Some(i) = args.iter().position(|x| x == "{") {
-                out.push(Body::Argv(args[i + 1..].to_vec(), feed.clone()));
-            }
-            return out;
-        }
-        "coproc" => {
-            out.push(Body::Argv(args.clone(), feed.clone()));
-            return out;
-        }
-        "arch" => {
-            // its options are architecture names (`-arm64`); `-arch`, `-d` and `-e` take a value
-            let mut i = 0;
-            while let Some(x) = args.get(i) {
-                match x.as_str() {
-                    "--" => {
-                        i += 1;
-                        break;
-                    }
-                    "-arch" | "-d" | "-e" => i += 2,
-                    s if s.starts_with('-') => i += 1,
-                    _ => break,
-                }
-            }
-            out.push(Body::Argv(
-                args.get(i..).map(<[String]>::to_vec).unwrap_or_default(),
-                feed.clone(),
-            ));
-            return out;
-        }
-        _ => {}
+    if let Some(bodies) = builtin_bodies(a, feed) {
+        return bodies;
     }
     if let Some(spec) = RUNNERS.iter().find(|s| s.names.contains(&p)) {
         runner(p, spec, args, feed, &mut out);
@@ -764,7 +652,7 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
                 out.extend(it.codes.into_iter().map(|c| Body::Code(it.lang, c)));
                 out.extend(it.lines.into_iter().map(|l| Body::Line(l, feed.clone())));
                 if it.stdin {
-                    from_stdin(&mut out, Some(it.lang));
+                    fed_script(&mut out, Some(it.lang), p, feed);
                 }
             }
         }
@@ -810,6 +698,131 @@ pub(crate) fn bodies(a: &Argv, feed: &Feed) -> Vec<Body> {
         }
     }
     out
+}
+
+/// Read a here-document as a script; a pipe remains opaque, as before.
+fn fed_script(out: &mut Vec<Body>, lang: Option<Lang>, p: &str, feed: &Feed) {
+    if let Some(s) = &feed.stdin {
+        out.push(match lang {
+            Some(l) => Body::Code(l, s.clone()),
+            None => Body::Line(s.clone(), Feed::default()),
+        });
+    } else if feed.piped {
+        out.push(Body::Unseen(format!(
+            "管道把脚本喂给 {p}，看不出会执行什么"
+        )));
+    }
+}
+
+/// Shell builtins and programs with their own embedded-command syntax.
+fn builtin_bodies(a: &Argv, feed: &Feed) -> Option<Vec<Body>> {
+    let p = a.program.as_str();
+    let args = &a.args;
+    let mut out = vec![];
+    match p {
+        "eval" => {
+            out.push(if a.xargs {
+                Body::Unseen("eval 的内容来自标准输入".into())
+            } else {
+                Body::Line(args.join(" "), feed.clone())
+            });
+            return Some(out);
+        }
+        "source" | "." => {
+            if operands(args)
+                .first()
+                .is_none_or(|f| STDIN_PATHS.contains(&f.as_str()))
+            {
+                fed_script(&mut out, None, p, feed);
+            }
+            return Some(out);
+        }
+        "find" => {
+            let mut i = 0;
+            while i < args.len() {
+                if matches!(args[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+                    let end = args[i + 1..]
+                        .iter()
+                        .position(|x| x == ";" || x == "+")
+                        .map_or(args.len(), |e| i + 1 + e);
+                    out.push(Body::Argv(args[i + 1..end].to_vec(), feed.clone()));
+                    i = end;
+                }
+                i += 1;
+            }
+            return Some(out);
+        }
+        "git" => return Some(git(args, feed)),
+        // GNU sed is `gsed` where the system's is BSD's
+        "sed" | "gsed" => {
+            if let Some(why) = sed_runs(args) {
+                out.push(Body::Unseen(why));
+            }
+            return Some(out);
+        }
+        "awk" | "gawk" | "mawk" | "nawk" => {
+            match awk_parts(args) {
+                Some((progs, _)) => {
+                    out.extend(progs.into_iter().map(|s| Body::Code(Lang::Awk, s.into())));
+                }
+                None => out.push(Body::Unseen("awk 的程序在文件里，看不出会做什么".into())),
+            }
+            return Some(out);
+        }
+        "alias" => {
+            // `alias k=pkill` makes `k` run that line
+            out.extend(
+                operands(args)
+                    .into_iter()
+                    .filter_map(|x| x.split_once('='))
+                    .map(|(_, v)| Body::Line(v.to_string(), feed.clone())),
+            );
+            return Some(out);
+        }
+        "trap" => {
+            if let Some(action) = operands(args).first()
+                && !matches!(action.as_str(), "" | "-")
+                && !args.iter().any(|x| x == "-l" || x == "-p")
+            {
+                out.push(Body::Line(action.to_string(), feed.clone()));
+            }
+            return Some(out);
+        }
+        "function" => {
+            // `function f { …`: what follows the brace is a command of its own
+            if let Some(i) = args.iter().position(|x| x == "{") {
+                out.push(Body::Argv(args[i + 1..].to_vec(), feed.clone()));
+            }
+            return Some(out);
+        }
+        "coproc" => {
+            out.push(Body::Argv(args.clone(), feed.clone()));
+            return Some(out);
+        }
+        "arch" => {
+            out.push(Body::Argv(arch_words(args), feed.clone()));
+            return Some(out);
+        }
+        _ => None,
+    }
+}
+
+/// The command words after architecture, directory and environment options.
+fn arch_words(args: &[String]) -> Vec<String> {
+    // its options are architecture names (`-arm64`); `-arch`, `-d` and `-e` take a value
+    let mut i = 0;
+    while let Some(x) = args.get(i) {
+        match x.as_str() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            "-arch" | "-d" | "-e" => i += 2,
+            s if s.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    args.get(i..).map(<[String]>::to_vec).unwrap_or_default()
 }
 
 /// The command of a runner ([`RUNNERS`]) after its options.
@@ -1252,6 +1265,45 @@ const SUB_RUNNERS: &[SubRunner] = &[
     },
 ];
 
+/// The runner option name without an attached value.
+fn runner_option_name(w: &str) -> String {
+    w.split_once('=')
+        .map_or(w.to_string(), |(n, _)| n.to_string())
+}
+
+/// Commands after -- and shell lines anywhere among a runner's own options.
+fn dash_runner_bodies(
+    r: &SubRunner,
+    args: &[String],
+    own: &[String],
+    i: usize,
+    dash: Option<usize>,
+    feed: &Feed,
+) -> Vec<Body> {
+    let mut out = vec![];
+    // a line may be given anywhere among its own words (`nix-shell -p x --run '…'`)
+    let mut j = i;
+    while let Some(x) = own.get(j) {
+        j += 1;
+        if r.line.contains(&runner_option_name(x).as_str()) {
+            match x.split_once('=') {
+                Some((_, v)) => out.push(Body::Line(v.to_string(), feed.clone())),
+                None => {
+                    out.extend(own.get(j).map(|l| Body::Line(l.clone(), feed.clone())));
+                    j += 1;
+                }
+            }
+        }
+    }
+    if let Some(d) = dash {
+        let words = args[d + 1..].to_vec();
+        if !words.is_empty() {
+            out.push(Body::Argv(words, feed.clone()));
+        }
+    }
+    out
+}
+
 /// What a [`SubRunner`] runs; `None`: `p` is none, or not in the form that runs a command (`npm
 /// install`, `bun run x`).
 pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Body>> {
@@ -1259,10 +1311,6 @@ pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Bo
     // what `--` ends: the runner's own words
     let dash = args.iter().position(|x| x == "--");
     let own = &args[..dash.unwrap_or(args.len())];
-    let name = |w: &str| {
-        w.split_once('=')
-            .map_or(w.to_string(), |(n, _)| n.to_string())
-    };
     let mut i = 0;
     if !r.subs.is_empty() {
         // the subcommand, after global options only (`npm --prefix x exec`, not `npm install exec`)
@@ -1275,7 +1323,7 @@ pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Bo
                 }
                 break k;
             }
-            k += if r.valued.contains(&name(x).as_str()) && !x.contains('=') {
+            k += if r.valued.contains(&runner_option_name(x).as_str()) && !x.contains('=') {
                 2
             } else {
                 1
@@ -1290,27 +1338,7 @@ pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Bo
     }
     let mut out = vec![];
     if r.dashdash {
-        // a line may be given anywhere among its own words (`nix-shell -p x --run '…'`)
-        let mut j = i;
-        while let Some(x) = own.get(j) {
-            j += 1;
-            if r.line.contains(&name(x).as_str()) {
-                match x.split_once('=') {
-                    Some((_, v)) => out.push(Body::Line(v.to_string(), feed.clone())),
-                    None => {
-                        out.extend(own.get(j).map(|l| Body::Line(l.clone(), feed.clone())));
-                        j += 1;
-                    }
-                }
-            }
-        }
-        if let Some(d) = dash {
-            let words = args[d + 1..].to_vec();
-            if !words.is_empty() {
-                out.push(Body::Argv(words, feed.clone()));
-            }
-        }
-        return Some(out);
+        return Some(dash_runner_bodies(r, args, own, i, dash, feed));
     }
     let mut shell_mode = false;
     // the options before the command
@@ -1318,7 +1346,7 @@ pub(crate) fn sub_runner(p: &str, args: &[String], feed: &Feed) -> Option<Vec<Bo
         if x == "--" || !x.starts_with('-') || x == "-" {
             break;
         }
-        let n = name(x);
+        let n = runner_option_name(x);
         let step = if x.contains('=') { 1 } else { 2 };
         if r.none.contains(&n.as_str()) {
             return Some(out);
@@ -1751,6 +1779,18 @@ pub(crate) fn interpreter(p: &str, args: &[String]) -> Option<Inline> {
         first.get_or_insert(x.as_str());
     }
     out.codes = codes;
+    interpreter_input(p, first, module, args, &mut out);
+    Some(out)
+}
+
+/// Set interpreter input mode and extract the positional deno/bun command only after all options.
+fn interpreter_input(
+    p: &str,
+    first: Option<&str>,
+    module: bool,
+    args: &[String],
+    out: &mut Inline,
+) {
     match (p, first) {
         ("deno", Some("eval")) => out
             .codes
@@ -1770,7 +1810,6 @@ pub(crate) fn interpreter(p: &str, args: &[String]) -> Option<Inline> {
     } else if p == "deno" && first.is_none() {
         out.stdin = true;
     }
-    Some(out)
 }
 
 /// Words in code, in any of the languages, that start programs, call into native code, signal a
@@ -2099,73 +2138,80 @@ const SED_LONG: &[&str] = &[
     "version",
 ];
 
+/// Skip only the original horizontal whitespace accepted between sed components.
+fn sed_skip_blank(cs: &[char], i: &mut usize) {
+    while matches!(cs.get(*i), Some(' ' | '\t')) {
+        *i += 1;
+    }
+}
+
+/// Read the rest of a sed command line, keeping continued newlines.
+fn sed_to_eol(cs: &[char], i: &mut usize) -> String {
+    let mut out = String::new();
+    while let Some(&c) = cs.get(*i) {
+        if c == '\\' && cs.get(*i + 1) == Some(&'\n') {
+            out.push('\n');
+            *i += 2;
+            continue;
+        }
+        if c == '\n' {
+            break;
+        }
+        out.push(c);
+        *i += 1;
+    }
+    out
+}
+
+/// Consume one delimited sed part with escaped characters intact.
+fn sed_part(cs: &[char], i: &mut usize, d: char) -> Result<(), ()> {
+    while let Some(&c) = cs.get(*i) {
+        *i += 1;
+        if c == '\\' {
+            *i += 1;
+        } else if c == d {
+            return Ok(());
+        }
+    }
+    Err(())
+}
+
+/// Consume a numeric or delimited sed address before its command.
+fn sed_address(cs: &[char], i: &mut usize) -> Result<(), ()> {
+    let at = |i: usize| cs.get(i).copied();
+    match at(*i) {
+        Some(c) if c.is_ascii_digit() => {
+            while at(*i).is_some_and(|c| c.is_ascii_digit() || c == '~') {
+                *i += 1;
+            }
+        }
+        Some('$') => *i += 1,
+        Some('/') => {
+            *i += 1;
+            sed_part(cs, i, '/')?;
+            while matches!(at(*i), Some('I' | 'M')) {
+                *i += 1;
+            }
+        }
+        Some('\\') => {
+            let d = at(*i + 1).ok_or(())?;
+            *i += 2;
+            sed_part(cs, i, d)?;
+            while matches!(at(*i), Some('I' | 'M')) {
+                *i += 1;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// What in sed script `s` executes (`e …`, an `s` command's `e` flag); `Err`: not a script this
 /// reader knows.
 fn sed_script(s: &str) -> Result<Option<String>, ()> {
     let cs: Vec<char> = s.chars().collect();
     let mut i = 0;
     let at = |i: usize| cs.get(i).copied();
-    let skip_blank = |i: &mut usize| {
-        while matches!(cs.get(*i), Some(' ' | '\t')) {
-            *i += 1;
-        }
-    };
-    // the rest of the line (a file name, text, a command); a backslash-newline continues it
-    let to_eol = |i: &mut usize| -> String {
-        let mut out = String::new();
-        while let Some(&c) = cs.get(*i) {
-            if c == '\\' && cs.get(*i + 1) == Some(&'\n') {
-                out.push('\n');
-                *i += 2;
-                continue;
-            }
-            if c == '\n' {
-                break;
-            }
-            out.push(c);
-            *i += 1;
-        }
-        out
-    };
-    // a delimited part (`/re/`, `\%re%`, the parts of `s` and `y`), escapes kept
-    let part = |i: &mut usize, d: char| -> Result<(), ()> {
-        while let Some(&c) = cs.get(*i) {
-            *i += 1;
-            if c == '\\' {
-                *i += 1;
-            } else if c == d {
-                return Ok(());
-            }
-        }
-        Err(())
-    };
-    let address = |i: &mut usize| -> Result<(), ()> {
-        match at(*i) {
-            Some(c) if c.is_ascii_digit() => {
-                while at(*i).is_some_and(|c| c.is_ascii_digit() || c == '~') {
-                    *i += 1;
-                }
-            }
-            Some('$') => *i += 1,
-            Some('/') => {
-                *i += 1;
-                part(i, '/')?;
-                while matches!(at(*i), Some('I' | 'M')) {
-                    *i += 1;
-                }
-            }
-            Some('\\') => {
-                let d = at(*i + 1).ok_or(())?;
-                *i += 2;
-                part(i, d)?;
-                while matches!(at(*i), Some('I' | 'M')) {
-                    *i += 1;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    };
     loop {
         while matches!(at(i), Some(' ' | '\t' | '\n' | ';' | '}')) {
             i += 1;
@@ -2174,23 +2220,23 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
             return Ok(None);
         };
         if c == '#' {
-            to_eol(&mut i);
+            sed_to_eol(&cs, &mut i);
             continue;
         }
-        address(&mut i)?;
-        skip_blank(&mut i);
+        sed_address(&cs, &mut i)?;
+        sed_skip_blank(&cs, &mut i);
         if at(i) == Some(',') {
             i += 1;
-            skip_blank(&mut i);
+            sed_skip_blank(&cs, &mut i);
             if matches!(at(i), Some('+' | '~')) {
                 i += 1;
             }
-            address(&mut i)?;
+            sed_address(&cs, &mut i)?;
         }
-        skip_blank(&mut i);
+        sed_skip_blank(&cs, &mut i);
         while at(i) == Some('!') {
             i += 1;
-            skip_blank(&mut i);
+            sed_skip_blank(&cs, &mut i);
         }
         let Some(cmd) = at(i) else {
             return Err(());
@@ -2200,7 +2246,7 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
             '{' => continue,
             '=' | 'd' | 'D' | 'g' | 'G' | 'h' | 'H' | 'n' | 'N' | 'p' | 'P' | 'x' | 'z' | 'F' => {}
             'l' | 'L' | 'q' | 'Q' => {
-                skip_blank(&mut i);
+                sed_skip_blank(&cs, &mut i);
                 while at(i).is_some_and(|c| c.is_ascii_digit()) {
                     i += 1;
                 }
@@ -2211,11 +2257,11 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
                 }
             }
             'a' | 'i' | 'c' | 'r' | 'R' | 'w' | 'W' => {
-                to_eol(&mut i);
+                sed_to_eol(&cs, &mut i);
             }
             'e' => {
-                skip_blank(&mut i);
-                let run = to_eol(&mut i);
+                sed_skip_blank(&cs, &mut i);
+                let run = sed_to_eol(&cs, &mut i);
                 return Ok(Some(if run.trim().is_empty() {
                     "e".into()
                 } else {
@@ -2228,8 +2274,8 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
                     return Err(());
                 }
                 i += 1;
-                part(&mut i, d)?;
-                part(&mut i, d)?;
+                sed_part(&cs, &mut i, d)?;
+                sed_part(&cs, &mut i, d)?;
                 if cmd == 's' {
                     while let Some(f) = at(i) {
                         match f {
@@ -2237,7 +2283,7 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
                             'g' | 'p' | 'i' | 'I' | 'm' | 'M' => i += 1,
                             d if d.is_ascii_digit() => i += 1,
                             'w' => {
-                                to_eol(&mut i);
+                                sed_to_eol(&cs, &mut i);
                                 break;
                             }
                             _ => break,
@@ -2247,7 +2293,7 @@ fn sed_script(s: &str) -> Result<Option<String>, ()> {
             }
             _ => return Err(()),
         }
-        skip_blank(&mut i);
+        sed_skip_blank(&cs, &mut i);
         if !matches!(at(i), None | Some(';' | '\n' | '}' | '#')) {
             return Err(());
         }

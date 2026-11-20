@@ -67,12 +67,6 @@ steve-core	crates/steve-core/src/work.rs	cognitive_complexity	30
 steve-core	crates/steve-core/src/work.rs	too_many_lines	134
 steve-core	crates/steve-core/src/workflow.rs	cognitive_complexity	35,26
 steve-core	crates/steve-core/src/workflow.rs	too_many_lines	253,172,160,117
-steve-core	crates/steve-core/src/yolo/draft.rs	too_many_lines	123
-steve-core	crates/steve-core/src/yolo/exec.rs	too_many_lines	205,148,111,103
-steve-core	crates/steve-core/src/yolo/facts.rs	too_many_lines	179
-steve-core	crates/steve-core/src/yolo/guard.rs	too_many_lines	207
-steve-core	crates/steve-core/src/yolo/limits.rs	too_many_lines	255,128,125
-steve-core	crates/steve-core/src/yolo/mod.rs	too_many_lines	124
 steve-flow	crates/steve-flow/src/engine.rs	cognitive_complexity	29
 steve-flow	crates/steve-flow/src/exec.rs	too_many_lines	121
 steve-flow	crates/steve-flow/src/expr.rs	too_many_lines	115
