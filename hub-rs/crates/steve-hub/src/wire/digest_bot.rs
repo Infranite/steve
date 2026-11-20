@@ -113,7 +113,7 @@ fn runnable(c: &rusqlite::Connection, ws: &str) -> ApiResult<Option<(String, i64
 }
 
 /// Keep one history entry per uninterrupted sequence of Bot startup rejections. Other runs
-/// (including manual/cron runs) or a schedule version change begin a new sequence.
+/// (including manual/cron runs), a different error or a version change begin a new sequence.
 fn record_start_failure(
     tx: &steve_store::Tx,
     schedule: &schedules::Schedule,
@@ -123,6 +123,7 @@ fn record_start_failure(
     let (ws, id) = (&schedule.workspace_id, &schedule.id);
     let previous = runs::page(tx, ws, id, None, 1)?.pop().filter(|r| {
         r.status == "failed"
+            && r.error.as_deref() == Some(reason)
             && r.flow_version == schedule.version
             && r.context["source"] == "digest.bot"
             && r.work_item_id.is_none()
@@ -138,8 +139,10 @@ fn record_start_failure(
             .max(1)
             .saturating_add(1)
     });
-    let context =
-        json!({"at":now,"trigger":"manual","source":"digest.bot","start_failures":failures});
+    let first_at = previous
+        .as_ref()
+        .map_or(now, |r| r.context["first_at"].as_i64().unwrap_or(r.started));
+    let context = json!({"at":now,"first_at":first_at,"trigger":"manual","source":"digest.bot","start_failures":failures});
     let reused = previous.is_some();
     let run = match previous {
         Some(r) => r.id,
@@ -462,6 +465,11 @@ mod tests {
         let last = &rows[0];
         assert_eq!(last.id, first.id);
         assert_eq!(last.context["start_failures"], 1440);
+        assert_eq!(last.context["first_at"], now);
+        let view = last.view();
+        assert_eq!(view.start_failures, Some(1440));
+        assert_eq!(serde_json::to_value(&view).unwrap()["start_failures"], 1440);
+        assert_eq!(view.error, last.error);
         assert_eq!(
             last.attempts, 0,
             "flow action retry attempts are independent"
@@ -480,6 +488,53 @@ mod tests {
             rows,
             "an own commit at the same wall time cannot add a failure"
         );
+    }
+
+    #[tokio::test]
+    async fn a_changed_start_error_begins_a_new_counted_history_entry() {
+        use steve_runtime::Clock;
+        let (e, id) = bound().await;
+        let now = e.env.clock.now();
+        let runner = Runner(e.flow.clone());
+        let history = || {
+            e.env
+                .store()
+                .reader(|c| runs::page(c, WS, &id, None, 50))
+                .unwrap()
+        };
+        for error in ["first error", "first error"] {
+            runner
+                .failed_start(WS, &id, e.env.clock.now(), ApiError::rule(error))
+                .unwrap();
+            e.env.clock.advance(60_000);
+        }
+        let repeated = history().pop().unwrap();
+        assert_eq!(repeated.view().start_failures, Some(2));
+        assert_eq!(repeated.context["first_at"], now);
+        runner
+            .failed_start(WS, &id, e.env.clock.now(), ApiError::rule("changed error"))
+            .unwrap();
+        let rows = history();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].id, repeated.id);
+        assert_eq!(rows[0].view().start_failures, Some(1));
+        assert_eq!(rows[0].view().error.as_deref(), Some("changed error"));
+        assert_eq!(rows[0].context["first_at"], now + 120_000);
+        assert_eq!(
+            rows[1], repeated,
+            "the earlier error and count must remain intact"
+        );
+        let changed = rows[0].clone();
+        e.env.clock.advance(60_000);
+        runner
+            .failed_start(WS, &id, e.env.clock.now(), ApiError::rule("first error"))
+            .unwrap();
+        let rows = history();
+        assert_eq!(rows.len(), 3, "only the latest entry may be coalesced");
+        assert_eq!(rows[0].view().start_failures, Some(1));
+        assert_ne!(rows[0].id, repeated.id);
+        assert_eq!(rows[1], changed);
+        assert_eq!(rows[2], repeated);
     }
 
     #[tokio::test]
@@ -525,7 +580,7 @@ mod tests {
                 })
                 .unwrap();
             runner
-                .failed_start(WS, &id, now + 60_000, ApiError::rule("new failure"))
+                .failed_start(WS, &id, now + 60_000, ApiError::rule("first failure"))
                 .unwrap();
             let rows = e
                 .env
@@ -539,7 +594,7 @@ mod tests {
             );
             assert_ne!(rows[0].id, first.id, "{barrier}");
             assert_eq!(rows[0].context["start_failures"], 1);
-            assert_eq!(rows[0].error.as_deref(), Some("new failure"));
+            assert_eq!(rows[0].error.as_deref(), Some("first failure"));
             assert_eq!(
                 rows[0].flow_version,
                 first.flow_version + i64::from(barrier == "version")

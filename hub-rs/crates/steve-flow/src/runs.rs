@@ -92,6 +92,7 @@ impl RunRow {
             item_id: self.work_item_id.clone(),
             cost_usd: self.cost,
             error: self.error.clone(),
+            start_failures: self.context.get("start_failures").and_then(Value::as_i64),
         }
     }
 }
@@ -109,6 +110,9 @@ pub struct RunView {
     pub item_id: Option<String>,
     pub cost_usd: f64,
     pub error: Option<String>,
+    /// Consecutive startup rejections represented by this entry, when counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_failures: Option<i64>,
 }
 
 /// Connector-facing projection of canonical flow runs. A connector stores an event reference
