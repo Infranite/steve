@@ -203,24 +203,22 @@ fn rollback_is_offered_only_for_the_newest_release() {
     // `prev` (v1) is installed and declares capabilities for the typed storage state.
     let v1 = t.kit.core.config().home.join("releases/v1");
     std::fs::create_dir_all(&v1).unwrap();
-    let knows = |storage: &steve_store_sqlite::compat::StorageCapabilities| {
+    let knows = |storage: &steve_store::StorageCapabilities| {
         std::fs::write(
             v1.join("release.json"),
             json!({"version": "v1", "storage": storage}).to_string(),
         )
         .unwrap()
     };
-    let compatible = steve_store_sqlite::compat::StorageCapabilities::compiled();
+    let compatible = steve_store::StorageCapabilities::compiled();
     knows(&compatible);
     let (i1, s1, _) = t.item();
     let first = release(&i1, &s1);
     assert_eq!(t.engine.undo_kind(&first).as_deref(), Some("rollback"));
     // one that can't open the database (the new release migrated it) is not offered, nor started
     let mut incompatible = compatible.clone();
-    incompatible.layout = steve_store_sqlite::compat::SchemaRange {
-        min_read: 1,
-        target: 1,
-    };
+    incompatible.layout.min_read = 1;
+    incompatible.layout.target = 1;
     incompatible.legacy = None;
     knows(&incompatible);
     assert_eq!(
