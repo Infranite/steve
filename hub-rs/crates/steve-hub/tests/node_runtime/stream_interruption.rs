@@ -1,4 +1,5 @@
 use super::*;
+use steve_node_api::error as rpc_error;
 
 const ERROR: &str = "stream disconnected before completion: upstream stream interrupted";
 const STOP: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
@@ -185,7 +186,7 @@ async fn provider_stream_interruption_accepts_adapter_errors_and_stop_reasons() 
         }
         let mut c = build::done();
         c.stop_reason = stop.into();
-        c.error = error.map(|e| ApiError::new(ErrorCode::Internal, e));
+        c.error = error.map(|e| rpc_error(Code::Internal, e));
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
         eventually_sync("provider retry", || h.attempts().len() == 2).await;
@@ -276,7 +277,7 @@ async fn provider_stream_interruption_honors_delivery_question_and_cancel_during
         let mut c = build::done();
         c.outcome = Outcome::Failed;
         c.stop_reason = "error".into();
-        c.error = Some(ApiError::new(ErrorCode::Internal, ERROR));
+        c.error = Some(rpc_error(Code::Internal, ERROR));
         c.acted = true;
         h.node.finish(&exec, c).await.unwrap();
         if state == "cancel" {

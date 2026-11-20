@@ -4,6 +4,7 @@
 use super::{NodeFiles, denied, internal};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 use steve_node_api::*;
 
 #[derive(Default)]
@@ -20,11 +21,11 @@ const TTL: Duration = Duration::from_secs(600);
 const CHUNK: usize = INLINE_IMAGE_CHUNK;
 const MEMORY: usize = 2 * MAX_INLINE_IMAGE as usize;
 
-fn invalid(s: &str) -> ApiError {
-    ApiError::new(ErrorCode::Invalid, s)
+fn invalid(s: &str) -> Error {
+    rpc_error(Code::Invalid, s)
 }
-fn conflict() -> ApiError {
-    ApiError::new(ErrorCode::Conflict, "image transfer does not match")
+fn conflict() -> Error {
+    rpc_error(Code::Conflict, "image transfer does not match")
 }
 impl Upload {
     fn abort(&mut self) {
@@ -103,7 +104,7 @@ impl NodeFiles {
                 .count()
                 >= 4
         {
-            return Err(ApiError::new(ErrorCode::Exhausted, "image transfer quota"));
+            return Err(rpc_error(Code::Exhausted, "image transfer quota"));
         }
         let u = Upload {
             execution: exec,
@@ -155,10 +156,7 @@ impl NodeFiles {
             }
         } else {
             if used + b.bytes.len() > MEMORY {
-                return Err(ApiError::new(
-                    ErrorCode::Exhausted,
-                    "image transfer memory quota",
-                ));
+                return Err(rpc_error(Code::Exhausted, "image transfer memory quota"));
             }
             u.bytes.extend(b.bytes);
         }
@@ -398,7 +396,7 @@ mod tests {
         );
         assert_eq!(
             files.finish_upload(t.id.clone()).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
         assert!(files.upload(chunk(&t.id, 0, b"changed")).await.is_err());
         assert!(files.upload(chunk(&t.id, 50, &bytes[50..])).await.is_err());
@@ -550,7 +548,7 @@ mod tests {
             files.upload(chunk(&t.id, 0, bytes)).await.unwrap();
             assert_eq!(
                 files.finish_upload(t.id.clone()).await.unwrap_err().code,
-                ErrorCode::Invalid
+                Code::Invalid
             );
             assert_eq!(
                 files.upload_status(t.id.clone()).await.unwrap(),
@@ -570,7 +568,7 @@ mod tests {
         files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
         assert_eq!(
             files.finish_upload(t.id.clone()).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
         assert_eq!(
             files.upload_status(t.id.clone()).await.unwrap(),
@@ -715,7 +713,7 @@ mod tests {
         );
         assert_eq!(
             foreign.begin_upload(b.clone()).await.unwrap_err().code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let files = NodeFiles::new(
             h.store.clone(),
@@ -727,7 +725,7 @@ mod tests {
         changed.manifest.sha256 = Digest::sha256(b"different");
         assert_eq!(
             files.begin_upload(changed).await.unwrap_err().code,
-            ErrorCode::Conflict
+            Code::Conflict
         );
         h.store
             .transaction::<_, steve_store::StoreError>(|tx| {

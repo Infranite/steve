@@ -6,6 +6,7 @@
 //! `offline` then, while inspection, replay, acks, cancel and abandon go through.
 
 use std::sync::{Arc, Mutex};
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -129,23 +130,23 @@ impl RemoteNode {
             .as_ref()
             .filter(|l| !l.conn.is_closed())
             .map(|l| l.conn.clone())
-            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "node offline"))
+            .ok_or_else(|| rpc_error(Code::Unavailable, "node offline"))
     }
 
     fn conn(&self, new_work: bool) -> ApiResult<Arc<Conn>> {
         let slot = self.slot.lock().unwrap();
         match slot.link.as_ref() {
-            Some(l) if l.conn.is_closed() => Err(ApiError::new(ErrorCode::Offline, "node offline")),
-            Some(l) if l.conn.is_upgrade() => Err(ApiError::new(
-                ErrorCode::Offline,
+            Some(l) if l.conn.is_closed() => Err(rpc_error(Code::Unavailable, "node offline")),
+            Some(l) if l.conn.is_upgrade() => Err(rpc_error(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             )),
-            Some(_) if new_work && slot.reconciling => Err(ApiError::new(
-                ErrorCode::Offline,
+            Some(_) if new_work && slot.reconciling => Err(rpc_error(
+                Code::Unavailable,
                 "node restarted, reconciling first",
             )),
             Some(l) => Ok(l.conn.clone()),
-            None => Err(ApiError::new(ErrorCode::Offline, "node offline")),
+            None => Err(rpc_error(Code::Unavailable, "node offline")),
         }
     }
 
@@ -218,8 +219,8 @@ impl JobExecutor for RemoteNode {
     /// nothing sent, so the caller may route it elsewhere.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
         if !self.is_colocated() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "jobs do not run on a remote node yet",
             ));
         }
@@ -280,8 +281,8 @@ impl WorkspaceExecutor for RemoteNode {
             ..
         } = &c.body.action
         {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "a push to another branch is not on a remote node yet",
             ));
         }
@@ -355,7 +356,7 @@ impl Discovery for RemoteNode {
                 Some(&op),
             )
             .await?;
-        state.try_into().map_err(ApiError::from)
+        state.try_into().map_err(Error::from)
     }
     async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
         let op = s.operation.clone();
@@ -366,7 +367,7 @@ impl Discovery for RemoteNode {
                 Some(&op),
             )
             .await?;
-        state.try_into().map_err(ApiError::from)
+        state.try_into().map_err(Error::from)
     }
     async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
         let state: upgrade_v1::StatusResponse = self
@@ -378,7 +379,7 @@ impl Discovery for RemoteNode {
                 None,
             )
             .await?;
-        state.try_into().map_err(ApiError::from)
+        state.try_into().map_err(Error::from)
     }
     async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
         let op = r.operation.clone();
@@ -393,8 +394,8 @@ impl Discovery for RemoteNode {
     }
     async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
         if !self.is_colocated() {
-            return Err(ApiError::new(
-                ErrorCode::Denied,
+            return Err(rpc_error(
+                Code::Forbidden,
                 "install harnesses on a separate Node with its operator CLI",
             ));
         }

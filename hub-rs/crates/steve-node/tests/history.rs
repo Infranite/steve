@@ -248,7 +248,7 @@ async fn an_import_reads_a_listed_key_at_its_version_and_pages_its_events() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     // changed since it was listed: stale
     let e = t
         .node
@@ -259,7 +259,7 @@ async fn an_import_reads_a_listed_key_at_its_version_and_pages_its_events() {
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Stale);
+    assert_eq!(e.code, Code::Stale);
 }
 
 #[tokio::test]
@@ -310,9 +310,9 @@ async fn a_forged_key_is_refused() {
             ))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{key}: {e:?}");
+        assert_eq!(e.code, Code::Invalid, "{key}: {e:?}");
         let e = t.node.locate(source).await.unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{key}");
+        assert_eq!(e.code, Code::Invalid, "{key}");
     }
     // an id that is a path is not an id
     for id in ["../x", "a/b", ""] {
@@ -324,7 +324,7 @@ async fn a_forged_key_is_refused() {
             })
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{id}");
+        assert_eq!(e.code, Code::Invalid, "{id}");
     }
     // an import nobody started has no pages
     let e = t
@@ -332,7 +332,7 @@ async fn a_forged_key_is_refused() {
         .import_page(OperationId::new("imp_none").unwrap(), page(10, None))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Invalid);
+    assert_eq!(e.code, Code::Invalid);
 }
 
 #[tokio::test]
@@ -376,7 +376,7 @@ async fn locate_finds_a_harness_session_by_its_id() {
             key: "session:gone".into(),
         })
         .await;
-    assert_eq!(gone.unwrap_err().code, ErrorCode::Invalid);
+    assert_eq!(gone.unwrap_err().code, Code::Invalid);
 }
 
 #[tokio::test]

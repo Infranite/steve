@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use markdown::mdast::Node;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -189,7 +190,7 @@ impl Images {
                 self.reply_spent += start.elapsed();
                 match result {
                     // A newer Node can still send the old image attachments to an older Hub.
-                    Ok(Err(e)) if e.code == ErrorCode::Unsupported => {}
+                    Ok(Err(e)) if e.code == Code::Unsupported => {}
                     result => {
                         let text = match result {
                             Ok(Ok(text)) if text.starts_with(&b.text[..b.emitted]) => text,
@@ -461,8 +462,8 @@ fn local_path(destination: &str) -> Option<String> {
     }
     Some(decoded)
 }
-fn invalid() -> ApiError {
-    ApiError::new(ErrorCode::Denied, "inline image unavailable")
+fn invalid() -> Error {
+    rpc_error(Code::Forbidden, "inline image unavailable")
 }
 
 pub(crate) fn protected_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> bool {
@@ -568,13 +569,9 @@ impl Drop for PendingUpload {
         }
     }
 }
-fn retryable(error: &ApiError) -> bool {
-    // Every blob method here is idempotent. An unknown/lost reply is safe to resume with the
-    // same begin key; validation, permission and protocol errors cannot be repaired by resending.
-    matches!(
-        error.retry,
-        RetryClass::SameOperation | RetryClass::AfterReconcile
-    ) || error.code == ErrorCode::Internal
+fn retryable(error: &Error) -> bool {
+    // Blob methods are idempotent: resume the same begin key after a retryable/lost reply.
+    error.retry != Retry::Never || error.code == Code::Internal
 }
 async fn abandon(files: Arc<dyn HubFiles>, begin: BeginUpload, mut id: Option<TransferId>) {
     for _ in 0..2 {
@@ -701,7 +698,7 @@ async fn upload(
                 // A Hub restart loses an in-memory transfer ID. Begin with the same key must
                 // recheck the execution grant before restarting bytes; a revoked grant still
                 // refuses it. Content/integrity errors remain terminal and are never retried.
-                let again = retryable(&e) || (pending.id.is_some() && e.code == ErrorCode::Denied);
+                let again = retryable(&e) || (pending.id.is_some() && e.code == Code::Forbidden);
                 last = e;
                 if !again {
                     break;
@@ -725,6 +722,7 @@ mod tests {
         reads: AtomicUsize,
         bytes: Mutex<Vec<u8>>,
         manifest: Mutex<Option<BlobManifest>>,
+        begin_keys: Mutex<Vec<OperationId>>,
         corrupt_receipt: bool,
         aborts: AtomicUsize,
         finishes: AtomicUsize,
@@ -740,6 +738,8 @@ mod tests {
         ChunkHangs,
         FinishHangs,
         FinishOfflineOnce,
+        FinishUnknownLaterOnce,
+        FinishUnknownNever,
         FinishDeniedOnce,
         FinishOffline,
         FinishInvalid,
@@ -757,6 +757,7 @@ mod tests {
         }
         async fn begin_upload(&self, b: BeginUpload) -> ApiResult<Transfer> {
             let first = self.reads.fetch_add(1, Ordering::SeqCst) == 0;
+            self.begin_keys.lock().unwrap().push(b.key.clone());
             *self.manifest.lock().unwrap() = Some(b.manifest);
             if self.fault == Fault::BeginReplyLost && first {
                 self.entered.notify_one();
@@ -786,20 +787,24 @@ mod tests {
                 self.entered.notify_one();
                 std::future::pending::<()>().await;
             }
+            if self.fault == Fault::FinishUnknownNever {
+                return Err(rpc_error(Code::OutcomeUnknown, "lost reply; do not resend"));
+            }
+            if self.fault == Fault::FinishUnknownLaterOnce && first {
+                return Err(rpc_error(Code::OutcomeUnknown, "lost idempotent reply")
+                    .retry(Retry::Later { after_ms: None }));
+            }
             if self.fault == Fault::FinishOffline
                 || (self.fault == Fault::FinishOfflineOnce && first)
             {
-                return Err(ApiError::new(ErrorCode::Offline, "lost reply"));
+                return Err(rpc_error(Code::Unavailable, "lost reply"));
             }
             if self.fault == Fault::FinishDeniedOnce && first {
                 *self.bytes.lock().unwrap() = vec![];
-                return Err(ApiError::new(
-                    ErrorCode::Denied,
-                    "transfer registry restarted",
-                ));
+                return Err(rpc_error(Code::Forbidden, "transfer registry restarted"));
             }
             if self.fault == Fault::FinishInvalid {
-                return Err(ApiError::new(ErrorCode::Invalid, "invalid image"));
+                return Err(rpc_error(Code::Invalid, "invalid image"));
             }
             let m = self.manifest.lock().unwrap().clone().unwrap();
             Ok(ArtifactRef {
@@ -925,6 +930,36 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn unknown_finish_advice_controls_same_key_resume_and_terminal_cleanup() {
+        for (fault, ok) in [
+            (Fault::FinishUnknownLaterOnce, true),
+            (Fault::FinishUnknownNever, false),
+        ] {
+            let files = Arc::new(Files {
+                fault,
+                ..Files::default()
+            });
+            let bytes = b"\x89PNG\r\n\x1a\npayload";
+            let result = upload(files.clone(), &exec(), bytes).await;
+            assert_eq!(result.is_ok(), ok);
+            let keys = files.begin_keys.lock().unwrap();
+            assert_eq!(keys.len(), if ok { 2 } else { 1 });
+            assert!(keys.iter().all(|key| key == &keys[0]));
+            assert_eq!(
+                files.finishes.load(Ordering::SeqCst),
+                if ok { 2 } else { 1 }
+            );
+            assert_eq!(files.aborts.load(Ordering::SeqCst), usize::from(!ok));
+            if ok {
+                assert_eq!(files.bytes.lock().unwrap().as_slice(), bytes);
+            } else {
+                assert_eq!(result.unwrap_err().retry, Retry::Never);
+                assert!(files.bytes.lock().unwrap().is_empty());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gfm_urls_preserve_original_text_and_never_call_hub_files() {
         let dir = tempfile::tempdir().unwrap();

@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use steve_node_api::error as rpc_error;
 use steve_node_api::testkit::FakeNode;
 use steve_node_api::*;
 
@@ -11,7 +12,7 @@ use async_trait::async_trait;
 pub struct Delayed {
     pub base: Arc<FakeNode>,
     once: AtomicBool,
-    disconnected: std::sync::Mutex<Option<ErrorCode>>,
+    disconnected: std::sync::Mutex<Option<Code>>,
     pub entered: tokio::sync::Notify,
     pub gate: tokio::sync::Semaphore,
 }
@@ -25,7 +26,7 @@ impl Delayed {
             gate: tokio::sync::Semaphore::new(0),
         })
     }
-    pub fn disconnect(&self, code: ErrorCode) {
+    pub fn disconnect(&self, code: Code) {
         *self.disconnected.lock().unwrap() = Some(code);
     }
     pub fn reconnect(&self) {
@@ -144,7 +145,7 @@ impl Discovery for Delayed {
 
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
         if let Some(code) = *self.disconnected.lock().unwrap() {
-            return Err(ApiError::new(code, "persistent disconnect"));
+            return Err(rpc_error(code, "persistent disconnect"));
         }
         let snapshot = self.base.probe(false).await?;
         if !self.once.swap(true, Ordering::SeqCst) {

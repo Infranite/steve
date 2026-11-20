@@ -299,7 +299,7 @@ impl NodeRuntime {
         tx: &Tx,
         op: &str,
         success: bool,
-        error: Option<&ApiError>,
+        error: Option<&Error>,
     ) -> Result<(), StoreError> {
         let Some(row) = rt::permission_of_answer_in(tx, op)? else {
             return Ok(());

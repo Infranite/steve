@@ -24,7 +24,7 @@ pub enum WorkspaceFact {
     /// It could not be made: `error` is the Node's.
     PrepareFailed {
         session: String,
-        error: Option<ApiError>,
+        error: Option<Error>,
     },
     /// The tidy of the item's worktree is over: `removed`, or it is kept (dirty, changed since,
     /// refused). `note`: why it was kept, or what else could not be done.
@@ -137,10 +137,11 @@ fn tidy_since_in(
     workspace: &str,
     rowid: i64,
 ) -> Result<Option<bool>, StoreError> {
+    // G4-W31B-RETRY-SHAPE: remove the legacy string fallback with migration 116.
     let (done, open): (bool, bool) = tx.query_row(
         "SELECT
            EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND state='finished' AND json_extract(receipt,'$.success')=1),
-           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND (state NOT IN ('finished','rejected') OR (state='rejected' AND json_extract(receipt,'$.payload.retry')='never') OR (state='finished' AND json_extract(receipt,'$.success')=0 AND json_extract(receipt,'$.payload.state.error.retry')='never')))",
+           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND (state NOT IN ('finished','rejected') OR (state='rejected' AND COALESCE(json_extract(receipt,'$.payload.retry.kind'),json_extract(receipt,'$.payload.retry'))='never') OR (state='finished' AND json_extract(receipt,'$.success')=0 AND COALESCE(json_extract(receipt,'$.payload.state.error.retry.kind'),json_extract(receipt,'$.payload.state.error.retry'))='never')))",
         rusqlite::params![node, workspace, rowid],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -343,7 +344,7 @@ impl NodeRuntime {
         &self,
         tx: &Tx,
         op: &str,
-        error: Option<&ApiError>,
+        error: Option<&Error>,
         detail: &str,
     ) -> Result<Option<End>, StoreError> {
         let Some(session) = command_any_session_in(tx, op)? else {
@@ -414,5 +415,51 @@ impl NodeRuntime {
                 note: (!detail.is_empty()).then(|| detail.to_string()),
             });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retry_shape_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tidy_reads_saved_never_and_retryable_failures_in_both_retry_shapes() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE node_commands(node_id TEXT,method TEXT,request TEXT,state TEXT,receipt TEXT)").unwrap();
+        for legacy in [false, true] {
+            for rejected in [false, true] {
+                for never in [false, true] {
+                    db.execute("DELETE FROM node_commands", []).unwrap();
+                    let retry = if legacy {
+                        json!(if never { "never" } else { "after_reconcile" })
+                    } else if never {
+                        json!({"kind":"never"})
+                    } else {
+                        json!({"kind":"later","after_ms":null})
+                    };
+                    let error = json!({"code":"internal","retry":retry,"safe_detail":"retained"});
+                    let receipt = if rejected {
+                        json!({"success":false,"payload":error})
+                    } else {
+                        json!({"success":false,"payload":{"state":{"error":error}}})
+                    };
+                    db.execute(
+                        "INSERT INTO node_commands VALUES ('n1','tidy_workspace',?1,?2,?3)",
+                        rusqlite::params![
+                            json!({"body":{"workspace":{"id":"w1"}}}).to_string(),
+                            if rejected { "rejected" } else { "finished" },
+                            receipt.to_string()
+                        ],
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        tidy_since_in(&db, "n1", "w1", 0).unwrap(),
+                        if never { Some(false) } else { None },
+                        "legacy={legacy}, rejected={rejected}, never={never}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -7,19 +7,26 @@ use crate::*;
 /// Local archive naming, outside the permanent wire contract.
 pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
 
-impl From<ApiError> for v1::Error {
-    fn from(error: ApiError) -> Self {
-        let code = match error.code {
-            ErrorCode::Busy => v1::Code::Busy,
-            ErrorCode::Unsupported => v1::Code::Unsupported,
-            ErrorCode::Denied => v1::Code::Denied,
-            ErrorCode::Conflict => v1::Code::Conflict,
-            ErrorCode::Exhausted => v1::Code::Exhausted,
-            ErrorCode::Invalid | ErrorCode::Expired => v1::Code::Invalid,
-            ErrorCode::Downgrade => v1::Code::Downgrade,
-            ErrorCode::Stale | ErrorCode::Offline => v1::Code::Incompatible,
-            // Never turn uncertainty into permission to resend a possibly executed command.
-            ErrorCode::OutcomeUnknown | ErrorCode::Gap | ErrorCode::Internal => v1::Code::Internal,
+impl From<Error> for v1::Error {
+    fn from(error: Error) -> Self {
+        let code = if error
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::DowngradeRefused))
+        {
+            v1::Code::Downgrade
+        } else {
+            match error.code {
+                Code::Busy => v1::Code::Busy,
+                Code::Unsupported => v1::Code::Unsupported,
+                Code::Forbidden => v1::Code::Denied,
+                Code::Conflict => v1::Code::Conflict,
+                Code::Exhausted => v1::Code::Exhausted,
+                Code::Invalid | Code::NotFound => v1::Code::Invalid,
+                Code::Stale | Code::Unavailable => v1::Code::Incompatible,
+                // Uncertainty and unfamiliar ordinary failures never authorize v1 replay.
+                _ => v1::Code::Internal,
+            }
         };
         Self {
             code,
@@ -28,31 +35,20 @@ impl From<ApiError> for v1::Error {
     }
 }
 
-impl From<v1::Error> for ApiError {
+impl From<v1::Error> for Error {
     fn from(error: v1::Error) -> Self {
         let code = match error.code {
-            v1::Code::Incompatible => ErrorCode::Offline,
-            v1::Code::Unsupported => ErrorCode::Unsupported,
-            v1::Code::Invalid => ErrorCode::Invalid,
-            v1::Code::Downgrade => ErrorCode::Downgrade,
-            v1::Code::Busy => ErrorCode::Busy,
-            v1::Code::Denied => ErrorCode::Denied,
-            v1::Code::Conflict => ErrorCode::Conflict,
-            v1::Code::Exhausted => ErrorCode::Exhausted,
-            v1::Code::Internal => ErrorCode::Internal,
+            v1::Code::Incompatible => Code::Unavailable,
+            v1::Code::Unsupported => Code::Unsupported,
+            v1::Code::Invalid => Code::Invalid,
+            v1::Code::Downgrade => return NodeReason::downgrade_refused(error.detail),
+            v1::Code::Busy => Code::Busy,
+            v1::Code::Denied => Code::Forbidden,
+            v1::Code::Conflict => Code::Conflict,
+            v1::Code::Exhausted => Code::Exhausted,
+            v1::Code::Internal => Code::Internal,
         };
-        let retry = if code == ErrorCode::Offline || error.code.retryable() {
-            RetryClass::SameOperation
-        } else {
-            RetryClass::Never
-        };
-        Self {
-            code,
-            retry,
-            operation: None,
-            state: None,
-            safe_detail: error.detail,
-        }
+        crate::error(code, error.detail)
     }
 }
 

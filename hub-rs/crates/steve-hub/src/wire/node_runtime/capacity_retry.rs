@@ -2,6 +2,7 @@
 //! ceiling survive restarts in the existing command ledger; the Node protocol stays unchanged.
 
 use super::*;
+use steve_node_api::error as rpc_error;
 
 pub(super) const UNAVAILABLE: &str = steve_core::runtime::MODEL_SERVICE_UNAVAILABLE;
 pub(super) const RETRIES: i64 = 3;
@@ -95,7 +96,7 @@ impl NodeRuntime {
             let completion = Completion {
                 outcome: Outcome::Failed,
                 stop_reason: UNAVAILABLE.into(),
-                error: Some(ApiError::new(ErrorCode::Internal, error)),
+                error: Some(rpc_error(Code::Internal, error)),
                 result: vec![],
                 continuation: None,
                 transient: false,

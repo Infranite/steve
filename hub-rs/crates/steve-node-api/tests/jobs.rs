@@ -1,6 +1,7 @@
 //! The job contract: typed think and research work, their reports, and how the fake Node runs them.
 
 use std::sync::Arc;
+use steve_node_api::error as rpc_error;
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -281,12 +282,12 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
         cases.push(("research budget", j));
     }
     for (i, (what, spec)) in cases.into_iter().enumerate() {
-        assert_eq!(spec.check().unwrap_err().code, ErrorCode::Invalid, "{what}");
+        assert_eq!(spec.check().unwrap_err().code, Code::Invalid, "{what}");
         let e = n
             .start_job(cmd(&format!("op_bad{i}"), spec))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Invalid, "{what}");
+        assert_eq!(e.code, Code::Invalid, "{what}");
     }
     assert!(n.log().is_empty());
     assert!(sink.kinds().is_empty());
@@ -305,7 +306,7 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
         .start_job(cmd("op_rs", research_in_projects()))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unsupported);
+    assert_eq!(e.code, Code::Unsupported);
     let mut unsandboxed = research_in_projects();
     unsandboxed.run.policy.sandbox = SandboxRequirement::None;
     n.start_job(cmd("op_r", unsandboxed.clone())).await.unwrap();
@@ -326,22 +327,19 @@ async fn a_job_command_runs_once_and_an_attempt_never_twice() {
     // same id, other work: conflict
     let mut other = c.clone();
     other.body.work = research("j_1", "a_1", "hi").work;
-    assert_eq!(
-        n.start_job(other).await.unwrap_err().code,
-        ErrorCode::Conflict
-    );
+    assert_eq!(n.start_job(other).await.unwrap_err().code, Code::Conflict);
     // the same attempt under another operation: conflict, even after it ended
     let e = n
         .start_job(cmd("op_j2", job("j_1", "a_1", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     n.finish(&exec_job("j_1", "a_1"), done()).await.unwrap();
     let e = n
         .start_job(cmd("op_j3", job("j_1", "a_1", "hi")))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(e.code, Code::Conflict);
     // the Hub's fallback is a new attempt of the same job
     n.start_job(cmd("op_j4", job("j_1", "a_2", "hi")))
         .await
@@ -415,7 +413,7 @@ async fn a_job_streams_its_draft_and_ends_with_its_answer() {
     // nothing more after the end
     assert_eq!(
         n.draft(&exec, "m3", &["x"]).await.unwrap_err().code,
-        ErrorCode::Stale
+        Code::Stale
     );
 }
 
@@ -430,7 +428,7 @@ async fn a_failed_research_attempt_keeps_its_report() {
     let failed = |end: JobEnd| Completion {
         outcome: Outcome::Failed,
         stop_reason: "error".into(),
-        error: Some(ApiError::new(ErrorCode::Internal, "harness error")),
+        error: Some(rpc_error(Code::Internal, "harness error")),
         ..report(end)
     };
     // a report that says done next to a failure contradicts itself
@@ -439,14 +437,14 @@ async fn a_failed_research_attempt_keeps_its_report() {
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     assert_eq!(
         n.finish(&exec, report(JobEnd::Failed))
             .await
             .unwrap_err()
             .code,
-        ErrorCode::Invalid
+        Code::Invalid
     );
     let end = failed(JobEnd::Failed);
     roundtrip(&end);
@@ -551,7 +549,7 @@ async fn a_job_past_its_deadline_times_out() {
             result: Some(OperationResult::Execution(c)),
             error: Some(e),
         } => {
-            assert_eq!(e.code, ErrorCode::Expired);
+            assert_eq!(e.code, Code::Stale);
             assert_eq!(c.job, None);
         }
         s => panic!("{s:?}"),

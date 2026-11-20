@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -447,7 +448,7 @@ impl Upgrades {
         match d.upgrade_stage(ask).await {
             Ok(_) => {}
             // it may have taken it: ask below
-            Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {}
+            Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {}
             Err(e) => return Err(failed(format!("the node refused: {}", e.safe_detail))),
         }
         let s = self
@@ -502,10 +503,10 @@ impl Upgrades {
                 .await
             {
                 Ok(_) => break,
-                Err(e) if e.code == ErrorCode::Busy && tokio::time::Instant::now() < until => {
+                Err(e) if e.code == Code::Busy && tokio::time::Instant::now() < until => {
                     tokio::time::sleep(self.timing.poll).await;
                 }
-                Err(e) if matches!(e.code, ErrorCode::OutcomeUnknown | ErrorCode::Offline) => {
+                Err(e) if matches!(e.code, Code::OutcomeUnknown | Code::Unavailable) => {
                     break;
                 }
                 Err(e) => {
@@ -797,10 +798,10 @@ pub fn read_chunk(
     max: u32,
 ) -> ApiResult<ReadChunk> {
     use std::io::{Read, Seek, SeekFrom};
-    let denied = || ApiError::new(ErrorCode::Denied, "artifact not granted to this operation");
+    let denied = || rpc_error(Code::Forbidden, "artifact not granted to this operation");
     let row = store
         .reader(|c| store_nodes::upgrade_get(c, operation.as_str()))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?
         .ok_or_else(denied)?;
     let path = PathBuf::from(&row.file);
     if row.node_id != node.as_str()
@@ -812,26 +813,23 @@ pub fn read_chunk(
         return Err(denied());
     }
     if max == 0 || offset > row.size as u64 {
-        return Err(ApiError::new(ErrorCode::Invalid, "bad read"));
+        return Err(rpc_error(Code::Invalid, "bad read"));
     }
     let mut f = std::fs::File::open(&path)
-        .map_err(|_| ApiError::new(ErrorCode::Conflict, "the upgrade archive is gone"))?;
+        .map_err(|_| rpc_error(Code::Conflict, "the upgrade archive is gone"))?;
     let size = f
         .metadata()
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?
         .len();
     if size != row.size as u64 {
-        return Err(ApiError::new(
-            ErrorCode::Conflict,
-            "the upgrade archive changed",
-        ));
+        return Err(rpc_error(Code::Conflict, "the upgrade archive changed"));
     }
     f.seek(SeekFrom::Start(offset))
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
     let len = (max.min(256 * 1024) as u64).min(size - offset) as usize;
     let mut bytes = vec![0; len];
     f.read_exact(&mut bytes)
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
     Ok(ReadChunk {
         offset,
         eof: offset + len as u64 == size,
@@ -1515,7 +1513,7 @@ mod tests {
             read_chunk(&f.store, &f.data, &other, &op, &id, 0, 4)
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let wrong_op = OperationId::new("nup_y").unwrap();
         assert!(read_chunk(&f.store, &f.data, &n, &wrong_op, &id, 0, 4).is_err());
@@ -1526,7 +1524,7 @@ mod tests {
             read_chunk(&f.store, &f.data, &n, &op, &id, 0, 4)
                 .unwrap_err()
                 .code,
-            ErrorCode::Denied,
+            Code::Forbidden,
             "not after it staged"
         );
     }

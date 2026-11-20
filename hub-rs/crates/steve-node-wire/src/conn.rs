@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use steve_node_api::upgrade_v1 as upgrade;
-use steve_node_api::{ApiError, ApiResult, ErrorCode, OperationId};
+use steve_node_api::{ApiResult, Code, Error, OperationId, Retry};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -169,7 +170,7 @@ impl Schema {
                 p: env.p,
             }
             .encode()
-            .map_err(ApiError::from),
+            .map_err(Error::from),
         }
     }
 
@@ -412,13 +413,13 @@ impl Conn {
     /// Calls `method` with the table's lane and deadline.
     pub async fn call(&self, method: &str, p: Value, op: Option<&OperationId>) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(rpc_error(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             ));
         }
         let spec = methods::spec(method)
-            .ok_or_else(|| ApiError::new(ErrorCode::Internal, format!("no method {method}")))?;
+            .ok_or_else(|| rpc_error(Code::Internal, format!("no method {method}")))?;
         self.call_with(method, p, spec.lane, spec.class.deadline(), op)
             .await
     }
@@ -432,8 +433,8 @@ impl Conn {
         op: Option<&OperationId>,
     ) -> ApiResult<Value> {
         if self.is_upgrade() {
-            return Err(ApiError::new(
-                ErrorCode::Offline,
+            return Err(rpc_error(
+                Code::Unavailable,
                 "ordinary protocol unavailable while upgrading",
             ));
         }
@@ -441,7 +442,7 @@ impl Conn {
             .call_raw(method, p, lane, deadline, op, Schema::Ordinary)
             .await?;
         let outcome: Outcome = serde_json::from_value(raw)
-            .map_err(|e| ApiError::new(ErrorCode::Internal, format!("bad result: {e}")))?;
+            .map_err(|e| rpc_error(Code::Internal, format!("bad result: {e}")))?;
         match outcome {
             Outcome::Ok(value) => Ok(value),
             Outcome::Err(mut error) => {
@@ -489,7 +490,7 @@ impl Conn {
         op: Option<&OperationId>,
         schema: Schema,
     ) -> ApiResult<Value> {
-        let offline = |why: &str| ApiError::new(ErrorCode::Offline, format!("{method}: {why}"));
+        let offline = |why: &str| rpc_error(Code::Unavailable, format!("{method}: {why}"));
         if self.is_closed() {
             return Err(offline("not connected"));
         }
@@ -522,7 +523,8 @@ impl Conn {
                 .is_ok();
             match op {
                 Some(op) if !never_written => {
-                    ApiError::uncertain(op, format!("{method}: {why} after it was sent"))
+                    steve_node_api::uncertain(op, format!("{method}: {why} after it was sent"))
+                        .retry(Retry::Later { after_ms: None })
                 }
                 _ => offline(why),
             }
@@ -835,8 +837,8 @@ async fn reader(
                 let Some(permit) = permit else {
                     s.respond_now(
                         env.id,
-                        Outcome::Err(ApiError::new(
-                            ErrorCode::Exhausted,
+                        Outcome::Err(rpc_error(
+                            Code::Exhausted,
                             "too many requests in flight on this link",
                         )),
                         s.generation,
@@ -864,7 +866,7 @@ async fn reader(
             },
             Kind::Unknown => s.respond_now(
                 env.id,
-                Outcome::Err(ApiError::new(ErrorCode::Unsupported, "unknown frame kind")),
+                Outcome::Err(rpc_error(Code::Unsupported, "unknown frame kind")),
                 s.generation,
                 schema,
             ),
@@ -887,7 +889,7 @@ fn refuse_other_generation(s: &Arc<Shared>, env: Envelope, schema: Schema) -> bo
     }
     s.respond_now(
         env.id,
-        Outcome::Err(ApiError::new(ErrorCode::Stale, "another connection")),
+        Outcome::Err(rpc_error(Code::Stale, "another connection")),
         env.generation,
         schema,
     );
@@ -963,12 +965,12 @@ pub fn peer_text(s: &str) -> String {
     out
 }
 
-pub fn unsupported(method: &str) -> ApiError {
-    ApiError::new(ErrorCode::Unsupported, format!("unknown method {method}"))
+pub fn unsupported(method: &str) -> Error {
+    rpc_error(Code::Unsupported, format!("unknown method {method}"))
 }
 
 pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
-    serde_json::to_value(v).map_err(|e| ApiError::new(ErrorCode::Internal, format!("encode: {e}")))
+    serde_json::to_value(v).map_err(|e| rpc_error(Code::Internal, format!("encode: {e}")))
 }
 
 /// Decodes a request. A kind this end does not know (a newer peer's variant) is `unsupported`,
@@ -977,11 +979,11 @@ pub(crate) fn to_value<T: serde::Serialize>(v: &T) -> ApiResult<Value> {
 pub fn from_value<T: serde::de::DeserializeOwned>(v: Value) -> ApiResult<T> {
     serde_json::from_value(v).map_err(|e| {
         let code = if e.to_string().starts_with("unknown variant") {
-            ErrorCode::Unsupported
+            Code::Unsupported
         } else {
-            ErrorCode::Invalid
+            Code::Invalid
         };
-        ApiError::new(code, format!("decode: {e}"))
+        rpc_error(code, format!("decode: {e}"))
     })
 }
 
@@ -995,11 +997,9 @@ pub fn answer_of<T: serde::de::DeserializeOwned>(
     op: Option<&OperationId>,
 ) -> ApiResult<T> {
     serde_json::from_value(v).map_err(|e| match op {
-        Some(op) => ApiError::uncertain(op, format!("{method}: unreadable answer: {e}")),
-        None => ApiError::new(
-            ErrorCode::Invalid,
-            format!("{method}: unreadable answer: {e}"),
-        ),
+        Some(op) => steve_node_api::uncertain(op, format!("{method}: unreadable answer: {e}"))
+            .retry(Retry::Later { after_ms: None }),
+        None => rpc_error(Code::Invalid, format!("{method}: unreadable answer: {e}")),
     })
 }
 

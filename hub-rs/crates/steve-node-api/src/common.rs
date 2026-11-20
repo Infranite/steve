@@ -1,52 +1,47 @@
 //! Commands, receipts, observed states and errors shared by every face of the protocol.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 use crate::ids::*;
 use crate::run::{Part, SessionView};
 use crate::workspace::{GitFacts, WorkspaceView};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    /// The Node (or the Hub) cannot be reached.
-    Offline,
-    /// Already running something that excludes this (one attempt per session at a time).
-    Busy,
-    /// This Node cannot do it (no such harness, no sandbox of the required kind).
-    Unsupported,
-    Denied,
-    /// Past its deadline or lease.
-    Expired,
-    /// Past `accept_before`, or an answer to a request nobody waits for anymore.
-    Stale,
-    /// Same key, different content.
-    Conflict,
-    /// Out of capacity, disk or budget.
-    Exhausted,
-    Invalid,
-    /// Switching to an older release would make the Node journal unreadable.
-    Downgrade,
-    /// It may or may not have happened; ask, do not redo.
-    OutcomeUnknown,
-    /// Events were lost beyond the retention window.
-    Gap,
-    Internal,
+pub use steve_types::devices::NodeReason;
+pub use steve_types::{Code, Error, Param, Params, Retry};
+
+/// Construct an ordinary protocol error using the shared retry policy.
+pub fn error(code: Code, detail: impl Into<String>) -> Error {
+    Error {
+        code,
+        retry: code.default_retry(),
+        reason: None,
+        params: Params::default(),
+        safe_detail: detail.into(),
+    }
 }
 
-/// What the caller may do after an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetryClass {
-    Never,
-    /// Resend the very same command (same operation id): safe, it is deduplicated.
-    SameOperation,
-    /// Find out what happened first ([`crate::ports::ExecutionControl::inspect`]).
-    AfterReconcile,
+/// Attach display metadata. Operation identity for decisions belongs to commands and receipts.
+pub fn on_operation(mut error: Error, operation: &OperationId) -> Error {
+    error
+        .params
+        .0
+        .insert("operation".into(), Param::Str(operation.to_string()));
+    error
 }
 
-/// Where an operation stood when an error was raised (flat, so errors and results never nest).
+/// Unknown outcomes default to reconciliation. Only proven safe callers opt into retry.
+pub fn uncertain(operation: &OperationId, detail: impl Into<String>) -> Error {
+    let mut error = on_operation(error(Code::OutcomeUnknown, detail), operation);
+    error
+        .params
+        .0
+        .insert("state".into(), Param::Str("unknown".into()));
+    error
+}
+
+pub type ApiResult<T> = Result<T, Error>;
+
+/// The state of an observed operation; error metadata is carried in display params.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateTag {
@@ -56,190 +51,6 @@ pub enum StateTag {
     Finished,
     Unknown,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiError {
-    pub code: ErrorCode,
-    pub retry: RetryClass,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<OperationId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<StateTag>,
-    /// Safe to show and to log: no secret, no path outside the workspace.
-    pub safe_detail: String,
-}
-
-impl ApiError {
-    /// Refused before anything was accepted: nothing ran. Offline, busy and exhausted may be resent
-    /// as the very same command (same operation id, never a new attempt); the rest may not.
-    pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
-        let retry = match code {
-            ErrorCode::Offline | ErrorCode::Busy | ErrorCode::Exhausted => {
-                RetryClass::SameOperation
-            }
-            ErrorCode::OutcomeUnknown | ErrorCode::Gap => RetryClass::AfterReconcile,
-            _ => RetryClass::Never,
-        };
-        ApiError {
-            code,
-            retry,
-            operation: None,
-            state: None,
-            safe_detail: detail.into(),
-        }
-    }
-    /// The command may have been accepted (the answer got lost, the connection broke after sending):
-    /// find out with [`crate::ports::ExecutionControl::operation`] before doing anything else.
-    pub fn uncertain(op: &OperationId, detail: impl Into<String>) -> Self {
-        ApiError {
-            code: ErrorCode::OutcomeUnknown,
-            retry: RetryClass::AfterReconcile,
-            operation: Some(op.clone()),
-            state: Some(StateTag::Unknown),
-            safe_detail: detail.into(),
-        }
-    }
-    pub fn on(mut self, op: &OperationId) -> Self {
-        self.operation = Some(op.clone());
-        self
-    }
-}
-
-impl fmt::Display for ApiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}: {}", self.code, self.safe_detail)
-    }
-}
-
-impl std::error::Error for ApiError {}
-
-/// Preserve the Node's explicit retry classification; this conversion never resends a command.
-impl From<ApiError> for steve_types::Error {
-    fn from(error: ApiError) -> Self {
-        use steve_types::{Code, Param, Params, Retry};
-        let code = match error.code {
-            ErrorCode::Offline => Code::Unavailable,
-            ErrorCode::Busy => Code::Busy,
-            ErrorCode::Unsupported => Code::Unsupported,
-            ErrorCode::Denied => Code::Forbidden,
-            ErrorCode::Expired | ErrorCode::Stale => Code::Stale,
-            ErrorCode::Conflict => Code::Conflict,
-            ErrorCode::Exhausted => Code::Exhausted,
-            ErrorCode::Invalid | ErrorCode::Downgrade => Code::Invalid,
-            ErrorCode::OutcomeUnknown => Code::OutcomeUnknown,
-            ErrorCode::Gap => Code::Gap,
-            ErrorCode::Internal => Code::Internal,
-        };
-        let retry = match error.retry {
-            RetryClass::Never => Retry::Never,
-            RetryClass::SameOperation => Retry::Later { after_ms: None },
-            RetryClass::AfterReconcile => Retry::Now,
-        };
-        let mut params = Params::default();
-        if let Some(operation) = error.operation {
-            params
-                .0
-                .insert("operation".into(), Param::Str(operation.to_string()));
-        }
-        if let Some(state) = error.state {
-            let state = match state {
-                StateTag::Accepted => "accepted",
-                StateTag::Running => "running",
-                StateTag::Waiting => "waiting",
-                StateTag::Finished => "finished",
-                StateTag::Unknown => "unknown",
-            };
-            params.0.insert("state".into(), Param::Str(state.into()));
-        }
-        Self {
-            code,
-            retry,
-            reason: None,
-            params,
-            safe_detail: error.safe_detail,
-        }
-    }
-}
-
-#[cfg(test)]
-mod error_contract_tests {
-    use super::*;
-    use steve_types::{Code, Param, Retry};
-
-    #[test]
-    fn every_node_code_and_explicit_retry_class() {
-        let table = [
-            (ErrorCode::Offline, Code::Unavailable),
-            (ErrorCode::Busy, Code::Busy),
-            (ErrorCode::Unsupported, Code::Unsupported),
-            (ErrorCode::Denied, Code::Forbidden),
-            (ErrorCode::Expired, Code::Stale),
-            (ErrorCode::Stale, Code::Stale),
-            (ErrorCode::Conflict, Code::Conflict),
-            (ErrorCode::Exhausted, Code::Exhausted),
-            (ErrorCode::Invalid, Code::Invalid),
-            (ErrorCode::Downgrade, Code::Invalid),
-            (ErrorCode::OutcomeUnknown, Code::OutcomeUnknown),
-            (ErrorCode::Gap, Code::Gap),
-            (ErrorCode::Internal, Code::Internal),
-        ];
-        for (node_code, code) in table {
-            for (wire_retry, retry) in [
-                (RetryClass::Never, Retry::Never),
-                (RetryClass::SameOperation, Retry::Later { after_ms: None }),
-                (RetryClass::AfterReconcile, Retry::Now),
-            ] {
-                let error = steve_types::Error::from(ApiError {
-                    code: node_code,
-                    retry: wire_retry,
-                    operation: None,
-                    state: None,
-                    safe_detail: "safe detail".into(),
-                });
-                assert_eq!(error.code, code, "{node_code:?}");
-                assert_eq!(error.retry, retry, "{node_code:?} / {wire_retry:?}");
-                assert_eq!(error.safe_detail, "safe detail");
-                assert_eq!(error.reason, None);
-                assert!(error.params.0.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn outcome_unknown_with_never_does_not_enable_retry() {
-        let error = steve_types::Error::from(ApiError {
-            code: ErrorCode::OutcomeUnknown,
-            retry: RetryClass::Never,
-            operation: None,
-            state: None,
-            safe_detail: "unknown".into(),
-        });
-        assert_eq!(error.retry, Retry::Never);
-    }
-
-    #[test]
-    fn operation_and_every_state_are_display_params() {
-        for (state, expected) in [
-            (StateTag::Accepted, "accepted"),
-            (StateTag::Running, "running"),
-            (StateTag::Waiting, "waiting"),
-            (StateTag::Finished, "finished"),
-            (StateTag::Unknown, "unknown"),
-        ] {
-            let error = steve_types::Error::from(ApiError {
-                code: ErrorCode::OutcomeUnknown,
-                retry: RetryClass::Never,
-                operation: Some(OperationId::new("op-1").unwrap()),
-                state: Some(state),
-                safe_detail: "safe detail".into(),
-            });
-            assert_eq!(error.params.0["operation"], Param::Str("op-1".into()));
-            assert_eq!(error.params.0["state"], Param::Str(expected.into()));
-        }
-    }
-}
-
-pub type ApiResult<T> = Result<T, ApiError>;
 
 /// A command from the Hub. `id` makes it idempotent; `issued_at` and `accept_before` never change on
 /// a retry, so a command older than its window is refused as stale even after its tombstone is gone.
@@ -269,9 +80,10 @@ impl<T: Serialize> Command<T> {
     /// `issued_at` ≤ `accept_before`.
     pub fn check_window(&self) -> ApiResult<()> {
         if self.issued_at > self.accept_before {
-            return Err(
-                ApiError::new(ErrorCode::Invalid, "accept_before is before issued_at").on(&self.id),
-            );
+            return Err(crate::on_operation(
+                crate::error(Code::Invalid, "accept_before is before issued_at"),
+                &self.id,
+            ));
         }
         Ok(())
     }
@@ -318,7 +130,7 @@ pub fn canonical_json(v: &serde_json::Value) -> String {
 /// sha256 of the canonical JSON of `v`. Fails (rather than hashing nothing) when `v` does not serialize.
 pub fn digest_of<T: Serialize + ?Sized>(v: &T) -> ApiResult<Digest> {
     let v = serde_json::to_value(v)
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("not serializable: {e}")))?;
+        .map_err(|e| crate::error(Code::Invalid, format!("not serializable: {e}")))?;
     Ok(Digest::sha256(canonical_json(&v).as_bytes()))
 }
 
@@ -359,7 +171,7 @@ pub enum Observed {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<OperationResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<ApiError>,
+        error: Option<Error>,
     },
     Unknown {
         reason: String,
@@ -404,7 +216,7 @@ pub struct Completion {
     /// Steve's stop reason (`end_turn`, `max_tokens`, `refusal`, `cancelled`, `error`…).
     pub stop_reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ApiError>,
+    pub error: Option<Error>,
     /// The final answer of a job; empty for a session turn (its text is in the events).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub result: Vec<Part>,
@@ -550,4 +362,153 @@ pub struct Page<T> {
     pub items: Vec<T>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Cursor>,
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_codes_default_retry_and_wire_shape_follow_the_shared_contract() {
+        let later = Retry::Later { after_ms: None };
+        let cases = [
+            (
+                "offline",
+                error(Code::Unavailable, "safe"),
+                "unavailable",
+                later,
+            ),
+            ("busy", error(Code::Busy, "safe"), "busy", later),
+            (
+                "unsupported",
+                error(Code::Unsupported, "safe"),
+                "unsupported",
+                Retry::Never,
+            ),
+            (
+                "denied",
+                error(Code::Forbidden, "safe"),
+                "forbidden",
+                Retry::Never,
+            ),
+            ("expired", error(Code::Stale, "safe"), "stale", Retry::Never),
+            ("stale", error(Code::Stale, "safe"), "stale", Retry::Never),
+            (
+                "conflict",
+                error(Code::Conflict, "safe"),
+                "conflict",
+                Retry::Never,
+            ),
+            (
+                "exhausted",
+                error(Code::Exhausted, "safe"),
+                "exhausted",
+                later,
+            ),
+            (
+                "invalid",
+                error(Code::Invalid, "safe"),
+                "invalid",
+                Retry::Never,
+            ),
+            (
+                "downgrade",
+                NodeReason::downgrade_refused("safe"),
+                "invalid",
+                Retry::Never,
+            ),
+            (
+                "outcome_unknown",
+                error(Code::OutcomeUnknown, "safe"),
+                "outcome_unknown",
+                Retry::Never,
+            ),
+            ("gap", error(Code::Gap, "safe"), "gap", Retry::Never),
+            (
+                "snapshot_gone",
+                NodeReason::snapshot_gone("safe"),
+                "stale",
+                Retry::Never,
+            ),
+            (
+                "no_such_operation",
+                NodeReason::no_such_operation("missing_op", "safe"),
+                "not_found",
+                Retry::Never,
+            ),
+            (
+                "internal",
+                error(Code::Internal, "safe"),
+                "internal",
+                Retry::Never,
+            ),
+        ];
+        for (old_name, error, code, retry) in cases {
+            let value = serde_json::to_value(&error).unwrap();
+            assert_eq!(value["code"], code, "{old_name}");
+            assert!(value["retry"].is_object(), "{old_name}");
+            assert_eq!(error.retry, retry, "{old_name}");
+            let reason = match old_name {
+                "downgrade" => Some("node.downgrade_refused"),
+                "snapshot_gone" => Some("node.snapshot_gone"),
+                "no_such_operation" => Some("node.no_such_operation"),
+                _ => None,
+            };
+            assert_eq!(
+                error.reason.as_ref().map(|r| r.as_str()),
+                reason,
+                "{old_name}"
+            );
+            if old_name == "no_such_operation" {
+                assert_eq!(error.params.0["operation"], Param::Str("missing_op".into()));
+            }
+            assert_eq!(serde_json::from_value::<Error>(value).unwrap(), error);
+        }
+    }
+
+    #[test]
+    fn unknown_and_gap_default_to_never_and_retry_requires_an_explicit_producer() {
+        let operation = OperationId::new("op-1").unwrap();
+        let unknown = uncertain(&operation, "reply lost");
+        assert_eq!(unknown.retry, Retry::Never);
+        assert_eq!(error(Code::OutcomeUnknown, "unknown").retry, Retry::Never);
+        assert_eq!(error(Code::Gap, "gap").retry, Retry::Never);
+        let retryable = unknown.retry(Retry::Later { after_ms: None });
+        let decoded: Error =
+            serde_json::from_slice(&serde_json::to_vec(&retryable).unwrap()).unwrap();
+        assert_eq!(decoded.retry, Retry::Later { after_ms: None });
+        assert_eq!(decoded.params.0["operation"], Param::Str("op-1".into()));
+        assert_eq!(decoded.params.0["state"], Param::Str("unknown".into()));
+    }
+
+    #[test]
+    fn operation_and_every_state_are_display_params() {
+        let operation = OperationId::new("op-1").unwrap();
+        for state in [
+            StateTag::Accepted,
+            StateTag::Running,
+            StateTag::Waiting,
+            StateTag::Finished,
+            StateTag::Unknown,
+        ] {
+            let state = serde_json::to_value(state)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut error = on_operation(error(Code::Internal, "safe"), &operation);
+            error
+                .params
+                .0
+                .insert("state".into(), Param::Str(state.clone()));
+            let value = serde_json::to_value(&error).unwrap();
+            assert!(value.get("operation").is_none());
+            assert!(value.get("state").is_none());
+            let decoded: Error = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.params.0["operation"], Param::Str("op-1".into()));
+            assert_eq!(decoded.params.0["state"], Param::Str(state));
+            assert_eq!(decoded.code, Code::Internal);
+            assert_eq!(decoded.retry, Retry::Never);
+        }
+    }
 }

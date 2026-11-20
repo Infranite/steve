@@ -2,6 +2,7 @@
 //! command/process ledgers only after all recorded groups are proven gone, preserve pending
 //! events, and fence pre-upgrade commands. Initialization and recovery commit together.
 use super::*;
+use steve_node_api::error as rpc_error;
 
 /// 4: operation states are checked columns and restart recovery is an indexed bulk update.
 pub(super) const VERSION: i64 = 4;
@@ -209,8 +210,8 @@ impl Tx<'_> {
         if groups.into_iter().any(|pgid| {
             !(2..=i32::MAX as i64).contains(&pgid) || !crate::procs::state(pgid, None).gone()
         }) {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "stop the old Node's processes before upgrading the journal",
             ));
         }

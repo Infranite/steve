@@ -3,6 +3,7 @@
 //! `RemoteSink/Tools → link → ServeHub(sink, tools)` the other.
 
 use std::sync::{Arc, Mutex};
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use steve_node_api::testkit::RecordingSink;
@@ -124,10 +125,10 @@ impl HubTools for StubTools {
                 structured: None,
                 end_turn: false,
             }),
-            None => Err(ApiError::new(ErrorCode::Invalid, "no such call")),
+            None => Err(rpc_error(Code::Invalid, "no such call")),
         }
     }
     async fn cancel_call(&self, _: ToolKey) -> ApiResult<ToolResult> {
-        Err(ApiError::new(ErrorCode::Unsupported, "no"))
+        Err(rpc_error(Code::Unsupported, "no"))
     }
 }

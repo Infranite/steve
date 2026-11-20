@@ -153,7 +153,7 @@ pub(super) async fn prepare_dir(
         let mut r = loop {
             match node.prepare_workspace(c.clone()).await {
                 // another run's step is making it right now
-                Err(e) if e.code == ErrorCode::Busy && Instant::now() < until => {
+                Err(e) if e.code == Code::Busy && Instant::now() < until => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 other => break other.map_err(|e| e.to_string())?,
@@ -663,7 +663,7 @@ mod tests {
             .tidy_workspace(tidy(view.revision.clone()))
             .await
             .unwrap_err();
-        assert_eq!(e.code, ErrorCode::Busy, "{e}");
+        assert_eq!(e.code, Code::Busy, "{e}");
         // you ask for `b` to run again: the lost one is stopped first, then it runs anew, once
         let mut again = sleeper(&t, "b", Duration::from_secs(10));
         again.rerun = 1;

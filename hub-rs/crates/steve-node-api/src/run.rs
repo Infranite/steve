@@ -252,8 +252,8 @@ impl Skill {
     /// description of one line, content within [`Self::MAX_CONTENT`] (all together within
     /// [`Self::MAX_TOTAL`]), no NUL anywhere.
     pub fn check_all(skills: &[Skill]) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        use crate::common::Code;
+        let bad = |m: &str| Err(crate::error(Code::Invalid, m.to_string()));
         if skills.len() > Self::MAX {
             return bad("too many skills");
         }
@@ -339,8 +339,8 @@ impl McpServer {
     /// Checks what a Node is given: at most 32 servers, names usable and once each (`steve` is
     /// Steve's own), commands and urls set, at most 64 variables each, named, without line breaks.
     pub fn check_all(servers: &[McpServer]) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        use crate::common::Code;
+        let bad = |m: &str| Err(crate::error(Code::Invalid, m.to_string()));
         if servers.len() > 32 {
             return bad("too many MCP servers");
         }
@@ -450,8 +450,8 @@ impl TurnSpec {
     /// current choice and policy (`open` as last configured). A model or policy change goes through
     /// [`ConfigureSession`] first; a continuation belongs to the session.
     pub fn check_against(&self, open: &OpenSession) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        use crate::common::Code;
+        let bad = |why: &str| Err(crate::error(Code::Invalid, why));
         if self.session != open.session {
             return bad("turn of another session");
         }
@@ -568,8 +568,8 @@ impl JobWork {
 impl JobSpec {
     /// The shape every Node checks before it accepts a job (what it can enforce it checks after).
     pub fn check(&self) -> crate::common::ApiResult<()> {
-        use crate::common::{ApiError, ErrorCode};
-        let bad = |why: &str| Err(ApiError::new(ErrorCode::Invalid, why));
+        use crate::common::Code;
+        let bad = |why: &str| Err(crate::error(Code::Invalid, why));
         let run = &self.run;
         if run.directory != RunDirectory::Scratch {
             return bad("a job runs in its own scratch directory");

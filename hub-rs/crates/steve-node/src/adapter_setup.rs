@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_acp::adapters::{Probe, ProbeStatus};
 use steve_acp::{AcpConfig, adapters, managed};
@@ -55,8 +56,8 @@ impl Drop for Lease {
 pub(crate) fn no_orphan_installer(t: &Tx) -> ApiResult<()> {
     if let Some(p) = t.proc_of(&process_key())? {
         if !crate::procs::state(p.pgid, p.started).gone() {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(rpc_error(
+                Code::Busy,
                 "a previous adapter installer is still running or unknown; reconcile it before starting work",
             ));
         }
@@ -143,8 +144,8 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
         if crate::procs::state(p.pgid, p.started).gone() {
             t.drop_proc(&p.session, p.pgid)?;
         } else {
-            return Err(ApiError::new(
-                ErrorCode::Busy,
+            return Err(rpc_error(
+                Code::Busy,
                 "a harness or installer still runs (or its outcome is unknown); release idle sessions and wait for running work",
             ));
         }
@@ -153,8 +154,8 @@ pub(crate) fn idle(t: &Tx) -> ApiResult<()> {
         !o.receipt.state.is_finished()
             && !matches!(o.method.as_str(), "install_harness" | "upgrade_harness")
     }) {
-        return Err(ApiError::new(
-            ErrorCode::Busy,
+        return Err(rpc_error(
+            Code::Busy,
             "execution or workspace work is active or unknown; wait for it before installing adapters",
         ));
     }

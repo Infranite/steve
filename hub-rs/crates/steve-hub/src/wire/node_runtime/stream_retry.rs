@@ -2,6 +2,7 @@
 //! already ran. They resume with a reminder to inspect effects, never by replaying the original task.
 
 use super::*;
+use steve_node_api::error as rpc_error;
 
 pub(super) const STREAM_INTERRUPTED: &str = steve_core::runtime::MODEL_STREAM_INTERRUPTED;
 
@@ -52,8 +53,8 @@ impl NodeRuntime {
         if let Some(e) = capacity {
             c.outcome = Outcome::Failed;
             c.stop_reason = capacity_retry::UNAVAILABLE.into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Internal,
+            c.error = Some(rpc_error(
+                Code::Internal,
                 steve_acp::capacity_summary(&e, self.clock.now()),
             ));
             c.transient = true;
@@ -71,8 +72,8 @@ impl NodeRuntime {
         if let Some(e) = evidence {
             c.outcome = Outcome::Failed;
             c.stop_reason = STREAM_INTERRUPTED.into();
-            c.error = Some(ApiError::new(
-                ErrorCode::Internal,
+            c.error = Some(rpc_error(
+                Code::Internal,
                 e.chars().take(300).collect::<String>(),
             ));
             c.transient = true;

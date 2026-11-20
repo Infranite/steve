@@ -1,4 +1,5 @@
 use super::*;
+use steve_node_api::error as rpc_error;
 use steve_node_api::testkit::{FakeNode, build};
 
 use steve_runtime::FakeClock;
@@ -45,10 +46,10 @@ async fn a_nodes_stop_reason_is_said_in_chinese() {
             "Node 连续 90 秒没能接收 harness 的输出（它的本地运行记录或磁盘卡住了），已中断这次运行"
         );
         // the very words, but another code: not ours to rephrase
-        let other = ApiError::new(ErrorCode::Stale, NodeStop::HarnessGone.detail());
+        let other = rpc_error(Code::Stale, NodeStop::HarnessGone.detail());
         assert_eq!(said(&other), "the harness is gone");
-        let changed = ApiError::new(
-            ErrorCode::Conflict,
+        let changed = rpc_error(
+            Code::Conflict,
             "this resource's workspace was prepared otherwise",
         );
         assert!(workspace_binding_conflict(&changed));
@@ -58,11 +59,11 @@ async fn a_nodes_stop_reason_is_said_in_chinese() {
                 "hub.node.workspace_conflict"
             ))
         );
-        assert!(!workspace_binding_conflict(&ApiError::new(
-            ErrorCode::Internal,
+        assert!(!workspace_binding_conflict(&rpc_error(
+            Code::Internal,
             changed.safe_detail.clone()
         )));
-        let harness = ApiError::new(ErrorCode::Internal, "rate limited, try later");
+        let harness = rpc_error(Code::Internal, "rate limited, try later");
         assert_eq!(said(&harness), "rate limited, try later");
     })
     .await;
@@ -886,7 +887,7 @@ fn retry_sql(rt: &NodeRuntime, sql: &str) {
         .unwrap();
 }
 
-fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
+fn retry_failed(rt: &NodeRuntime, op: String, error: Error) {
     let mut receipt = Receipt {
         operation: idv(op).unwrap(),
         state: Observed::Accepted,
@@ -907,16 +908,23 @@ fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
 #[tokio::test]
 async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure_does_not() {
     for rejected in [false, true] {
-        for retry in [RetryClass::Never, RetryClass::AfterReconcile] {
+        for retry in [Retry::Never, Retry::Later { after_ms: None }] {
             let (_dir, node, rt, seen) = retry_fixture();
             assert!(rt.send_one().await); // prepare
             assert!(rt.send_one().await); // open
             assert!(rt.tidy_session_workspace("s1", true).unwrap());
-            let mut error = ApiError::new(ErrorCode::Internal, "dirty worktree retained");
+            let mut error = rpc_error(Code::Internal, "dirty worktree retained");
             error.retry = retry;
             if rejected {
-                node.refuse_next("tidy_workspace", error);
+                // Arrange a stored terminal refusal. A live Later RPC now resends the same
+                // command; old saved refusals may still advise another cleanup generation.
+                node.refuse_next("tidy_workspace", error.clone().retry(Retry::Never));
                 assert!(rt.send_one().await);
+                rt.tx(|tx| {
+                    tx.execute("UPDATE node_commands SET receipt=json_set(receipt,'$.payload',json(?1)) WHERE method='tidy_workspace' AND state='rejected'",
+                        [serde_json::to_string(&error).unwrap()])?;
+                    Ok(())
+                }).unwrap();
             } else {
                 let op = retry_query(
                     &rt,
@@ -931,7 +939,7 @@ async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure
             }
             assert_eq!(
                 retry_count(&rt, "tidy_workspace"),
-                if retry == RetryClass::Never { 1 } else { 2 }
+                if retry == Retry::Never { 1 } else { 2 }
             );
             // A new prepare is a new cleanup generation, regardless of the older failure.
             retry_sql(&rt, "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated)
@@ -954,16 +962,13 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
             rt.prompt("s1", "first", "user", &[]).unwrap(),
             Planned::Created
         );
-        node.refuse_next(
-            "start_turn",
-            ApiError::new(ErrorCode::Invalid, "session not open"),
-        );
+        node.refuse_next("start_turn", rpc_error(Code::Invalid, "session not open"));
         assert!(rt.send_one().await); // the refused-start path calls reopen_in
         let failed_op: String = retry_query(
             &rt,
             "SELECT operation_id FROM node_commands WHERE method='open_session' ORDER BY rowid DESC LIMIT 1",
         );
-        let error = ApiError::new(ErrorCode::Invalid, "unsupported effort");
+        let error = rpc_error(Code::Invalid, "unsupported effort");
         if rejected {
             node.refuse_next("open_session", error);
             assert!(rt.send_one().await);
@@ -1004,8 +1009,8 @@ async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
 #[tokio::test]
 async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliation() {
     let (_dir, node, rt, _seen) = retry_fixture();
-    let mut error = ApiError::new(ErrorCode::OutcomeUnknown, "reply lost; do not retry");
-    error.retry = RetryClass::Never;
+    let mut error = rpc_error(Code::OutcomeUnknown, "reply lost; do not retry");
+    error.retry = Retry::Never;
     node.refuse_next("prepare_workspace", error);
     assert!(rt.send_one().await);
     for _ in 0..3 {
@@ -1032,4 +1037,41 @@ async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliatio
     assert!(rt.send_one().await); // its dependent open can now go
     assert_eq!(retry_count(&rt, "prepare_workspace"), 1);
     assert_eq!(node.log().len(), 2); // one prepare and its dependent open
+}
+
+#[tokio::test]
+async fn a_retryable_unknown_is_resent_with_the_same_operation_and_keeps_maybe_sent() {
+    for (code, uncertain) in [(Code::OutcomeUnknown, true), (Code::Busy, false), (Code::Exhausted, false)] {
+        let (_dir, node, rt, _seen) = retry_fixture();
+        let before: String = retry_query(
+            &rt,
+            "SELECT request FROM node_commands WHERE operation_id='op_prep_s1'",
+        );
+        node.refuse_next(
+            "prepare_workspace",
+            rpc_error(code, "retry same operation").retry(Retry::Later { after_ms: None }),
+        );
+        assert!(rt.send_one().await);
+        let (state, maybe_sent, request): (String, bool, String) = rt.store.reader(|c| {
+            Ok::<_, StoreError>(c.query_row("SELECT state,maybe_sent,request FROM node_commands WHERE operation_id='op_prep_s1'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
+        }).unwrap();
+        assert_eq!(state, "pending");
+        assert_eq!(maybe_sent, uncertain);
+        assert_eq!(request, before);
+        if code == Code::Exhausted {
+            let refusals: i64 = retry_query(&rt, "SELECT json_extract(receipt,'$.exhausted') FROM node_commands WHERE operation_id='op_prep_s1'");
+            assert_eq!(refusals, 1, "exhausted RPCs take the existing backoff branch");
+        }
+        retry_sql(
+            &rt,
+            "UPDATE node_commands SET retry_at=0,lease_until=NULL WHERE operation_id='op_prep_s1'",
+        );
+        assert!(rt.send_one().await);
+        assert_eq!(retry_count(&rt, "prepare_workspace"), 1);
+        assert_eq!(
+            node.log().len(),
+            1,
+            "the retry accepts one prepare, never a new operation"
+        );
+    }
 }

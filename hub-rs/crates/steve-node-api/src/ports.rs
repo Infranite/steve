@@ -53,8 +53,8 @@ pub trait ExecutionControl: Send + Sync {
     /// Explicitly retire an unknown control operation; never implicitly re-executes it.
     /// Default preserves compatibility with Nodes that do not implement control recovery.
     async fn recover(&self, _c: Command<Recover>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "control recovery unsupported",
         ))
     }
@@ -88,23 +88,23 @@ pub trait WorkspaceExecutor: Send + Sync {
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
     /// Immutable delivery transfer. Old peers fail closed, never fall back to `read_file`.
     async fn read_delivery(&self, _q: FileRead) -> ApiResult<DeliveryChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "strict delivery reads unsupported",
         ))
     }
     /// Current-execution delivery; old peers fail closed without a filesystem fallback.
     async fn read_execution_delivery(&self, _q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "execution-scoped delivery reads unsupported; upgrade the Node",
         ))
     }
     /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
     /// general filesystem read (which can follow links and does not bind an execution view).
     async fn read_artifact(&self, _q: ArtifactRead) -> ApiResult<ReadChunk> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "execution-scoped artifact reads unsupported",
         ))
     }
@@ -118,8 +118,8 @@ pub trait Discovery: Send + Sync {
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
     /// This must not fall back to a harness probe on an incompatible link.
     async fn probe_build(&self) -> ApiResult<crate::upgrade_v1::ProbeBuildResponse> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "minimal build discovery unsupported",
         ))
     }
@@ -127,8 +127,8 @@ pub trait Discovery: Send + Sync {
     /// lowering it defers new starts until enough finish. The Hub persists the setting and reapplies
     /// it before dispatching turns, including after reconnect/restart. Workspace-only Nodes refuse.
     async fn set_session_capacity(&self, _sessions: u32) -> ApiResult<()> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "live session capacity unsupported",
         ))
     }
@@ -136,67 +136,67 @@ pub trait Discovery: Send + Sync {
     /// Stage the Hub's release on this Node ([`NodeUpgrade`]) when
     /// [`Discovery::probe_build`] reports it as upgradable.
     async fn upgrade_stage(&self, _u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     async fn upgrade_switch(&self, _s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     /// The state of an upgrade this Node knows (`invalid` for one it does not).
     async fn upgrade_status(&self, _operation: OperationId) -> ApiResult<NodeUpgradeState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is upgraded by its operator",
         ))
     }
     /// Begin removing this Node from its machine ([`NodeRemove`]). Only a Node that advertises
     /// [`FEATURE_NODE_REMOVE`] does; any other is removed by its operator on that machine.
     async fn remove_begin(&self, _r: NodeRemove) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// Confirm (or give up) a removal that is `ready` ([`RemoveCommit`]).
     async fn remove_commit(&self, _c: RemoveCommit) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// The state of a removal this Node knows (`invalid` for one it does not).
     async fn remove_status(&self, _operation: OperationId) -> ApiResult<NodeRemoveState> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "this node is removed by its operator",
         ))
     }
     /// Asynchronous, journaled setup. Retrying the same command reads its receipt. Only an
     /// authenticated, colocated Hub owner may request it; remote Nodes remain operator-managed.
     async fn install_harness(&self, _c: Command<InstallHarness>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "controlled harness installation unsupported",
         ))
     }
     /// Component checks on this Node, separate from ACP/provider probing. `fresh` starts one
     /// background check; the reply is a snapshot, not a promise that the check has finished.
     async fn harness_updates(&self, _fresh: bool) -> ApiResult<HarnessUpdateReport> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "upgrade this Node to enable harness-updates-v1",
         ))
     }
     /// Journaled upgrade of installed, managed components only. The authenticated instance
     /// owner may target a separate Node; the Node's own exec ceiling still applies.
     async fn upgrade_harness(&self, _c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
+        Err(crate::error(
+            Code::Unsupported,
             "upgrade this Node to enable harness-updates-v1",
         ))
     }
@@ -208,11 +208,11 @@ pub trait Discovery: Send + Sync {
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
     /// How the machine is doing now (B3); a Node that cannot say answers `unsupported`.
     async fn vitals(&self) -> ApiResult<NodeVitals> {
-        Err(ApiError::new(ErrorCode::Unsupported, "vitals"))
+        Err(crate::error(Code::Unsupported, "vitals"))
     }
     /// What machine this is ([`HostInfo`]); a Node that cannot say answers `unsupported`.
     async fn host(&self) -> ApiResult<HostInfo> {
-        Err(ApiError::new(ErrorCode::Unsupported, "host"))
+        Err(crate::error(Code::Unsupported, "host"))
     }
 }
 
@@ -245,10 +245,7 @@ pub trait HubFiles: Send + Sync {
     /// Completed assistant Markdown, before the turn releases its execution workspace. The Hub
     /// derives placement and audience from the authenticated Node and execution ledger.
     async fn capture_reply(&self, _q: ReplyCapture) -> ApiResult<String> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "reply capture unsupported",
-        ))
+        Err(crate::error(Code::Unsupported, "reply capture unsupported"))
     }
 
     async fn fetch(

@@ -2,6 +2,7 @@
 //! and bounded inbox pruning.
 
 use super::*;
+use steve_node_api::error as rpc_error;
 
 pub(super) const PRUNE_BATCH: i64 = 500;
 /// ?1 node, ?2 received before, ?3 at most. The json_extract terms match migration 036's indexes.
@@ -47,14 +48,14 @@ pub struct Sink(pub std::sync::Weak<NodeRuntime>);
 impl EventSink for Sink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
         let Some(rt) = self.0.upgrade() else {
-            return Err(ApiError::new(ErrorCode::Offline, "the hub is gone"));
+            return Err(rpc_error(Code::Unavailable, "the hub is gone"));
         };
         tokio::task::spawn_blocking(move || {
             rt.receive(&batch)
-                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+                .map_err(|e| rpc_error(Code::Internal, e.to_string()))
         })
         .await
-        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?
+        .map_err(|e| rpc_error(Code::Internal, e.to_string()))?
     }
 }
 

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(rpc_error(Code::Unavailable, "no hub")),
         }
     }
 }
@@ -822,7 +823,7 @@ async fn real_node_gateway_same_and_cross_model_retries_share_call_but_not_attem
         let mut failed = build::done();
         failed.outcome = Outcome::Failed;
         failed.stop_reason = "error".into();
-        failed.error = Some(ApiError::new(ErrorCode::Internal, "503 busy"));
+        failed.error = Some(rpc_error(Code::Internal, "503 busy"));
         node.finish(&first, failed).await.unwrap();
         eventually_sync("retry job accepted", || {
             node.log().iter().filter(|(m, _)| *m == "start_job").count() == 2

@@ -133,12 +133,12 @@ async fn target(
     Ok((store, svc.fleet.remote(&node)))
 }
 
-fn node_error(e: na::ApiError) -> ApiError {
+fn node_error(e: na::Error) -> ApiError {
     let status = match e.code {
-        na::ErrorCode::Denied => 403,
-        na::ErrorCode::Invalid => 400,
-        na::ErrorCode::Offline => 503,
-        na::ErrorCode::Unsupported => 409,
+        na::Code::Forbidden => 403,
+        na::Code::Invalid => 400,
+        na::Code::Unavailable => 503,
+        na::Code::Unsupported => 409,
         _ => 409,
     };
     ApiError::Json(status, e.safe_detail)
@@ -180,8 +180,8 @@ async fn inspect(node: &dyn na::Node, run: &Run) -> na::ApiResult<na::Receipt> {
     )
     .await
     .unwrap_or_else(|_| {
-        Err(na::ApiError::new(
-            na::ErrorCode::OutcomeUnknown,
+        Err(na::error(
+            na::Code::OutcomeUnknown,
             "Receipt read timed out; reconnect and inspect the same operation",
         ))
     })
@@ -212,8 +212,8 @@ pub async fn get(
     )
     .await
     .unwrap_or_else(|_| {
-        Err(na::ApiError::new(
-            na::ErrorCode::Offline,
+        Err(na::error(
+            na::Code::Unavailable,
             "Node update inventory timed out",
         ))
     });
@@ -242,7 +242,9 @@ pub async fn get(
                 let receipt = match inspect(node.as_ref(), run).await {
                     Ok(receipt) => Some(receipt),
                     Err(e)
-                        if e.code == na::ErrorCode::Invalid
+                        if e.reason
+                            .as_ref()
+                            .is_some_and(|r| r.is(na::NodeReason::NoSuchOperation))
                             && crate::nodes::now() > run.command.accept_before.0 =>
                     {
                         Some(na::Receipt {
@@ -250,8 +252,8 @@ pub async fn get(
                             state: na::Observed::Finished {
                                 outcome: na::Outcome::Failed,
                                 result: None,
-                                error: Some(na::ApiError::new(
-                                    na::ErrorCode::Expired,
+                                error: Some(na::error(
+                                    na::Code::Stale,
                                     "The Node has no receipt and the acceptance deadline passed; explicitly retry with a new operation",
                                 )),
                             },
@@ -268,7 +270,7 @@ pub async fn get(
         }
         Ok(_) => {
             error = Some("Node returned another Node's update inventory".into());
-            code = Some(na::ErrorCode::Invalid);
+            code = Some(na::Code::Invalid);
         }
         Err(e) => {
             error = Some(e.safe_detail);
@@ -413,28 +415,29 @@ pub async fn start(
     // such operation; resending this exact saved command then cannot repeat an accepted effect.
     let result = match inspect(node.as_ref(), &run).await {
         Ok(r) => Ok(r),
-        Err(e) if e.code == na::ErrorCode::Invalid => tokio::time::timeout(
-            Duration::from_secs(10),
-            node.upgrade_harness(run.command.clone()),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(na::ApiError::new(
-                na::ErrorCode::OutcomeUnknown,
-                "Acceptance timed out; inspect this operation after reconnecting",
-            ))
-        }),
+        Err(e)
+            if e.reason
+                .as_ref()
+                .is_some_and(|r| r.is(na::NodeReason::NoSuchOperation)) =>
+        {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                node.upgrade_harness(run.command.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(na::error(
+                    na::Code::OutcomeUnknown,
+                    "Acceptance timed out; inspect this operation after reconnecting",
+                ))
+            })
+        }
         Err(e) => Err(e),
     };
     let reconciled = result.is_ok();
     let receipt = match result {
         Ok(r) => r,
-        Err(e)
-            if !matches!(
-                e.code,
-                na::ErrorCode::OutcomeUnknown | na::ErrorCode::Offline
-            ) =>
-        {
+        Err(e) if !matches!(e.code, na::Code::OutcomeUnknown | na::Code::Unavailable) => {
             let receipt = na::Receipt {
                 operation: run.command.id.clone(),
                 state: na::Observed::Finished {

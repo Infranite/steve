@@ -4,7 +4,16 @@
 use crate::*;
 use serde::Serialize;
 
-pub const REASONS: &[ReasonSet] = &[];
+reasons! {
+    pub enum NodeReason = "node" {
+        NoSuchOperation = no_such_operation [NotFound] (operation),
+        SnapshotGone = snapshot_gone [Stale] (),
+        DowngradeRefused = downgrade_refused [Invalid] (),
+    }
+    retired { }
+}
+
+pub const REASONS: &[ReasonSet] = &[NodeReason::SET];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]

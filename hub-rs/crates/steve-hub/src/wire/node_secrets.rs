@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use steve_modules::vault::inject::{How, RunOutput};
@@ -264,18 +265,23 @@ struct Bound {
 #[async_trait]
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
-        let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
+        let err = |code, m: &str| {
+            Err(steve_node_api::on_operation(
+                rpc_error(code, m.to_string()),
+                &operation,
+            ))
+        };
         if let Some(session) = operation.as_str().strip_prefix(MCP_SECRETS_OP) {
             let Some(s) = self.all.sessions.get().cloned() else {
-                return err(ErrorCode::Denied, "no secret for this session");
+                return err(Code::Forbidden, "no secret for this session");
             };
             let (node, session) = (self.node.to_string(), session.to_string());
             let v = tokio::task::spawn_blocking(move || s.value(&node, &session, &id))
                 .await
-                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+                .map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
             return match v {
                 Some(v) => Ok(SecretBytes::new(v.to_vec())),
-                None => err(ErrorCode::Denied, "no such secret for this session"),
+                None => err(Code::Forbidden, "no such secret for this session"),
             };
         }
         let values = {
@@ -283,32 +289,32 @@ impl HubSecrets for Bound {
             let Some(h) = held.get_mut(operation.as_str()) else {
                 let ended = self.all.ended.lock().unwrap_or_else(|e| e.into_inner());
                 return if ended.iter().any(|o| o == operation.as_str()) {
-                    err(ErrorCode::Stale, "the operation ended")
+                    err(Code::Stale, "the operation ended")
                 } else {
-                    err(ErrorCode::Denied, "no secret for this operation")
+                    err(Code::Forbidden, "no secret for this operation")
                 };
             };
             if h.node != self.node {
-                return err(ErrorCode::Denied, "a secret of another Node");
+                return err(Code::Forbidden, "a secret of another Node");
             }
             if !h.ids.contains(&id) {
-                return err(ErrorCode::Denied, "no such secret for this operation");
+                return err(Code::Forbidden, "no such secret for this operation");
             }
             if !h.taken.insert(id.clone()) {
-                return err(ErrorCode::Stale, "already taken");
+                return err(Code::Stale, "already taken");
             }
             h.values.clone()
         };
         let label = id.clone();
         let v = tokio::task::spawn_blocking(move || values.value(&label))
             .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            .map_err(|e| rpc_error(Code::Internal, e.to_string()))?;
         match v {
             // the vault's bytes go as they are; its copy is wiped when it goes
             Ok(v) => Ok(SecretBytes::new(v.expose().to_vec())),
             Err(e) => {
                 tracing::warn!(%operation, "vault use: a value could not be read: {e}");
-                err(ErrorCode::Internal, "the value could not be read")
+                err(Code::Internal, "the value could not be read")
             }
         }
     }
@@ -734,16 +740,16 @@ mod tests {
         // another Node, another field, an operation given nothing
         assert_eq!(
             code(all.for_node(far).take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         let mine = all.for_node(local);
         assert_eq!(
             code(mine.take(op("op_a"), "名称".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(
             code(mine.take(op("op_b"), "令牌".into()).await),
-            ErrorCode::Denied
+            Code::Forbidden
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 0, "nothing decrypted yet");
         // its own: once, decrypted then
@@ -753,12 +759,12 @@ mod tests {
         // a replay, and anything after it ended
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         all.end("op_a");
         assert_eq!(
             code(mine.take(op("op_a"), "令牌".into()).await),
-            ErrorCode::Stale
+            Code::Stale
         );
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
     }
@@ -793,12 +799,12 @@ mod tests {
         );
         assert!(refused.is_err());
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "already taken");
         all.end("op_push");
         give();
         let error = take().await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 
@@ -815,7 +821,7 @@ mod tests {
             .take(OperationId::new("op_retired").unwrap(), "token".into())
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Stale);
+        assert_eq!(error.code, Code::Stale);
         assert_eq!(error.safe_detail, "the operation ended");
         assert_eq!(values.0.load(Ordering::SeqCst), 1);
 

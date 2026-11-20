@@ -1287,7 +1287,7 @@ impl crate::node_git::NodeGit for Remote {
         use steve_node_api as na;
         self.asked.lock().unwrap().push(q.clone());
         if self.offline {
-            return Err(na::ApiError::new(na::ErrorCode::Offline, "设备离线"));
+            return Err(na::error(na::Code::Unavailable, "设备离线"));
         }
         Ok(na::GitFacts {
             revision: na::Revision::new("g1").unwrap(),

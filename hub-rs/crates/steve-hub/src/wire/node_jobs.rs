@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_core::gateway::{
     OnText, OneCall, OneModel, OneShotError, ThinkTools, Tried, split_static,
@@ -105,7 +106,7 @@ pub(super) struct Think {
 }
 
 /// The completion the Hub writes for an attempt it ends on its own word.
-fn ended(outcome: Outcome, stop_reason: &str, error: Option<ApiError>) -> Completion {
+fn ended(outcome: Outcome, stop_reason: &str, error: Option<Error>) -> Completion {
     Completion {
         outcome,
         stop_reason: stop_reason.into(),
@@ -506,7 +507,7 @@ impl NodeRuntime {
         tx: &Tx,
         method: &str,
         attempt: &str,
-        e: &ApiError,
+        e: &Error,
     ) -> Result<(), StoreError> {
         match method {
             "start_job" => {
@@ -526,22 +527,17 @@ impl NodeRuntime {
     /// An abandon that did not go through. The Node has no record of the attempt: it did not run
     /// there, and it ends interrupted. Otherwise it stays as it is (a person's Stop is not needed:
     /// its caller is gone either way).
-    fn job_abandon_failed_in(
-        &self,
-        tx: &Tx,
-        attempt: &str,
-        e: &ApiError,
-    ) -> Result<(), StoreError> {
+    fn job_abandon_failed_in(&self, tx: &Tx, attempt: &str, e: &Error) -> Result<(), StoreError> {
         let unknown_to_node =
-            e.code == ErrorCode::Invalid && e.safe_detail.contains("no such operation");
+            e.code == Code::Invalid && e.safe_detail.contains("no such operation");
         if unknown_to_node
             && jobs::attempt_in(tx, attempt)?.is_some_and(|a| a.state == AttemptState::Unknown)
         {
             let c = ended(
                 Outcome::Interrupted,
                 "error",
-                Some(ApiError::new(
-                    ErrorCode::Invalid,
+                Some(rpc_error(
+                    Code::Invalid,
                     "the Node holds no record of this attempt: it did not run there",
                 )),
             );
@@ -766,9 +762,7 @@ impl Drop for Waiting {
 /// A Node's completion of a failed call as the one-shot error it was (`stop_reason` and the
 /// adapter's words), so the caller sees the very error an in-process run gives.
 fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
-    if c.error
-        .as_ref()
-        .is_some_and(|e| e.code == ErrorCode::Exhausted)
+    if c.error.as_ref().is_some_and(|e| e.code == Code::Exhausted)
         && c.error
             .as_ref()
             .is_some_and(|e| e.safe_detail == "the output limit was reached")
@@ -1299,7 +1293,7 @@ mod tests {
         let refused = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, steve_acp::TOOL_REFUSED)),
+            Some(rpc_error(Code::Internal, steve_acp::TOOL_REFUSED)),
         );
         assert!(matches!(
             call_error(&refused, Duration::from_secs(1)),
@@ -1308,7 +1302,7 @@ mod tests {
         let other = ended(
             Outcome::Failed,
             "error",
-            Some(ApiError::new(ErrorCode::Internal, "the provider said no")),
+            Some(rpc_error(Code::Internal, "the provider said no")),
         );
         assert!(matches!(
             call_error(&other, Duration::from_secs(1)),

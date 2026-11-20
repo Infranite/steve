@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use steve_node_api::error as rpc_error;
 use steve_runtime::testkit::eventually_sync;
 
 use serde_json::{Value, json};
@@ -99,7 +100,7 @@ impl EventSink for Gate {
         let to = self.0.lock().unwrap().clone();
         match to {
             Some(w) => Sink(w).commit(batch).await,
-            None => Err(ApiError::new(ErrorCode::Offline, "no hub")),
+            None => Err(rpc_error(Code::Unavailable, "no hub")),
         }
     }
 }

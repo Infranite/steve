@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steve_node_api::error as rpc_error;
 
 use steve_acp::adapters::{self, UpdateComponent};
 use steve_acp::{AcpConfig, managed};
@@ -271,8 +272,8 @@ impl LocalNode {
         let cfg = &self.0.cfg.acp;
         let id = &c.body.harness;
         if !cfg.managed_adapter(id) || c.body.versions.is_empty() {
-            return Err(ApiError::new(
-                ErrorCode::Unsupported,
+            return Err(rpc_error(
+                Code::Unsupported,
                 "Only installed components in this Node's managed prefix may be upgraded",
             ));
         }
@@ -284,16 +285,16 @@ impl LocalNode {
                 let spec = components
                     .iter()
                     .find(|s| s.id == component)
-                    .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "Unknown component id"))?;
+                    .ok_or_else(|| rpc_error(Code::Invalid, "Unknown component id"))?;
                 if !owned(cfg, id, spec) {
-                    return Err(ApiError::new(
-                        ErrorCode::Denied,
+                    return Err(rpc_error(
+                        Code::Forbidden,
                         "The selected component is external, missing or overridden; manage it on the Node",
                     ));
                 }
                 let installed = installed(spec).ok_or_else(|| {
-                    ApiError::new(
-                        ErrorCode::Stale,
+                    rpc_error(
+                        Code::Stale,
                         "Component changed during the version read; refresh and retry",
                     )
                 })?;
@@ -305,8 +306,8 @@ impl LocalNode {
                         || check.and_then(|v| v.latest.as_ref()) != Some(target)
                         || !managed::newer(target, &installed)
                     {
-                        return Err(ApiError::new(
-                            ErrorCode::Stale,
+                        return Err(rpc_error(
+                            Code::Stale,
                             "Component versions changed or have not been checked on this Node; refresh before upgrading",
                         ));
                     }
@@ -316,21 +317,21 @@ impl LocalNode {
         }
         let req = adapter_setup::requirements(cfg, id).await;
         if let Some(e) = req.node_error.or(req.npm_error) {
-            return Err(ApiError::new(ErrorCode::Unsupported, e));
+            return Err(rpc_error(Code::Unsupported, e));
         }
         let mut prefix = None;
         let mut changed = false;
         let (receipt, fresh) = self.accept("upgrade_harness", &c, |t| {
             if self.0.node_upgrade_pending() {
-                return Err(ApiError::new(
-                    ErrorCode::Busy,
+                return Err(rpc_error(
+                    Code::Busy,
                     "A Node release upgrade is in progress",
                 ));
             }
             adapter_setup::idle(t)?;
             prefix = Some(
                 managed::prefix_lock(&cfg.steve_home, true)
-                    .map_err(|e| ApiError::new(ErrorCode::Busy, e))?,
+                    .map_err(|e| rpc_error(Code::Busy, e))?,
             );
             // Recheck ownership and versions after locking the prefix; a CLI may have raced
             // the registry read. Never downgrade or redirect an external command.
@@ -343,14 +344,14 @@ impl LocalNode {
                 if !owned(cfg, id, spec)
                     || installed(spec).is_some_and(|v| managed::newer(&v, target))
                 {
-                    return Err(ApiError::new(
-                        ErrorCode::Stale,
+                    return Err(rpc_error(
+                        Code::Stale,
                         "Components changed before admission; refresh and retry",
                     ));
                 }
                 let current = installed(spec).ok_or_else(|| {
-                    ApiError::new(
-                        ErrorCode::Stale,
+                    rpc_error(
+                        Code::Stale,
                         "Component changed before admission; refresh and retry",
                     )
                 })?;
@@ -362,8 +363,8 @@ impl LocalNode {
                     if check.and_then(|v| v.latest.as_ref()) != Some(target)
                         || !managed::newer(target, &current)
                     {
-                        return Err(ApiError::new(
-                            ErrorCode::Stale,
+                        return Err(rpc_error(
+                            Code::Stale,
                             "Refresh component versions before retrying",
                         ));
                     }
@@ -411,7 +412,7 @@ impl LocalNode {
                     }
                     Ok(())
                 }).await.map_err(|_| "Upgrade task interrupted; inspect this Node before retrying".to_string()).and_then(|r|r);
-                let state = match result { Ok(()) => succeeded(), Err(e) => Observed::Finished { outcome: Outcome::Failed, result: None, error: Some(ApiError::new(ErrorCode::Internal,e)) } };
+                let state = match result { Ok(()) => succeeded(), Err(e) => Observed::Finished { outcome: Outcome::Failed, result: None, error: Some(rpc_error(Code::Internal,e)) } };
                 if inner.j.tx(|t| t.set_state(&op, &state)).is_err() { inner.fault(); }
                 inner.adapter_probes.forget().await;
                 inner.wake.notify_one();

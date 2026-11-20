@@ -3,6 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use steve_node_api::error as rpc_error;
 
 use sha2::Digest as _;
 use steve_node_api::*;
@@ -41,10 +42,10 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
     let root = roots
         .iter()
         .find(|r| r.id == at.root)
-        .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not a root this node allows"))?;
+        .ok_or_else(|| rpc_error(Code::Forbidden, "not a root this node allows"))?;
     if write && root.access == RootAccess::ReadOnly {
-        return Err(ApiError::new(
-            ErrorCode::Denied,
+        return Err(rpc_error(
+            Code::Forbidden,
             "a read-only root: no workspace there",
         ));
     }
@@ -53,21 +54,18 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
         .components()
         .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
-            "a relative path inside the root",
-        ));
+        return Err(rpc_error(Code::Invalid, "a relative path inside the root"));
     }
     let base = root
         .path
         .canonicalize()
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("root unavailable: {e}")))?;
+        .map_err(|e| rpc_error(Code::Invalid, format!("root unavailable: {e}")))?;
     let p = base.join(rel);
     let real = p
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such directory"))?;
+        .map_err(|_| rpc_error(Code::Invalid, "no such directory"))?;
     if !real.starts_with(&base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+        return Err(rpc_error(Code::Forbidden, "outside the root"));
     }
     Ok(real)
 }
@@ -77,12 +75,9 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
 /// (symlinks included); the directory itself, when it is there, must resolve to the same place.
 pub(crate) fn target(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
     let rel = Path::new(at.rel.as_str());
-    let name = rel.file_name().ok_or_else(|| {
-        ApiError::new(
-            ErrorCode::Invalid,
-            "a directory inside the root, not the root",
-        )
-    })?;
+    let name = rel
+        .file_name()
+        .ok_or_else(|| rpc_error(Code::Invalid, "a directory inside the root, not the root"))?;
     let parent = RootPath {
         root: at.root.clone(),
         rel: RelPath::new(
@@ -91,15 +86,15 @@ pub(crate) fn target(roots: &[Root], at: &RootPath) -> ApiResult<PathBuf> {
                 .unwrap_or_default()
                 .to_string(),
         )
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?,
+        .map_err(|e| rpc_error(Code::Invalid, e.to_string()))?,
     };
     let p = resolve(roots, &parent, true)?.join(name);
     if p.exists() {
         let real = p
             .canonicalize()
-            .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+            .map_err(|e| rpc_error(Code::Invalid, e.to_string()))?;
         if real != p {
-            return Err(ApiError::new(ErrorCode::Denied, "outside the root"));
+            return Err(rpc_error(Code::Forbidden, "outside the root"));
         }
     }
     Ok(p)
@@ -115,20 +110,20 @@ pub(crate) fn below(base: &Path, rel: &RelPath) -> ApiResult<PathBuf> {
     if r.components()
         .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
     {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
+        return Err(rpc_error(
+            Code::Invalid,
             "a relative path inside the workspace",
         ));
     }
     let real = base
         .join(r)
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "no such directory"))?;
+        .map_err(|_| rpc_error(Code::Invalid, "no such directory"))?;
     if !real.starts_with(base) {
-        return Err(ApiError::new(ErrorCode::Denied, "outside the workspace"));
+        return Err(rpc_error(Code::Forbidden, "outside the workspace"));
     }
     if !real.is_dir() {
-        return Err(ApiError::new(ErrorCode::Invalid, "not a directory"));
+        return Err(rpc_error(Code::Invalid, "not a directory"));
     }
     Ok(real)
 }
@@ -648,13 +643,13 @@ pub(crate) fn add_worktree_above(
         && let Some(free) = free()
         && free < floor
     {
-        return Err(ApiError::new(
-            ErrorCode::Exhausted,
+        return Err(rpc_error(
+            Code::Exhausted,
             format!("disk low: {free} bytes free, the floor is {floor}"),
         ));
     }
     add_worktree(commands, repo, path, branch, base)
-        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("git worktree: {e}")))
+        .map_err(|e| rpc_error(Code::Invalid, format!("git worktree: {e}")))
 }
 
 /// `path` is a worktree of `repo` with `branch` checked out.
@@ -734,12 +729,9 @@ pub(crate) fn remove(
 pub fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<PathBuf> {
     let real = path
         .canonicalize()
-        .map_err(|_| ApiError::new(ErrorCode::Invalid, "the workspace directory is gone"))?;
+        .map_err(|_| rpc_error(Code::Invalid, "the workspace directory is gone"))?;
     if !real.is_dir() {
-        return Err(ApiError::new(
-            ErrorCode::Invalid,
-            "the workspace is not a directory",
-        ));
+        return Err(rpc_error(Code::Invalid, "the workspace is not a directory"));
     }
     if under_root
         && !roots
@@ -748,10 +740,7 @@ pub fn still_valid(path: &Path, roots: &[Root], under_root: bool) -> ApiResult<P
             .filter_map(|r| r.path.canonicalize().ok())
             .any(|r| real.starts_with(r))
     {
-        return Err(ApiError::new(
-            ErrorCode::Denied,
-            "the workspace left its root",
-        ));
+        return Err(rpc_error(Code::Forbidden, "the workspace left its root"));
     }
     Ok(real)
 }

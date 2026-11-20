@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use steve_node_api::error as rpc_error;
 
 use async_trait::async_trait;
 use steve_node_api::*;
@@ -58,14 +59,14 @@ struct NoRuntime;
 #[async_trait]
 impl EventSink for NoRuntime {
     async fn commit(&self, _: EventBatch) -> ApiResult<EventAck> {
-        Err(ApiError::new(
-            ErrorCode::Offline,
+        Err(rpc_error(
+            Code::Unavailable,
             "no coordinator for this node yet",
         ))
     }
 }
 
-struct NoTools(ApiError);
+struct NoTools(Error);
 
 #[async_trait]
 impl HubTools for NoTools {
@@ -317,8 +318,8 @@ impl NodeFleet {
                 }
                 // the Hub has not finished starting: refused for now, the Node calls again
                 None => {
-                    return Arc::new(NoTools(ApiError::new(
-                        ErrorCode::Offline,
+                    return Arc::new(NoTools(rpc_error(
+                        Code::Unavailable,
                         "the Hub's tools are not ready yet",
                     )));
                 }

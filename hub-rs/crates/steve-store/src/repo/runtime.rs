@@ -633,7 +633,7 @@ const REALTIME_STOP_RECEIPT_SQL: &str = r#"INSERT OR IGNORE INTO realtime_output
    AND json_extract(c.receipt,'$.payload.state.outcome') IN ('succeeded','failed','cancelled','interrupted'))
   OR (c.state='rejected' AND c.maybe_sent=0 AND
    (json_extract(c.receipt,'$.payload.reason')='cancelled before it was sent'
-    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry')='text'))))
+    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry')='object' AND json_extract(c.receipt,'$.payload.retry.kind') IN ('never','later','now')))))
  ON CONFLICT(attempt_id) DO UPDATE SET
   ended=MAX(excluded.ended,COALESCE((SELECT MAX(at) FROM realtime_output_samples
                                   WHERE attempt_id=excluded.attempt_id),excluded.ended)),
@@ -1286,4 +1286,61 @@ pub fn permissions_of_attempt_in(tx: &Tx<'_>, attempt: &str) -> Result<Vec<Permi
         "WHERE attempt_id=? AND state IN ('waiting','answering') ORDER BY created, rowid",
         [attempt],
     )
+}
+
+#[cfg(test)]
+mod retry_shape_tests {
+    use super::REALTIME_STOP_RECEIPT_SQL;
+    use rusqlite::{Connection, params};
+    use serde_json::json;
+
+    fn stop_evidence_fixture() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE runtime_attempts(attempt_id TEXT,turn_id TEXT,node_id TEXT,operation_id TEXT,created INTEGER);
+            CREATE TABLE runtime_turns(turn_id TEXT,session_id TEXT);
+            CREATE TABLE sessions(id TEXT,workspace_id TEXT,item_id TEXT,bot_id TEXT,readonly INTEGER);
+            CREATE TABLE items(id TEXT,workspace_id TEXT,project_id TEXT);
+            CREATE TABLE node_commands(operation_id TEXT,node_id TEXT,target_attempt TEXT,method TEXT,state TEXT,maybe_sent INTEGER,receipt TEXT,updated INTEGER);
+            CREATE TABLE realtime_output_attempts(attempt_id TEXT PRIMARY KEY,session_id TEXT,workspace_id TEXT,project_id TEXT,bot_id TEXT,node_id TEXT,started INTEGER,ended INTEGER,baseline INTEGER,stop_evidence TEXT,not_started INTEGER);
+            CREATE TABLE realtime_output_samples(attempt_id TEXT,at INTEGER);
+            INSERT INTO runtime_attempts VALUES('a1','t1','n1','op1',1);
+            INSERT INTO runtime_turns VALUES('t1','s1');
+            INSERT INTO sessions VALUES('s1','w1','i1','b1',0);
+            INSERT INTO items VALUES('i1','w1','p1');
+            INSERT INTO node_commands VALUES('op1','n1','a1','start_turn','rejected',0,'{}',20);").unwrap();
+        db
+    }
+
+    #[test]
+    fn current_unsent_refusals_require_a_valid_retry_object() {
+        let db = stop_evidence_fixture();
+        for (retry, maybe_sent, expected) in [
+            (json!({"kind":"never"}), false, true),
+            (json!({"kind":"later","after_ms":null}), false, true),
+            (json!({"kind":"now"}), false, true),
+            (json!({"kind":"future"}), false, false),
+            (json!({}), false, false),
+            (json!("never"), false, false),
+            (json!("same_operation"), false, false),
+            (json!(null), false, false),
+            (json!({"kind":"never"}), true, false),
+        ] {
+            db.execute("DELETE FROM realtime_output_attempts", [])
+                .unwrap();
+            let receipt =
+                json!({"payload":{"code":"internal","retry":retry,"safe_detail":"refused"}});
+            db.execute(
+                "UPDATE node_commands SET receipt=?1,maybe_sent=?2",
+                params![receipt.to_string(), maybe_sent],
+            )
+            .unwrap();
+            db.execute(REALTIME_STOP_RECEIPT_SQL, ["op1"]).unwrap();
+            let count: i64 = db.query_row("SELECT COUNT(*) FROM realtime_output_attempts WHERE stop_evidence='unsent' AND not_started=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(
+                count,
+                i64::from(expected),
+                "retry={retry}, maybe_sent={maybe_sent}"
+            );
+        }
+    }
 }
