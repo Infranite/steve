@@ -198,8 +198,15 @@ struct State {
     daily_since: i64,
     /// When the next catch-up of never-synced connections is due.
     next_catch_up: i64,
-    /// Each connection's [`crate::accounts::connections::repo::change_signature`] when last seen.
+    /// Last signature handled by explicit `connection_changed` calls.
     seen: HashMap<String, String>,
+    /// Last authoritative signature observed by the due source, independently of explicit calls.
+    observed: HashMap<String, String>,
+    /// The first due query records existing facts without scheduling every old connection.
+    observed_ready: bool,
+    /// Pending entries inferred from connection facts may extend their own 5s quiet window.
+    /// Explicit directory events and row lookup retry deadlines keep their existing deadline.
+    inferred_pending: std::collections::BTreeSet<(String, String)>,
 }
 
 /// The outcome of a connection's last sync, kept in `connections.config.directory` for the 组织架构
@@ -356,6 +363,69 @@ impl DirectorySync {
         })
     }
 
+    /// Isolate unreadable per-connection metadata just as the sync's due-row lookup does.
+    fn connection_fact(
+        &self,
+        c: &Connection,
+        ws: &str,
+        id: &str,
+    ) -> ApiResult<(Option<String>, bool)> {
+        let signature = crate::accounts::connections::repo::change_signature(c, id)?;
+        let eligible = match self.conns.get(c, ws, id) {
+            Ok(row) => row.is_some(),
+            Err(ApiError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
+        Ok((signature, eligible))
+    }
+
+    /// Recompute connection changes from authoritative rows, never from a commit hint's payload.
+    fn observe_connections(&self) -> ApiResult<()> {
+        let facts = self.m.store.reader(|c| -> ApiResult<_> {
+            let mut st = c.prepare("SELECT workspace_id,id FROM connections ORDER BY id")?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?,r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut facts = Vec::with_capacity(rows.len());
+            for (ws, id) in rows {
+                match self.connection_fact(c, &ws, &id) {
+                    Ok((signature, eligible)) => facts.push((ws, id, signature, Some(eligible))),
+                    Err(error) => {
+                        tracing::warn!(connection = %id, %error, "directory connection facts unavailable");
+                        facts.push((ws, id, None, None));
+                    }
+                }
+            }
+            Ok(facts)
+        })?;
+        let mut st = lock(&self.state);
+        let live: std::collections::BTreeSet<_> =
+            facts.iter().map(|(_, id, _, _)| id.as_str()).collect();
+        st.observed.retain(|id, _| live.contains(id.as_str()));
+        st.seen.retain(|id, _| live.contains(id.as_str()));
+        st.inferred_pending
+            .retain(|(_, id)| live.contains(id.as_str()));
+        let seed = !st.observed_ready;
+        st.observed_ready = true;
+        let now = self.m.clock.now();
+        for (ws, id, signature, eligible) in facts {
+            let Some(eligible) = eligible else { continue };
+            let changed = match signature {
+                Some(signature) => {
+                    st.observed.insert(id.clone(), signature.clone()).as_ref() != Some(&signature)
+                }
+                None => st.observed.remove(&id).is_some(),
+            };
+            if !seed && eligible && changed {
+                let key = (ws, id);
+                if !st.pending.contains_key(&key) || st.inferred_pending.contains(&key) {
+                    st.pending.insert(key.clone(), now.saturating_add(5_000));
+                    st.inferred_pending.insert(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A connection was connected, re-verified or changed its permissions: one sync soon (after
     /// the same quiet period as directory events), when it can read a directory.
     pub fn connection_changed(&self, ws: &str, connection_id: &str) {
@@ -384,22 +454,27 @@ impl DirectorySync {
         };
         if ok && changed {
             let due = self.m.clock.now() + 5_000;
-            lock(&self.state)
-                .pending
-                .insert((ws.into(), connection_id.into()), due);
+            let mut st = lock(&self.state);
+            let key = (ws.into(), connection_id.into());
+            st.inferred_pending.remove(&key);
+            st.pending.insert(key, due);
+            drop(st);
             self.wake.notify_one();
         }
     }
 
-    /// Follows `{type:"connection", id, ws}` events (the Hub's typed connection tap) with
-    /// [`DirectorySync::connection_changed`] until the sender goes away.
-    pub async fn watch(self: Arc<Self>, mut rx: mpsc::Receiver<steve_types::Notification>) {
-        while let Some(ev) = rx.recv().await {
-            if let Some(steve_types::DomainEvent::Channels(
-                steve_types::ChannelsEvent::Connection { id, ws },
-            )) = ev.event.as_domain()
-            {
-                self.connection_changed(ws.as_str(), id.as_str());
+    /// Own the physical-table subscription for contacts.sync. Hints only request a due requery;
+    /// the source itself checks connection signatures and workspace clocks from storage.
+    /// Register while constructing the Job future, so commits before its first poll are buffered.
+    pub fn watch(self: Arc<Self>) -> impl std::future::Future<Output = ()> + Send {
+        let committed = self
+            .m
+            .store
+            .commit_wake(&["connections", "workspaces", "settings"]);
+        async move {
+            loop {
+                committed.notified().await;
+                self.wake.notify_one();
             }
         }
     }
@@ -407,9 +482,11 @@ impl DirectorySync {
     /// A directory reported a change: one sync of that connection after [`DEBOUNCE_MS`] of quiet.
     pub fn changed(&self, ws: &str, connection_id: &str) {
         let due = self.m.clock.now() + DEBOUNCE_MS;
-        lock(&self.state)
-            .pending
-            .insert((ws.into(), connection_id.into()), due);
+        let mut st = lock(&self.state);
+        let key = (ws.into(), connection_id.into());
+        st.inferred_pending.remove(&key);
+        st.pending.insert(key, due);
+        drop(st);
         self.wake.notify_one();
     }
 
@@ -487,6 +564,7 @@ impl DirectorySync {
                 if st.pending.get(&key) != Some(&at) {
                     continue;
                 }
+                st.inferred_pending.remove(&key);
                 if failed.contains(&key) {
                     st.pending.insert(key, now.saturating_add(CATCH_UP_MS));
                 } else {
@@ -632,6 +710,7 @@ impl steve_runtime::due::DueSource for DirectoryDue {
         self.0
             .m
             .blocking(move |m| {
+                sync.observe_connections()?;
                 let (since, mut next) = {
                     let st = lock(&sync.state);
                     (
@@ -816,3 +895,6 @@ mod due_contract_tests {
         assert_eq!(f.source.next_due().await.unwrap(), Some(daily));
     }
 }
+
+#[cfg(test)]
+mod commit_wake_tests;

@@ -20,10 +20,6 @@ const RATIONALE: &[(&str, &str)] = &[
         "Plugin event API forwards selected committed business facts; it is not a DueSource wake.",
     ),
     (
-        "steve-hub/src/wire/install/domain/contacts.rs",
-        "Existing contacts.watch due-loop wake debt; R7f removes this subscriber in its second commit.",
-    ),
-    (
         "steve-hub/src/wire/install/domain/extensions.rs",
         "Connection lifecycle hooks start/stop reactive adapter instances, not a DueSource wake.",
     ),
