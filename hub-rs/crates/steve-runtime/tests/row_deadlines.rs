@@ -1,19 +1,17 @@
 use steve_runtime::due::RowDeadlines;
 
 #[test]
-fn r3e_fences_are_ready_at_the_exact_deadline_and_replace_explicitly() {
+fn r3e_recorded_deadlines_are_replaced_explicitly() {
     let rows = RowDeadlines::default();
-    assert!(rows.ready("missing", 0));
     assert_eq!(rows.not_before("missing"), None);
     rows.defer("a", 1000);
-    assert!(!rows.ready("a", 999));
-    assert!(rows.ready("a", 1000));
-    assert!(rows.ready("a", 1001));
+    assert_eq!(rows.not_before("a"), Some(1000));
     rows.defer("a", 2000);
     assert_eq!(rows.not_before("a"), Some(2000));
     rows.defer("a", 500);
-    assert!(
-        rows.ready("a", 500),
+    assert_eq!(
+        rows.not_before("a"),
+        Some(500),
         "the caller may deliberately bring a row forward"
     );
 }
@@ -25,9 +23,9 @@ fn r3e_live_rows_are_retained_without_time_or_cache_policy() {
     rows.defer("gone", i64::MAX);
     rows.retain_live(["live"]);
     assert_eq!(rows.not_before("live"), Some(1000));
-    assert!(rows.ready("gone", 0));
+    assert_eq!(rows.not_before("gone"), None);
     rows.retain_live(std::iter::empty::<&str>());
-    assert!(rows.ready("live", 0));
+    assert_eq!(rows.not_before("live"), None);
 }
 
 #[test]
@@ -36,6 +34,10 @@ fn r3e_batch_snapshot_drops_only_elapsed_fences_and_clear_lifts_all() {
     rows.defer("past", 999);
     rows.defer("at", 1000);
     rows.defer("future", 1001);
+    // Deliberately combine the views to pin the documented removal effect. A production
+    // source must choose one view so an elapsed fence does not unexpectedly disappear.
+    assert_eq!(rows.not_before("past"), Some(999));
+    assert_eq!(rows.not_before("at"), Some(1000));
     assert_eq!(rows.pending(1000), [("future".to_owned(), 1001)].into());
     assert_eq!(rows.not_before("past"), None);
     assert_eq!(rows.not_before("at"), None);

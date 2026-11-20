@@ -3,10 +3,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Caller-owned row deadlines. The domain supplies absolute milliseconds and keeps its own
-/// persistence/retry policy. Missing and elapsed fences are ready; nothing is loaded or refreshed.
+/// persistence/retry policy. Only future fences delay work; nothing is loaded or refreshed.
 /// Dropping the ledger (including on restart) removes its fences. This is not a scheduler:
 /// it owns neither a clock nor a wake signal. A caller that makes work due earlier outside
 /// its current pass must wake its source separately.
+///
+/// Callers implementing [`super::DueSource`] must publish the larger of a row's stored due time
+/// and its `not_before`/`pending` fence from [`super::DueSource::next_due`], and use that same
+/// effective deadline in [`super::DueSource::run_due`]. Filtering only in `run_due` leaves
+/// `next_due` reporting an already-due storage value, so `due_loop` repeatedly invokes work
+/// before the fence has elapsed instead of sleeping until it.
 #[derive(Default)]
 pub struct RowDeadlines {
     rows: Mutex<HashMap<String, i64>>,
@@ -22,12 +28,13 @@ impl RowDeadlines {
         self.rows().insert(key.into(), at);
     }
 
+    /// Read the recorded fence without consuming it. It may already be in the past and remains
+    /// visible until [`Self::pending`], [`Self::retain_live`] or [`Self::clear`] removes it.
+    /// Choose this view or `pending` for a source; do not mix them: `pending` discards elapsed
+    /// entries, so a later `not_before` may return `None` for the same key, including after a
+    /// wall-clock rewind. This method alone never expires a record.
     pub fn not_before(&self, key: &str) -> Option<i64> {
         self.rows().get(key).copied()
-    }
-
-    pub fn ready(&self, key: &str, now: i64) -> bool {
-        self.not_before(key).is_none_or(|at| at <= now)
     }
 
     /// Forget rows no longer present in the source's authoritative live set.

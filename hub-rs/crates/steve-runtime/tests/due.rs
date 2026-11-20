@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steve_runtime::due::contract::{Fixture, check};
-use steve_runtime::due::{DueError, DueSource, FALLBACK, due_loop};
+use steve_runtime::due::{DueError, DueSource, FALLBACK, RowDeadlines, due_loop};
 use steve_runtime::policy::{Backoff, Jitter};
 use steve_runtime::{Clock, FakeClock};
 use tokio::sync::Notify;
@@ -489,4 +489,83 @@ async fn bounded_contract_reuses_the_second_of_exactly_two_fixtures() {
     )
     .await;
     assert!(fixtures.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn row_deadlines_delay_next_due_so_run_due_cannot_spin_before_the_fence() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct DeferredRow {
+        stored_due: i64,
+        fences: RowDeadlines,
+        runs: AtomicUsize,
+        done: AtomicBool,
+    }
+    impl DueSource for DeferredRow {
+        fn name(&self) -> &'static str {
+            "test.row-fence"
+        }
+        async fn next_due(&self) -> Result<Option<i64>, DueError> {
+            Ok((!self.done.load(Ordering::SeqCst)).then(|| {
+                self.stored_due
+                    .max(self.fences.not_before("row").unwrap_or(self.stored_due))
+            }))
+        }
+        async fn run_due(&self, now: i64) -> Result<(), DueError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            // Keep a broken busy loop observable instead of monopolizing the executor.
+            tokio::task::yield_now().await;
+            let effective = self
+                .stored_due
+                .max(self.fences.not_before("row").unwrap_or(self.stored_due));
+            if effective <= now {
+                self.done.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+    let clock = Arc::new(FakeClock::new(T0));
+    let source = Arc::new(DeferredRow {
+        stored_due: T0,
+        fences: RowDeadlines::default(),
+        runs: AtomicUsize::new(0),
+        done: AtomicBool::new(false),
+    });
+    source.fences.defer("row", T0 + 1000);
+    let task = steve_runtime::spawn(
+        "test.row-fence",
+        due_loop(
+            source.clone(),
+            clock.clone(),
+            Arc::new(Notify::new()),
+            Backoff {
+                base: Duration::from_secs(1),
+                max: Duration::from_secs(1),
+                factor: 1,
+                jitter: Jitter::None,
+                attempts: None,
+                reset_after: None,
+            },
+        ),
+    );
+    until(|| clock.observed(T0) || source.runs.load(Ordering::SeqCst) > 0).await;
+    assert_eq!(source.runs.load(Ordering::SeqCst), 0);
+    for delta in [200, 300, 499] {
+        let now = clock.advance(delta);
+        until(|| clock.observed(now) || source.runs.load(Ordering::SeqCst) > 0).await;
+        assert_eq!(
+            source.runs.load(Ordering::SeqCst),
+            0,
+            "next_due must include the fence, not just run_due's filter"
+        );
+    }
+    clock.advance(1);
+    until(|| source.done.load(Ordering::SeqCst)).await;
+    assert_eq!(source.runs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        source.fences.not_before("row"),
+        Some(T0 + 1000),
+        "reading an elapsed fence does not expire it"
+    );
+    task.stop();
+    task.await;
 }
