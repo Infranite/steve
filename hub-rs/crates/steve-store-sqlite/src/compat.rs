@@ -1,5 +1,5 @@
-//! Shared compatibility semantics. The storage JSON follows the 6v proposal;
-//! it remains a draft until release-protocol review, not a finalized manifest.
+//! Shared storage capability contract. Each flat entry has the same meaning:
+//! accept min_read..=target, then migrate to target; never open future schemas.
 use crate::{
     layout::{self, Layout},
     migrate,
@@ -13,7 +13,6 @@ use steve_types::Error;
 pub const LEGACY_INPUT: i64 = 113;
 /// Old-reader rejection signal, not a migration or physical reader generation.
 pub const LEGACY_READER_FENCE: i64 = 1000;
-pub const STORAGE_FORMAT_VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageState {
     Empty,
@@ -30,32 +29,28 @@ pub enum StorageState {
 #[serde(deny_unknown_fields)]
 pub struct SchemaRange {
     pub min_read: u32,
-    pub max_read: u32,
     pub target: u32,
 }
 impl SchemaRange {
     fn valid(self) -> bool {
-        self.min_read <= self.target && self.target <= self.max_read
+        self.min_read > 0 && self.min_read <= self.target
     }
     fn accepts(self, version: u32, exact: bool) -> bool {
-        (self.min_read..=self.max_read).contains(&version) && (!exact || version == self.target)
+        (self.min_read..=self.target).contains(&version) && (!exact || version == self.target)
     }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyCapabilities {
-    pub min_read: i64,
-    pub max_read: i64,
-    pub convert: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageCapabilities {
-    pub format_version: u32,
     pub layout: SchemaRange,
-    pub contract_schema: u32,
-    pub domains: BTreeMap<String, SchemaRange>,
-    pub legacy: LegacyCapabilities,
+    pub contract: SchemaRange,
+    pub core: SchemaRange,
+    pub stream: SchemaRange,
+    pub comms: SchemaRange,
+    /// Presence alone declares conversion support. This temporary entry may be
+    /// omitted by a candidate after its legacy converter has been removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy: Option<SchemaRange>,
 }
 /// Structural domain completeness is shared by observation and candidate validation.
 pub(crate) fn require_domains<T>(domains: &BTreeMap<String, T>) -> Result<(), Error> {
@@ -78,51 +73,48 @@ pub(crate) fn legacy_refusal(version: i64, maximum: i64) -> Error {
     }
 }
 impl StorageCapabilities {
-    /// All schema targets come from the embedded catalog, selected by domain name.
+    /// Domain bounds come from the first/last embedded migrations, legacy from
+    /// its compiled head, physical layout from the compiled layout catalog.
+    /// No release version or separately hand-maintained JSON numbers are used.
     pub fn compiled() -> Self {
-        let head = |set: &migrate::MigrationSet| set.migrations.last().map_or(0, |m| m.version);
+        let range = |domain| {
+            let set = migrate::CATALOG.iter().find(|s| s.domain == domain);
+            SchemaRange {
+                min_read: set
+                    .and_then(|s| s.migrations.first())
+                    .map_or(0, |m| m.version),
+                target: set
+                    .and_then(|s| s.migrations.last())
+                    .map_or(0, |m| m.version),
+            }
+        };
+        let legacy_head = crate::legacy::SCHEMA_VERSION as u32;
         Self {
-            format_version: STORAGE_FORMAT_VERSION,
             layout: SchemaRange {
                 min_read: layout::LAYOUT_GENERATION,
-                max_read: layout::LAYOUT_GENERATION,
                 target: layout::LAYOUT_GENERATION,
             },
-            contract_schema: migrate::CATALOG
-                .iter()
-                .find(|s| s.domain == "contract")
-                .map_or(0, head),
-            domains: migrate::CATALOG
-                .iter()
-                .filter(|s| s.domain != "contract")
-                .map(|s| {
-                    let target = head(s);
-                    (
-                        s.domain.into(),
-                        SchemaRange {
-                            min_read: 0,
-                            max_read: target,
-                            target,
-                        },
-                    )
-                })
-                .collect(),
-            legacy: LegacyCapabilities {
-                min_read: LEGACY_INPUT,
-                max_read: LEGACY_INPUT,
-                convert: true,
-            },
+            contract: range("contract"),
+            core: range("core"),
+            stream: range("stream"),
+            comms: range("comms"),
+            legacy: Some(SchemaRange {
+                min_read: legacy_head,
+                target: legacy_head,
+            }),
         }
     }
     fn validate(&self) -> Result<(), Error> {
-        require_domains(&self.domains)?;
-        if self.format_version != STORAGE_FORMAT_VERSION
-            || !self.layout.valid()
-            || self.layout.min_read == 0
-            || self.contract_schema == 0
-            || self.domains.values().any(|r| !r.valid())
-            || self.legacy.min_read < 0
-            || self.legacy.min_read > self.legacy.max_read
+        if [
+            self.layout,
+            self.contract,
+            self.core,
+            self.stream,
+            self.comms,
+        ]
+        .into_iter()
+        .chain(self.legacy)
+        .any(|r| !r.valid())
         {
             return Err(incompatible("invalid candidate storage capabilities"));
         }
@@ -144,12 +136,15 @@ impl StorageCapabilities {
                 if exact {
                     return Err(needs_hub());
                 }
-                if self.legacy.convert
-                    && (self.legacy.min_read..=self.legacy.max_read).contains(schema_version)
-                {
+                let Some(legacy) = self.legacy else {
+                    return Err(incompatible(
+                        "candidate does not include a legacy converter",
+                    ));
+                };
+                if u32::try_from(*schema_version).is_ok_and(|v| legacy.accepts(v, false)) {
                     Ok(())
                 } else {
-                    Err(legacy_refusal(*schema_version, self.legacy.max_read))
+                    Err(legacy_refusal(*schema_version, legacy.target.into()))
                 }
             }
             StorageState::Current {
@@ -159,13 +154,19 @@ impl StorageCapabilities {
             } => {
                 layout.validate_shape()?;
                 require_domains(domains)?;
-                if !self.layout.accepts(layout.generation, exact)
-                    || layout.min_reader > self.layout.max_read
-                    || *contract_schema != self.contract_schema
-                    || self
-                        .domains
-                        .iter()
-                        .any(|(d, r)| !r.accepts(domains[d], exact))
+                // One predicate for every declared storage item, including
+                // physical min_reader. A current store never consults legacy.
+                let versions = [
+                    (layout.generation, self.layout),
+                    (*contract_schema, self.contract),
+                    (domains["core"], self.core),
+                    (domains["stream"], self.stream),
+                    (domains["comms"], self.comms),
+                ];
+                if versions
+                    .into_iter()
+                    .any(|(v, range)| !range.accepts(v, exact))
+                    || !self.layout.accepts(layout.min_reader, false)
                 {
                     return Err(incompatible(
                         "storage schema differs from this program; start or upgrade the Hub first",
@@ -175,8 +176,9 @@ impl StorageCapabilities {
             }
         }
     }
-    /// Draft storage object only. Legacy top-level schema wrappers belong to the
-    /// release/build-info caller, and must not be used by new compatibility gates.
+    /// Storage object only. Legacy top-level schema wrappers retain their three
+    /// fields in the release/build-info caller; new gates never consult them.
+    /// The name stays stable for callers wiring this payload into build-info.
     pub fn encode_build_info_draft(&self) -> Result<serde_json::Value, Error> {
         self.validate()?;
         serde_json::to_value(self).map_err(|_| incompatible("cannot encode storage capabilities"))
