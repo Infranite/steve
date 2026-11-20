@@ -1480,3 +1480,6 @@ fn single_user_fulltext_candidates_include_private_memories_but_keep_workspace_a
         })
         .unwrap();
 }
+
+#[path = "facts/cases.rs"]
+mod facts_cases;
