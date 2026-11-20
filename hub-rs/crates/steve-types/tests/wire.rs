@@ -323,7 +323,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             user: "user-a".into(),
         },
         "node",
-        Scope::User("user-a".into()),
+        Scope::Hub,
     );
     fixtures.insert("node.json".to_owned());
     devicesevent.insert("node");
@@ -333,7 +333,7 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             user: "user-a".into(),
         },
         "client",
-        Scope::User("user-a".into()),
+        Scope::Hub,
     );
     fixtures.insert("client.json".to_owned());
     devicesevent.insert("client");

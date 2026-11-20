@@ -22,12 +22,8 @@ pub enum DevicesEvent {
 
 impl Scoped for DevicesEvent {
     fn scope(&self) -> Scope {
-        match self {
-            Self::ReleaseHold { .. } => Scope::Hub,
-            Self::Device { .. } => Scope::Hub,
-            Self::Node { user, .. } => Scope::User(user.clone()),
-            Self::Client { user, .. } => Scope::User(user.clone()),
-        }
+        // The owner's devices and presence are installation-wide state on a single-user Hub.
+        Scope::Hub
     }
 }
 

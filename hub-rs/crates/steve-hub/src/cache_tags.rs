@@ -6,7 +6,7 @@ use steve_types::*;
 pub fn scope(scope: &Scope) -> Tag {
     match scope {
         Scope::Ws(ws) => Tag::of("state", ws.as_str()),
-        Scope::Hub | Scope::User(_) => Tag::global("state"),
+        Scope::Hub => Tag::global("state"),
     }
 }
 pub fn state_event(event: &BusEvent) -> bool {

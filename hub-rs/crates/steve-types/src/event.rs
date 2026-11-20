@@ -1,6 +1,6 @@
 //! Typed bus envelopes and domain dispatch; revisions are data, never SSE cursors.
 
-use crate::{Rev, UserId, WorkspaceId};
+use crate::{Rev, WorkspaceId};
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -16,7 +16,6 @@ pub struct Envelope<E> {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum Scope {
     Ws(WorkspaceId),
-    User(UserId),
     Hub,
 }
 

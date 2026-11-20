@@ -34,7 +34,7 @@ use tokio::sync::broadcast::{
 use tokio::time::{Instant, Interval, interval_at};
 
 use super::{AppState, Ctx};
-use crate::bus::{Bus, Cursor, Delivery, Replay, Viewer};
+use crate::bus::{Bus, Cursor, Delivery, Replay};
 use crate::presence::Here;
 use steve_types::{BusEvent, Envelope, LiveEvent, Scoped, StreamControl};
 
@@ -105,8 +105,8 @@ struct Resume {
 }
 
 struct Sub {
-    /// who the stream is for: its workspace, and who is signed in
-    ws: Viewer,
+    /// The workspace the stream shows; Hub events reach every connection.
+    ws: String,
     rx: Receiver<Arc<Delivery>>,
     ping: Interval,
     /// `None`: a legacy subscriber (no cursor), served exactly as before
@@ -187,12 +187,12 @@ fn reset_frame(epoch: &str, head: u64) -> Vec<u8> {
 impl Sub {
     /// A subscriber that continues after `after` (as sent on the wire). Subscribes before reading the log, so
     /// a frame sent in between arrives on the broadcast too and is dropped there as already replayed.
-    fn resumed(bus: &Bus, ws: Viewer, after: &str) -> Sub {
+    fn resumed(bus: &Bus, ws: String, after: &str) -> Sub {
         Sub::resumed_on(bus, ws, bus.subscribe(), after)
     }
 
     /// [`Sub::resumed`] on a receiver subscribed before this call.
-    fn resumed_on(bus: &Bus, ws: Viewer, rx: Receiver<Arc<Delivery>>, after: &str) -> Sub {
+    fn resumed_on(bus: &Bus, ws: String, rx: Receiver<Arc<Delivery>>, after: &str) -> Sub {
         let replay = bus.replay_from(after);
         let mut sub = Sub {
             ws,
@@ -222,7 +222,7 @@ impl Sub {
                 // Keep typed Arcs; encode only a chunk at a time in `Pending::pop_front`.
                 for f in frames {
                     let Some(id) = f.id else { continue };
-                    if id <= r.last || !f.visible(&self.ws) {
+                    if id <= r.last || !f.visible_to(&self.ws) {
                         continue;
                     }
                     self.pending.push(Part::Frame(f, id));
@@ -257,7 +257,7 @@ impl Sub {
     /// The bytes `f` goes out as on this stream, or `None` when it is not for this subscriber or was
     /// already written.
     fn take(&mut self, f: &Delivery) -> Option<Bytes> {
-        let visible = f.visible(&self.ws);
+        let visible = f.visible_to(&self.ws);
         match (self.resume.as_mut(), f.id) {
             (Some(r), Some(id)) => {
                 if id <= r.last {
@@ -340,7 +340,7 @@ impl Sub {
 /// the legacy stream).
 pub fn events(
     st: &AppState,
-    ws: Viewer,
+    ws: String,
     here: Option<Here>,
     after: Option<String>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + use<> {
@@ -383,19 +383,13 @@ pub async fn stream(
     headers: HeaderMap,
 ) -> Response {
     let after = cursor_of(&q, &headers);
-    let owner = c.user.get("role").and_then(serde_json::Value::as_str) == Some("owner");
     // a signed-in client is online while this stream is open (G6)
     let store = st.modules.as_ref().map(|m| &m.store);
     let here = c
         .client
         .as_ref()
         .map(|cl| st.presence.enter(store, &cl.id, &c.me));
-    let viewer = Viewer {
-        ws: c.ws,
-        user: c.me,
-        owner,
-    };
-    let mut res = Response::new(Body::from_stream(events(&st, viewer, here, after)));
+    let mut res = Response::new(Body::from_stream(events(&st, c.ws, here, after)));
     let h = res.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -421,11 +415,6 @@ mod tests {
         let event: BusEvent = match scope {
             Scope::Ws(ws) => steve_types::ConfigEvent::Project { id: "p".into(), ws }.into(),
             Scope::Hub => steve_types::DevicesEvent::Device { id: "d".into() }.into(),
-            Scope::User(user) => steve_types::DevicesEvent::Node {
-                id: "n".into(),
-                user,
-            }
-            .into(),
         };
         Arc::new(Delivery {
             envelope: Arc::new(Envelope {
@@ -439,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn visible_connections_and_replay_share_one_lazy_encoding() {
-        let events: [BusEvent; 2] = [
+        let events: [BusEvent; 4] = [
             steve_types::WorkEvent::Item {
                 id: "item".into(),
                 ws: "a".into(),
@@ -456,21 +445,36 @@ mod tests {
                 ws: "a".into(),
             }
             .into(),
+            steve_types::DevicesEvent::Node {
+                id: "node".into(),
+                user: "owner".into(),
+            }
+            .into(),
+            steve_types::DevicesEvent::Client {
+                id: "client".into(),
+                user: "owner".into(),
+            }
+            .into(),
         ];
         for event in events {
             let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
                 Default::default(),
             )));
             let start = bus.cursor();
-            let subscriber = || Sub {
-                ws: "a".into(),
+            let subscriber = |ws: &str| Sub {
+                ws: ws.into(),
                 here: None,
                 rx: bus.subscribe(),
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: None,
                 pending: Pending::default(),
             };
-            let (first, second) = (subscriber(), subscriber());
+            let second_ws = if event.scope() == Scope::Hub {
+                "b"
+            } else {
+                "a"
+            };
+            let (first, second) = (subscriber("a"), subscriber(second_ws));
             let mut watch = bus.subscribe();
             bus.publish(event);
             let delivery = tokio::time::timeout(Duration::from_secs(5), watch.recv())
@@ -503,6 +507,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn signing_out_closes_only_that_clients_streams_after_hub_notifications() {
+        let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+            Default::default(),
+        )));
+        let presence = Arc::new(crate::presence::Presence::default());
+        let subscriber = |client: &str, ws: &str| Sub {
+            ws: ws.into(),
+            here: Some(presence.enter(None, client, "owner")),
+            rx: bus.subscribe(),
+            ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
+            resume: None,
+            pending: Pending::default(),
+        };
+        let (first, second, other) = (
+            subscriber("client-a", "a"),
+            subscriber("client-a", "b"),
+            subscriber("client-b", "c"),
+        );
+        bus.publish(steve_types::DevicesEvent::Client {
+            id: "client-a".into(),
+            user: "owner".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (first, second, other) = tokio::join!(first.next(), second.next(), other.next());
+            let first = first.unwrap().1;
+            let second = second.unwrap().1;
+            let other = other.unwrap().1;
+            assert!(presence.kick(None, "client-a"));
+            assert!(first.next().await.is_none());
+            assert!(second.next().await.is_none());
+            bus.publish(steve_types::DevicesEvent::Node {
+                id: "node".into(),
+                user: "owner".into(),
+            });
+            let bytes = other.next().await.unwrap().0.unwrap();
+            assert!(
+                std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("\"type\":\"node\"")
+            );
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

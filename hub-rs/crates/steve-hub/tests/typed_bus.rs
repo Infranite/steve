@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use steve_hub::{
-    bus::{Bus, Scope, Viewer},
+    bus::{Bus, Scope},
     wire::store::BusPublisher,
 };
 use steve_store::{Store, StoreError};
@@ -104,38 +104,18 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
         assert_eq!(serde_json::to_value(&*tap_value).unwrap(), value, "{tag}");
         assert!(value["rev"].is_number());
         assert_eq!(value["type"], tag);
-        let personal = matches!(tag, "node" | "client");
-        let hub = matches!(tag, "device" | "release.hold");
-        for (ws, user, owner) in [
-            ("a", "user", false),
-            ("b", "user", false),
-            ("a", "other", false),
-            ("b", "owner", true),
-            ("b", "", false),
-        ] {
-            let viewer = Viewer {
-                ws: ws.into(),
-                user: user.into(),
-                owner,
-            };
+        let hub = matches!(tag, "device" | "release.hold" | "node" | "client");
+        for ws in ["a", "b", ""] {
             assert_eq!(
-                frame.visible(&viewer),
-                if hub {
-                    true
-                } else if personal {
-                    owner || user == "user"
-                } else {
-                    ws == "a"
-                },
-                "{tag}: {viewer:?}"
+                frame.visible_to(ws),
+                hub || ws == "a",
+                "{tag}: workspace {ws:?}"
             );
         }
         assert_eq!(
             frame.envelope.scope(),
             if hub {
                 Scope::Hub
-            } else if personal {
-                Scope::User("user".into())
             } else {
                 Scope::Ws("a".into())
             }
@@ -195,21 +175,15 @@ async fn typed_transcript_preserves_slim_sse_and_full_tap_payloads() {
     assert_eq!(typed["data"]["content"], json!({"type":"image"}));
 }
 
-/// Privacy: a workspace event that lost its workspace, or a personal event that lost its user, must not
-/// fall through to everyone. Workspace events reach no viewer at all (not even one without a workspace);
-/// personal events reach only the Hub's owners.
+/// Workspace events without a workspace reach nobody, including connections without a workspace.
+/// Device notifications remain Hub-wide even when their user payload is empty.
 #[tokio::test]
-async fn events_without_a_workspace_or_user_reach_nobody_beyond_the_owners() {
+async fn missing_workspaces_reach_nobody_and_devices_without_users_remain_hub_wide() {
     let bus = Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
         Default::default(),
     )));
     let mut rx = bus.subscribe();
-    let viewers = [
-        ("", "", false),
-        ("a", "user", false),
-        ("", "user", false),
-        ("b", "owner", true),
-    ];
+    let workspaces = ["", "a", "b"];
     for tag in [
         "item",
         "steve.tool",
@@ -221,13 +195,8 @@ async fn events_without_a_workspace_or_user_reach_nobody_beyond_the_owners() {
     ] {
         bus.publish(bus_cases::typed(tag, ""));
         let (frame, _) = next(&mut rx).await;
-        for (ws, user, owner) in viewers {
-            let viewer = Viewer {
-                ws: ws.into(),
-                user: user.into(),
-                owner,
-            };
-            assert!(!frame.visible(&viewer), "{tag}: {viewer:?}");
+        for ws in workspaces {
+            assert!(!frame.visible_to(ws), "{tag}: workspace {ws:?}");
         }
     }
     for event in [
@@ -242,13 +211,9 @@ async fn events_without_a_workspace_or_user_reach_nobody_beyond_the_owners() {
     ] {
         bus.publish(steve_types::DomainEvent::from(event));
         let (frame, _) = next(&mut rx).await;
-        for (ws, user, owner) in viewers {
-            let viewer = Viewer {
-                ws: ws.into(),
-                user: user.into(),
-                owner,
-            };
-            assert_eq!(frame.visible(&viewer), owner, "{viewer:?}");
+        assert_eq!(frame.envelope.scope(), Scope::Hub);
+        for ws in workspaces {
+            assert!(frame.visible_to(ws), "workspace {ws:?}");
         }
     }
 }
