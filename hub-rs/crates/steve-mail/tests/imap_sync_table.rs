@@ -1,4 +1,4 @@
-//! Pin command failures and cursor commits before splitting the folder sync engine.
+//! Command failures must preserve the unconfirmed window for the next sync.
 mod support;
 
 use steve_mail::fake::fixtures;
@@ -33,7 +33,7 @@ impl MailSink for Sink {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn command_failures_preserve_existing_errors_and_cursor_updates() {
+async fn command_failures_keep_cursors_and_replay_the_window() {
     let stages = ["examine", "search", "sizes", "bodies", "store"];
     for (stage, name) in stages.into_iter().enumerate() {
         let h = setup().await;
@@ -76,19 +76,12 @@ async fn command_failures_preserve_existing_errors_and_cursor_updates() {
         }
         let start = h.imap.commands().len();
         let result = adapter.sync(&cx, &mut state, &mut sink).await;
-        // async-imap currently treats a tagged SEARCH NO as an empty result. Pin that existing
-        // behavior here; this refactor must not silently change its cursor/error semantics.
-        let empty_search = name == "search";
-        if empty_search {
-            assert_eq!(result.unwrap().fetched, 0, "{name}");
+        let expected = if name == "store" {
+            AdapterError::Store("table store failure".into())
         } else {
-            let expected = if name == "store" {
-                AdapterError::Store("table store failure".into())
-            } else {
-                AdapterError::Rejected("邮件服务器拒绝了这个操作".into())
-            };
-            assert_eq!(result.unwrap_err(), expected, "{name}");
-        }
+            AdapterError::Rejected("邮件服务器拒绝了这个操作".into())
+        };
+        assert_eq!(result.unwrap_err(), expected, "{name}");
         let commands: Vec<_> = h.imap.commands()[start..]
             .iter()
             .filter_map(|c| {
@@ -110,20 +103,16 @@ async fn command_failures_preserve_existing_errors_and_cursor_updates() {
         assert_eq!(folder.uidvalidity.is_some(), stage > 0, "{name}");
         assert_eq!(
             (folder.last_uid, folder.synced, folder.cursor.as_deref()),
-            (
-                empty_search.then_some(1),
-                empty_search.then_some(state.now),
-                None
-            ),
+            (None, None, None),
             "{name}"
         );
         assert!(sink.messages.is_empty(), "{name}");
         sink.fail = false;
         let report = adapter.sync(&cx, &mut state, &mut sink).await.unwrap();
-        assert_eq!(report.fetched, usize::from(!empty_search), "{name}");
+        assert_eq!(report.fetched, 1, "{name}");
         assert_eq!(state.folders[0].last_uid, Some(1), "{name}");
         assert_eq!(state.folders[0].synced, Some(state.now), "{name}");
-        assert_eq!(sink.messages.len(), usize::from(!empty_search), "{name}");
+        assert_eq!(sink.messages.len(), 1, "{name}");
         assert!(sink.messages.iter().all(|m| m.backfill), "{name}");
     }
 }

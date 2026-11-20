@@ -12,7 +12,7 @@
 //!
 //! The password is read from the vault for each connection and never logged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use async_imap::imap_proto::{
@@ -701,11 +701,13 @@ fn item_of(attrs: &[AttributeValue<'_>]) -> Item {
     it
 }
 
-/// Runs a FETCH-like command and collects its FETCH responses (async-imap's `Fetch` does not expose
-/// `X-GM-THRID`, so the responses are read directly).
-async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
+/// A command succeeds only at its own tagged OK, never at an empty or partial data stream.
+async fn checked_command(
+    s: &mut Session,
+    cmd: &str,
+    mut receive: impl FnMut(&Response<'_>) + Send,
+) -> Result<(), AdapterError> {
     let tag = timed(async { s.run_command(cmd).await.map_err(imap_err) }).await?;
-    let mut out = Vec::new();
     loop {
         let r = timed(async {
             s.read_response()
@@ -715,10 +717,9 @@ async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
         .await?
         .ok_or_else(|| AdapterError::Transient("和邮件服务器的连接断了".into()))?;
         match r.parsed() {
-            Response::Fetch(_, attrs) => out.push(item_of(attrs)),
             Response::Done { tag: t, status, .. } if *t == tag => {
                 return match status {
-                    Status::Ok => Ok(out),
+                    Status::Ok => Ok(()),
                     _ => Err(AdapterError::Rejected("邮件服务器拒绝了这个操作".into())),
                 };
             }
@@ -726,9 +727,36 @@ async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
                 status: Status::Bye,
                 ..
             } => return Err(AdapterError::Transient("和邮件服务器的连接断了".into())),
-            _ => {}
+            _ => receive(r.parsed()),
         }
     }
+}
+
+/// Collect FETCH data without losing Gmail's X-GM-THRID or the command's completion status.
+async fn fetch(s: &mut Session, cmd: &str) -> Result<Vec<Item>, AdapterError> {
+    let mut out = Vec::new();
+    checked_command(s, cmd, |response| {
+        if let Response::Fetch(_, attrs) = response {
+            out.push(item_of(attrs));
+        }
+    })
+    .await?;
+    Ok(out)
+}
+
+/// async-imap's SEARCH parser discards tagged NO/BAD; do not accept its empty/partial set.
+async fn search_uids(s: &mut Session, query: &str) -> Result<HashSet<u32>, AdapterError> {
+    timed(async {
+        let mut out = HashSet::new();
+        checked_command(s, &format!("UID SEARCH {query}"), |response| {
+            if let Response::MailboxData(MailboxDatum::Search(ids)) = response {
+                out.extend(ids);
+            }
+        })
+        .await?;
+        Ok(out)
+    })
+    .await
 }
 
 /// `UID STORE <uid> <op>FLAGS.SILENT (<flag>)`.
@@ -783,14 +811,10 @@ async fn discover_uids(
 ) -> Result<Vec<u32>, AdapterError> {
     let mut uids: Vec<u32> = if last_uid.is_none() {
         let since = search_date(now - sync_days.max(1) * 86_400_000);
-        let mut u: Vec<u32> = timed(async {
-            s.uid_search(format!("SINCE {since}"))
-                .await
-                .map_err(imap_err)
-        })
-        .await?
-        .into_iter()
-        .collect();
+        let mut u: Vec<u32> = search_uids(s, &format!("SINCE {since}"))
+            .await?
+            .into_iter()
+            .collect();
         u.sort_unstable();
         let skip = u.len().saturating_sub(FIRST_SYNC_MAX);
         u.split_off(skip)
@@ -1121,10 +1145,11 @@ impl ImapAdapter {
                 }
             }
             if let Some(mid) = message_id {
-                let found = s
-                    .uid_search(format!("HEADER Message-ID {}", quote(&format!("<{mid}>"))))
-                    .await
-                    .map_err(imap_err)?;
+                let found = search_uids(
+                    s,
+                    &format!("HEADER Message-ID {}", quote(&format!("<{mid}>"))),
+                )
+                .await?;
                 if let Some(u) = found.into_iter().min() {
                     return Ok((wire.clone(), u));
                 }
