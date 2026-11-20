@@ -38,7 +38,7 @@ steve-core/src/util.rs	1
 steve-core/src/yolo/undo_tests.rs	1
 steve-flow/tests/code_nodes.rs	1
 steve-flow/tests/flows.rs	1
-steve-flow/tests/signals.rs	2
+steve-flow/tests/signals.rs	1
 steve-github/tests/g3.rs	4
 steve-hub/src/api/dedupe.rs	2
 steve-hub/src/api/outputs/node.rs	1

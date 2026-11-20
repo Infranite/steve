@@ -482,6 +482,7 @@ fn data_frames(service: i32, msg_id: &str, payload: &[u8], parts: usize) -> Vec<
 async fn attempt(sh: &Arc<Shared>, event_id: &str, attempt: u32) -> Option<i64> {
     // A connection the client already counts as up is registered by now (bounded: an upgrade whose
     // socket never arrives must not hold deliveries).
+    // This outer service timeout must stay below testkit::EVENTUALLY (60 s).
     let _ = tokio::time::timeout(
         UPGRADE_WAIT,
         steve_runtime::testkit::eventually_sync(
@@ -563,6 +564,7 @@ async fn deliver(sh: Arc<Shared>, event_id: String, first_attempt: u32) {
         return;
     }
     for delay in schedule {
+        // Simulated provider redelivery cadence, not a readiness poll in the test harness.
         tokio::time::sleep(delay).await;
         n += 1;
         if attempt(&sh, &event_id, n).await == Some(200) {

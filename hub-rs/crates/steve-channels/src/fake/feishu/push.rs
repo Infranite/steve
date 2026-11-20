@@ -200,6 +200,7 @@ impl EventPusher {
             if all.last().is_some_and(Delivery::ok) {
                 break;
             }
+            // Simulated webhook retry schedule, not a test waiting for readiness.
             tokio::time::sleep(*delay).await;
             all.push(self.redeliver(&id).await?);
         }

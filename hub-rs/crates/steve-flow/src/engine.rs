@@ -1243,7 +1243,7 @@ mod tests {
         // the cut-off step landed before the run was ended, and nothing lands after
         let at_end = steps(&e, &id);
         busy.await.unwrap();
-        tokio::time::advance(Duration::from_millis(100)).await;
+        steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
         assert_eq!(at_end, 1);
         assert_eq!(steps(&e, &id), at_end);
         let run = e

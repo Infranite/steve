@@ -1483,6 +1483,7 @@ async fn get_resource(
         (rt.resource_delay, rt.resource_answer.clone())
     };
     if !delay.is_zero() {
+        // Simulated in-flight download latency lets revocation race with the response.
         tokio::time::sleep(delay).await;
     }
     if let Some((status, ct, body)) = answer {

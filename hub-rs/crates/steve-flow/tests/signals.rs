@@ -878,7 +878,7 @@ async fn signal_events_are_coalesced() {
     // Freeze only after the real ingest writes completed. The existing observation window now
     // runs in virtual time, visiting intermediate timer deadlines rather than jumping past them.
     tokio::time::pause();
-    tokio::time::sleep(signals::COALESCE + Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(signals::COALESCE + Duration::from_millis(200)).await;
     let sig: Vec<BusEvent> = e
         .env
         .take_events()

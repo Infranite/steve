@@ -73,6 +73,15 @@ pub fn eventually_blocking<D: Description, F: FnMut() -> bool>(what: D, mut cond
     }
 }
 
+/// Observes a fixed negative window, normally with Tokio's current-thread clock paused.
+/// Unlike `advance`, awaiting the virtual sleep lets the runtime visit intermediate deadlines
+/// and poll the tasks they wake before the window ends. Callers assert the absence of an effect
+/// after this returns; effects exactly at the end boundary and external I/O need their own
+/// synchronization. On an unpaused clock this waits real time, so it is not a condition waiter.
+pub async fn quiet_for(window: Duration) {
+    tokio::time::sleep(window).await;
+}
+
 /// Returns true once `condition` holds; panics with `what` at the shared deadline.
 /// The boolean preserves assertions at call sites; a false result is never silently ignored.
 pub async fn eventually<F, Fut>(what: impl Description, condition: F) -> bool
@@ -143,8 +152,36 @@ mod tests {
     use super::*;
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_window_runs_timer_woken_tasks_before_returning() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let work = progress.clone();
+        let worker = tokio::spawn(async move {
+            let first = tokio::time::sleep(Duration::from_millis(10));
+            tokio::pin!(first);
+            entered.send(()).unwrap();
+            first.await;
+            work.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                work.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        });
+        ready.await.unwrap();
+        let started = Instant::now();
+        quiet_for(Duration::from_millis(30)).await;
+        // Check before joining: awaiting the worker here would mask an advance-only helper.
+        assert_eq!(progress.load(Ordering::SeqCst), 2);
+        assert!(worker.is_finished());
+        assert_eq!(started.elapsed(), Duration::from_millis(30));
+        worker.await.unwrap();
+    }
 
     #[test]
     fn blocking_conditions_never_enter_the_temporary_runtime() {

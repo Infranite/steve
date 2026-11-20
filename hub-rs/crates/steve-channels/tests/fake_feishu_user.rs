@@ -201,6 +201,7 @@ async fn grants_and_single_use_refresh_tokens() {
     assert!(s(&t["scope"]).contains("offline_access"));
 }
 
+// Keep current_thread: this test pauses Tokio time between real HTTP requests.
 #[tokio::test]
 async fn device_flow() {
     let f = FakeFeishu::start().await.unwrap();
@@ -394,6 +395,7 @@ async fn user_token_reads_history_with_restrictions() {
     assert_eq!(u.get(&tt, &list(ids::GROUP_CHAT, "")).await["code"], 0);
 }
 
+// Keep current_thread: virtual rate-window advancement uses Tokio's pause/advance/resume.
 #[tokio::test]
 async fn send_as_user_needs_scope_and_is_rate_limited() {
     let f = FakeFeishu::start().await.unwrap();

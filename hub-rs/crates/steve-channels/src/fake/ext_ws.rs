@@ -409,6 +409,7 @@ async fn serve(socket: WebSocket, world: Arc<Mutex<World>>) {
             }
         }
     });
+    // Fake-server protocol deadline for a missing hello, not a readiness poll.
     let hello_deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(hello_deadline);
     loop {

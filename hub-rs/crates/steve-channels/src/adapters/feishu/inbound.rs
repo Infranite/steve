@@ -1030,7 +1030,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(next(&mut out).await, "b1", "chat B ran while A was busy");
-        tokio::time::advance(std::time::Duration::from_millis(50)).await;
+        steve_runtime::testkit::quiet_for(std::time::Duration::from_millis(50)).await;
         assert!(out.try_recv().is_err(), "a2 waits for a1");
         gate.notify_one();
         assert_eq!(next(&mut out).await, "a1");

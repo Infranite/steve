@@ -358,7 +358,7 @@ async fn connections_listed_and_changed_meanwhile_both_start() {
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_b:start"), 1);
     // each got its channel settings in the declared mode first
     assert_eq!(
@@ -418,7 +418,7 @@ async fn a_restart_waits_for_the_old_run_whose_sink_then_refuses() {
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_a:start"), 2);
     h.rt.shutdown().await;
 }
@@ -435,7 +435,7 @@ async fn what_a_stopped_run_returns_is_not_reported() {
     h.event("con_a");
     h.wait_for("restarted", |h| h.probe.count("con_a:start") == 2)
         .await;
-    tokio::time::advance(Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(
         h.one("SELECT status FROM connections WHERE id = 'con_a'"),
         "ok"
@@ -474,7 +474,7 @@ async fn a_run_failing_on_a_credential_replaced_before_its_event_is_not_reported
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(200)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(200)).await;
     assert_eq!(h.probe.count("con_a:start"), 2);
     assert_eq!(
         h.one("SELECT status FROM connections WHERE id = 'con_a'"),
@@ -521,9 +521,9 @@ async fn failures_and_panics_are_retried_and_reported() {
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     let n = h.probe.count("con_r:start");
-    tokio::time::advance(Duration::from_millis(400)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(400)).await;
     assert_eq!(h.probe.count("con_r:start"), n, "not retried in reauth");
     h.rt.shutdown().await;
 }
@@ -540,20 +540,20 @@ async fn a_finished_run_starts_again_only_when_wanted_again() {
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(300)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(300)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
     h.exec("UPDATE connections SET status = 'paused' WHERE id = 'con_a'");
     h.event("con_a");
     h.exec("UPDATE connections SET status = 'ok' WHERE id = 'con_a'");
     // the two events may be read after both writes: then nothing changed, so also a new
     // credential (another fingerprint) starts it again
-    tokio::time::advance(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     h.event("con_a");
     h.wait_for("queued connection events reconciled", |h| {
         h.tx.capacity() == h.tx.max_capacity()
     })
     .await;
-    tokio::time::advance(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     if h.probe.count("con_a:start") == 1 {
         h.exec("UPDATE connections SET credential_item = 'vi_con_a_2' WHERE id = 'con_a'");
         h.event("con_a");
@@ -663,7 +663,7 @@ async fn shutdown_aborts_a_run_that_does_not_stop() {
     assert_eq!(h.probe.count("con_b:end"), 1);
     // nothing starts after shutdown
     h.event("con_a");
-    tokio::time::advance(Duration::from_millis(100)).await;
+    steve_runtime::testkit::quiet_for(Duration::from_millis(100)).await;
     assert_eq!(h.probe.count("con_a:start"), 1);
     let _ = &h.ch;
 }
@@ -846,6 +846,7 @@ async fn supervisor_stable_success_and_supersession_reset_the_next_failure() {
             .expect("the supervisor must start another run")
     }
     async fn settled_success(h: &H) {
+        // Let the real supervisor consume the successful completion before replacing its fingerprint.
         steve_runtime::testkit::eventually_sync("the successful run settled", || {
             h.rt.running().is_empty()
         })

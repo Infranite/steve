@@ -109,9 +109,10 @@ async fn event_is_delivered_and_acked_within_3s() {
     assert_eq!(f.ws_deliveries_of(&id).len(), 1);
 
     // Pinged right away and then every PingInterval; pongs keep the connection alive.
-    steve_runtime::testkit::eventually_sync("three heartbeat pings are received", || {
-        f.ws_connections()[0].pings >= 3
-    })
+    steve_runtime::testkit::eventually_sync(
+        "four heartbeat pings cross the read-deadline window",
+        || f.ws_connections()[0].pings >= 4,
+    )
     .await;
     assert!(f.ws_connections()[0].pings >= 3);
     assert_eq!(f.ws_connects_total(), 1);
