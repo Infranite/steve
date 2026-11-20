@@ -43,7 +43,7 @@ table	crates/steve-channels/tests/c1_feishu_ws.rs	5
 table	crates/steve-channels/tests/c1_spaces_messages.rs	6
 table	crates/steve-channels/tests/c3_rules.rs	15
 table	crates/steve-channels/tests/c4_compose.rs	23
-table	crates/steve-channels/tests/c56_outbound.rs	45
+table	crates/steve-channels/tests/c56_outbound.rs	44
 table	crates/steve-channels/tests/capi_channels.rs	1
 table	crates/steve-channels/tests/cleanup.rs	10
 table	crates/steve-channels/tests/ext_media.rs	2
@@ -112,7 +112,7 @@ write	crates/steve-channels/tests/attention.rs	3
 write	crates/steve-channels/tests/c1_spaces_messages.rs	3
 write	crates/steve-channels/tests/c3_rules.rs	1
 write	crates/steve-channels/tests/c4_compose.rs	8
-write	crates/steve-channels/tests/c56_outbound.rs	20
+write	crates/steve-channels/tests/c56_outbound.rs	22
 write	crates/steve-channels/tests/capi_channels.rs	1
 write	crates/steve-channels/tests/cleanup.rs	5
 write	crates/steve-channels/tests/conversation_preferences.rs	4

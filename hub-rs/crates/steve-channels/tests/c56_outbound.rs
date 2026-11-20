@@ -7647,7 +7647,9 @@ async fn queue_query_failure_reaches_the_due_loop() {
     f.h.env
         .store()
         .with_conn(|c| {
-            c.execute_batch("ALTER TABLE chan_messages RENAME TO unavailable_messages")?;
+            c.execute_batch(
+                "ALTER TABLE personal_notifications RENAME TO unavailable_notifications",
+            )?;
             Ok(())
         })
         .unwrap();
@@ -7655,4 +7657,14 @@ async fn queue_query_failure_reaches_the_due_loop() {
         f.source.run_due(now).await.is_err(),
         "a failed batch read must back off as a source error"
     );
+    // Put the table back so the fixture's closing digest audit reads an intact schema.
+    f.h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "ALTER TABLE unavailable_notifications RENAME TO personal_notifications",
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }
