@@ -1,6 +1,8 @@
 //! Offline user-service management. A process ID never proves a Node is idle or
 //! identifies its running build. Replacing or unregistering a service requires
 //! a known stopped state; launchd must additionally have unloaded its job.
+mod uninstall;
+
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1057,87 +1059,11 @@ impl Service {
         Ok(output.stdout)
     }
 
-    fn uninstall(&mut self) -> Result<Value> {
-        self.require_registration("uninstall")?;
-        let present = exists(&self.config);
-        let definition = if present {
-            Some(regular(&self.config)?)
-        } else {
-            None
-        };
-        if let Some(bytes) = &definition
-            && self.system == System::Darwin
-        {
-            let value: Value = plist::from_bytes(bytes)?;
-            ensure!(
-                value["Label"] == self.label,
-                "service definition label differs from the exact owned label"
-            );
-        }
-        let old_record = if exists(&self.record_path) {
-            Some(regular(&self.record_path)?)
-        } else {
-            None
-        };
-        ensure!(
-            self.record.as_object().is_some_and(|o| o.is_empty())
-                || (self.record["component"] == self.component
-                    && self.record["label"] == self.label),
-            "service record does not identify this component and label"
-        );
-        self.stopped()?;
-        if present && self.system == System::Linux {
-            self.systemctl(&["daemon-reload"], true)?;
-            self.stopped()?;
-        }
-        let effective = if present && self.system == System::Linux {
-            Some(self.isolated_unit(definition.as_ref().unwrap())?)
-        } else {
-            None
-        };
-        let mut pending = self.record.get("uninstall").cloned().unwrap_or(json!({}));
-        ensure!(
-            pending.is_object(),
-            "uninstall receipt is invalid; inspect the retained service record"
-        );
-        if !present && pending["phase"] != "pending" {
-            return Ok(
-                json!({"installed":false,"changed":false,"started":false,"home_preserved":true,"archive":pending["archive"]}),
-            );
-        }
-        let services = self.home.join("services");
-        directory(&services)?;
-        let retired = services.join("retired");
-        directory(&retired)?;
-        let archive;
-        if pending["phase"] == "pending" {
-            archive = self.resume_uninstall_archive(&retired, &pending, definition.as_deref())?;
-        } else {
-            let definition = definition
-                .as_ref()
-                .context("uninstall definition disappeared")?;
-            archive = retired.join(format!("{}-{}", self.component, Uuid::new_v4().simple()));
-            directory(&archive)?;
-            atomic(&archive.join("definition"), definition)?;
-            ensure!(
-                regular(&archive.join("definition"))? == *definition,
-                "service definition backup did not verify"
-            );
-            if let Some(bytes) = &old_record {
-                atomic(&archive.join("record.json"), bytes)?;
-                ensure!(
-                    regular(&archive.join("record.json"))? == *bytes,
-                    "service record backup did not verify"
-                );
-            }
-            pending = json!({"phase":"pending","archive":archive.file_name().unwrap().to_str().unwrap(),"config":text(&self.config)?,
-                "definition_sha256":digest(definition),"record_sha256":old_record.as_ref().map(|bytes|digest(bytes))});
-            self.record["component"] = json!(self.component);
-            self.record["label"] = json!(self.label);
-            self.record["uninstall"] = pending.clone();
-            self.record["uninstalled"] = json!(false);
-            atomic(&self.record_path, &json_bytes(&self.record)?)?;
-        }
+    fn remove_uninstall_definition(
+        &self,
+        definition: Option<Vec<u8>>,
+        effective: Option<String>,
+    ) -> Result<()> {
         if let Some(definition) = definition {
             self.stopped()?;
             ensure!(
@@ -1166,18 +1092,7 @@ impl Service {
             !exists(&self.config),
             "service definition reappeared; inspect it before retrying uninstall"
         );
-        pending["phase"] = json!("complete");
-        self.record["uninstall"] = pending;
-        self.record["uninstalled"] = json!(true);
-        let bytes = json_bytes(&self.record)?;
-        atomic(&self.record_path, &bytes)?;
-        ensure!(
-            regular(&self.record_path)? == bytes,
-            "uninstall receipt did not verify"
-        );
-        Ok(
-            json!({"installed":false,"changed":true,"started":false,"home_preserved":true,"archive":text(&archive)?}),
-        )
+        Ok(())
     }
 
     fn resume_uninstall_archive(
