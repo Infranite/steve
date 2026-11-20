@@ -140,17 +140,22 @@ async fn workspaces_report_and_reclaim() {
 
     /* the boot pass may still run: a second caller is told it was skipped, never blocked */
     let end = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let (s, v) = e.call("POST", "/api/system/workspaces/reclaim", None).await;
-        assert_eq!(s, 200, "{v}");
-        if v["skipped"] == false {
-            assert_eq!(v["removed"], Value::Array(vec![]));
-            assert!(v["free_after"].as_u64().is_some(), "{v}");
-            break;
-        }
-        assert!(tokio::time::Instant::now() < end, "never ran: {v}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    steve_runtime::testkit::eventually(
+        "A reclaim request runs after the boot pass releases it.",
+        || async {
+            let (s, v) = e.call("POST", "/api/system/workspaces/reclaim", None).await;
+            assert_eq!(s, 200, "{v}");
+            if v["skipped"] == false {
+                assert_eq!(v["removed"], Value::Array(vec![]));
+                assert!(v["free_after"].as_u64().is_some(), "{v}");
+                true
+            } else {
+                assert!(tokio::time::Instant::now() < end, "never ran: {v}");
+                false
+            }
+        },
+    )
+    .await;
     assert!(
         e.worktrees.join("OLD-1/f").exists(),
         "a folder no item points at is never deleted"

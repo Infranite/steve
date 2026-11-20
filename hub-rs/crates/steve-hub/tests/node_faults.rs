@@ -271,15 +271,22 @@ impl ToolHost {
     /// Opens the ledger (marking calls left running as unknown) once the last owner let it go.
     async fn start(&self) {
         let t0 = Instant::now();
-        let tools = loop {
-            match NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home) {
-                Ok(t) => break t,
+        let mut tools = None;
+        eventually_sync(
+            "The previous owner releases the tool ledger.",
+            || match NodeTools::open(self.store.clone(), NodeId::new(NODE).unwrap(), &self.home) {
+                Ok(t) => {
+                    tools = Some(t);
+                    true
+                }
                 Err(e) if e.code == ErrorCode::Busy && t0.elapsed() < Duration::from_secs(20) => {
-                    tokio::time::sleep(Duration::from_millis(20)).await
+                    false
                 }
                 Err(e) => panic!("open the tool ledger: {e:?}"),
-            }
-        };
+            },
+        )
+        .await;
+        let tools = tools.unwrap();
         tools.install(self.service.clone()).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

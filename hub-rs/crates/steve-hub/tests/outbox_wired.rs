@@ -395,15 +395,14 @@ async fn upgrade_drain_blocks_new_mutations_and_waits_for_existing_external_work
         "owner cookie is not supervisor control authorization"
     );
     drop(permit);
-    let mut ready = false;
-    for _ in 0..30 {
-        let status = e.domain.upgrade_drain("status").await.unwrap();
-        if status["ready"] == true {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let ready = steve_runtime::testkit::eventually(
+        "The upgrade drain seals after external work ends.",
+        || async {
+            let status = e.domain.upgrade_drain("status").await.unwrap();
+            status["ready"] == true
+        },
+    )
+    .await;
     assert!(ready);
     assert!(
         e.store.continuing_activity("late_mcp", || true).is_none(),

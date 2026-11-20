@@ -5,7 +5,6 @@
 mod node_harness;
 
 use std::path::Path;
-use std::time::Duration;
 
 use node_harness::*;
 use serde_json::{Value, json};
@@ -80,15 +79,22 @@ async fn call(
 }
 
 async fn stopped(h: &Hub, id: &str) -> Value {
-    for _ in 0..200 {
-        let (s, v) = call(h, reqwest::Method::GET, "u1", &format!("/{id}"), json!({})).await;
-        assert_eq!(s, 200);
-        if v["state"] != "running" {
-            return v;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("install {id} did not stop");
+    let result = std::sync::Mutex::new(Value::Null);
+    steve_runtime::testkit::eventually(
+        format!("Install {id} leaves its running state."),
+        || async {
+            let (s, v) = call(h, reqwest::Method::GET, "u1", &format!("/{id}"), json!({})).await;
+            assert_eq!(s, 200);
+            if v["state"] != "running" {
+                *result.lock().unwrap() = v;
+                true
+            } else {
+                false
+            }
+        },
+    )
+    .await;
+    result.into_inner().unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -230,12 +236,10 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
 
     // what the Node would do with the code it was given: pair with it
     let code_file = target.path().join("code");
-    for _ in 0..200 {
-        if code_file.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    steve_runtime::testkit::eventually_sync("The installer writes its pairing code.", || {
+        code_file.exists()
+    })
+    .await;
     let code = std::fs::read_to_string(&code_file)
         .unwrap()
         .trim()
@@ -244,15 +248,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     assert_eq!(h.claim(&code, &Identity::generate().unwrap()).await.0, 200);
     std::fs::write(target.path().join("paired"), "").unwrap();
 
-    let mut done = Value::Null;
-    for _ in 0..200 {
-        let (_, v) = call(&h, reqwest::Method::GET, "u1", &format!("/{id}"), json!({})).await;
-        if v["state"] != "running" {
-            done = v;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let done = stopped(&h, &id).await;
     assert_eq!(done["state"], "done", "{done}");
     let node = done["node_id"].as_str().unwrap();
     // confirmed by the install: active without a fingerprint check
@@ -316,22 +312,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
         json!({"address": FAIL}),
     )
     .await;
-    let mut failed = Value::Null;
-    for _ in 0..200 {
-        let (_, v) = call(
-            &h,
-            reqwest::Method::GET,
-            "u1",
-            &format!("/{failing}"),
-            json!({}),
-        )
-        .await;
-        if v["state"] != "running" {
-            failed = v;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let failed = stopped(&h, &failing).await;
     assert_eq!(failed["state"], "failed", "{failed}");
     assert_eq!(failed["failed_step"], "setup", "{failed}");
     assert_eq!(failed["address"], FAIL, "{failed}");
@@ -479,12 +460,11 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     )
     .await;
     assert_eq!(s, 200);
-    for _ in 0..200 {
-        if code_file.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    steve_runtime::testkit::eventually_sync(
+        "The retried installer writes its next pairing code.",
+        || code_file.exists(),
+    )
+    .await;
     let next_code = std::fs::read_to_string(&code_file).unwrap();
     let (s, claim) = h
         .claim(next_code.trim(), &Identity::generate().unwrap())
