@@ -237,32 +237,32 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     assert_eq!(s, 200, "{v}");
     // the request returns at once; with the modules' hooks wired the close commits once they answered
     assert_eq!(v["phase"], "closing", "{v}");
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "finishing_through_the_api_runs_an_item_flow_once_through_the_outbox: waiting for || e.one( \"SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'\" ) == 1", format!(
-        "closed"
-    )) }), || e.one(
+    eventually_sync(
+        "The outbox completion closes the delivered work item.",
+        || {
+            e.one(
             "SELECT count(*) FROM items WHERE id = 'ST-90' AND phase = 'closed' AND status = 'done'"
-        ) == 1)
-        .await;
+        ) == 1
+        },
+    )
+    .await;
     assert_eq!(
         e.one("SELECT count(*) FROM outbox_events WHERE topic = 'work.item.done'"),
         1
     );
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "finishing_through_the_api_runs_an_item_flow_once_through_the_outbox: waiting for || e .one(\"SELECT count(*) FROM outbox_receipts\") == 3", format!(
-        "all three consumers received it"
-    )) }), || e
-            .one("SELECT count(*) FROM outbox_receipts")
-            == 3)
-        .await;
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "finishing_through_the_api_runs_an_item_flow_once_through_the_outbox: waiting for || e .one(\"SELECT count(*) FROM flow_runs WHERE status = 'done'\") == 1", format!(
-        "the flow ran"
-    )) }), || e
-            .one("SELECT count(*) FROM flow_runs WHERE status = 'done'")
-            == 1)
-        .await;
-    eventually_sync("finishing_through_the_api_runs_an_item_flow_once_through_the_outbox: waiting for || e .one(\"SELECT count(*) FROM personal_notifications\") == 1", || e
-            .one("SELECT count(*) FROM personal_notifications")
-            == 1)
-        .await;
+    eventually_sync("All three outbox consumers save their receipts.", || {
+        e.one("SELECT count(*) FROM outbox_receipts") == 3
+    })
+    .await;
+    eventually_sync("The flow run started by the outbox completes.", || {
+        e.one("SELECT count(*) FROM flow_runs WHERE status = 'done'") == 1
+    })
+    .await;
+    eventually_sync(
+        "The outbox creates exactly one personal notification.",
+        || e.one("SELECT count(*) FROM personal_notifications") == 1,
+    )
+    .await;
     let (s, inbox) = e.call("GET", "/api/me/notifications", None).await;
     assert_eq!(s, 200, "{inbox}");
     assert_eq!(inbox[0]["mode"], "log");
@@ -607,10 +607,11 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    eventually_sync("real_completion_notification_reaches_e1_and_existing_c6_fake_adapter: waiting for || e.one( \"SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL\" ) == 1", || e.one(
-            "SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL"
-        ) == 1)
-        .await;
+    eventually_sync(
+        "The personal notification receives its durable delivery binding.",
+        || e.one("SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL") == 1,
+    )
+    .await;
     assert_eq!(
         e.one("SELECT count(*) FROM outbox_events WHERE topic='work.item.done'"),
         1

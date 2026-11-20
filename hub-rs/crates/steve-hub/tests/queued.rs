@@ -216,13 +216,14 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|s| s["id"].as_str())
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "item: waiting for || async { let s = e.session(&sid).await; s[\"busy\"] == true && s[\"status\"] == \"running\" }", format!(
-        "the first turn runs"
-    )) }), || async {
+    eventually(
+        "The Hub sees the target session running before the test continues.",
+        || async {
             let s = e.session(&sid).await;
             s["busy"] == true && s["status"] == "running"
-        })
-        .await;
+        },
+    )
+    .await;
     sid
 }
 
@@ -329,10 +330,13 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         )
         .await;
     assert_eq!((s, v["result"].as_str()), (200, Some("interrupted")), "{v}");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.prompts().len() == 2 }", format!(
-        "the next turn starts: {:?}",
-        e.prompts()
-    )) }), || async { e.prompts().len() == 2 }).await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The adapter receives both queued prompts in order; the next turn starts: {:?}",
+            e.prompts()
+        )
+    });
+    eventually(diagnostic, || async { e.prompts().len() == 2 }).await;
     assert_eq!(e.prompts()[1], "三\n\n二（改过）");
     assert!(e.queued(&sid).await.is_empty());
 
@@ -353,22 +357,26 @@ async fn edit_withdraw_and_send_now_during_a_slow_turn() {
         assert_eq!(s, 409, "{m} {p}: {v}");
         assert_eq!(v["error"], "这条消息已经发出，不能再改");
     }
-    eventually("edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.session(&sid).await[\"busy\"] == false }", || async {
-            e.session(&sid).await["busy"] == false
-        })
-        .await;
+    eventually(
+        "The target session becomes idle after the turn finishes.",
+        || async { e.session(&sid).await["busy"] == false },
+    )
+    .await;
     assert_eq!(e.prompts().len(), 2);
     // the turn ended: the hint is gone (the session change refreshes the state)
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "edit_withdraw_and_send_now_during_a_slow_turn: waiting for || async { e.open_decision(\"dec_midturn\") .await .get(\"agent_busy\") .is_none() }", format!(
-        "{}",
-        e.open_decision("dec_midturn").await
-    )) }), || async {
-            e.open_decision("dec_midturn")
-                .await
-                .get("agent_busy")
-                .is_none()
-        })
-        .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The pending decision no longer reports a busy agent; {}",
+            e.open_decision("dec_midturn").await
+        )
+    });
+    eventually(diagnostic, || async {
+        e.open_decision("dec_midturn")
+            .await
+            .get("agent_busy")
+            .is_none()
+    })
+    .await;
     let k = e.kinds(&sid).await;
     for x in [
         "queued",

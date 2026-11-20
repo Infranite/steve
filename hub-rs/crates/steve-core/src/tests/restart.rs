@@ -139,13 +139,7 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     k.rt.end_turn(&k.core, &busy, "end_turn", None);
     assert_eq!(k.core.drain(&token, false).unwrap().unwrap().running, 0);
     steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || holds() .last() .unwrap() .as_ref() .is_some_and(|h| h[\"running\"] == 0)",
-                format!("the running count is published as it drops")
-            )
-        }),
+        "The release drain finishes all active work before resuming queued work.",
         || {
             holds()
                 .last()
@@ -158,7 +152,7 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
     /* the script exits without restarting us (it failed): the hold lifts and held prompts go */
     std::fs::write(k.home().join("go"), "").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || !k.rt.is_holding()",
+        "The runtime releases the installation drain hold.",
         || !k.rt.is_holding(),
     );
     assert_eq!(k.core.hold_status(), None);
@@ -168,7 +162,7 @@ fn approving_a_release_runs_the_script_and_drain_holds_until_it_exits() {
         "the end of the hold is published"
     );
     steve_runtime::testkit::eventually_blocking(
-        "approving_a_release_runs_the_script_and_drain_holds_until_it_exits: waiting for || k.rt.prompts_of(&idle) == vec![\"排队的\"]",
+        "The queued prompt is delivered after the session hold is released.",
         || k.rt.prompts_of(&idle) == vec!["排队的"],
     );
     let args = std::fs::read_to_string(k.home().join("args")).unwrap();

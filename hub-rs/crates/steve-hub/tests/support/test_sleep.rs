@@ -19,6 +19,8 @@ const HEADER: &str = "# Existing test sleep calls; only shrinks.\n# file under h
 fn sleep_names() -> BTreeSet<String> {
     BTreeSet::from(["sleep".into(), "sleep_until".into()])
 }
+// Boundary: a name re-exported with pub use ... as and then ordinarily imported elsewhere
+// cannot be resolved by this file-local syntax scan; it is not a Rust name resolver.
 fn aliases(tree: &syn::UseTree, names: &mut BTreeSet<String>) {
     match tree {
         syn::UseTree::Path(p) => aliases(&p.tree, names),

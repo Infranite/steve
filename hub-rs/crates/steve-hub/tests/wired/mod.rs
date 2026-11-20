@@ -492,14 +492,18 @@ async fn mail_draft_through_approval(checker_available: bool) {
         .await;
     assert_eq!(s, 200, "{d}");
     assert!(d["decision_id"].as_str().is_some(), "{d}");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "mail_draft_through_approval: waiting for || async { let (_, d) = e.call(\"GET\", &format!(\"/api/mail/drafts/{id}\"), None).await; matches!(d[\"status\"].as_str(), Some(\"sent\" | \"failed\")) }", format!(
-        "draft never finished: {:?}",
-        e.call("GET", &format!("/api/mail/drafts/{id}"), None).await
-    )) }), || async {
-            let (_, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
-            matches!(d["status"].as_str(), Some("sent" | "failed"))
-        })
-        .await;
+    // The send queue can spend up to 30 seconds in its final disclosure check.
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The approved mail draft reaches its sent or failed terminal state; draft never finished: {:?}",
+            e.call("GET", &format!("/api/mail/drafts/{id}"), None).await
+        )
+    });
+    eventually(diagnostic, || async {
+        let (_, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
+        matches!(d["status"].as_str(), Some("sent" | "failed"))
+    })
+    .await;
     let (s, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
     assert_eq!(s, 200, "{d}");
     let sent = smtp.sent();
@@ -536,15 +540,18 @@ async fn mail_draft_through_approval(checker_available: bool) {
         "{d}"
     );
     // the triage template was installed for the new mailbox
-    eventually("mail_draft_through_approval: waiting for || async { one::<String>( &e.db, \"SELECT id FROM flows WHERE origin = 'template:mail-triage'\", &[], ) .is_some() }", || async {
+    eventually(
+        "Mail approval creates its ordinary mail-triage schedule.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT id FROM flows WHERE origin = 'template:mail-triage'",
                 &[],
             )
             .is_some()
-        })
-        .await;
+        },
+    )
+    .await;
 }
 
 /// V4: `steve_secret_use` from a session opens a `secret_use` decision; answering it over the API
@@ -620,15 +627,18 @@ async fn a_secret_use_runs_after_its_decision() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    eventually("a_secret_use_runs_after_its_decision: waiting for || async { one::<String>( &e.db, \"SELECT status FROM secret_uses WHERE status IN ('ok', 'failed', 'error') LIMIT 1\", &[], ) .is_some() }", || async {
+    eventually(
+        "The approved secret use records its final execution status.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT status FROM secret_uses WHERE status IN ('ok', 'failed', 'error') LIMIT 1",
                 &[],
             )
             .is_some()
-        })
-        .await;
+        },
+    )
+    .await;
     let (status, code): (Option<String>, Option<i64>) = (
         one(
             &e.db,
@@ -715,40 +725,37 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     envelope["event"]["message"]["create_time"] = json!(now);
     envelope["event"]["message"]["update_time"] = json!(now);
     fake.ws_push_envelope(envelope);
-    eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            let c = rusqlite::Connection::open(&e.db).expect("db");
-            let dump = |sql: &str| -> Vec<String> {
-                let mut st = c.prepare(sql).expect("sql");
-                let n = st.column_count();
-                st.query_map([], |r| {
-                    Ok((0..n)
-                        .map(|i| {
-                            format!(
-                                "{:?}",
-                                r.get_ref(i).map(|v| v
-                                    .as_str()
-                                    .map(String::from)
-                                    .unwrap_or_else(|_| format!("{v:?}")))
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" | "))
-                })
-                .expect("q")
-                .collect::<Result<_, _>>()
-                .expect("rows")
-            };
-            format!(
-                "no reply reached the fake; messages {:?}; decisions {:?}; attempts {}",
-                dump("SELECT direction, status, text FROM chan_messages"),
-                dump("SELECT subject_type, status, question, draft FROM decisions"),
-                fake.send_attempts().len()
-            )
-        }),
-        || async { fake.sent().len() > before },
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let c = rusqlite::Connection::open(&e.db).expect("db");
+        let dump = |sql: &str| -> Vec<String> {
+            let mut st = c.prepare(sql).expect("sql");
+            let n = st.column_count();
+            st.query_map([], |r| {
+                Ok((0..n)
+                    .map(|i| {
+                        format!(
+                            "{:?}",
+                            r.get_ref(i).map(|v| v
+                                .as_str()
+                                .map(String::from)
+                                .unwrap_or_else(|_| format!("{v:?}")))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | "))
+            })
+            .expect("q")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+        };
+        format!(
+            "no reply reached the fake; messages {:?}; decisions {:?}; attempts {}",
+            dump("SELECT direction, status, text FROM chan_messages"),
+            dump("SELECT subject_type, status, question, draft FROM decisions"),
+            fake.send_attempts().len()
+        )
+    });
+    eventually(diagnostic, || async { fake.sent().len() > before }).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let sent = fake.sent();
     assert_eq!(sent.len(), before + 1, "exactly one message");
@@ -768,13 +775,13 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
     assert_eq!(s, 200, "{b}");
     // “收到” went on first and was swapped for “完成” once the reply was out
     let m = "om_p2ptext00000000000000000000001";
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_channel_round_trip_on_the_fake_feishu: waiting for || async { fake.reactions_on(m) == [\"DONE\"] }", format!(
-        "{:?}",
-        fake.reactions()
-    )) }), || async {
-            fake.reactions_on(m) == ["DONE"]
-        })
-        .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The channel message reaction changes to done after the reply is sent; {:?}",
+            fake.reactions()
+        )
+    });
+    eventually(diagnostic, || async { fake.reactions_on(m) == ["DONE"] }).await;
     let r = fake.reactions();
     assert_eq!(r[0].emoji_type, "OnIt");
     assert!(
@@ -890,17 +897,18 @@ async fn a_channel_round_trip_on_the_fake_feishu() {
         .await
         .expect("inbound");
     assert!(!got.duplicate);
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_channel_round_trip_on_the_fake_feishu: waiting for || async { one::<String>( &e.db, \"SELECT id FROM decisions WHERE subject_type = 'chan_message' AND status = 'open'\", &[], ) .is_some() }", format!(
-        "your account's reply waits for you"
-    )) }), || async {
+    eventually(
+        "The personal channel message opens its send-approval decision.",
+        || async {
             one::<String>(
                 &e.db,
                 "SELECT id FROM decisions WHERE subject_type = 'chan_message' AND status = 'open'",
                 &[],
             )
             .is_some()
-        })
-        .await;
+        },
+    )
+    .await;
     assert_eq!(fake.sent().len(), sent_before, "nothing sent as you");
 
     // disconnecting the bot keeps its spaces (left, without a connection)
@@ -1024,17 +1032,18 @@ async fn a_new_issue_becomes_a_suggestion() {
         )
         .await
         .expect("github ingest");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "a_new_issue_becomes_a_suggestion: waiting for || async { one::<i64>( &e.db, \"SELECT COUNT(*) FROM items WHERE title LIKE '%乱码-I7%'\", &[], ) .is_some_and(|n| n == 1) }", format!(
-        "a proposed item for the issue"
-    )) }), || async {
+    eventually(
+        "The incoming issue creates exactly one suggested work item.",
+        || async {
             one::<i64>(
                 &e.db,
                 "SELECT COUNT(*) FROM items WHERE title LIKE '%乱码-I7%'",
                 &[],
             )
             .is_some_and(|n| n == 1)
-        })
-        .await;
+        },
+    )
+    .await;
 }
 
 /// A plugin from a directory library: listed, installed, connected (its process started with the

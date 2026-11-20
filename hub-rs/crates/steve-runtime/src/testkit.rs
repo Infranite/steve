@@ -45,14 +45,32 @@ where
     }
 }
 
-/// Blocking adapter for synchronous tests; it drives the same eventual-condition loop.
-/// Call async adapters inside a Tokio runtime instead of nesting a blocking runtime.
-pub fn eventually_blocking<D: Description, F: FnMut() -> bool>(what: D, condition: F) -> bool {
-    tokio::runtime::Builder::new_current_thread()
+/// Blocking adapter for synchronous tests. Conditions run outside the temporary runtime so
+/// tested code cannot detach work onto a runtime that disappears when this wait returns.
+/// The runtime only drives the shared poll wait and renders timeout diagnostics.
+pub fn eventually_blocking<D: Description, F: FnMut() -> bool>(what: D, mut condition: F) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
-        .expect("condition-wait runtime")
-        .block_on(eventually_sync(what, condition))
+        .expect("condition-wait runtime");
+    let deadline = Instant::now() + EVENTUALLY;
+    loop {
+        if condition() {
+            return true;
+        }
+        let waiting = Instant::now() < deadline
+            && runtime.block_on(async {
+                tokio::time::timeout_at(deadline, next_wait(None))
+                    .await
+                    .is_ok()
+            });
+        if !waiting {
+            panic!(
+                "timed out waiting for {}",
+                runtime.block_on(what.describe())
+            );
+        }
+    }
 }
 
 /// Returns true once `condition` holds; panics with `what` at the shared deadline.
@@ -87,6 +105,18 @@ where
     wait(what, Some(wake), condition).await
 }
 
+/// One sleep point for async waits and the synchronous adapter.
+fn next_wait(wake: Option<&Notify>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    match wake {
+        Some(wake) => {
+            let mut notified = Box::pin(wake.notified());
+            notified.as_mut().enable();
+            notified
+        }
+        None => Box::pin(tokio::time::sleep(POLL)),
+    }
+}
+
 async fn wait<F, Fut>(what: impl Description, wake: Option<&Notify>, mut condition: F) -> bool
 where
     F: FnMut() -> Fut,
@@ -94,14 +124,7 @@ where
 {
     let deadline = Instant::now() + EVENTUALLY;
     loop {
-        let next: Pin<Box<dyn Future<Output = ()> + Send + '_>> = match wake {
-            Some(wake) => {
-                let mut notified = Box::pin(wake.notified());
-                notified.as_mut().enable();
-                notified
-            }
-            None => Box::pin(tokio::time::sleep(POLL)),
-        };
+        let next = next_wait(wake);
         let ready = tokio::time::timeout_at(deadline, condition()).await;
         if matches!(ready, Ok(true)) {
             return true;
@@ -124,10 +147,15 @@ mod tests {
     };
 
     #[test]
-    fn blocking_adapter_uses_the_same_ready_condition() {
-        assert!(eventually_blocking("ready from a synchronous test", || {
-            true
+    fn blocking_conditions_never_enter_the_temporary_runtime() {
+        let mut calls = 0;
+        assert!(eventually_blocking("a second poll outside Tokio", || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            calls += 1;
+            calls == 2
         }));
+        assert_eq!(calls, 2);
+        assert!(tokio::runtime::Handle::try_current().is_err());
     }
 
     #[tokio::test(start_paused = true)]

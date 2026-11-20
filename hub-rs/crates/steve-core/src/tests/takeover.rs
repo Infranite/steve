@@ -292,7 +292,7 @@ fn a_done_when_project_ignores_the_release_choice_of_an_acceptance() {
         let x = remote(&k, upstream::DONE_MERGE, false);
         k.core.resolve(&x.decision, "pass", text, "me").unwrap();
         steve_runtime::testkit::eventually_blocking(
-            "a_done_when_project_ignores_the_release_choice_of_an_acceptance: waiting for || k.core.tx().st.probing.is_empty()",
+            "The background release probe finishes before the next lifecycle step.",
             || k.core.tx().st.probing.is_empty(),
         );
         assert_eq!(k.phase(&x.item), "closing", "{text}");
@@ -496,20 +496,17 @@ pub(super) fn merge_and_tag(x: &Remote, tag: Option<&str>) {
 /// merged: the agent is told what is still missing, and its turn runs. Merging before that look
 /// answered would race it: it may read the remote before or after the push.
 pub(super) fn told_what_is_missing(k: &Kit, x: &Remote) {
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "told_what_is_missing: waiting for || { k.rt.prompts_of(&x.session) .last() .is_some_and(|p| p.contains(\"按这个项目的约定\")) }",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || {
-            k.rt.prompts_of(&x.session)
-                .last()
-                .is_some_and(|p| p.contains("按这个项目的约定"))
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The continuation prompt explains the remaining release requirements; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        k.rt.prompts_of(&x.session)
+            .last()
+            .is_some_and(|p| p.contains("按这个项目的约定"))
+    });
 }
 
 pub(super) fn op_states(k: &Kit, item: &str) -> Vec<(String, String)> {
@@ -531,7 +528,7 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     let x = remote(&k, upstream::DONE_TAG, true);
     // not merged yet: the agent hears once what is missing, nothing for you
     steve_runtime::testkit::eventually_blocking(
-        "accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build: waiting for || { k.rt.prompts_of(&x.session) .last() .is_some_and(|p| p.contains(\"按这个项目的约定\")) }",
+        "The continuation prompt explains the remaining release requirements.",
         || {
             k.rt.prompts_of(&x.session)
                 .last()
@@ -547,7 +544,7 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     merge_and_tag(&x, None);
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     steve_runtime::testkit::eventually_blocking(
-        "accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build: waiting for || k.core.tx().st.probing.is_empty()",
+        "The background release probe finishes before the next lifecycle step.",
         || k.core.tx().st.probing.is_empty(),
     );
     assert_eq!(k.phase(&x.item), "closing");
@@ -564,16 +561,13 @@ fn accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build() {
     g(&x.repo, &["push", "-q", "origin", "v1.0.0"]);
     k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "accepted_it_waits_for_the_merge_and_the_tag_then_closes_without_the_build: waiting for || k.phase(&x.item) == \"closed\"",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || k.phase(&x.item) == "closed",
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
     let i = k.db().item(&x.item).unwrap().unwrap();
     assert_eq!(i.outcome.as_deref(), Some("completed"));
     assert_eq!(
@@ -614,21 +608,18 @@ fn a_look_begun_before_a_turn_ended_is_not_kept_a_fresh_one_decides() {
         seq
     };
     // its answer is not kept: the closing is checked again, with a look of its own (no tick needed)
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "a_look_begun_before_a_turn_ended_is_not_kept_a_fresh_one_decides: waiting for || { k.core.tx().st.probing.is_empty() && op_states(&k, &x.item) .first() .is_some_and(|o| o.1 == \"succeeded\") }",
-                format!("{:?}", op_states(&k, &x.item))
-            )
-        }),
-        || {
-            k.core.tx().st.probing.is_empty()
-                && op_states(&k, &x.item)
-                    .first()
-                    .is_some_and(|o| o.1 == "succeeded")
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The release probe completes and records a successful release operation; {:?}",
+            op_states(&k, &x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        k.core.tx().st.probing.is_empty()
+            && op_states(&k, &x.item)
+                .first()
+                .is_some_and(|o| o.1 == "succeeded")
+    });
     assert_eq!(k.core.tx().st.probe_seq, seq + 1, "one fresh look");
 }
 
@@ -648,16 +639,13 @@ fn stopped_after_merging_and_tagging_it_completes_on_steves_check() {
         &x.session,
         "PR #1 已经合并到 main，v0.2.21 的 tag 也已推送，GitHub 正在构建发布包，还没出结果。",
     );
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "stopped_after_merging_and_tagging_it_completes_on_steves_check: waiting for || k.phase(&x.item) == \"closed\"",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || k.phase(&x.item) == "closed",
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
     let i = k.db().item(&x.item).unwrap().unwrap();
     assert_eq!(
         (i.outcome.as_deref(), i.acceptance.as_deref()),
@@ -683,7 +671,7 @@ fn stopped_before_the_merge_it_is_continued_with_what_steve_found() {
     stop(&k, &x.session, "分支推上去了。");
     // the line and the prompt are written one after the other: wait for both
     steve_runtime::testkit::eventually_blocking(
-        "stopped_before_the_merge_it_is_continued_with_what_steve_found: waiting for || { !steve_lines(&k, &x.item).is_empty() && !k.rt.prompts_of(&x.session).is_empty() }",
+        "Steve records the release findings and sends a continuation prompt.",
         || !steve_lines(&k, &x.item).is_empty() && !k.rt.prompts_of(&x.session).is_empty(),
     );
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
@@ -725,7 +713,7 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
         .unwrap();
     k.core.resolve(&d, "pass", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "an_accepted_delivery_that_moved_tells_the_agent_what_moved: waiting for || k.core.tx().st.probing.is_empty()",
+        "The background release probe finishes before the next lifecycle step.",
         || k.core.tx().st.probing.is_empty(),
     );
     // a rebase onto a newer main is not a new result
@@ -737,7 +725,7 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
     commit(&x.wt, "notes.md", "n\n");
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     steve_runtime::testkit::eventually_blocking(
-        "an_accepted_delivery_that_moved_tells_the_agent_what_moved: waiting for || k.core.tx().st.probing.is_empty()",
+        "The background release probe finishes before the next lifecycle step.",
         || k.core.tx().st.probing.is_empty(),
     );
     let i = k.db().item(&x.item).unwrap().unwrap();
@@ -823,7 +811,7 @@ fn a_build_is_followed_once_and_only_a_failure_is_told() {
     merge_and_tag(&x, Some("v2.0.0"));
     stop(&k, &x.session, "合并了，tag 推了。");
     steve_runtime::testkit::eventually_blocking(
-        "a_build_is_followed_once_and_only_a_failure_is_told: waiting for || k.phase(&x.item) == \"closed\"",
+        "The accepted item closes after its release requirements are satisfied.",
         || k.phase(&x.item) == "closed",
     );
     let commit = g(&x.repo, &["rev-parse", "main"]);
@@ -908,7 +896,7 @@ fn tagged_with_build(tag: &str) -> (Kit, Remote, PathBuf, tempfile::TempDir) {
     k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "tagged_with_build: waiting for || { let _ = k.core.lifecycle_tick(); op_states(&k, &x.item).len() == 2 }",
+        "Both the release and build operations are registered.",
         || {
             let _ = k.core.lifecycle_tick();
             op_states(&k, &x.item).len() == 2
@@ -966,19 +954,17 @@ fn a_goal_that_asks_for_the_build_to_pass_stays_open_while_it_runs_and_when_it_f
     k.rt.end_turn(&k.core, &x.session, "cancelled", None);
     k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "a_goal_that_asks_for_the_build_to_pass_stays_open_while_it_runs_and_when_it_failed: waiting for || { let _ = k.core.lifecycle_tick(); k.phase(&x.item) == \"closed\" }",
-                format!("{:?} {:?}", k.status(&x.item), blockers(&k, &x.item))
-            )
-        }),
-        || {
-            let _ = k.core.lifecycle_tick();
-            k.phase(&x.item) == "closed"
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?} {:?}",
+            k.status(&x.item),
+            blockers(&k, &x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        let _ = k.core.lifecycle_tick();
+        k.phase(&x.item) == "closed"
+    });
 }
 
 #[test]
@@ -1057,7 +1043,7 @@ fn a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag() {
         k.core.tx().forget_probe(&x.item);
         k.core.lifecycle_tick().unwrap();
         steve_runtime::testkit::eventually_blocking(
-            "a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag: waiting for || { let _ = k.core.lifecycle_tick(); !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == \"succeeded\" }",
+            "The required release operation records a successful outcome.",
             || {
                 let _ = k.core.lifecycle_tick();
                 !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
@@ -1111,20 +1097,17 @@ fn a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag() {
         // you mark it done yourself: that is the evidence
         k.finish(&x.item).unwrap();
         steve_runtime::testkit::eventually_blocking(
-            "a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag: waiting for || k.core.tx().st.probing.is_empty()",
+            "The background release probe finishes before the next lifecycle step.",
             || k.core.tx().st.probing.is_empty(),
         );
         k.core.lifecycle_tick().unwrap();
-        steve_runtime::testkit::eventually_blocking(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "a_goal_that_asks_for_this_instance_waits_until_it_runs_the_tag: waiting for || k.phase(&x.item) == \"closed\"",
-                    format!("{:?}", k.status(&x.item))
-                )
-            }),
-            || k.phase(&x.item) == "closed",
-        );
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The accepted item closes after its release requirements are satisfied; {:?}",
+                k.status(&x.item)
+            )
+        });
+        steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
     }
 }
 
@@ -1143,19 +1126,16 @@ fn another_project_is_not_checked_against_this_instance() {
     // the agent's turn ends: the remote is looked at afresh in the background, and a tick after
     // it answered closes the item
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "another_project_is_not_checked_against_this_instance: waiting for || { let _ = k.core.lifecycle_tick(); k.phase(&x.item) == \"closed\" }",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || {
-            let _ = k.core.lifecycle_tick();
-            k.phase(&x.item) == "closed"
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        let _ = k.core.lifecycle_tick();
+        k.phase(&x.item) == "closed"
+    });
 }
 
 #[test]
@@ -1227,25 +1207,22 @@ fn a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one
     merge_and_tag(&x, Some("v1.0.1"));
     stop(&k, &x.session, "合并了，tag 推了。");
     steve_runtime::testkit::eventually_blocking(
-        "a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one: waiting for || !steve_lines(&k, &x.item).is_empty()",
+        "Steve records the missing operational verification on the item.",
         || !steve_lines(&k, &x.item).is_empty(),
     );
     assert_eq!(k.phase(&x.item), "active");
     // the timeline line comes first, the prompt to the agent a moment later
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one: waiting for || k .rt .prompts_of(&x.session) .last() .is_some_and(|p| p.contains(\"还要求实际操作验证\"))",
-                format!("{:?}", k.rt.prompts_of(&x.session).last())
-            )
-        }),
-        || {
-            k.rt.prompts_of(&x.session)
-                .last()
-                .is_some_and(|p| p.contains("还要求实际操作验证"))
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The continuation prompt requests the missing operational verification; {:?}",
+            k.rt.prompts_of(&x.session).last()
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        k.rt.prompts_of(&x.session)
+            .last()
+            .is_some_and(|p| p.contains("还要求实际操作验证"))
+    });
 }
 
 /// An item whose goal asks for the build to pass, delivered in a project with `rule` on `url`,
@@ -1270,7 +1247,7 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
     stop(&k, &x.session, "合并了。");
     // the timeline line comes first, the prompt to the agent a moment later: wait for both
     steve_runtime::testkit::eventually_blocking(
-        "stopped_after_merging: waiting for || { !steve_lines(&k, &x.item).is_empty() && k.rt.prompts_of(&x.session).len() > before }",
+        "Steve records the release findings and sends a continuation prompt.",
         || !steve_lines(&k, &x.item).is_empty() && k.rt.prompts_of(&x.session).len() > before,
     );
     (k, x)
@@ -1365,26 +1342,24 @@ fn a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery() {
     k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery: waiting for || { let _ = k.core.lifecycle_tick(); !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == \"succeeded\" }",
+        "The required release operation records a successful outcome.",
         || {
             let _ = k.core.lifecycle_tick();
             !op_states(&k, &x.item).is_empty() && op_states(&k, &x.item)[0].1 == "succeeded"
         },
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "a_build_goal_whose_tag_build_cant_be_followed_rests_on_the_delivery: waiting for || { let _ = k.core.lifecycle_tick(); k.phase(&x.item) == \"closed\" }",
-                format!("{:?} {:?}", k.status(&x.item), blockers(&k, &x.item))
-            )
-        }),
-        || {
-            let _ = k.core.lifecycle_tick();
-            k.phase(&x.item) == "closed"
-        },
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?} {:?}",
+            k.status(&x.item),
+            blockers(&k, &x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || {
+        let _ = k.core.lifecycle_tick();
+        k.phase(&x.item) == "closed"
+    });
     assert_eq!(
         op_states(&k, &x.item),
         vec![(OP_RELEASE.to_string(), "succeeded".to_string())]
@@ -1505,20 +1480,14 @@ fn accepted_without_a_commit_of_its_own_completes_on_the_acceptance_not_as_merge
         k.core.resolve(&x.decision, "pass", "", "me").unwrap();
         // on GitHub its pull request is looked at once (here `gh` can't be asked: no merged PR)
         settle_pr(&k);
-        steve_runtime::testkit::eventually_blocking(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "accepted_without_a_commit_of_its_own_completes_on_the_acceptance_not_as_merged: waiting for || k.phase(&x.item) == \"closed\"",
-                    format!(
-                        "{rule}: {:?} {:?}",
-                        k.status(&x.item),
-                        blockers(&k, &x.item)
-                    )
-                )
-            }),
-            || k.phase(&x.item) == "closed",
-        );
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The accepted item closes after its release requirements are satisfied; {rule}: {:?} {:?}",
+                k.status(&x.item),
+                blockers(&k, &x.item)
+            )
+        });
+        steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
         let i = k.db().item(&x.item).unwrap().unwrap();
         assert_eq!(i.outcome.as_deref(), Some("completed"), "{rule}");
         assert_eq!(
@@ -1556,7 +1525,7 @@ fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_
     settle_pr(&k);
     // without a merged pull request's word, nothing of its own is there to call merged
     steve_runtime::testkit::eventually_blocking(
-        "a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_request: waiting for || k.phase(&x.item) == \"closed\"",
+        "The accepted item closes after its release requirements are satisfied.",
         || k.phase(&x.item) == "closed",
     );
     assert!(
@@ -1569,7 +1538,7 @@ fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_
 /// The pull request looks `pull` would make once the acceptance asked for one.
 pub(super) fn settle_pr(k: &Kit) {
     steve_runtime::testkit::eventually_blocking(
-        "settle_pr: waiting for || { k.core.tx().st.pr_checked.clear(); k.core.check_prs().unwrap() > 0 }",
+        "The pull request is checked after the previous cached result is cleared.",
         || {
             k.core.tx().st.pr_checked.clear();
             k.core.check_prs().unwrap() > 0
@@ -1589,7 +1558,7 @@ fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
     let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "看了一下，好像没什么要改的。");
     steve_runtime::testkit::eventually_blocking(
-        "stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged: waiting for || k.rt.prompts_of(&x.session).len() > before",
+        "The fake runtime receives a new continuation prompt.",
         || k.rt.prompts_of(&x.session).len() > before,
     );
     assert_ne!(k.phase(&x.item), "closed");
@@ -1683,7 +1652,7 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
     );
     k.finish(&x.item).unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_queued_message: waiting for || !k.open_fails(&x.item).is_empty()",
+        "The item opens a release failure card for human attention.",
         || !k.open_fails(&x.item).is_empty(),
     );
     let fails = k.open_fails(&x.item);
@@ -1714,16 +1683,13 @@ fn your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_q
         .unwrap();
     assert_eq!(d.options, ["release_live", "release_waive", "look"]);
     k.core.resolve(&d.id, "release_live", "", "me").unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "your_finish_with_the_worktree_gone_and_the_session_in_error_is_a_card_not_a_queued_message: waiting for || k.phase(&x.item) == \"closed\"",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || k.phase(&x.item) == "closed",
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
     let i = k.db().item(&x.item).unwrap().unwrap();
     assert_eq!(i.outcome.as_deref(), Some("completed"));
 }
@@ -1737,7 +1703,7 @@ fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_qu
         .unwrap();
     k.finish(&x.item).unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_queueing_it: waiting for || !k.open_fails(&x.item).is_empty() && k.core.tx().st.probing.is_empty()",
+        "The item opens a release failure card for human attention.",
         || !k.open_fails(&x.item).is_empty() && k.core.tx().st.probing.is_empty(),
     );
     let fails = k.open_fails(&x.item);
@@ -1753,14 +1719,11 @@ fn your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_qu
     merge_and_tag(&x, None);
     k.core.tx().forget_probe(&x.item);
     k.core.lifecycle_tick().unwrap();
-    steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "your_finish_with_the_session_in_error_tells_you_what_is_missing_instead_of_queueing_it: waiting for || k.phase(&x.item) == \"closed\"",
-                format!("{:?}", k.status(&x.item))
-            )
-        }),
-        || k.phase(&x.item) == "closed",
-    );
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The accepted item closes after its release requirements are satisfied; {:?}",
+            k.status(&x.item)
+        )
+    });
+    steve_runtime::testkit::eventually_blocking(diagnostic, || k.phase(&x.item) == "closed");
 }

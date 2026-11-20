@@ -975,7 +975,7 @@ fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
     assert_ne!(a1, a2);
     drop(gate);
     steve_runtime::testkit::eventually_blocking(
-        "a_deferred_stop_reaches_only_the_turn_it_was_asked_for: waiting for || !k.rt.st().stops.is_empty()",
+        "The deferred stop reaches the requested runtime turn.",
         || !k.rt.st().stops.is_empty(),
     );
     let st = k.rt.st();
@@ -988,7 +988,7 @@ fn a_deferred_stop_reaches_only_the_turn_it_was_asked_for() {
     assert_ne!(k.phase(&i.id), "closed");
     k.rt.end_turn(&k.core, &s.id, "end_turn", None);
     steve_runtime::testkit::eventually_blocking(
-        "a_deferred_stop_reaches_only_the_turn_it_was_asked_for: waiting for || k.phase(&i.id) == \"closed\"",
+        "The accepted item closes after its release requirements are satisfied.",
         || k.phase(&i.id) == "closed",
     );
 }
@@ -1124,7 +1124,7 @@ fn item_actions() {
     k.core.item_action(&i.id, ItemAction::Drop, "me").unwrap();
     // a cancel is a request: the running turn is stopped, the close follows its end
     steve_runtime::testkit::eventually_blocking(
-        "item_actions: waiting for || k.rt.st().cancelled.contains(&s.id)",
+        "The fake runtime records cancellation of the target session.",
         || k.rt.st().cancelled.contains(&s.id),
     );
     k.rt.end_turn(&k.core, &s.id, "cancelled", None);

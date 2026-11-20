@@ -126,7 +126,11 @@ async fn branch_and_reason_reach_the_event() {
         "密钥 sk-live-123456 别外传",
     )
     .await;
-    eventually_sync("bot condition", || outcome(&e, &evt) == "need").await;
+    eventually_sync(
+        "The connector event records that human input is required.",
+        || outcome(&e, &evt) == "need",
+    )
+    .await;
     let (reason, handled_by): (String, String) = e
         .env
         .store()
@@ -182,7 +186,11 @@ async fn configured_bot_brings_its_duty_and_rules() {
         .gateway
         .reply(r#"{"branch":"其他","reason":"不是告警"}"#);
     let evt = ingest(&e, "m2", "订阅：本周新闻", "新闻").await;
-    eventually_sync("bot condition", || outcome(&e, &evt) == "ignored").await;
+    eventually_sync(
+        "The connector event is stored with its ignored outcome.",
+        || outcome(&e, &evt) == "ignored",
+    )
+    .await;
     let p = e.env.gateway.last_prompt().unwrap();
     assert!(p.starts_with("你是「运维」"), "{p}");
     assert!(p.contains("你的职责：运维值班"));
@@ -213,7 +221,11 @@ async fn branch_outside_the_list_follows_on_fail() {
     flow(&e, triage(bot_cfg())).await;
     e.env.gateway.reply(r#"{"branch":"转给财务","reason":"?"}"#);
     let evt = ingest(&e, "m3", "发票", "").await;
-    eventually_sync("bot condition", || outcome(&e, &evt) == "failed").await;
+    eventually_sync(
+        "The connector event records the bot execution failure.",
+        || outcome(&e, &evt) == "failed",
+    )
+    .await;
     let err: String = q(&e, "SELECT error FROM flow_runs WHERE event_id = ?", [&evt]);
     assert_eq!(err, "Bot 选的分支「转给财务」不在列表里");
     // branch:其他 takes that edge instead
@@ -226,7 +238,11 @@ async fn branch_outside_the_list_follows_on_fail() {
     ev.scope_ext_id = Some("INBOX".into());
     let evt = e.flow.ingest(WS, None, ev).await.unwrap();
     let evt = evt.id().unwrap().to_string();
-    eventually_sync("bot condition", || outcome(&e, &evt) == "ignored").await;
+    eventually_sync(
+        "The connector event is stored with its ignored outcome.",
+        || outcome(&e, &evt) == "ignored",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -238,19 +254,22 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     e.env.gateway.fail("timeout");
     let evt = ingest(&e, "m5", "Sarah：在吗", "").await;
     let run = {
-        eventually_sync("bot condition", || {
-            e.env
-                .store()
-                .with_conn(|c| {
-                    Ok(c.query_row(
+        eventually_sync(
+            "The event-triggered flow run persists its waiting state.",
+            || {
+                e.env
+                    .store()
+                    .with_conn(|c| {
+                        Ok(c.query_row(
                         "SELECT count(*) FROM flow_runs WHERE event_id = ? AND status = 'waiting'",
                         [&evt],
                         |r| r.get::<_, i64>(0),
                     )?)
-                })
-                .unwrap()
-                == 1
-        })
+                    })
+                    .unwrap()
+                    == 1
+            },
+        )
         .await;
         run_of(&e, &evt)
     };
@@ -279,19 +298,22 @@ async fn gateway_timeout_retries_once_ten_minutes_later() {
     e.env.gateway.fail("timeout");
     e.env.gateway.reply(r#"{"branch":"其他","reason":"闲聊"}"#);
     let evt = ingest(&e, "m6", "周末愉快", "").await;
-    eventually_sync("bot condition", || {
-        e.env
-            .store()
-            .with_conn(|c| {
-                Ok(c.query_row(
+    eventually_sync(
+        "The event-triggered flow run persists its retry deadline.",
+        || {
+            e.env
+                .store()
+                .with_conn(|c| {
+                    Ok(c.query_row(
                     "SELECT count(*) FROM flow_runs WHERE event_id = ? AND retry_at IS NOT NULL",
                     [&evt],
                     |r| r.get::<_, i64>(0),
                 )?)
-            })
-            .unwrap()
-            == 1
-    })
+                })
+                .unwrap()
+                == 1
+        },
+    )
     .await;
     e.env.clock.advance(10 * 60 * 1000);
     for id in steve_flow::testkit::claim_due(&e.flow).unwrap() {

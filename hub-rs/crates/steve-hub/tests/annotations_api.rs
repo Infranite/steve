@@ -218,13 +218,7 @@ async fn item(e: &Env, goal: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "item: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
-                format!("the first turn runs")
-            )
-        }),
+        "The Hub sees the target session running before the test continues.",
         || async { e.session(&sid).await["busy"] == true },
     )
     .await;
@@ -361,15 +355,18 @@ async fn drafts_one_send_and_the_item_line() {
         (s, v["again"].as_bool(), v["pending"].as_bool()),
         (200, Some(true), Some(false))
     );
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "drafts_one_send_and_the_item_line: waiting for || async { e.prompts() .iter() .any(|p| p.contains(\"对产出的批注（2 条）\")) }", format!(
-        "the agent hears the notes: {:?}",
-        e.prompts()
-    )) }), || async {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The work prompt includes both annotations on the output; the agent hears the notes: {:?}",
             e.prompts()
-                .iter()
-                .any(|p| p.contains("对产出的批注（2 条）"))
-        })
-        .await;
+        )
+    });
+    eventually(diagnostic, || async {
+        e.prompts()
+            .iter()
+            .any(|p| p.contains("对产出的批注（2 条）"))
+    })
+    .await;
     assert_eq!(
         e.prompts()
             .iter()

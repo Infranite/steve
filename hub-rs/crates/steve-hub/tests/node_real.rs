@@ -308,26 +308,23 @@ fn now_ms() -> i64 {
 
 /// Up and serving the full app.
 async fn serving(h: &Home) {
-    let ok = eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!("the Hub serves; log:\n{}", hub_log(h))
-        }),
-        || async {
-            let Ok(r) = reqwest::Client::new()
-                .get(format!("{}/healthz", h.base()))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-            else {
-                return false;
-            };
-            r.json::<Value>()
-                .await
-                .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
-        },
-    )
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("the Hub serves; log:\n{}", hub_log(h))
+    });
+    eventually(diagnostic, || async {
+        let Ok(r) = reqwest::Client::new()
+            .get(format!("{}/healthz", h.base()))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        r.json::<Value>()
+            .await
+            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+    })
     .await;
-    assert!(ok, "the Hub serves; log:\n{}", hub_log(h));
 }
 
 fn hub_log(h: &Home) -> String {
@@ -534,38 +531,32 @@ impl Real {
             .await;
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
-        eventually_sync(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "node_real state",
-                    format!("a session for the item; log:\n{}", hub_log(&self.h))
-                )
-            }),
-            || {
-                sid = self
-                    .h
-                    .one("SELECT id FROM sessions WHERE item_id=?", &[&item]);
-                sid.is_some()
-            },
-        )
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The item receives its session binding; Hub log:\n{}",
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || {
+            sid = self
+                .h
+                .one("SELECT id FROM sessions WHERE item_id=?", &[&item]);
+            sid.is_some()
+        })
         .await;
         let sid = sid.expect("session");
-        eventually_sync(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "node_real state",
-                    format!("bound to the local Node; log:\n{}", hub_log(&self.h))
-                )
-            }),
-            || {
-                self.h.count(
-                    "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
-                    &[&sid],
-                ) == 1
-            },
-        )
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The item session is bound to the local Node; Hub log:\n{}",
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || {
+            self.h.count(
+                "SELECT COUNT(*) FROM runtime_sessions WHERE session_id=? AND node_id='local'",
+                &[&sid],
+            ) == 1
+        })
         .await;
         sid
     }
@@ -657,41 +648,28 @@ impl Real {
 
     /// Waits for the session's permission mode to be configured on the Node, failing with the log.
     async fn configure_over(&self, sid: &str, permissions: &str) {
-        eventually_sync(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "node_real state",
-                    format!(
-                        "configured {permissions} on the Node; log:\n{}",
-                        hub_log(&self.h)
-                    )
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The Node applies the requested permission configuration; configured {permissions} on the Node; log:\n{}",
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || self.configured(sid, permissions) == 1).await;
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "The configured Node session becomes ready again; Hub log:\n{}",
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || {
+            self.h
+                .one(
+                    "SELECT phase FROM runtime_sessions WHERE session_id=?",
+                    &[&sid],
                 )
-            }),
-            || self.configured(sid, permissions) == 1,
-        )
-        .await;
-        eventually_sync(
-            steve_runtime::testkit::on_timeout(|| async {
-                format!(
-                    "{}; {}",
-                    "node_real state",
-                    format!(
-                        "ready again after the configure; log:\n{}",
-                        hub_log(&self.h)
-                    )
-                )
-            }),
-            || {
-                self.h
-                    .one(
-                        "SELECT phase FROM runtime_sessions WHERE session_id=?",
-                        &[&sid],
-                    )
-                    .as_deref()
-                    == Some("ready")
-            },
-        )
+                .as_deref()
+                == Some("ready")
+        })
         .await;
     }
 
@@ -699,14 +677,21 @@ impl Real {
     async fn turn_over(&self, sid: &str, n: i64, what: &str) {
         let since = now_ms();
         let mut failed = None;
-        let over = eventually_sync("node_real state", || {
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{what}: turn {n} finishes; failed card: {:?}; Hub log:\n{}",
+                self.failed(sid, since),
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || {
             failed = self.failed(sid, since);
             failed.is_some() || self.done(sid, n)
         })
         .await;
         assert!(
-            over && failed.is_none(),
-            "{what}: turn {n} over (failed: {failed:?}); log:\n{}",
+            failed.is_none(),
+            "{what}: turn {n} failed: {failed:?}; Hub log:\n{}",
             hub_log(&self.h)
         );
     }
@@ -726,15 +711,22 @@ impl Real {
     async fn card(&self, sid: &str, what: &str) -> String {
         let since = now_ms();
         let (mut card, mut failed) = (None, None);
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            format!(
+                "{what}: a permission card appears; failed card: {:?}; Hub log:\n{}",
+                self.failed(sid, since),
+                hub_log(&self.h)
+            )
+        });
+        eventually_sync(diagnostic, || {
+            card = self.open_card(sid);
+            failed = self.failed(sid, since);
+            card.is_some() || failed.is_some()
+        })
+        .await;
         assert!(
-            eventually_sync("node_real state", || {
-                card = self.open_card(sid);
-                failed = self.failed(sid, since);
-                card.is_some() || failed.is_some()
-            })
-            .await
-                && failed.is_none(),
-            "{what}: a permission card (failed: {failed:?}); log:\n{}",
+            failed.is_none(),
+            "{what}: permission request failed: {failed:?}; Hub log:\n{}",
             hub_log(&self.h)
         );
         card.expect("card")
@@ -1066,27 +1058,35 @@ async fn a_cancel_mid_turn_ends_it() {
              text. Do not use any tools.",
         )
         .await;
-    // some output first if it streams; the turn must still be running either way
-    let streamed = eventually_sync("node_real state", || r.said(&sid, 0, "twenty") > 0).await;
-    assert!(!r.done(&sid, 1), "still running (streamed: {streamed})");
+    // Wait for the ordinary turn state, never for a harness-specific streaming chunk.
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        let (_, session) = r.c.call("GET", &format!("/api/sessions/{sid}"), None).await;
+        format!(
+            "The session is running before cancellation; session: {session}; Hub log:\n{}",
+            hub_log(&r.h)
+        )
+    });
+    eventually(diagnostic, || async {
+        let (_, session) = r.c.call("GET", &format!("/api/sessions/{sid}"), None).await;
+        session["busy"] == true && session["status"] == "running"
+    })
+    .await;
+    assert!(!r.done(&sid, 1), "the turn is running before cancellation");
     let (st, v) =
         r.c.call("POST", &format!("/api/sessions/{sid}/cancel"), None)
             .await;
     assert_eq!((st, &v["ok"]), (200, &json!(true)), "cancel: {v}");
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "node_real state",
-                format!("the cancelled turn is over; log:\n{}", hub_log(&r.h))
-            )
-        }),
-        || r.done(&sid, 1),
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node turn records its finished attempt; the cancelled turn is over; log:\n{}",
+            hub_log(&r.h)
+        )
+    });
+    eventually_sync(diagnostic, || r.done(&sid, 1)).await;
+    let streamed = r.said(&sid, 0, "twenty") > 0;
     assert!(
         r.said(&sid, 0, "cancelled") > 0,
-        "the turn ended as cancelled"
+        "the turn ended as cancelled (streamed: {streamed})"
     );
 
     let seq = r.seq(&sid);
@@ -1185,23 +1185,20 @@ async fn a_released_session_reopens_with_its_conversation() {
     r.turn_over(&sid, 1, "remember").await;
     r.hub.stop();
     r.restart().await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "node_real state",
-                format!("let go across the restart; log:\n{}", hub_log(&r.h))
-            )
-        }),
-        || {
-            r.h.one(
-                "SELECT phase FROM runtime_sessions WHERE session_id=?",
-                &[&sid],
-            )
-            .as_deref()
-                == Some("released")
-        },
-    )
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The idle Node session releases its harness after restart; let go across the restart; log:\n{}",
+            hub_log(&r.h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        r.h.one(
+            "SELECT phase FROM runtime_sessions WHERE session_id=?",
+            &[&sid],
+        )
+        .as_deref()
+            == Some("released")
+    })
     .await;
     let seq = r.seq(&sid);
     r.c.say(
@@ -1284,18 +1281,19 @@ async fn a_hub_killed_mid_turn_is_unknown_never_rerun_and_stop_abandons_it() {
     r.restart().await;
     // B6: never re-run; the Hub gives the cut attempt up once the Node confirms its harness is
     // gone, and the agent is continued
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "node_real state", format!(
-        "the cut attempt is given up; log:\n{}",
-        hub_log(&r.h)
-    )) }), || r.h.count(
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The interrupted Node attempt is recorded as abandoned after restart; the cut attempt is given up; log:\n{}",
+            hub_log(&r.h)
+        )
+    });
+    eventually_sync(diagnostic, || r.h.count(
             "SELECT COUNT(*) FROM runtime_attempts WHERE turn_id=? AND json_extract(completion,'$.stop_reason')='node_restarted'",
             &[&turn],
         ) == 1)
         .await;
     eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!("{}; {}", "node_real state", format!("the session says why"))
-        }),
+        "The session records the reason its Node attempt was interrupted.",
         || r.said(&sid, 0, "Node 重启了") > 0,
     )
     .await;
@@ -1512,19 +1510,16 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
         );
     }
     let mut own = None;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "node_real state",
-                format!("the harness started `{bg}`; log:\n{}", hub_log(&r.h))
-            )
-        }),
-        || {
-            own = pid_of(&bg);
-            own.is_some()
-        },
-    )
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The harness records the process it started for the background command; the harness started `{bg}`; log:\n{}",
+            hub_log(&r.h)
+        )
+    });
+    eventually_sync(diagnostic, || {
+        own = pid_of(&bg);
+        own.is_some()
+    })
     .await;
     let own = own.expect("pid");
 
@@ -1548,17 +1543,7 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
         ("resolved", "decided"),
         "{w:?}"
     );
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "node_real state",
-                format!("the background sleep ended")
-            )
-        }),
-        || !alive(own),
-    )
-    .await;
+    eventually_sync("The background command process exits.", || !alive(own)).await;
 
     // not the harness's: left to the user
     /// Killed with the case, even when it fails.
@@ -1587,16 +1572,18 @@ async fn yolo_answers_a_node_session_from_the_nodes_facts() {
     )
     .await;
     let mut w = None;
-    let looked = eventually_sync("node_real state", || {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "kill {other}: a permission card or the turn's end appears; card: {:?}; Hub log:\n{}",
+            yolo_word(&r, &sid, since),
+            hub_log(&r.h)
+        )
+    });
+    eventually_sync(diagnostic, || {
         w = yolo_word(&r, &sid, since);
         w.is_some() || r.done(&sid, 3)
     })
     .await;
-    assert!(
-        looked,
-        "kill {other}: a card or the turn's end; log:\n{}",
-        hub_log(&r.h)
-    );
     match w {
         Some(w) => {
             eprintln!("case 10: kill {other} (not the harness's): {w:?}");

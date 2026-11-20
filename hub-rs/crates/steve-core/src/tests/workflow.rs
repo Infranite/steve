@@ -1341,13 +1341,7 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
     );
     drop(gate);
     steve_runtime::testkit::eventually_blocking(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels: waiting for || { let st = k.rt.st(); turns.iter().all(|(session, attempt)| { st.stops.iter().any(|(turn, result)| { &turn.session == session && &turn.attempt == attempt && *result == crate::Stop::Requested }) }) }",
-                format!("the restarted core must send a stop for every persisted running attempt")
-            )
-        }),
+        "Every persisted pause request reaches its original runtime turn.",
         || {
             let st = k.rt.st();
             turns.iter().all(|(session, attempt)| {

@@ -218,13 +218,7 @@ async fn item(e: &Env, goal: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "item: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
-                format!("the first turn runs")
-            )
-        }),
+        "The Hub sees the target session running before the test continues.",
         || async { e.session(&sid).await["busy"] == true },
     )
     .await;
@@ -281,14 +275,15 @@ async fn ones_own_variables_reach_the_items_harness() {
 
     // an item asked for over the API runs with the asker's variables
     item(&e, "环境变量 @say ok").await;
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "ones_own_variables_reach_the_items_harness: waiting for || async { std::fs::read_to_string(&e.log) .unwrap_or_default() .contains(\"\\\"spawn\\\"\") }", format!(
-        "the adapter started"
-    )) }), || async {
+    eventually(
+        "The fake adapter records the new harness process launch.",
+        || async {
             std::fs::read_to_string(&e.log)
                 .unwrap_or_default()
                 .contains("\"spawn\"")
-        })
-        .await;
+        },
+    )
+    .await;
     let env = std::fs::read_to_string(&e.log)
         .unwrap_or_default()
         .lines()

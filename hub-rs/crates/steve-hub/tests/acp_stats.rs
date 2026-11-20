@@ -181,13 +181,7 @@ async fn item_on(e: &Env, goal: &str, bot: &str) -> String {
         .unwrap_or_else(|| panic!("no session of {iid} in {ss}"))
         .to_string();
     eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "item_on: waiting for || async { e.session(&sid).await[\"busy\"] == true }",
-                format!("the first turn runs")
-            )
-        }),
+        "The Hub sees the target session running before the test continues.",
         || async { e.session(&sid).await["busy"] == true },
     )
     .await;
@@ -203,12 +197,11 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     )
     .await;
     // the first turn is under way on the Node (a message queued before it starts goes with it)
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "turns_and_tokens_land_in_the_stats_tables: waiting for || async { e.count(\"SELECT count(*) FROM agent_turns\") == 1 }", format!(
-        "the first turn starts"
-    )) }), || async {
-            e.count("SELECT count(*) FROM agent_turns") == 1
-        })
-        .await;
+    eventually(
+        "The first agent turn is recorded in the statistics table.",
+        || async { e.count("SELECT count(*) FROM agent_turns") == 1 },
+    )
+    .await;
     let (s, v) = e
         .call(
             "POST",
@@ -217,8 +210,8 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "turns_and_tokens_land_in_the_stats_tables: waiting for || async { e.count(\"SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL\") == 2 }", format!(
-        "two turns end: {:?} {:?}",
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("Both completed turns are recorded with their end times; two turns end: {:?} {:?}",
         e.db()
             .prepare("SELECT id, started, ended, stop_reason, node_attempt_id FROM agent_turns")
             .unwrap()
@@ -233,14 +226,17 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             .unwrap()
             .map(Result::unwrap)
             .collect::<Vec<_>>()
-    )) }), || async {
-            e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
-        })
-        .await;
-    eventually("turns_and_tokens_land_in_the_stats_tables: waiting for || async { e.session(&sid).await[\"busy\"] == false }", || async {
-            e.session(&sid).await["busy"] == false
-        })
-        .await;
+    )
+    });
+    eventually(diagnostic, || async {
+        e.count("SELECT count(*) FROM agent_turns WHERE ended IS NOT NULL") == 2
+    })
+    .await;
+    eventually(
+        "The target session becomes idle after the turn finishes.",
+        || async { e.session(&sid).await["busy"] == false },
+    )
+    .await;
     let c = e.db();
     let turns: Vec<(Option<String>, Option<i64>, i64, String, i64, String)> = c
         .prepare("SELECT item_id, user_seq, attempt, stop_reason, tools, tool_kinds FROM agent_turns WHERE session_id = ? ORDER BY started, rowid")
@@ -329,9 +325,9 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "realtime-bot",
     )
     .await;
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "turns_and_tokens_land_in_the_stats_tables: waiting for || async { let (s, v) = e .call(\"GET\", \"/api/stats/realtime?bot=realtime-bot\", None) .await; s == 200 && v[\"state\"] == \"estimated\" && v[\"output_sessions\"] == 1 && e.session(&streaming).await[\"busy\"] == true }", format!(
-        "streamed text is visible while the attempt is running"
-    )) }), || async {
+    eventually(
+        "Realtime statistics include the streaming output estimate.",
+        || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;
@@ -339,16 +335,19 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
                 && v["state"] == "estimated"
                 && v["output_sessions"] == 1
                 && e.session(&streaming).await["busy"] == true
-        })
-        .await;
-    eventually("turns_and_tokens_land_in_the_stats_tables: waiting for || async { e.session(&streaming).await[\"busy\"] == false }", || async {
-            e.session(&streaming).await["busy"] == false
-        })
-        .await;
-    eventually("turns_and_tokens_land_in_the_stats_tables: waiting for || async { e.count(\"SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'\") == 3 }", || async {
-            e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3
-        })
-        .await;
+        },
+    )
+    .await;
+    eventually(
+        "The target session becomes idle after the turn finishes.",
+        || async { e.session(&streaming).await["busy"] == false },
+    )
+    .await;
+    eventually(
+        "Every completed output session receives its end sample.",
+        || async { e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3 },
+    )
+    .await;
     // The API's clock is rounded down to the current second. Settlement can leave >3s
     // since the final text: a read point just before the durable end is correctly partial.
     // Wait for that same clock to include the end; do not change source times or TPS units.
@@ -363,15 +362,16 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
     let (_, before) = e
         .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
         .await;
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "turns_and_tokens_land_in_the_stats_tables: waiting for || async { let (s, v) = e .call(\"GET\", \"/api/stats/realtime?bot=realtime-bot\", None) .await; s == 200 && v[\"at\"].as_i64().is_some_and(|at| at >= ended) }", format!(
-        "the rounded read clock must include the persisted stop"
-    )) }), || async {
+    eventually(
+        "Realtime statistics advance beyond the final turn timestamp.",
+        || async {
             let (s, v) = e
                 .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
                 .await;
             s == 200 && v["at"].as_i64().is_some_and(|at| at >= ended)
-        })
-        .await;
+        },
+    )
+    .await;
     let (status, realtime) = e
         .call(
             "GET",

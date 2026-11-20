@@ -122,7 +122,7 @@ fn own_steve_is_released_after_the_cool_down_elsewhere_stays_with_you() {
     assert_eq!(t.decision(&d).result["approved"], true);
     assert_eq!(t.decision(&d).result["decided_by"], "yolo");
     steve_runtime::testkit::eventually_blocking(
-        "own_steve_is_released_after_the_cool_down_elsewhere_stays_with_you: waiting for || outcome(&t, &d) == \"released\"",
+        "The release operation finishes with a released outcome.",
         || outcome(&t, &d) == "released",
     );
     // a release is evidence for a closing, never a close by itself: no delivery is waiting here
@@ -222,7 +222,7 @@ fn a_degraded_release_is_not_handed_back_to_the_bot() {
     let (item, sid, d) = releasing_item(&t, &own);
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "a_degraded_release_is_not_handed_back_to_the_bot: waiting for || open_fail(&t, &item).is_some()",
+        "The item opens a release failure card for human attention.",
         || open_fail(&t, &item).is_some(),
     );
     let f = open_fail(&t, &item).unwrap();
@@ -247,7 +247,7 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
     let (item, sid, d) = releasing_item(&t, &own);
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1: waiting for || open_fail(&t, &item).is_some()",
+        "The item opens a release failure card for human attention.",
         || open_fail(&t, &item).is_some(),
     );
     let f = open_fail(&t, &item).unwrap();
@@ -289,7 +289,7 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
         .unwrap();
     t.kit.core.resolve(&d, "yes", "", "me").unwrap();
     steve_runtime::testkit::eventually_blocking(
-        "a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1: waiting for || open_fail(&t, &item).is_some_and(|x| x != f)",
+        "The item opens a release failure card for human attention.",
         || open_fail(&t, &item).is_some_and(|x| x != f),
     );
     let f2 = open_fail(&t, &item).unwrap();
@@ -319,7 +319,7 @@ fn a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1() {
                 .any(|d| d.kind == "fail")
         };
         steve_runtime::testkit::eventually_blocking(
-            "a_failed_release_goes_back_once_and_two_yolo_failures_trip_b1: waiting for any_fail",
+            "The item opens a release failure card for human attention.",
             any_fail,
         );
         if let Some(f) = open_fail(&t, &item) {
@@ -341,7 +341,7 @@ fn yolo_metadata_keeps_a_failure_written_after_the_answer_snapshot() {
     let after = t.kit.core.resolve(&d, "yes", "", "yolo").unwrap();
     assert_eq!(after.result["outcome"], "releasing");
     steve_runtime::testkit::eventually_blocking(
-        "yolo_metadata_keeps_a_failure_written_after_the_answer_snapshot: waiting for || open_fail(&t, &item).is_some()",
+        "The item opens a release failure card for human attention.",
         || open_fail(&t, &item).is_some(),
     );
     let failed = t.decision(&d).result;
@@ -379,7 +379,7 @@ fn a_release_without_a_result_trips_b1_at_once() {
     t.engine.tick();
     assert_eq!(t.decision(&d).result["decided_by"], "yolo");
     steve_runtime::testkit::eventually_blocking(
-        "a_release_without_a_result_trips_b1_at_once: waiting for || open_fail(&t, &item).is_some()",
+        "The item opens a release failure card for human attention.",
         || open_fail(&t, &item).is_some(),
     );
     assert!(

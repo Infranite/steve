@@ -196,24 +196,21 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
 }
 
 async fn serving(h: &Home) {
-    let ok = eventually(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!("the Hub serves; log:\n{}", h.log())
-        }),
-        || async {
-            let Ok(r) = reqwest::Client::new()
-                .get(format!("{}/healthz", h.base()))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-            else {
-                return false;
-            };
-            r.json::<Value>().await.is_ok_and(|v| v["ok"] == true)
-        },
-    )
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!("the Hub serves; log:\n{}", h.log())
+    });
+    eventually(diagnostic, || async {
+        let Ok(r) = reqwest::Client::new()
+            .get(format!("{}/healthz", h.base()))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        r.json::<Value>().await.is_ok_and(|v| v["ok"] == true)
+    })
     .await;
-    assert!(ok, "the Hub serves; log:\n{}", h.log());
 }
 
 struct Client {
@@ -300,7 +297,7 @@ impl Client {
         let item = i["id"].as_str().expect("item").to_string();
         let mut sid = None;
         assert!(
-            eventually_sync("n2_acceptance state", || {
+            eventually_sync("The item receives its session binding.", || {
                 sid = h.one("SELECT id FROM sessions WHERE item_id=?", &item);
                 sid.is_some()
             })
@@ -541,16 +538,16 @@ async fn setup() -> (Home, Hub, NodeHome, NodeProc, String) {
     let hub = spawn_hub(&h, Some(&node));
     serving(&h).await;
     let p = n.run();
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("the Node linked; hub:\n{}\nnode:\n{}", h.log(), n.log())
-            )
-        }),
-        || h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0,
-    )
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The remote Node completes its first live link generation; Hub log:\n{}\nnode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || {
+        h.count("SELECT generation FROM nodes WHERE node_id=?", &node) > 0
+    })
     .await;
     (h, hub, n, p, node)
 }
@@ -560,21 +557,14 @@ async fn a_second_node_runs_a_whole_item() {
     let (h, _hub, n, mut p, node) = setup().await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "远程验收 @say hello-remote-5R").await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!(
-                    "the agent's reply came back over the link; hub:\n{}\nnode:\n{}",
-                    h.log(),
-                    n.log()
-                )
-            )
-        }),
-        || said(&h, &sid, "hello-remote-5R") > 0,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, &sid, "hello-remote-5R") > 0).await;
     assert_eq!(
         h.one(
             "SELECT node_id FROM runtime_sessions WHERE session_id=?",
@@ -585,8 +575,9 @@ async fn a_second_node_runs_a_whole_item() {
         "bound to the second Node"
     );
     assert!(
-        eventually_sync("n2_acceptance state", || attempts(&h, &sid, "finished")
-            >= 1)
+        eventually_sync("The Node turn records its finished attempt.", || attempts(
+            &h, &sid, "finished"
+        ) >= 1)
         .await
     );
     assert_eq!(n.got("hello-remote-5R"), 1, "the Node's agent got it once");
@@ -594,11 +585,14 @@ async fn a_second_node_runs_a_whole_item() {
     // a permission request becomes a card on the Hub; its answer reaches the Node's agent
     c.say(&sid, "@perm Bash").await;
     let mut card = None;
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "n2_acceptance state", format!(
-        "a permission card; hub:\n{}\nnode:\n{}",
-        h.log(),
-        n.log()
-    )) }), || {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node tool request opens its permission card; Hub log:\n{}\nnode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || {
             card = h.one(
                 "SELECT id FROM decisions WHERE session_id=? AND subject_type='tool_call' AND status='open'",
                 &sid,
@@ -615,17 +609,13 @@ async fn a_second_node_runs_a_whole_item() {
         )
         .await;
     assert_eq!(st, 200, "answer: {v}");
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("the Node's agent got the answer; node:\n{}", n.log())
-            )
-        }),
-        || said(&h, &sid, "perm:selected:") > 0,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The agent receives the selected permission answer; the Node's agent got the answer; node:\n{}",
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, &sid, "perm:selected:") > 0).await;
 
     // The default local model-job host may exist, but this item's turns and transcript belong
     // only to the remote Node.
@@ -655,51 +645,35 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     let sid = c
         .item(&h, "重启验收 @say one-8T @sleep 6000 @say two-8T")
         .await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!(
-                    "the turn started on the Node; hub:\n{}\nnode:\n{}",
-                    h.log(),
-                    n.log()
-                )
-            )
-        }),
-        || said(&h, &sid, "one-8T") > 0,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, &sid, "one-8T") > 0).await;
     // the Hub goes away mid-turn; the Node keeps running the turn and comes back to the new Hub
     hub.kill();
     let _hub = spawn_hub(&h, Some(&node));
     serving(&h).await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!(
-                    "the rest of the turn reached the restarted Hub; hub:\n{}\nnode:\n{}",
-                    h.log(),
-                    n.log()
-                )
-            )
-        }),
-        || said(&h, &sid, "two-8T") > 0,
-    )
-    .await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("{}\nhub:\n{}\nnode:\n{}", dump(&h, &sid), h.log(), n.log())
-            )
-        }),
-        || attempts(&h, &sid, "finished") >= 1,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node reply is stored as durable Steve conversation text; Hub log:\n{}\nnode:\n{}",
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, &sid, "two-8T") > 0).await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The Node turn records its finished attempt; {}\nhub:\n{}\nnode:\n{}",
+            dump(&h, &sid),
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || attempts(&h, &sid, "finished") >= 1).await;
     assert!(p.alive(), "the Node kept running");
     assert_eq!(n.got("one-8T"), 1, "never sent again");
     assert_eq!(
@@ -723,15 +697,24 @@ async fn hub_restart_keeps_the_work_going_and_nothing_runs_twice() {
     // up on its own once the restarted Node confirms its harness is gone (B6)
     let c = Client::login(&h).await;
     c.say(&sid, "断电验收-K7 @sleep 600000").await;
-    assert!(eventually_sync("n2_acceptance state", || n.got("断电验收-K7") == 1).await);
+    assert!(
+        eventually_sync(
+            "The fake Node receives the test turn prompt exactly once.",
+            || n.got("断电验收-K7") == 1
+        )
+        .await
+    );
     p.kill();
     let _p = n.run();
-    eventually_sync(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "n2_acceptance state", format!(
-        "the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
-        dump(&h, &sid),
-        h.log(),
-        n.log()
-    )) }), || {
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The interrupted Node attempt is recorded as abandoned after restart; the cut attempt is given up; {}\nhub:\n{}\nnode:\n{}",
+            dump(&h, &sid),
+            h.log(),
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || {
             h.count(
                 "SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND json_extract(a.completion,'$.stop_reason')='node_restarted'",
                 &sid,
@@ -765,29 +748,21 @@ async fn another_nodes_session_is_refused() {
     let (h, mut hub, n, _p, node) = setup().await;
     let c = Client::login(&h).await;
     let sid = c.item(&h, "隔离验收 @say iso-3M @sleep 600000").await;
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("node:\n{}", n.log())
-            )
-        }),
-        || n.got("iso-3M") == 1,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The correct Node receives the isolated session prompt; node:\n{}",
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || n.got("iso-3M") == 1).await;
     // what the harness said is in before the count below is taken
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("node:\n{}", n.log())
-            )
-        }),
-        || said(&h, &sid, "iso-3M") >= 1,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The isolated session stores its reply from the correct Node; node:\n{}",
+            n.log()
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, &sid, "iso-3M") >= 1).await;
     let exec: ExecutionRef = serde_json::from_str(
         &h.one(
             "SELECT a.execution FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",
@@ -1108,9 +1083,12 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let _proc_a = a.run();
     let mut proc_b = b.run();
     assert!(
-        eventually_sync("n2_acceptance state", || [&id_a, &id_b].iter().all(|id| {
-            h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0
-        }))
+        eventually_sync(
+            "Both test Nodes complete their live link generations.",
+            || [&id_a, &id_b]
+                .iter()
+                .all(|id| { h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0 })
+        )
         .await
     );
     let (_, report) = c
@@ -1247,45 +1225,33 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(run["dispatch"]["team"]["id"], team_a.as_str());
     assert_eq!(run["dispatch"]["team"]["source"], "default");
     assert_eq!(run["dispatch"]["placement"]["node"], id_a);
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("A received work: {}", a.log())
-            )
-        }),
-        || a.got("never-moved") == 1,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Node A receives the session originally pinned to it; A received work: {}",
+            a.log()
+        )
+    });
+    eventually_sync(diagnostic, || a.got("never-moved") == 1).await;
     default_team(&c, team_b).await;
     let second = make(&c, bot, None, "@say default-to-B").await;
     assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("B received work: {}", b.log())
-            )
-        }),
-        || b.got("default-to-B") == 1,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Node B receives the new default session; B received work: {}",
+            b.log()
+        )
+    });
+    eventually_sync(diagnostic, || b.got("default-to-B") == 1).await;
     let explicit = make(&c, bot, Some(team_a), "@say team-override").await;
     assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
     assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
-    eventually_sync(
-        steve_runtime::testkit::on_timeout(|| async {
-            format!(
-                "{}; {}",
-                "n2_acceptance state",
-                format!("old session completed: {}", dump(&h, sid))
-            )
-        }),
-        || said(&h, sid, "never-moved") > 0,
-    )
-    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The old session completes on its original Node; old session completed: {}",
+            dump(&h, sid)
+        )
+    });
+    eventually_sync(diagnostic, || said(&h, sid, "never-moved") > 0).await;
     assert_eq!(b.got("never-moved"), 0);
     let (_, again) = c.call("GET", &format!("/api/items/{rid}"), None).await;
     assert_eq!(again["dispatch"]["placement"]["session"], sid);
@@ -1293,14 +1259,17 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     assert_eq!(again["dispatch"]["team"]["id"], team_a.as_str());
 
     proc_b.kill();
-    eventually("make: waiting for || async { let (_, v) = c.call(\"GET\", &path, None).await; v[\"candidates\"].as_array().is_some_and(|ns| { ns.iter() .any(|n| n[\"id\"] == id_b && n[\"reason\"] == \"offline\") }) }", || async {
+    eventually(
+        "The placement response reports the unavailable Node as offline.",
+        || async {
             let (_, v) = c.call("GET", &path, None).await;
             v["candidates"].as_array().is_some_and(|ns| {
                 ns.iter()
                     .any(|n| n["id"] == id_b && n["reason"] == "offline")
             })
-        })
-        .await;
+        },
+    )
+    .await;
     let blocked = make(&c, bot, None, "@say must-not-cross").await;
     assert_eq!(
         blocked["dispatch"]["placement"]["reason"], "offline",

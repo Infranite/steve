@@ -302,14 +302,17 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
     );
     let (status, result) = act(&e, dep, "finish").await;
     assert_eq!(status, 200, "{result}");
-    eventually("creation_blocks_before_opening_a_session_and_completion_starts_it_once: waiting for || async { let (_, ss) = e.call(\"GET\", \"/api/sessions\", None).await; ss.as_array() .unwrap() .iter() .any(|s| s[\"item_id\"] == id && s[\"busy\"] == true && s[\"status\"] == \"running\") }", || async {
+    eventually(
+        "Finishing the dependency starts the dependent item session.",
+        || async {
             let (_, ss) = e.call("GET", "/api/sessions", None).await;
             ss.as_array()
                 .unwrap()
                 .iter()
                 .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
-        })
-        .await;
+        },
+    )
+    .await;
     let (_, ss) = e.call("GET", "/api/sessions", None).await;
     assert_eq!(
         ss.as_array()
@@ -320,14 +323,15 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
         1
     );
     // the fake adapter records a prompt after its session is already running: wait for it
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "creation_blocks_before_opening_a_session_and_completion_starts_it_once: waiting for || async { e.prompts() .iter() .any(|p| p.contains(\"无需为核对进度读取其他事项或请求扩大读取范围\")) }", format!(
-        "the dependent's prompt says it need not read other items"
-    )) }), || async {
+    eventually(
+        "The dependent prompt explicitly keeps unrelated items out of scope.",
+        || async {
             e.prompts()
                 .iter()
                 .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
-        })
-        .await;
+        },
+    )
+    .await;
     let (status, result) = act(&e, id, "drop").await;
     assert_eq!(status, 200, "{result}");
 }
@@ -424,21 +428,27 @@ async fn pause_finish_drop_and_new_cycles() {
     // lock, and the close commits once it stopped
     let (s, v) = act(&e, &iid, "finish").await;
     assert_eq!(s, 200, "{v}");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { e.session(&sid).await[\"busy\"] == false }", format!(
-        "the running turn is cancelled: {} {}",
-        e.session(&sid).await,
-        lifecycle(&e, &iid).await
-    )) }), || async {
-            e.session(&sid).await["busy"] == false
-        })
-        .await;
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"closed\" }", format!(
-        "closed once the turn stopped: {}",
-        lifecycle(&e, &iid).await
-    )) }), || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
-        })
-        .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "Finishing the item cancels its running session; the running turn is cancelled: {} {}",
+            e.session(&sid).await,
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        e.session(&sid).await["busy"] == false
+    })
+    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The finished item closes once its runtime turn has stopped; closed once the turn stopped: {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "closed"
+    })
+    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (
@@ -557,13 +567,16 @@ async fn pause_finish_drop_and_new_cycles() {
         "{v}"
     );
     // it closes once nothing of it runs (a turn still winding down under load is waited for)
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"closed\" }", format!(
-        "{}",
-        lifecycle(&e, &iid).await
-    )) }), || async {
-            lifecycle(&e, &iid).await["phase"] == "closed"
-        })
-        .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The finished item closes once its runtime turn has stopped; {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "closed"
+    })
+    .await;
     let l = lifecycle(&e, &iid).await;
     assert_eq!(
         (l["phase"].as_str(), l["outcome"].as_str()),
@@ -581,19 +594,21 @@ async fn pause_finish_drop_and_new_cycles() {
     )
     .await;
     assert_eq!(s, 200, "{v}");
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { e.prompts().iter().any(|p| p.contains(\"再做一次\")) }", format!(
-        "a new cycle with a goal starts the work"
-    )) }), || async {
-            e.prompts().iter().any(|p| p.contains("再做一次"))
-        })
-        .await;
-    eventually(steve_runtime::testkit::on_timeout(|| async { format!("{}; {}", "pause_finish_drop_and_new_cycles: waiting for || async { lifecycle(&e, &iid).await[\"phase\"] == \"active\" }", format!(
-        "{}",
-        lifecycle(&e, &iid).await
-    )) }), || async {
-            lifecycle(&e, &iid).await["phase"] == "active"
-        })
-        .await;
+    eventually(
+        "The adapter receives the request for another work cycle.",
+        || async { e.prompts().iter().any(|p| p.contains("再做一次")) },
+    )
+    .await;
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+        format!(
+            "The next work cycle returns the item to its active phase; {}",
+            lifecycle(&e, &iid).await
+        )
+    });
+    eventually(diagnostic, || async {
+        lifecycle(&e, &iid).await["phase"] == "active"
+    })
+    .await;
     let (_, v) = e.call("GET", &format!("/api/items/{iid}"), None).await;
     let cycles: Vec<(i64, &str)> = v["cycles"]
         .as_array()
