@@ -56,7 +56,7 @@ async fn an_incompatible_node_stays_linked_and_devices_explain_the_required_upgr
         )
         .await
         .unwrap();
-        until("upgrade link installed", 5, || {
+        eventually_sync("upgrade link installed", || {
             h.svc.registry.current(node.as_str()).is_some()
                 && h.svc.fleet.protocol(node.as_str()) == Some(protocol)
         })
