@@ -877,11 +877,12 @@ fn recovery_backoff() -> steve_runtime::policy::Backoff {
     }
 }
 
+/// Authoritative commit hints for the notification source and its wake regressions.
+pub const NOTIFICATION_WAKE_TABLES: &[&str] = &["personal_notifications", "notification_policies"];
+
 pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
     let clock = ch.modules().clock.clone();
-    let wake = ch
-        .store()
-        .commit_wake(&["personal_notifications", "notification_policies"]);
+    let wake = ch.store().commit_wake(NOTIFICATION_WAKE_TABLES);
     let source = Arc::new(NotificationDue {
         channels: ch,
         outbox,

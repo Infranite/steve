@@ -146,6 +146,7 @@ struct CommitWakes {
     hooked: bool,
     listeners: Vec<(Vec<&'static str>, std::sync::Weak<tokio::sync::Notify>)>,
     changed: std::collections::BTreeSet<String>,
+    committed: std::collections::BTreeSet<String>,
 }
 
 /// The write connection plus the publisher, handed to write closures so events go out under the lock.
@@ -272,6 +273,8 @@ impl Store {
     /// DELETEs, REPLACE's implicit deleted rows, or WITHOUT ROWID tables. Use explicit row writes
     /// for promptly making work due; these SQLite exceptions also rely on the fallback.
     /// A rolled-back savepoint can leave a harmless extra hint when its outer write commits.
+    /// Each SQLite commit seals its hint separately, so a later autocommit statement failure or
+    /// rollback in the same writer closure cannot erase an earlier successful commit.
     /// Hooks install lazily for live subscribers and detach before the next writer lease
     /// without subscribers. Subscribing inside a write scope also hints at its outer commit.
     pub fn commit_wake(&self, tables: &[&'static str]) -> Arc<tokio::sync::Notify> {
@@ -288,12 +291,17 @@ impl Store {
         if let Some(c) = self.active_conn() {
             register(c);
             // Earlier statements may predate hook installation. A conservative hint is safe.
-            self.inner
+            let mut state = self
+                .inner
                 .commit_wakes
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .changed
-                .extend(tables.iter().map(|t| (*t).to_owned()));
+                .unwrap_or_else(|e| e.into_inner());
+            let pending = if c.is_autocommit() {
+                &mut state.committed
+            } else {
+                &mut state.changed
+            };
+            pending.extend(tables.iter().map(|t| (*t).to_owned()));
         } else {
             let c = self.lock();
             register(&c);
@@ -328,6 +336,14 @@ impl Store {
             }))
             .expect("writer lease permits installing update hook");
             let wakes = self.inner.commit_wakes.clone();
+            c.commit_hook(Some(move || {
+                let mut state = wakes.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = std::mem::take(&mut state.changed);
+                state.committed.extend(changed);
+                false // A hint must never veto a business commit.
+            }))
+            .expect("writer lease permits installing commit hook");
+            let wakes = self.inner.commit_wakes.clone();
             c.rollback_hook(Some(move || {
                 wakes
                     .lock()
@@ -339,8 +355,11 @@ impl Store {
         } else {
             c.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
                 .expect("remove update hook");
+            c.commit_hook(None::<fn() -> bool>)
+                .expect("remove commit hook");
             c.rollback_hook(None::<fn()>).expect("remove rollback hook");
             state.changed.clear();
+            state.committed.clear();
         }
         state.hooked = needed;
     }
@@ -351,7 +370,7 @@ impl Store {
             .commit_wakes
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let changed = std::mem::take(&mut wakes.changed);
+        let changed = std::mem::take(&mut wakes.committed);
         wakes.listeners.retain(|(tables, w)| {
             if let Some(wake) = w.upgrade() {
                 if tables.iter().any(|t| changed.contains(*t)) {

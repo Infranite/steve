@@ -136,3 +136,65 @@ fn subscribing_inside_a_write_scope_covers_earlier_statements() {
         .unwrap();
     assert!(ready(&wake));
 }
+
+#[test]
+fn r3d_autocommit_failure_keeps_an_earlier_successful_commit_hint() {
+    for explicit_commit in [false, true] {
+        let (_dir, store) = setup();
+        insert(&store, 1).unwrap();
+        let wake = store.commit_wake(&["wake_sink"]);
+        let result = store.with_conn(|c| {
+            if explicit_commit {
+                c.execute_batch("BEGIN")?;
+            }
+            c.execute("INSERT INTO wake_source VALUES(2)", [])?;
+            if explicit_commit {
+                c.execute_batch("COMMIT")?;
+            }
+            assert!(
+                !ready(&wake),
+                "hints wait for the public writer scope to return"
+            );
+            c.execute("INSERT INTO wake_source VALUES(1)", [])?;
+            Ok(())
+        });
+        assert!(result.is_err(), "the second statement must actually fail");
+        assert!(
+            ready(&wake),
+            "the earlier SQLite commit must survive a later implicit rollback"
+        );
+        assert!(!ready(&wake));
+        store
+            .reader(|c| {
+                assert_eq!(
+                    c.query_row("SELECT sum(id) FROM wake_sink", [], |r| r.get::<_, i64>(0))?,
+                    3
+                );
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn r3d_later_transaction_rollback_keeps_an_earlier_commit_hint() {
+    let (_dir, store) = setup();
+    let wake = store.commit_wake(&["wake_sink"]);
+    store
+        .with_conn(|c| {
+            c.execute("INSERT INTO wake_source VALUES(1)", [])?;
+            c.execute_batch("BEGIN; INSERT INTO wake_source VALUES(2); ROLLBACK;")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(ready(&wake));
+    store
+        .reader(|c| {
+            assert_eq!(
+                c.query_row("SELECT sum(id) FROM wake_sink", [], |r| r.get::<_, i64>(0))?,
+                1
+            );
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+}

@@ -3121,7 +3121,14 @@ impl Outbox {
         // Background DueSource passes alone observe the transient per-row retry deadlines.
         lock(&self.deferred).clear();
         self.maintain(ch).await;
-        self.send_ready(ch, ch.now()).await + self.settle_unknown(ch, ch.now()).await
+        let sent = match self.send_ready(ch, ch.now()).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("channel send queue: {e}");
+                0
+            }
+        };
+        sent + self.settle_unknown(ch, ch.now()).await
     }
 
     // Conversions, expiry's cursor and draft checks are maintenance, not send deadlines.
@@ -3259,7 +3266,7 @@ impl Outbox {
         lock(&self.deferred).insert(id.to_owned(), now + QUEUE_EVERY.as_millis() as i64);
     }
 
-    async fn send_ready(&self, ch: &Channels, now: i64) -> usize {
+    async fn send_ready(&self, ch: &Channels, now: i64) -> ChannelResult<usize> {
         // B3: only due messages are selected before the LIMIT, so approved ones still inside their
         // delay can't fill the batch and starve those that are due
         let due = ch
@@ -3283,13 +3290,7 @@ impl Outbox {
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
             });
-        let due = match due {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("channel send queue: {e}");
-                return 0;
-            }
-        };
+        let due = due?;
         let mut n = 0;
         for (m, d) in due {
             self.defer_row(&m, now);
@@ -3299,7 +3300,7 @@ impl Outbox {
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
-        n + self.resume_direct(ch, now).await
+        Ok(n + self.resume_direct(ch, now).await?)
     }
 
     async fn convert_due(&self, ch: &Channels) {
@@ -3359,7 +3360,7 @@ impl Outbox {
     /// Direct messages (a rule's or a trigger's reply, no decision) whose send was cut off before
     /// it began, or that waited for their connection: sent under the authorization they were stored
     /// with (checked again by [`Outbox::send`]). One older than [`LATE_MS`] is asked about instead.
-    async fn resume_direct(&self, ch: &Channels, now: i64) -> usize {
+    async fn resume_direct(&self, ch: &Channels, now: i64) -> ChannelResult<usize> {
         let rows = ch
             .store()
             .reader(|c| -> ChannelResult<Vec<(String, i64, Option<i64>)>> {
@@ -3381,13 +3382,7 @@ impl Outbox {
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
             });
-        let rows = match rows {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("channel send queue (direct): {e}");
-                return 0;
-            }
-        };
+        let rows = rows?;
         let mut n = 0;
         for (m, created, tried) in rows {
             self.defer_row(&m, now);
@@ -3427,7 +3422,7 @@ impl Outbox {
                 Err(e) => tracing::warn!(message = m, "channel send failed: {e}"),
             }
         }
-        n
+        Ok(n)
     }
 
     /// A direct reply that did not go out in time: `failed`, with a retry / rewrite / discard card.
@@ -3470,7 +3465,7 @@ impl Outbox {
                   WHERE m.direction = 'out' AND m.status = 'unknown'
                     AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = ?1
                                       AND d.subject_id = m.id AND d.status = 'open')
-                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+                  ORDER BY coalesce((SELECT max(n.next_attempt_at) FROM personal_notifications n
                     JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
             let v = st
@@ -3554,14 +3549,7 @@ impl Outbox {
         });
         let clock = ch.modules().clock.clone();
         let weak = ch.downgrade();
-        let wake = ch.store().commit_wake(&[
-            "chan_messages",
-            "decisions",
-            "chan_send_state",
-            "personal_notifications",
-            "notification_policies",
-            "output_deliveries",
-        ]);
+        let wake = ch.store().commit_wake(QUEUE_WAKE_TABLES);
         let ended = weak.clone().closed();
         steve_runtime::spawn("channels.send", async move {
             struct Scope(Arc<Outbox>);
@@ -4623,12 +4611,22 @@ mod permission_tests {
     }
 }
 
+/// Authoritative commit hints for the durable send source, shared with its wake regressions.
+pub const QUEUE_WAKE_TABLES: &[&str] = &[
+    "chan_messages",
+    "decisions",
+    "chan_send_state",
+    "personal_notifications",
+    "notification_policies",
+    "output_deliveries",
+];
+
 // One candidate relation drives discovery and both batch consumers. Strict claim boundaries
 // become inclusive deadlines (+1ms); notification deferrals are filters before LIMIT, not ordering hints.
 const QUEUE_CANDIDATES: &str = "WITH candidates AS (
     SELECT m.id, d.id AS decision, m.created, NULL AS first_at,
       max(json_extract(d.result,'$.send_at'),coalesce(m.sent+?1+1,0),
-        coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+        coalesce((SELECT max(n.next_attempt_at) FROM personal_notifications n
           JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),
         coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0)) AS at
     FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
@@ -4638,7 +4636,7 @@ const QUEUE_CANDIDATES: &str = "WITH candidates AS (
     SELECT m.id, NULL, m.created, s.first_at,
       max(CASE WHEN m.sent IS NULL THEN m.created+?3+1 ELSE m.sent+?1+1 END,
         CASE WHEN s.first_at IS NOT NULL THEN 0 ELSE coalesce((
-          SELECT n.next_attempt_at FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+          SELECT max(n.next_attempt_at) FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
           JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
           WHERE od.message_id=m.id AND p.enabled=1),0) END,
         coalesce((SELECT value FROM json_each(?4) WHERE key=m.id),0))
@@ -4686,7 +4684,10 @@ impl steve_runtime::due::DueSource for QueueDue {
             return Ok(());
         };
         self.outbox.bind(&channels);
-        self.outbox.send_ready(&channels, now).await;
-        Ok(())
+        self.outbox
+            .send_ready(&channels, now)
+            .await
+            .map(|_| ())
+            .map_err(|e| steve_runtime::due::DueError(e.to_string()))
     }
 }

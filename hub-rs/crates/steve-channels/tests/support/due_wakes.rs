@@ -60,6 +60,28 @@ pub async fn assert_no_self_wake_loop<S: DueSource>(
         source,
         runs: AtomicUsize::new(0),
     });
+    let wake = ch.store().commit_wake(tables);
+    let touched = ch.store().transaction(|tx| -> steve_modules::ApiResult<_> {
+        for table in tables {
+            // Production constants contain trusted table names. Exercise a real watched write
+            // without changing the fixture's business fields or advancing its wall clock.
+            let n = tx.execute(&format!("UPDATE {table} SET rowid=rowid WHERE rowid IN (SELECT rowid FROM {table} LIMIT 1)"), [])?;
+            if n > 0 { return Ok(n); }
+        }
+        Ok(0)
+    }).unwrap();
+    assert!(
+        touched > 0,
+        "fixture must exercise its production subscription"
+    );
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(
+        std::pin::pin!(wake.notified())
+            .as_mut()
+            .poll(&mut cx)
+            .is_ready(),
+        "a real commit must wake the source before boundedness is tested"
+    );
     let task = steve_runtime::spawn(
         "test.commit_wake",
         steve_runtime::due::due_loop(
@@ -68,7 +90,7 @@ pub async fn assert_no_self_wake_loop<S: DueSource>(
                 wall,
                 elapsed: elapsed.clone(),
             }),
-            ch.store().commit_wake(tables),
+            wake,
             Backoff {
                 base: Duration::from_secs(1),
                 max: Duration::from_secs(1),

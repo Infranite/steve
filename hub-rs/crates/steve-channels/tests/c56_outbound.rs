@@ -7595,5 +7595,64 @@ async fn send_claim_commits_do_not_self_wake_into_a_busy_loop() {
             f.h.me
         ),
     );
-    due_wakes::assert_no_self_wake_loop(f.source, &f.h.ch, &["chan_messages"]).await;
+    due_wakes::assert_no_self_wake_loop(
+        f.source,
+        &f.h.ch,
+        steve_channels::outbound::QUEUE_WAKE_TABLES,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn r3d_queue_uses_the_latest_of_multiple_notification_deadlines() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    for direct in [false, true] {
+        for order in [[10_000, 20_000], [20_000, 10_000]] {
+            let f = QueueFixture::new().await;
+            let now = f.h.ch.now();
+            let id = f.add(now, false);
+            f.h.env.store().transaction(|tx| -> ApiResult<()> {
+                tx.execute("INSERT OR REPLACE INTO notification_policies(workspace_id,user_id,enabled,mode,timezone,consented_at,consent_since_seq,updated)
+                    VALUES (?1,?2,1,'now','UTC',0,0,0)", rusqlite::params![WS,ME])?;
+                tx.execute("INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,created)
+                    SELECT ?1,workspace_id,?2,?1,'test','{}','test',space_id,id,?3 FROM chan_messages WHERE id=?1", rusqlite::params![id,ME,now])?;
+                for (n, delay) in order.into_iter().enumerate() {
+                    let notice = format!("{id}-notice-{n}");
+                    tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,next_attempt_at,created,delivery_id)
+                        VALUES (?1,?2,?3,?1,?1,'now','body','submitted',?4,?5,?6)", rusqlite::params![notice,WS,ME,now+delay,now,id])?;
+                }
+                if direct {
+                    tx.execute("UPDATE chan_messages SET decision_id=NULL, created=?2, sent=NULL WHERE id=?1",
+                        rusqlite::params![id,now-steve_channels::outbound::UNCLAIMED_MS-1])?;
+                    steve_channels::send_state::keep(tx, &id, &Auth::None)?;
+                }
+                Ok(())
+            }).unwrap();
+            assert_eq!(f.source.next_due().await.unwrap(), Some(now + 20_000));
+            f.h.env.clock.set(now + 10_000);
+            f.source.run_due(now + 10_000).await.unwrap();
+            assert!(!f.done().contains(&id));
+            assert_eq!(f.source.next_due().await.unwrap(), Some(now + 20_000));
+        }
+    }
+}
+
+#[tokio::test]
+async fn r3d_queue_query_failure_reaches_the_due_loop() {
+    use steve_runtime::due::{DueSource, contract::Fixture};
+    let f = QueueFixture::new().await;
+    let now = f.h.ch.now();
+    f.add(now, false);
+    assert_eq!(f.source.next_due().await.unwrap(), Some(now));
+    f.h.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("ALTER TABLE chan_messages RENAME TO unavailable_messages")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        f.source.run_due(now).await.is_err(),
+        "a failed batch read must back off as a source error"
+    );
 }

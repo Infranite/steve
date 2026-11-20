@@ -230,6 +230,12 @@ impl Default for Timing {
 }
 
 impl Timing {
+    fn finish_run(self, attempt: &mut u32, ran: Duration) {
+        if ran >= self.backoff_max {
+            *attempt = 0;
+        }
+    }
+
     fn backoff(self) -> steve_runtime::policy::Backoff {
         steve_runtime::policy::Backoff {
             base: self.backoff_min,
@@ -650,6 +656,7 @@ async fn supervise(inner: Arc<Inner>, id: String, mut rx: watch::Receiver<Option
                 let c = current.take().expect("guarded");
                 lock(&inner.running).remove(&id);
                 let ran = c.started.elapsed();
+                t.finish_run(&mut attempt, ran);
                 let failed = match res {
                     Ok(Ok(())) => None,
                     Ok(Err(e)) => Some(match &e {
@@ -810,5 +817,32 @@ mod retry_sequence_tests {
             policy.supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
             Duration::from_secs(10)
         );
+    }
+    #[test]
+    fn r3d_lifecycle_stable_success_and_supersession_reset_the_next_failure() {
+        let timing = Timing::default();
+        for (outcome, ran, next_wait) in [
+            ("short success", 299, 300),
+            ("stable success", 300, 5),
+            ("long success", 7200, 5),
+            ("short superseded", 299, 300),
+            ("stable superseded", 300, 5),
+            ("long superseded", 7200, 5),
+        ] {
+            let mut attempt = 0;
+            for _ in 0..6 {
+                timing
+                    .backoff()
+                    .supervised(&mut attempt, Duration::ZERO, &mut rand::rng());
+            }
+            timing.finish_run(&mut attempt, Duration::from_secs(ran));
+            assert_eq!(
+                timing
+                    .backoff()
+                    .supervised(&mut attempt, Duration::ZERO, &mut rand::rng()),
+                Duration::from_secs(next_wait),
+                "{outcome}"
+            );
+        }
     }
 }

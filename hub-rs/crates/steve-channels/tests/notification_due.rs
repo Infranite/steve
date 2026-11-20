@@ -158,5 +158,10 @@ async fn notification_commits_do_not_self_wake_into_a_busy_loop() {
     let f = Notifications::new();
     f.add(NOW, true);
     let ch = f.source.channels.clone();
-    due_wakes::assert_no_self_wake_loop(f.source, &ch, &["personal_notifications"]).await;
+    due_wakes::assert_no_self_wake_loop(
+        f.source,
+        &ch,
+        steve_channels::notifications::NOTIFICATION_WAKE_TABLES,
+    )
+    .await;
 }
