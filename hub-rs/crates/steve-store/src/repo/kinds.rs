@@ -159,25 +159,24 @@ const MOVED_CAT: &str = "主题";
 /// tags keep their ids and descriptions. A reserved name in another category is refused before
 /// any seeding; an operator must explicitly rename that tag first.
 pub(crate) fn ensure(w: &W, ws: &str) -> Result<Vec<Tag>> {
-    let existing = KINDS
-        .iter()
-        .map(|(name, _)| {
-            one(
-                w.c,
-                "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
-                [ws, *name],
-                Tag::from_row,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if let Some(tag) = existing.iter().flatten().find(|tag| tag.cat != KIND_CAT) {
-        return Err(StoreError::Conflict(steve_i18n::t!(
-            "store.tag.kind_name",
-            name = tag.name.as_str()
-        )));
+    let mut pending = Vec::with_capacity(KINDS.len());
+    for (name, desc) in KINDS {
+        let existing = one(
+            w.c,
+            "SELECT * FROM tags WHERE workspace_id = ? AND name = ?",
+            [ws, name],
+            Tag::from_row,
+        )?;
+        if existing.as_ref().is_some_and(|tag| tag.cat != KIND_CAT) {
+            return Err(StoreError::Conflict(steve_i18n::t!(
+                "store.tag.kind_name",
+                name = name
+            )));
+        }
+        pending.push((name, desc, existing));
     }
     let mut out = vec![];
-    for ((name, desc), existing) in KINDS.into_iter().zip(existing) {
+    for (name, desc, existing) in pending {
         match existing {
             Some(tag) => out.push(tag),
             None => {
