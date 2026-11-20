@@ -295,10 +295,7 @@ fn daily_backup_follows_part_roots_and_skips_unreadable_caches_and_signing_passw
 fn daily_backup_without_file_parts_records_no_skips() {
     let home = tempfile::tempdir().unwrap();
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v);")
-        .unwrap();
+    current_database(&db, "CREATE TABLE evidence(v);");
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
     assert!(made.files.is_none());
     let files = saved_files(&made.database);
@@ -335,10 +332,10 @@ fn daily_backup_publishes_and_reads_distinct_non_utf8_skipped_paths() {
     expected.sort_by(|a, b| a.path.cmp(&b.path));
     write(home.path(), "workspaces/item/kept.txt", "kept");
     let db = home.path().join("database.sqlite3");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch("CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');")
-        .unwrap();
+    current_database(
+        &db,
+        "CREATE TABLE evidence(v); INSERT INTO evidence VALUES('kept');",
+    );
     let made = daily_backup::make(home.path(), &db, "20261120").unwrap();
     assert!(made.database.is_file());
     let files = saved_files(&made.database);
