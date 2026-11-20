@@ -132,6 +132,15 @@ struct Writer<E: Send + 'static> {
     executor: Executor<Arc<Engine>, EngineRunner<E>>,
     runner: Arc<SqliteBatchRunner<E>>,
 }
+/// SQLite DomainStore. Hints cover ordinary rowid tables written through this Store
+/// and its clones. Independent connections/processes and remote backends need the
+/// consumer's 60-second polling fallback.
+///
+/// WITHOUT ROWID domain tables are prohibited by the schema guard. update_hook
+/// misses truncate-optimized DELETE: the production source guard forbids clearing
+/// watched tables without a predicate, including constant-true WHERE expressions.
+/// REPLACE still hints through its INSERT. FTS shadow events do not imply a hint
+/// under the virtual table's logical name; subscribe to ordinary domain tables.
 pub struct SqliteStore<E: Send + 'static = ()> {
     registry: Arc<Registry>,
     writers: BTreeMap<Domain, Arc<Writer<E>>>,
@@ -140,8 +149,21 @@ pub struct SqliteStore<E: Send + 'static = ()> {
     clock: Arc<dyn WallClock>,
     runtime: Option<tokio::runtime::Handle>,
 }
+impl<E: Send + 'static> Clone for SqliteStore<E> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            writers: self.writers.clone(),
+            reads: self.reads.clone(),
+            hello: self.hello.clone(),
+            clock: self.clock.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
 impl<E: Send + 'static> SqliteStore<E> {
-    /// Engines must all come from the same validated layout. No new connection is opened here.
+    /// Engines must all come from the same validated layout. Writer connections are
+    /// reused. Commit hints cover this Store and its clones, not independent connections.
     /// Construct within the owning Tokio runtime; it must outlive the store and its reads.
     pub fn new(
         engines: Vec<Engine>,
@@ -313,6 +335,63 @@ impl<E: Send + 'static> SqliteStore<E> {
         let session = session.clone();
         blocking(self.runtime.clone(), move || reads.end_export(&session)).await
     }
+    /// Backend subscription entry keyed by physical table names in one writer
+    /// file. No entity/descriptor lookup occurs here. Entity watches and the
+    /// legacy Notify facade both attach weak consumer adapters to this registry.
+    /// A registration inside its root grant is conservative until root release.
+    pub fn subscribe_tables(&self, domain: Domain, tables: &[&str], hint: Arc<dyn CommitHint>) {
+        if tables.is_empty() {
+            return;
+        }
+        let writer = &self.writers[&domain];
+        let tables: Vec<_> = tables.iter().map(|s| (*s).to_owned()).collect();
+        // Registration never acquires a writer grant or connection: it is safe
+        // while another thread holds a root, or this thread holds another file.
+        writer.runner.watches.subscribe_hint(&tables, hint);
+        // Only this thread's capture for this registry can conservatively mark
+        // an in-scope subscription; other files/threads are ordinary registrations.
+        crate::exec::watch::Capture::subscribed(&writer.runner.watches, &tables);
+    }
+    /// Backend-only table-key bridge for the legacy Store::commit_wake facade.
+    /// It shares the entity watch registry, update hook and publication boundary.
+    /// Subscribing inside a writer scope conservatively hints at its outer commit;
+    /// pure rollbacks remain quiet. Domain code uses DomainStore::watch instead.
+    pub fn commit_wake(&self, domain: Domain, tables: &[&str]) -> Arc<tokio::sync::Notify> {
+        struct NotifyHint(std::sync::Weak<tokio::sync::Notify>);
+        impl CommitHint for NotifyHint {
+            fn is_alive(&self) -> bool {
+                self.0.strong_count() > 0
+            }
+            fn notify(&self) {
+                if let Some(notify) = self.0.upgrade() {
+                    notify.notify_one();
+                }
+            }
+        }
+        let wake = Arc::new(tokio::sync::Notify::new());
+        self.subscribe_tables(domain, tables, Arc::new(NotifyHint(Arc::downgrade(&wake))));
+        wake
+    }
+    fn watch_across_files(&self, entities: &[EntityName]) -> CommitWatch {
+        let watch = CommitWatch::new();
+        let mut files = BTreeSet::new();
+        for (domain, writer) in &self.writers {
+            if !files.insert(writer.engine.path()) {
+                continue;
+            }
+            let physical: Vec<_> = self
+                .registry
+                .entities()
+                .filter(|e| {
+                    entities.contains(&e.desc.name)
+                        && Arc::ptr_eq(&self.writers[&e.desc.domain], writer)
+                })
+                .map(|e| e.table.as_str())
+                .collect();
+            self.subscribe_tables(*domain, &physical, watch.hint());
+        }
+        watch
+    }
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
@@ -345,7 +424,11 @@ impl<E: Send + 'static> SqliteStore<E> {
         })?
     }
     /// Legacy bridge seam: allocate before the callback opens a transaction. The callback owns
-    /// COMMIT/rollback and pending events. Nested operations pass their existing RootRevision.
+    /// COMMIT/rollback and pending events. SQL hooks record candidates; notifications
+    /// leave only after the callback returns and successful statements are confirmed.
+    /// Nested operations reuse the revision. Independent writers are outside this registry.
+    /// Callbacks must preserve the writer's hooks/trace registration. Subscribe from
+    /// the writer callback, outside SQL functions or SQLite hook execution.
     pub fn with_root<T>(
         &self,
         domain: Domain,
@@ -367,6 +450,7 @@ impl<E: Send + 'static> SqliteStore<E> {
         } else {
             Ok(())
         };
+        // RootGuard publishes confirmed commits once, after rollback cleanup.
         // Release the Engine mutex before resuming caller unwinding; a user panic must
         // not poison the physical writer and prevent the next executor turn.
         drop(c);
@@ -398,10 +482,18 @@ impl<E: Send + 'static> SqliteStore<E> {
             ));
         }
         let connection = w.engine.writer_conn().map_err(CommitError::Fatal)?;
+        // SAFETY: this points into the Connection in Engine's mutex, not into the
+        // movable MutexGuard. RootGuard retains an Arc<Engine> (also if forgotten),
+        // is thread-bound, and finishes/drops Capture before releasing the mutex.
+        // Extending this borrow avoids a self-reference to the guard's own fields.
+        let captured_connection = unsafe { &*std::ptr::from_ref(&*connection) };
+        let capture = crate::exec::watch::Capture::begin(captured_connection, &w.runner.watches)
+            .map_err(crate::domains::sql_error)?;
         Ok(RootGuard {
-            engine: &w.engine,
             connection,
+            capture: Some(capture),
             _grant: grant,
+            engine: w.engine.clone(),
         })
     }
     /// Explicit verification/bootstrap only. Existing production tables must already have their
@@ -417,12 +509,15 @@ impl<E: Send + 'static> SqliteStore<E> {
 }
 /// Opaque root writer authorization. Only the executor can create it; borrowing
 /// the connection never escapes its authorization lifetime. Drop rolls back a
-/// leaked transaction, releases the mutex, then returns the executor's lease.
+/// leaked transaction, publishes confirmed table hints through Capture's single
+/// exit, releases the mutex, then returns the executor's lease.
 /// Kept thread-bound by RootGrant, and must never be held across await.
 pub struct RootGuard<'a, E: Send + 'static = ()> {
-    engine: &'a Engine,
+    // Capture drops before the mutex guard even if cleanup unwinds.
+    capture: Option<crate::exec::watch::Capture<'a>>,
     connection: std::sync::MutexGuard<'a, rusqlite::Connection>,
     _grant: RootGrant<Arc<Engine>, EngineRunner<E>>,
+    engine: Arc<Engine>,
 }
 impl<E: Send + 'static> RootGuard<'_, E> {
     pub fn connection(&self) -> &rusqlite::Connection {
@@ -440,10 +535,16 @@ impl<E: Send + 'static> Drop for RootGuard<'_, E> {
         if !self.connection.is_autocommit() {
             let _ = self.engine.rollback_root(&self.connection);
         }
+        if let Some(capture) = self.capture.take() {
+            capture.finish();
+        }
     }
 }
 // Written as boxed futures to implement the async_trait ABI without another macro dependency.
 impl<E: Send + 'static> DomainStore for SqliteStore<E> {
+    fn watch(&self, entities: &[EntityName]) -> CommitWatch {
+        self.watch_across_files(entities)
+    }
     fn hello(&self) -> &Hello {
         &self.hello
     }

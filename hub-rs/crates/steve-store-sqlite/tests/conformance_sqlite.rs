@@ -1,8 +1,5 @@
-//! Opt-in suite: RUSTFLAGS='--cfg sqlite_conformance' cargo nextest run -p
-//! steve-store-sqlite --features steve-storage-api/conformance --test conformance_sqlite.
-//! The conformance feature remains test-only without changing the production manifest.
-#![allow(unexpected_cfgs)]
-#![cfg(sqlite_conformance)]
+//! Opt-in suite: cargo nextest run -p steve-store-sqlite --features conformance.
+#![cfg(feature = "conformance")]
 #[path = "support/digest.rs"]
 mod digest_fixture;
 #[path = "uow_support.rs"]
@@ -292,7 +289,10 @@ fn crash_child() {
     sign(&mut u);
     let _ = verify::block_on(store.commit(u));
 }
+// Keep evidence collection isolated under libtest as well as nextest.
+static ACCESS_WINDOW: Mutex<()> = Mutex::new(());
 fn run_suite(split: bool) {
+    let _window = ACCESS_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(
         steve_store_sqlite::domains::fixtures::descriptors(),
         verify::entities::descriptors()
@@ -302,6 +302,7 @@ fn run_suite(split: bool) {
                 .any(|d| d.name == e.name))
             .collect::<Vec<_>>()
     );
+    let _ = steve_store_sqlite::exec::access_log::take();
     let harness = Lifecycle::new(split);
     let report = verify::run_with_named(&harness, &verify::digest::named_checks());
     println!(
@@ -319,6 +320,26 @@ fn run_suite(split: bool) {
         serde_json::to_string(&report).unwrap()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let accesses = steve_store_sqlite::exec::access_log::take();
+    assert!(
+        !accesses.is_empty(),
+        "authorizer must record the executed suite"
+    );
+    let tables: std::collections::BTreeSet<_> = accesses
+        .iter()
+        .map(|a| (&a.context, &a.table, a.mode))
+        .collect();
+    println!(
+        "TABLE_ACCESSES split={split}: {}",
+        serde_json::to_string(&tables).unwrap()
+    );
+    let actual = steve_store_sqlite::exec::access_log::cross_context(&accesses);
+    let expected =
+        steve_store_sqlite::exec::access_log::expected(include_str!("cross_context.txt"));
+    assert_eq!(
+        actual, expected,
+        "cross-context exceptions must exactly equal observed accesses"
+    );
 }
 #[test]
 fn single_file_contract_suite() {

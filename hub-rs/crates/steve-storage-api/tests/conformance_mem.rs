@@ -4,7 +4,7 @@ fn verify(loopback: bool) {
     let report = run(&MemHarness::new(loopback));
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     let registered = steve_storage_api::registry::ENTRIES.len();
-    assert_eq!(report.items.len(), 25 + registered);
+    assert_eq!(report.items.len(), 31 + registered);
     for entry in steve_storage_api::registry::ENTRIES {
         let items: Vec<_> = report
             .items
@@ -54,7 +54,7 @@ fn verify(loopback: bool) {
             .filter(|item| item.status == Status::Failed)
             .collect::<Vec<_>>()
     );
-    assert_eq!(report.passed(), 21 + registered);
+    assert_eq!(report.passed(), 27 + registered);
     assert_eq!(report.skipped(), 4);
     assert!(!report.all_passed());
     assert_eq!(report.measurements.len(), 2);

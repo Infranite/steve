@@ -150,7 +150,7 @@ pub fn prepare_layout(dir: &std::path::Path, split: bool) {
     }
     assert!(dir.join(CORE_FILE).exists());
 }
-pub fn open_store(
+pub fn open_sync_store(
     dir: &std::path::Path,
     registry: Arc<Registry>,
     time: Arc<Time>,
@@ -164,24 +164,33 @@ pub fn open_store(
     };
     let mut engines = Vec::new();
     for file in engine.layout().files.keys() {
-        if engine.path() != dir.join(file) {
+        if engine.path() != engine.data_dir().join(file) {
             engines.push(engine.open_peer(file).unwrap());
         }
     }
     engines.push(engine);
-    let _runtime = tokio::runtime::Handle::try_current()
-        .err()
-        .map(|_| runtime().enter());
-    steve_store_sqlite::store::SqliteStore::new(
+    steve_store_sqlite::store::SqliteStore::new_sync(
         engines,
         registry,
         time.clone(),
         Arc::new(|_, _: Vec<String>| {}),
-        || false,
+        || tokio::runtime::Handle::try_current().is_ok(),
     )
     .unwrap()
-    .with_snapshot_clock(time)
-    .unwrap()
+}
+
+pub fn open_store(
+    dir: &std::path::Path,
+    registry: Arc<Registry>,
+    time: Arc<Time>,
+) -> steve_store_sqlite::store::SqliteStore<String> {
+    open_sync_store(dir, registry, time.clone())
+        .with_runtime(
+            tokio::runtime::Handle::try_current().unwrap_or_else(|_| runtime().handle().clone()),
+        )
+        .unwrap()
+        .with_snapshot_clock(time)
+        .unwrap()
 }
 
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {

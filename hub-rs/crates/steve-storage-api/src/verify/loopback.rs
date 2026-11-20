@@ -29,6 +29,9 @@ fn wire<T: Serialize + DeserializeOwned>(value: &T) -> Result<T, Error> {
 }
 #[async_trait]
 impl<S: DomainStore + ?Sized> DomainStore for Loopback<S> {
+    fn watch(&self, entities: &[EntityName]) -> CommitWatch {
+        self.inner.watch(entities)
+    }
     fn hello(&self) -> &Hello {
         &self.hello
     }
