@@ -1,1 +1,1 @@
-The upgrade supervisor now finishes process-group cleanup before reaping the Hub child, so repeated shutdown cannot signal a reused process-group number.
+The upgrade supervisor now finishes process-group cleanup before reaping the Hub child, so repeated shutdown cannot signal a reused process-group number. Forced shutdown signals both the recorded group and the Hub child, even if their group membership changed.

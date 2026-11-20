@@ -6,6 +6,8 @@ use std::time::Duration;
 use steve_runtime::testkit::process::{AsyncChild as Child, AsyncCommand as Command};
 #[cfg(not(test))]
 use tokio::process::{Child, Command};
+const STOP_GRACE: Duration = Duration::from_secs(15);
+
 struct HubChild {
     process: Child,
     group: u32,
@@ -177,7 +179,9 @@ fn exited_unreaped(pid: u32, options: i32) -> std::io::Result<bool> {
         }
     }
 }
-async fn stop(child: &mut HubChild) -> Result<()> {
+/// Must run to completion: do not put this future in a cancellable select/timeout context.
+/// The blocking waitid can return only after the child exits and cannot be aborted with the future.
+async fn stop(child: &mut HubChild, grace: Duration) -> Result<()> {
     let Some(pid) = child.id() else {
         // A previous wait already released this identity; never signal its cached group.
         return Ok(());
@@ -189,7 +193,7 @@ async fn stop(child: &mut HubChild) -> Result<()> {
         }
         // Wait in the blocking pool without polling timers or reaping the leader.
         let mut observed = tokio::task::spawn_blocking(move || exited_unreaped(pid, 0));
-        match tokio::time::timeout(Duration::from_secs(15), &mut observed).await {
+        match tokio::time::timeout(grace, &mut observed).await {
             Ok(result) => {
                 result??;
             }
@@ -198,6 +202,8 @@ async fn stop(child: &mut HubChild) -> Result<()> {
                 exited_unreaped(pid, libc::WNOHANG)?;
                 unsafe {
                     libc::kill(-group, libc::SIGKILL);
+                    // The unreaped leader still pins its PID even if it left the recorded group.
+                    libc::kill(pid as i32, libc::SIGKILL);
                 }
                 observed.await??;
             }
@@ -363,7 +369,7 @@ async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operati
         ));
     }
     u.phase(op, "stopping", None)?;
-    stop(child).await?;
+    stop(child, STOP_GRACE).await?;
     u.phase(op, "backing_up", None)?;
     let copied = backup(&cfg.db_path(), &cfg.home, from.version, op.version.clone())
         .and_then(|saved| journal_backup_link(saved, &u.dir().join(format!("{}.sqlite3", op.id))));
@@ -410,7 +416,7 @@ async fn rollback(
     error: String,
 ) -> Result<()> {
     u.phase(op, "rolling_back", Some(error.clone()))?;
-    stop(child).await?;
+    stop(child, STOP_GRACE).await?;
     restore(
         &cfg.db_path(),
         backup_path,
@@ -523,7 +529,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut live = Liveness::default();
     let mut probed = tokio::time::Instant::now();
     loop {
-        tokio::select! {_ = term.recv()=>{stop(&mut child).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child).await?;return Ok(())},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}
+        tokio::select! {_ = term.recv()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::signal::ctrl_c()=>{stop(&mut child, STOP_GRACE).await?;return Ok(())},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}
         if let Some(mut op) = u.active()?
             && op.phase == "ready"
             && let Err(e) = apply(&cfg, &u, &mut child, &mut op).await
@@ -555,7 +561,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 tracing::error!(
                     "Hub did not answer /healthz {LIVENESS_MISSES} times in a row; stopping it"
                 );
-                stop(&mut child).await?;
+                stop(&mut child, STOP_GRACE).await?;
                 bail!("Hub stopped answering; supervisor must be restarted by service manager")
             }
         }
@@ -775,7 +781,7 @@ server.serve_forever()
         .await;
         let descendant: i32 = fs::read_to_string(ready).unwrap().parse().unwrap();
         assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
-        stop(&mut child).await.unwrap();
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
         assert!(child.id().is_none());
         steve_runtime::testkit::eventually_sync(
             "the old group and its descendant are gone",
@@ -784,13 +790,13 @@ server.serve_forever()
         .await;
         let mut canary = Command::new("/bin/sleep").arg("600").spawn().unwrap();
         child.group = canary.id().unwrap();
-        stop(&mut child).await.unwrap();
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
         assert!(canary.try_wait().unwrap().is_none());
         canary.kill().await.unwrap();
     }
 
     #[tokio::test]
-    async fn stop_forces_a_term_ignoring_child_before_reaping() {
+    async fn stop_forces_a_term_ignoring_child_outside_the_recorded_group() {
         let home = tempfile::tempdir().unwrap();
         let ready = home.path().join("ready");
         let process = Command::new("/bin/sh")
@@ -802,13 +808,18 @@ server.serve_forever()
             .arg(&ready)
             .spawn()
             .unwrap();
-        let group = process.id().unwrap();
+        let leader = process.id().unwrap();
+        // Model a leader outside the recorded group using another independently owned fixture.
+        // Keep that group's leader unreaped too, so this never signals a reusable/fabricated ID.
+        let mut former_group = Command::new("/bin/sleep").arg("600").spawn().unwrap();
+        let group = former_group.id().unwrap();
         let mut child = HubChild { process, group };
         steve_runtime::testkit::eventually_sync("child ignores TERM", || ready.exists()).await;
-        stop(&mut child).await.unwrap();
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
         assert!(child.id().is_none());
-        steve_runtime::testkit::eventually_sync("forced shutdown removed the group", || unsafe {
-            libc::kill(-(group as i32), 0) == -1
+        former_group.wait().await.unwrap();
+        steve_runtime::testkit::eventually_sync("forced shutdown removed both groups", || unsafe {
+            libc::kill(-(group as i32), 0) == -1 && libc::kill(-(leader as i32), 0) == -1
         })
         .await;
     }
@@ -907,13 +918,13 @@ server.serve_forever()
         let mut child = spawn(&cfg, &old, None).unwrap();
         let up = wait_health(&cfg, &u, &mut child, "0.1.0", None).await;
         if taken() {
-            let _ = stop(&mut child).await;
+            let _ = stop(&mut child, Duration::from_millis(50)).await;
             return false;
         }
         up.unwrap();
         let applied = apply(&cfg, &u, &mut child, &mut op).await;
         if taken() {
-            let _ = stop(&mut child).await;
+            let _ = stop(&mut child, Duration::from_millis(50)).await;
             return false;
         }
         applied.unwrap();
@@ -928,7 +939,7 @@ server.serve_forever()
                 .unwrap(),
             "before-upgrade"
         );
-        stop(&mut child).await.unwrap();
+        stop(&mut child, Duration::from_millis(50)).await.unwrap();
         true
     }
     #[tokio::test]

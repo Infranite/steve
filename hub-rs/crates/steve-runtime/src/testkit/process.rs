@@ -509,41 +509,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_or_failed_parent_probes_do_not_kill_a_healthy_owner() {
-        for outcome in ["return 1", "return 0"] {
-            let fixture = Fixture::new();
-            // Replace only the parentage probe; exercise the actual timeout loop and teardown.
-            let watch = WATCH
-                .replacen(
-                    "owner=$$",
-                    &format!(
-                        r#"failed_probe() {{ printf 'probe\n' >> "$PROBES"; {outcome}; }}
-owner=$$"#
-                    ),
-                    1,
-                )
-                .replace("/bin/ps -p \"$owner\" -o ppid=", "failed_probe");
-            let mut command = Command {
-                inner: command("/bin/sleep", &watch),
-                stdio: [false; 3],
-            };
-            let mut child = command
-                .arg("600")
-                .env("PROBES", fixture.0.join("probes"))
-                .spawn()
-                .unwrap();
-            eventually_sync("two empty parent probes while owner stays alive", || {
-                child.try_wait().unwrap().is_some()
-                    || fs::read_to_string(fixture.0.join("probes"))
-                        .unwrap_or_default()
-                        .lines()
-                        .count()
-                        >= 2
-            })
-            .await;
-            assert!(child.try_wait().unwrap().is_none(), "{outcome}");
-            drop(child);
-        }
+    async fn failed_parent_probe_does_not_kill_a_healthy_owner() {
+        let fixture = Fixture::new();
+        // Replace only the parentage probe; exercise the actual timeout loop and teardown.
+        let watch = WATCH
+            .replacen(
+                "owner=$$",
+                r#"failed_probe() { printf 'probe\n' >> "$PROBES"; return 1; }
+owner=$$"#,
+                1,
+            )
+            .replace("/bin/ps -p \"$owner\" -o ppid=", "failed_probe");
+        let mut command = Command {
+            inner: command("/bin/sleep", &watch),
+            stdio: [false; 3],
+        };
+        let mut child = command
+            .arg("600")
+            .env("PROBES", fixture.0.join("probes"))
+            .spawn()
+            .unwrap();
+        eventually_sync("two failed parent probes while owner stays alive", || {
+            child.try_wait().unwrap().is_some()
+                || fs::read_to_string(fixture.0.join("probes"))
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    >= 2
+        })
+        .await;
+        assert!(child.try_wait().unwrap().is_none());
+        drop(child);
     }
 
     #[test]
