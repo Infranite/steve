@@ -1,0 +1,2705 @@
+[
+  {
+    "command": "echo plain",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "echo plain"
+        ],
+        "matched": [
+          "echo"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "echo plain"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sh -c 'git status'",
+    "guard": {
+      "ask": "sh 会执行看不见的命令"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sh -c 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "bash -s <<'DONE'\ngit status\nDONE",
+    "guard": {
+      "ask": "here-document 喂给 bash，看不出会执行什么"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "bash -s <<'DONE'\ngit status\nDONE"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "printf code | python3 -",
+    "guard": {
+      "ask": "管道把程序喂给 python3，看不出会执行什么"
+    },
+    "full": {
+      "ask": "管道把脚本喂给 python3，看不出会执行什么"
+    },
+    "limit": null
+  },
+  {
+    "command": "eval 'git status'",
+    "guard": {
+      "ask": "eval 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "eval 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "source /dev/stdin <<'DONE'\ngit status\nDONE",
+    "guard": {
+      "ask": "here-document 喂给 source，看不出会执行什么"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "source /dev/stdin <<'DONE'\ngit status\nDONE"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "find . -exec git status \\;",
+    "guard": {
+      "ask": "find 的 -delete / -exec 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "find . -exec git status \\;"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git rebase -x 'git status' main",
+    "guard": {
+      "ask": "git 会运行命令行里给的别的命令，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git rebase -x 'git status' main"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed '1e id' a",
+    "guard": {
+      "ask": "sed 脚本会执行命令（e id），留给你"
+    },
+    "full": {
+      "ask": "sed 脚本会执行命令（e id），留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 's|a|b|g' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 's|a|b|g' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 's|a|b|g' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "awk '{print $1}' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "awk '{print $1}' a"
+        ],
+        "matched": [
+          "awk"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "awk '{print $1}' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "awk 'BEGIN {system(\"id\")}'",
+    "guard": {
+      "ask": "awk 程序里有 system()、管道或写文件，会执行或改别的东西"
+    },
+    "full": {
+      "ask": "内联代码里有能运行别的程序或动态执行的写法（system(），静态看不出会运行什么，留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "alias k='git status'",
+    "guard": {
+      "ask": "没见过的程序：alias"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "alias k='git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "trap 'git status' EXIT",
+    "guard": {
+      "ask": "没见过的程序：trap"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "trap 'git status' EXIT"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "function f { git status; }",
+    "guard": {
+      "ask": "没见过的程序：function"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "function f { git status; }"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "coproc git status",
+    "guard": {
+      "ask": "没见过的程序：coproc"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "coproc git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "arch -arm64 git status",
+    "guard": {
+      "ask": "没见过的程序：arch"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "arch -arm64 git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "watch -n 2 'git status'",
+    "guard": {
+      "ask": "没见过的程序：watch"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "watch -n 2 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "setsid --wait git status",
+    "guard": {
+      "ask": "没见过的程序：setsid"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "setsid --wait git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "flock -w 2 lock -c 'git status'",
+    "guard": {
+      "ask": "没见过的程序：flock"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "flock -w 2 lock -c 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "script -q /dev/null -c 'git status'",
+    "guard": {
+      "ask": "没见过的程序：script"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "script -q /dev/null -c 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "entr -s 'git status'",
+    "guard": {
+      "ask": "没见过的程序：entr"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "entr -s 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "npm --prefix . exec -- git status",
+    "guard": {
+      "ask": "npm . 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm --prefix . exec -- git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "npm install exec",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm install exec"
+        ],
+        "matched": [
+          "npm"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm install exec"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "pnpm exec git status",
+    "guard": {
+      "ask": "npx 会下载并运行 git，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "pnpm exec git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "nix-shell -p git --run 'git status'",
+    "guard": {
+      "ask": "nix-shell 会把命令交给 shell 执行，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "nix-shell -p git --run 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "nix shell -- git status",
+    "guard": {
+      "ask": "没见过的程序：nix"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "nix shell -- git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "cross-env A=1 B=2 git status",
+    "guard": {
+      "ask": "没见过的程序：cross-env"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cross-env A=1 B=2 git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "ccache -s",
+    "guard": {
+      "ask": "没见过的程序：ccache"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "ccache -s"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "uv run --unknown git status",
+    "guard": {
+      "ask": "uv 的选项 --unknown 不认识，看不出它运行的命令从哪开始"
+    },
+    "full": {
+      "ask": "uv 的选项 --unknown 不认识，看不出它运行的命令从哪开始"
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 -c 'print(1)'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -c 'print(1)'"
+        ],
+        "matched": [
+          "python3"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -c 'print(1)'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 -m example",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -m example"
+        ],
+        "matched": [
+          "python3"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -m example"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 -Wignore -c 'print(1)'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -Wignore -c 'print(1)'"
+        ],
+        "matched": [
+          "python3"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -Wignore -c 'print(1)'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 -- -",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -- -"
+        ],
+        "matched": [
+          "python3"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -- -"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "node --eval='1+1'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "node --eval='1+1'"
+        ],
+        "matched": [
+          "node"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "node --eval='1+1'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "node --import 'data:text/javascript,1' -e '1'",
+    "guard": {
+      "ask": "node --import 加载的是写在命令里的模块，看不出会做什么"
+    },
+    "full": {
+      "ask": "node --import 加载的是写在命令里的模块，看不出会做什么"
+    },
+    "limit": null
+  },
+  {
+    "command": "node --require file.js -e '1'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "node --require file.js -e '1'"
+        ],
+        "matched": [
+          "node"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "node --require file.js -e '1'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "ruby -e 'puts 1'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "ruby -e 'puts 1'"
+        ],
+        "matched": [
+          "ruby"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "ruby -e 'puts 1'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "perl -0777 -e 'print 1'",
+    "guard": {
+      "ask": "没见过的程序：perl"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "perl -0777 -e 'print 1'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "php -r 'echo 1;'",
+    "guard": {
+      "ask": "没见过的程序：php"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "php -r 'echo 1;'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "lua -e 'print(1)'",
+    "guard": {
+      "ask": "没见过的程序：lua"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "lua -e 'print(1)'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "Rscript -e 'print(1)'",
+    "guard": {
+      "ask": "没见过的程序：Rscript"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "Rscript -e 'print(1)'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "deno eval '1+1'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "deno eval '1+1'"
+        ],
+        "matched": [
+          "deno"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "deno eval '1+1'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "deno run -",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "deno run -"
+        ],
+        "matched": [
+          "deno"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "deno run -"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "bun exec 'git status'",
+    "guard": {
+      "ask": "bun 会把命令交给 shell 执行，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "bun exec 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 - <<'CODE'\nprint(1)\nCODE",
+    "guard": {
+      "ask": "here-document 喂给 python3，看不出会执行什么"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 - <<'CODE'\nprint(1)\nCODE"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed '1,3!p' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '1,3!p' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '1,3!p' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed '/a/,+2 p' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '/a/,+2 p' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '/a/,+2 p' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed '\\%a%p' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '\\%a%p' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '\\%a%p' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 's|a\\|b|c|2p' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 's|a\\|b|c|2p' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 's|a\\|b|c|2p' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 'a\\\ntext' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 'a\\\ntext' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 'a\\\ntext' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed ':again;p;b again' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed ':again;p;b again' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed ':again;p;b again' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed '# comment\np' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '# comment\np' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed '# comment\np' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 's/a/b/w out\ne' a",
+    "guard": {
+      "ask": "sed 脚本会执行命令（e），留给你"
+    },
+    "full": {
+      "ask": "sed 脚本会执行命令（e），留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 's/a/b/ge' a",
+    "guard": {
+      "ask": "sed 脚本会执行命令（s///e），留给你"
+    },
+    "full": {
+      "ask": "sed 脚本会执行命令（s///e），留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 's/a/b' a",
+    "guard": {
+      "ask": "看不懂 sed 脚本 s/a/b，看不出会不会执行命令"
+    },
+    "full": {
+      "ask": "看不懂 sed 脚本 s/a/b，看不出会不会执行命令"
+    },
+    "limit": null
+  },
+  {
+    "command": "sed 'y/a/b/' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 'y/a/b/' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed 'y/a/b/' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sed -f script.sed a",
+    "guard": {
+      "ask": "sed 的脚本在文件里，看不出会不会执行命令"
+    },
+    "full": {
+      "ask": "sed 的脚本在文件里，看不出会不会执行命令"
+    },
+    "limit": null
+  },
+  {
+    "command": "sed -i 's/a/b/' a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed -i 's/a/b/' a"
+        ],
+        "matched": [
+          "sed"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sed -i 's/a/b/' a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "gsed '1e id' a",
+    "guard": {
+      "ask": "sed 脚本会执行命令（e id），留给你"
+    },
+    "full": {
+      "ask": "sed 脚本会执行命令（e id），留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "wget -O result https://example.invalid/a",
+    "guard": {
+      "ask": "没见过的程序：wget"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "wget -O result https://example.invalid/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "wget --method GET -P out https://example.invalid/a",
+    "guard": {
+      "ask": "没见过的程序：wget"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "wget --method GET -P out https://example.invalid/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "wget --post-data=x https://example.invalid/a",
+    "guard": {
+      "ask": "没见过的程序：wget"
+    },
+    "full": {
+      "limit": 5,
+      "what": "wget 发出数据"
+    },
+    "limit": {
+      "n": 5,
+      "what": "wget 发出数据"
+    }
+  },
+  {
+    "command": "http GET https://example.invalid/a",
+    "guard": {
+      "ask": "没见过的程序：http"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "http GET https://example.invalid/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "xh POST https://example.invalid/a key=value",
+    "guard": {
+      "ask": "没见过的程序：xh"
+    },
+    "full": {
+      "limit": 5,
+      "what": "HTTP 请求会把数据发出去"
+    },
+    "limit": {
+      "n": 5,
+      "what": "HTTP 请求会把数据发出去"
+    }
+  },
+  {
+    "command": "rsync a b",
+    "guard": {
+      "ask": "没见过的程序：rsync"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "rsync a b"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "rsync a fixture:/b",
+    "guard": {
+      "ask": "没见过的程序：rsync"
+    },
+    "full": {
+      "limit": 5,
+      "what": "rsync 到远端"
+    },
+    "limit": {
+      "n": 5,
+      "what": "rsync 到远端"
+    }
+  },
+  {
+    "command": "npm publish",
+    "guard": {
+      "ask": "npm publish 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "发布到包仓库"
+    },
+    "limit": {
+      "n": 5,
+      "what": "发布到包仓库"
+    }
+  },
+  {
+    "command": "yarn run deploy",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "yarn run deploy"
+        ],
+        "matched": [
+          "yarn"
+        ]
+      }
+    },
+    "full": {
+      "limit": 5,
+      "what": "运行发布或部署脚本"
+    },
+    "limit": {
+      "n": 5,
+      "what": "运行发布或部署脚本"
+    }
+  },
+  {
+    "command": "npm run test",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm run test"
+        ],
+        "matched": [
+          "npm"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm run test"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "npx --yes eslint a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npx --yes eslint a"
+        ],
+        "matched": [
+          "npx"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npx --yes eslint a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "cargo publish",
+    "guard": {
+      "ask": "cargo publish 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "发布到 crates.io"
+    },
+    "limit": {
+      "n": 5,
+      "what": "发布到 crates.io"
+    }
+  },
+  {
+    "command": "cargo check",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cargo check"
+        ],
+        "matched": [
+          "cargo"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cargo check"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "cargo --config 'target.x.runner=command' test",
+    "guard": {
+      "ask": "cargo --config 指定了要运行的程序，看不出会运行什么"
+    },
+    "full": {
+      "ask": "cargo --config 指定了要运行的程序，看不出会运行什么"
+    },
+    "limit": null
+  },
+  {
+    "command": "twine upload artifact",
+    "guard": {
+      "ask": "没见过的程序：twine"
+    },
+    "full": {
+      "limit": 5,
+      "what": "发布到包仓库"
+    },
+    "limit": {
+      "n": 5,
+      "what": "发布到包仓库"
+    }
+  },
+  {
+    "command": "docker push fixture/image",
+    "guard": {
+      "ask": "没见过的程序：docker"
+    },
+    "full": {
+      "limit": 5,
+      "what": "推送镜像"
+    },
+    "limit": {
+      "n": 5,
+      "what": "推送镜像"
+    }
+  },
+  {
+    "command": "make release",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "make release"
+        ],
+        "matched": [
+          "make"
+        ]
+      }
+    },
+    "full": {
+      "limit": 5,
+      "what": "运行发布或部署目标"
+    },
+    "limit": {
+      "n": 5,
+      "what": "运行发布或部署目标"
+    }
+  },
+  {
+    "command": "python3 -m pip install example",
+    "guard": {
+      "ask": "pip / venv 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -m pip install example"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "mv a ../other",
+    "guard": {
+      "ask": "mv 的路径不在工作区内：../other"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "mv a ../other"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": {
+      "n": 4,
+      "what": "改动或删除工作区以外的路径：../other"
+    }
+  },
+  {
+    "command": "cp -t out a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cp -t out a"
+        ],
+        "matched": [
+          "cp"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cp -t out a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "install a out",
+    "guard": {
+      "ask": "没见过的程序：install"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "install a out"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "ln a link",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "ln a link"
+        ],
+        "matched": [
+          "ln"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "ln a link"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "dd if=a of=out",
+    "guard": {
+      "ask": "没见过的程序：dd"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "dd if=a of=out"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "chmod 600 a",
+    "guard": {
+      "ask": "没见过的程序：chmod"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "chmod 600 a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "tar -xf a -C out",
+    "guard": {
+      "ask": "没见过的程序：tar"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "tar -xf a -C out"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "unzip a -d out",
+    "guard": {
+      "ask": "没见过的程序：unzip"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "unzip a -d out"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "touch a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "touch a"
+        ],
+        "matched": [
+          "touch"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "touch a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "rm a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "rm a"
+        ],
+        "matched": [
+          "rm"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "rm a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "sh -c 'cp a b'",
+    "guard": {
+      "ask": "sh 会执行看不见的命令"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "sh -c 'cp a b'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl -sS -o out http://localhost:18991/a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -sS -o out http://localhost:18991/a"
+        ],
+        "matched": [
+          "curl"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -sS -o out http://localhost:18991/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl --output=out --header 'X-Probe: yes' http://127.0.0.1:18991/a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl --output=out --header 'X-Probe: yes' http://127.0.0.1:18991/a"
+        ],
+        "matched": [
+          "curl"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl --output=out --header 'X-Probe: yes' http://127.0.0.1:18991/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl -soout http://[::1]:18991/a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -soout http://[::1]:18991/a"
+        ],
+        "matched": [
+          "curl"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -soout http://[::1]:18991/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl -X POST http://localhost:18991/a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -X POST http://localhost:18991/a"
+        ],
+        "matched": [
+          "curl"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -X POST http://localhost:18991/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl --proxy p http://localhost/a",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl --proxy p http://localhost/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl --unknown http://localhost/a",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl --unknown http://localhost/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl http://localhost:bad/a",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl http://localhost:bad/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl http://localhost/a http://example.invalid/b",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl http://localhost/a http://example.invalid/b"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl http://user@localhost/a",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl http://user@localhost/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl --url http://localhost/a",
+    "guard": {
+      "ask": "curl 访问本机以外，或有看不懂的参数，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl --url http://localhost/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "curl -g http://localhost/a",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -g http://localhost/a"
+        ],
+        "matched": [
+          "curl"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "curl -g http://localhost/a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git -c core.editor=id status",
+    "guard": {
+      "ask": "git 会运行命令行里给的别的命令，留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git -c core.editor=id 可能让 git 运行别的命令或推送"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git -c core.editor=id 可能让 git 运行别的命令或推送"
+    }
+  },
+  {
+    "command": "git --config-env=core.editor=EDITOR status",
+    "guard": {
+      "ask": "git --config-env=core.editor=EDITOR 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git --config-env core.editor=EDITOR 可能让 git 运行别的命令或推送"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git --config-env core.editor=EDITOR 可能让 git 运行别的命令或推送"
+    }
+  },
+  {
+    "command": "git --git-dir=.git status",
+    "guard": {
+      "ask": "git --git-dir / --work-tree 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git --git-dir=.git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git -C ../elsewhere reset --hard",
+    "guard": {
+      "ask": "git -C 到工作区外：../elsewhere"
+    },
+    "full": {
+      "limit": 4,
+      "what": "git reset 作用在工作区以外"
+    },
+    "limit": {
+      "n": 4,
+      "what": "git reset 作用在工作区以外"
+    }
+  },
+  {
+    "command": "git branch -D feature",
+    "guard": {
+      "ask": "git branch 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git branch -D feature"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git branch -df other",
+    "guard": {
+      "ask": "git branch 留给你"
+    },
+    "full": {
+      "limit": 4,
+      "what": "删别的事项的分支"
+    },
+    "limit": {
+      "n": 4,
+      "what": "删别的事项的分支"
+    }
+  },
+  {
+    "command": "git branch --del --for feature",
+    "guard": {
+      "ask": "git branch 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git branch --del --for feature"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git worktree list",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git worktree list"
+        ],
+        "matched": [
+          "git"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git worktree list"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git worktree remove ../other",
+    "guard": {
+      "ask": "git worktree 留给你"
+    },
+    "full": {
+      "limit": 4,
+      "what": "git worktree remove/move"
+    },
+    "limit": {
+      "n": 4,
+      "what": "git worktree remove/move"
+    }
+  },
+  {
+    "command": "git update-ref refs/heads/feature HEAD",
+    "guard": {
+      "ask": "git update-ref 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git update-ref refs/heads/feature HEAD"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git update-ref refs/heads/other HEAD",
+    "guard": {
+      "ask": "git update-ref 留给你"
+    },
+    "full": {
+      "limit": 4,
+      "what": "改写或删除别的事项的分支"
+    },
+    "limit": {
+      "n": 4,
+      "what": "改写或删除别的事项的分支"
+    }
+  },
+  {
+    "command": "git update-ref --stdin",
+    "guard": {
+      "ask": "git update-ref 留给你"
+    },
+    "full": {
+      "limit": 4,
+      "what": "git update-ref --stdin 看不出改的是哪个分支"
+    },
+    "limit": {
+      "n": 4,
+      "what": "git update-ref --stdin 看不出改的是哪个分支"
+    }
+  },
+  {
+    "command": "git remote set-url origin https://example.invalid/repo",
+    "guard": {
+      "ask": "git remote 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "改 git 远端地址"
+    },
+    "limit": {
+      "n": 5,
+      "what": "改 git 远端地址"
+    }
+  },
+  {
+    "command": "git config alias.ship push",
+    "guard": {
+      "ask": "git config 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git config alias.ship 可能让 git 运行别的命令或推送"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git config alias.ship 可能让 git 运行别的命令或推送"
+    }
+  },
+  {
+    "command": "git submodule foreach 'git status'",
+    "guard": {
+      "ask": "git 会运行命令行里给的别的命令，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "git submodule foreach 'git status'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "git lfs push origin",
+    "guard": {
+      "ask": "git lfs 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git lfs push"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git lfs push"
+    }
+  },
+  {
+    "command": "git svn dcommit",
+    "guard": {
+      "ask": "git svn 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git svn dcommit"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git svn dcommit"
+    }
+  },
+  {
+    "command": "git custom-command",
+    "guard": {
+      "ask": "git custom-command 留给你"
+    },
+    "full": {
+      "limit": 5,
+      "what": "不认识的 git 子命令 custom-command（可能是推送的别名）"
+    },
+    "limit": {
+      "n": 5,
+      "what": "不认识的 git 子命令 custom-command（可能是推送的别名）"
+    }
+  },
+  {
+    "command": "git push origin feature",
+    "guard": {
+      "ask": "feature 不是 Steve 给事项开的分支"
+    },
+    "full": {
+      "limit": 5,
+      "what": "git push"
+    },
+    "limit": {
+      "n": 5,
+      "what": "git push"
+    }
+  },
+  {
+    "command": "cargo install example",
+    "guard": {
+      "ask": "cargo install 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cargo install example"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "npm -g install example",
+    "guard": {
+      "ask": "全局安装留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "npm -g install example"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "go env -w GOPROXY=x",
+    "guard": {
+      "ask": "go env 会改工作区以外"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "go env -w GOPROXY=x"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "python3 -m venv .venv",
+    "guard": {
+      "ask": "pip / venv 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "python3 -m venv .venv"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "find . -delete",
+    "guard": {
+      "ask": "find 的 -delete / -exec 留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "find . -delete"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "cp a b",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cp a b"
+        ],
+        "matched": [
+          "cp"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cp a b"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "cp ../input out",
+    "guard": {
+      "ask": "../input 在工作区外"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "cp ../input out"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "awk -f script.awk a",
+    "guard": {
+      "ask": "awk 的程序在文件里，看不出会做什么"
+    },
+    "full": {
+      "ask": "awk 的程序在文件里，看不出会做什么"
+    },
+    "limit": null
+  },
+  {
+    "command": "kill 111",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "kill 111"
+        ],
+        "matched": [
+          "kill"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "kill 111"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "kill 999",
+    "guard": {
+      "ask": "进程 999 不是这个会话的 Agent 启动的，留给你"
+    },
+    "full": {
+      "ask": "进程 999 不是这个会话的 Agent 启动的，留给你"
+    },
+    "limit": null
+  },
+  {
+    "command": "custom-program --data 'hello world'",
+    "guard": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "custom-program --data 'hello world'"
+        ],
+        "matched": [
+          "custom-program"
+        ]
+      }
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "custom-program --data 'hello world'"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "fd -x git status",
+    "guard": {
+      "ask": "fd 的选项会运行别的命令，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "fd -x git status"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "rg --pre id a",
+    "guard": {
+      "ask": "rg 的选项会运行别的命令，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "rg --pre id a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  },
+  {
+    "command": "tar --to-command=id -xf a",
+    "guard": {
+      "ask": "tar 的选项会运行别的命令，留给你"
+    },
+    "full": {
+      "allow": "once",
+      "checks": {
+        "kind": "execute",
+        "paths": [],
+        "commands": [
+          "tar --to-command=id -xf a"
+        ],
+        "matched": "full",
+        "level": "full"
+      }
+    },
+    "limit": null
+  }
+]
