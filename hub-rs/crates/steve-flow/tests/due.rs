@@ -940,3 +940,154 @@ async fn alarm_hold_commits_do_not_self_wake_into_repeated_due_rounds() {
     task.stop();
     task.await;
 }
+
+/// Observe the loop returning to a stored deadline after each real planning pass.
+struct ScheduleAlarmClock {
+    clock: Arc<steve_runtime::FakeClock>,
+    waits: std::sync::atomic::AtomicUsize,
+}
+impl Clock for ScheduleAlarmClock {
+    fn now(&self) -> i64 {
+        self.clock.now()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.waits.fetch_add(1, Ordering::SeqCst);
+        self.clock.sleep(duration)
+    }
+}
+struct SchedulePlans {
+    clock: Arc<ScheduleAlarmClock>,
+    observed: Mutex<Vec<(bool, bool, usize)>>,
+}
+impl AlarmSource for SchedulePlans {
+    fn family(&self) -> &'static str {
+        "brief"
+    }
+    fn plan(&self, c: &Connection, ws: &str, id: &str, _: i64) -> FlowResult<Vec<Want>> {
+        let (enabled, deleted) = c.query_row(
+            "SELECT enabled,deleted FROM flows WHERE workspace_id=?1 AND id=?2",
+            params![ws, id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        self.observed.lock().unwrap().push((
+            enabled,
+            deleted,
+            self.clock.waits.load(Ordering::SeqCst),
+        ));
+        Ok(vec![])
+    }
+    fn line(&self, _: &Connection, _: &str, _: &str, _: &str) -> FlowResult<Option<AlarmLine>> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn committed_schedule_patch_and_delete_wake_planning_without_clearing_unrelated_holds() {
+    use steve_flow::schedules::{Fields, Mode, Origin, Spec};
+    use steve_modules::testkit::{call, caller};
+    let env = TestEnv::new(|_| {});
+    env.clock.set(NOW);
+    let clock = Arc::new(ScheduleAlarmClock {
+        clock: env.clock.clone(),
+        waits: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let plans = Arc::new(SchedulePlans {
+        clock: clock.clone(),
+        observed: Mutex::new(vec![]),
+    });
+    let setup = FlowSetup::new(Arc::new(FakeCore::default()))
+        .alarm_source(Arc::new(AlarmLines))
+        .alarm_source(plans.clone());
+    let mut registry = steve_modules::Registry::new();
+    setup.register(&mut registry);
+    let modules = steve_modules::Modules::with_clock(
+        env.store().clone(),
+        env.gateway.clone(),
+        registry,
+        clock.clone(),
+    );
+    let cx = setup.build(modules.clone(), Arc::new(Claimed));
+    let spec = Spec {
+        requester: Some(ME.into()),
+        when: "每天 08:00".into(),
+        cron: "0 8 * * *".into(),
+        tz: "UTC".into(),
+        what: String::new(),
+        bot: String::new(),
+        mode: Mode::Brief,
+        project_id: None,
+        tags: vec![],
+        missed: Default::default(),
+        overlap: Default::default(),
+        budget_usd: 0.0,
+    };
+    let id = env.store().transaction(|tx| -> FlowResult<_> {
+        let id = steve_flow::schedules::insert(tx,WS,ME,&Fields{name:"brief",spec:&spec,enabled:true},&Origin::default(),NOW)?;
+        tx.execute("INSERT INTO time_alarms(id,workspace_id,owner_user,kind,subject,planned_for,fire_at,hold_until,created,updated) VALUES('schedule-hold',?1,?2,'todo','contract:held',?3,?3,?4,?3,?3)",params![WS,ME,NOW,NOW+DAY])?;
+        Ok(id)
+    }).unwrap();
+    let task = steve_runtime::spawn("flow.alarms", AlarmClock::new(cx.clone()).run());
+    until(|| !plans.observed.lock().unwrap().is_empty()).await;
+    until(|| clock.waits.load(Ordering::SeqCst) > 0).await;
+    plans.observed.lock().unwrap().clear();
+    let router = steve_flow::routes(cx).with_state(modules);
+    for (method, body, expected) in [
+        ("PATCH", Some(json!({"enabled":false})), (false, false)),
+        ("DELETE", None, (false, true)),
+    ] {
+        let (status, response) = call(
+            &router,
+            Some(&caller(WS, ME)),
+            method,
+            &format!("/schedules/{id}"),
+            body.as_ref(),
+        )
+        .await;
+        assert_eq!(status, 200, "{method}: {response}");
+        until(|| {
+            plans
+                .observed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(enabled, deleted, _)| (enabled, deleted) == expected)
+        })
+        .await;
+        let at_plan = plans
+            .observed
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|&&(enabled, deleted, _)| (enabled, deleted) == expected)
+            .unwrap()
+            .2;
+        // A later sleep is prepared only after this actual replan/claim/replan round
+        // finishes. This avoids asserting while a manual recheck could still fire the hold.
+        until(|| clock.waits.load(Ordering::SeqCst) > at_plan).await;
+        let held: (String, Option<i64>) = env
+            .store()
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT state,hold_until FROM time_alarms WHERE id='schedule-hold'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(
+            held,
+            ("planned".into(), Some(NOW + DAY)),
+            "{method} must not invalidate a different subject's hold"
+        );
+        assert_eq!(
+            env.clock.now(),
+            NOW,
+            "{method} committed trigger woke without fallback"
+        );
+    }
+    task.stop();
+    task.await;
+}

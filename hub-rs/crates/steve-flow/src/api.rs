@@ -362,7 +362,6 @@ async fn patch(
         )
     })?;
     cx.wake();
-    cx.wake_alarms();
     view(&cx, &who.ws, &id)
 }
 
@@ -399,7 +398,6 @@ async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
         schedules::delete(tx, &s, now)
     })?;
     cx.wake();
-    cx.wake_alarms();
     Ok(Json(json!({ "ok": true })))
 }
 
