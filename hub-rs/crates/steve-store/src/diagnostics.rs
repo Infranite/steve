@@ -941,6 +941,16 @@ mod tests {
             .create(
                 crate::WS,
                 &crate::NewItem {
+                    tags: vec![
+                        store
+                            .tags()
+                            .kinds(crate::WS)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: "Concurrent diagnostic snapshot".into(),
                     bot_id: "worker".into(),
                     ..Default::default()

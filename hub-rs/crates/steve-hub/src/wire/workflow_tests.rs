@@ -123,6 +123,16 @@ impl Fixture {
             .create(
                 WS,
                 &NewItem {
+                    tags: vec![
+                        self.store
+                            .tags()
+                            .kinds(WS)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: "Test graph".into(),
                     goal: "Complete, review and integrate".into(),
                     bot_id: "writer".into(),

@@ -362,6 +362,16 @@ mod tests {
                 .create(
                     WS,
                     &NewItem {
+                        tags: vec![
+                            store
+                                .tags()
+                                .kinds(WS)
+                                .unwrap()
+                                .into_iter()
+                                .find(|tag| tag.name == "feat")
+                                .unwrap()
+                                .id,
+                        ],
                         title: "Collaborative work".into(),
                         bot_id: "writer".into(),
                         requested_by: requested.map(str::to_string),

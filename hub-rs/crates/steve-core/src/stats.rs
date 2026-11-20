@@ -343,6 +343,15 @@ mod tests {
             .create(
                 steve_store::WS,
                 &steve_store::NewItem {
+                    tags: vec![
+                        s.tags()
+                            .kinds(steve_store::WS)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: "bill".into(),
                     goal: "bill".into(),
                     bot_id: "owner".into(),

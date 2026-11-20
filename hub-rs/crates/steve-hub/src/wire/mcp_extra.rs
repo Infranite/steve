@@ -691,6 +691,16 @@ mod session_identity_tests {
                 .create(
                     WS,
                     &steve_store::NewItem {
+                        tags: vec![
+                            e.store()
+                                .tags()
+                                .kinds(WS)
+                                .unwrap()
+                                .into_iter()
+                                .find(|tag| tag.name == "feat")
+                                .unwrap()
+                                .id,
+                        ],
                         title: "Digest fixture".into(),
                         bot_id: "steve".into(),
                         requested_by: user.map(str::to_string),

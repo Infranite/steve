@@ -47,6 +47,15 @@ fn fixture() -> (tempfile::TempDir, Store, String, String, String) {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "accounting probe".into(),
                 goal: "g".into(),
                 bot_id: "dev".into(),

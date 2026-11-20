@@ -57,6 +57,16 @@ impl Fixture {
             .create(
                 ws,
                 &NewItem {
+                    tags: vec![
+                        self.store
+                            .tags()
+                            .kinds(ws)
+                            .unwrap()
+                            .into_iter()
+                            .find(|tag| tag.name == "feat")
+                            .unwrap()
+                            .id,
+                    ],
                     title: title.into(),
                     goal: format!("goal: {title}"),
                     bot_id: format!("bot_{ws}"),
@@ -172,6 +182,16 @@ fn bot_membership_grants_only_the_current_items_workspace_even_with_a_different_
         .create(
             "default",
             &NewItem {
+                tags: vec![
+                    f.store
+                        .tags()
+                        .kinds("default")
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "shared bot management".into(),
                 bot_id: "bot_other".into(),
                 ..Default::default()
