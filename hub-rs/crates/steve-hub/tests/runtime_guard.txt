@@ -20,6 +20,8 @@ steve-channels/src/adapters/ext_ws/session.rs	timer-loop	adapters::ext_ws::sessi
 steve-channels/src/adapters/feishu/app_registration/service.rs	timer-loop	adapters::feishu::app_registration::service::Registrations::poll_until_done	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::cancel	1
 steve-channels/src/adapters/feishu/auth.rs	timer-loop	adapters::feishu::auth::DeviceFlows::start_with	1
+# Feishu's bucket map owns atomic debt reservations, not GCRA admission or a reusable cache.
+# Keep its idle-key eviction with the protocol until Feishu plugin extraction.
 steve-channels/src/adapters/feishu/ratelimit.rs	ttl-cache	adapters::feishu::ratelimit::Limiter::buckets	1
 steve-channels/src/adapters/feishu/self_poll.rs	timer-loop	adapters::feishu::self_poll::SelfPoller::run	1
 steve-channels/src/adapters/feishu/ws.rs	timer-loop	adapters::feishu::ws::Inner::serve	1

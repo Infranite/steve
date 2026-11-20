@@ -8,6 +8,13 @@
 //!   `x-ogw-ratelimit-reset` time (one second when absent, at most [`MAX_BACKOFF`]) and try again
 //!   with the same request, so the same `uuid`: Feishu drops the repeat if the first did get
 //!   through.
+//!
+//! This is Feishu's debt-reservation protocol, not runtime's GCRA admission policy: every
+//! reservation debits every key, even below zero, and returns the longest wait among their
+//! individual deadlines. Rejecting without consuming would let concurrent senders reuse the
+//! same quota instead of reserving successive turns. One mutex protects the whole key set.
+//! The bucket remains owned by this adapter and moves with the Feishu plugin;
+//! it is not a second general-purpose limiter or a missing runtime GCRA feature.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -289,6 +296,70 @@ mod retry_sequence_tests {
             assert_eq!(limiter.reserve(&[("app", rate)]), Duration::ZERO);
         }
     }
+    #[test]
+    fn bucket_balance_table_pins_debt_refill_and_the_burst_ceiling() {
+        let start = Instant::now();
+        let mut bucket = Bucket::new(2, start);
+        for (at_ms, tokens, wait_ms) in [
+            (0, 1.0, 0),
+            (0, 0.0, 0),
+            (0, -1.0, 500),
+            (0, -2.0, 1000),
+            (250, -2.5, 1250),
+            (1000, -2.0, 1000),
+            (2500, 0.0, 0),
+            (1_000_000, 1.0, 0),
+        ] {
+            let wait = bucket.take(start + Duration::from_millis(at_ms));
+            assert_eq!(bucket.tokens, tokens, "balance at {at_ms}ms");
+            assert_eq!(
+                wait,
+                Duration::from_millis(wait_ms),
+                "deadline at {at_ms}ms"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multi_key_table_reserves_every_key_and_preserves_individual_deadlines() {
+        let limiter = Limiter::new();
+        for (advance_ms, app_tokens, chat_tokens, app_wait_ms, chat_wait_ms) in [
+            (0, 1.0, 0.0, 0, 0),
+            (0, 0.0, -1.0, 0, 1000),
+            (0, -1.0, -2.0, 500, 2000),
+            (250, -1.5, -2.75, 750, 2750),
+            (4750, 1.0, 0.0, 0, 0),
+        ] {
+            tokio::time::advance(Duration::from_millis(advance_ms)).await;
+            let now = Instant::now();
+            let wait = limiter.reserve(&[("app", 2), ("chat", 1)]);
+            let buckets = limiter.buckets.lock().unwrap();
+            let app = &buckets["app"];
+            let chat = &buckets["chat"];
+            assert_eq!(
+                (app.last, chat.last),
+                (now, now),
+                "one reservation time for both keys"
+            );
+            assert_eq!(
+                (app.tokens, chat.tokens),
+                (app_tokens, chat_tokens),
+                "the available key is debited even when its partner is in debt"
+            );
+            for (bucket, expected_ms) in [(app, app_wait_ms), (chat, chat_wait_ms)] {
+                let deadline =
+                    bucket.last + Duration::from_secs_f64((-bucket.tokens / bucket.rate).max(0.0));
+                assert_eq!(deadline, now + Duration::from_millis(expected_ms));
+            }
+            assert_eq!(
+                wait,
+                Duration::from_millis(app_wait_ms.max(chat_wait_ms)),
+                "the whole reservation waits until every key can be used"
+            );
+        }
+        assert_eq!(limiter.reserve(&[]), Duration::ZERO);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retry_table_honours_hints_caps_and_counts() {
         for (hint, cap, wait_ms) in [
