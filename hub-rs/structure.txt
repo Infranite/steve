@@ -7,7 +7,6 @@ steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	cognitive_compl
 steve-channels	crates/steve-channels/src/adapters/ext_ws/feed.rs	too_many_lines	119
 steve-channels	crates/steve-channels/src/adapters/feishu/self_poll.rs	cognitive_complexity	33
 steve-channels	crates/steve-channels/src/adapters/feishu/self_poll.rs	too_many_lines	157,145
-steve-channels	crates/steve-channels/src/adapters/feishu/ws.rs	cognitive_complexity	37,34
 steve-channels	crates/steve-channels/src/channel_accounts.rs	cognitive_complexity	30
 steve-channels	crates/steve-channels/src/channel_accounts.rs	too_many_lines	198
 steve-channels	crates/steve-channels/src/cleanup.rs	too_many_lines	107,104
@@ -15,8 +14,6 @@ steve-channels	crates/steve-channels/src/conversations.rs	cognitive_complexity	2
 steve-channels	crates/steve-channels/src/conversations.rs	too_many_lines	274,118
 steve-channels	crates/steve-channels/src/drafts.rs	cognitive_complexity	43,40
 steve-channels	crates/steve-channels/src/drafts.rs	too_many_lines	184,177,113
-steve-channels	crates/steve-channels/src/inbound.rs	cognitive_complexity	73,54,28
-steve-channels	crates/steve-channels/src/inbound.rs	too_many_lines	511,263,161
 steve-channels	crates/steve-channels/src/lifecycle.rs	cognitive_complexity	40
 steve-channels	crates/steve-channels/src/outbound.rs	cognitive_complexity	29,29
 steve-channels	crates/steve-channels/src/outbound.rs	too_many_lines	140,124,117
