@@ -35,6 +35,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # inventory comparison reads the target snapshot and candidate commit trailers
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
@@ -49,6 +51,11 @@ jobs:
           python3 packaging/homebrew/test-sync.py
           python3 scripts/test-install-nextest.py
           python3 scripts/test-affected.py
+          python3 scripts/test_structure_guard.py
+          python3 scripts/test-check-inventory-growth.py
+      - name: Compare guarded inventories with the merge baseline
+        if: runner.os == 'Linux'
+        run: python3 scripts/check-inventory-growth.py --event-file "$GITHUB_EVENT_PATH"
       - name: Release scripts
         run: |
           python3 ops/test-schema-gate.py
@@ -177,7 +184,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
-          components: rustfmt
+          components: ${{ runner.os == 'Linux' && matrix.shard == 1 && 'rustfmt,clippy' || 'rustfmt' }}
       # Formatting needs no build, so one shard checks it before compiling and fails within seconds.
       - name: Rust formatting (cargo fmt --check)
         if: runner.os == 'Linux' && matrix.shard == 1
@@ -214,6 +221,10 @@ jobs:
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --partition "$PARTITION" --message-format json > ci-artifacts/list.json
           cp hub-rs/target/cargo-timings/cargo-timing.html ci-artifacts/
+      # One Linux shard reuses this target directory; metric collection includes production lib/bin only.
+      - name: Guard production function structure
+        if: runner.os == 'Linux' && matrix.shard == 1
+        run: python3 scripts/structure_guard.py
       - name: Rust tests
         id: rust-tests
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
