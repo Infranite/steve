@@ -35,6 +35,15 @@ fn fixture() -> (tempfile::TempDir, Store, String, Vec<String>, Vec<String>) {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "Live usage".into(),
                 goal: "g".into(),
                 bot_id: "dev".into(),

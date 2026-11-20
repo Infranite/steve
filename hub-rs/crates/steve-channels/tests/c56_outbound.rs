@@ -4509,6 +4509,17 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .create(
             WS,
             &steve_store::NewItem {
+                tags: vec![
+                    h.env
+                        .store()
+                        .tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "update".into(),
                 bot_id: "steve".into(),
                 ..Default::default()

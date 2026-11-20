@@ -36,6 +36,15 @@ fn setup() -> (tempfile::TempDir, Store, String) {
         .create(
             WS,
             &NewItem {
+                tags: vec![
+                    s.tags()
+                        .kinds(WS)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.name == "feat")
+                        .unwrap()
+                        .id,
+                ],
                 title: "bill".into(),
                 goal: "bill".into(),
                 bot_id: "bill".into(),
