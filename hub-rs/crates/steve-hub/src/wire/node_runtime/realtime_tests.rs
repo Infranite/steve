@@ -231,7 +231,11 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
     let before = serde_json::to_value(f.read(f.at + 5_000)).unwrap();
     f.rt.receive(&batch).unwrap();
     f.rt.apply_some();
-    let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
+    let path = f.store.path().to_path_buf();
+    let at = f.at;
+    drop(f.rt);
+    drop(f.store);
+    let reopened = Store::open(path, steve_store::NoPublisher).unwrap();
     let after = reopened
         .reader(|c| {
             steve_stats::realtime::read(
@@ -241,7 +245,7 @@ fn realtime_upgrade_late_node_stop_resolves_only_the_unknown_tail() {
                     project: None,
                     bot: None,
                 },
-                f.at + 5_000,
+                at + 5_000,
             )
         })
         .unwrap();
@@ -412,7 +416,11 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
     f.rt.receive(&batch).unwrap();
     f.rt.apply_some();
     assert_eq!(f.units(), 16);
-    let reopened = Store::open(f.store.path(), steve_store::NoPublisher).unwrap();
+    let path = f.store.path().to_path_buf();
+    let at = f.at;
+    drop(f.rt);
+    drop(f.store);
+    let reopened = Store::open(path, steve_store::NoPublisher).unwrap();
     let r = reopened
         .reader(|c| {
             steve_stats::realtime::read(
@@ -422,7 +430,7 @@ fn realtime_replay_overlap_reopen_and_pruned_inbox_do_not_duplicate() {
                     project: None,
                     bot: None,
                 },
-                f.at,
+                at,
             )
         })
         .unwrap();

@@ -611,7 +611,7 @@ async fn rest_owner_scope_foreign_ids_profile_resets_and_undo() {
 
 #[test]
 fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
-    let e = env();
+    let mut e = env();
     msg(&e, "s1", "m1", NOW, None, None, "persisted");
     let failed: Result<(), StoreError> = e.store().transaction(|tx| {
         let mut report = window::Report::default();
@@ -637,8 +637,17 @@ fn queued_packets_and_receipts_survive_reopening_store_and_rollback_together() {
     );
     #[path = "../../steve-store/tests/support/digest_audit.rs"]
     mod reopened_audit;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = Directory(e.dir.path().to_path_buf());
+    e.dir.disable_cleanup(true);
+    drop(e);
     let reopened = steve_store::Store::open(
-        e.dir.path().join("steve.sqlite3"),
+        dir.0.join("steve.sqlite3"),
         steve_store::FnPublisher(|_| {}),
     )
     .unwrap();

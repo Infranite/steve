@@ -500,8 +500,10 @@ mod tests {
                 });
             }));
             assert!(panicked.is_err());
+            let steve_modules::testkit::TestEnv { dir, modules, .. } = e;
+            drop(modules);
             let reopened = Store::open(
-                e.dir.path().join("steve.sqlite3"),
+                dir.path().join("steve.sqlite3"),
                 steve_store::FnPublisher(|_| {}),
             )
             .unwrap();

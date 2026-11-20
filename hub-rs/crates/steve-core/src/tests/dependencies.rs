@@ -709,8 +709,7 @@ fn interrupted_wait_recovers_durably_without_losing_or_duplicating_wakeup() {
     let mut cfg = CoreConfig::for_home(k.home());
     cfg.disk.floor = 0;
     cfg.disk.low = 0;
-    let reopened =
-        steve_store::Store::open(k.db().store().path(), steve_store::NoPublisher).unwrap();
+    let reopened = k.db().store().clone();
     let core = Core::new(
         crate::repo::Db::new(reopened),
         k.rt.clone(),

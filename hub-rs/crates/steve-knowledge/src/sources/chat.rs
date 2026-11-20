@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn extraction_crash_before_receipt_rolls_back_and_reopens_once() {
         use steve_modules::testkit::{TestEnv, WS};
-        let mut env = TestEnv::new(|r| {
+        let env = TestEnv::new(|r| {
             r.decision(candidates::SUBJECT, Box::new(candidates::MemDecisions));
         });
         let origin = Origin {
@@ -380,11 +380,24 @@ mod tests {
             })
         }));
         assert!(crashed.is_err());
+        let steve_modules::testkit::TestEnv {
+            dir,
+            modules,
+            gateway,
+            clock,
+            events,
+        } = env;
+        drop(modules);
         let reopened = steve_store::Store::open(&path, steve_store::NoPublisher).unwrap();
         let mut registry = steve_modules::Registry::new();
         registry.decision(candidates::SUBJECT, Box::new(candidates::MemDecisions));
-        env.modules =
-            Modules::with_clock(reopened, env.gateway.clone(), registry, env.clock.clone());
+        let env = steve_modules::testkit::TestEnv {
+            dir,
+            modules: Modules::with_clock(reopened, gateway.clone(), registry, clock.clone()),
+            gateway,
+            clock,
+            events,
+        };
         assert!(
             env.modules
                 .store

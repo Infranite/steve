@@ -765,8 +765,7 @@ mod tests {
                 w.node.is_none(),
                 "local execution remains explicitly disabled"
             );
-            let store =
-                steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
+            let store = w.core.store().store().clone();
             let registered: i64 = store
                 .reader(|c| {
                     c.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
@@ -836,8 +835,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(p.text, "答案");
-            let store =
-                steve_store::Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).unwrap();
+            let store = w.core.store().store().clone();
             let n: i64 = store
                 .reader(|c| {
                     Ok::<_, steve_store::StoreError>(c.query_row(

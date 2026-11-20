@@ -7,6 +7,8 @@ pub mod access_log;
 #[cfg(test)]
 mod maintenance_tests;
 mod schedule;
+#[cfg(test)]
+mod shutdown_tests;
 pub(crate) mod watch;
 pub use schedule::{Head, LANES, Lane, Scheduler, index, name, target};
 
@@ -116,15 +118,23 @@ struct Shared<C, R: BatchRunner<C>> {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
-struct Handle<C, R: BatchRunner<C>>(Arc<Shared<C, R>>);
+struct Handle<C, R: BatchRunner<C>>(Arc<Shared<C, R>>, Option<std::thread::JoinHandle<()>>);
 impl<C, R: BatchRunner<C>> Drop for Handle<C, R> {
     fn drop(&mut self) {
         lock(&self.0.state).closing = true;
         self.0.changed.notify_all();
+        if let Some(worker) = self.1.take()
+            && worker.thread().id() != std::thread::current().id()
+        {
+            // No scheduler lock is held while maintenance finishes and the worker
+            // releases its connection. A final handle dropped by a job detaches.
+            let _ = worker.join();
+        }
     }
 }
 /// Clone this handle for every facade of the same Engine. File labels do not establish identity.
-/// Dropping the last handle cancels queued work; active grants remain valid until their last drop.
+/// Dropping the last handle cancels queued work and joins the worker (worker-owned drops detach).
+/// Active grants retain their connection until their last drop.
 pub struct Executor<C: Send + 'static, R: BatchRunner<C>> {
     handle: Arc<Handle<C, R>>,
 }
@@ -278,11 +288,11 @@ impl<C: Send + 'static, R: BatchRunner<C>> Executor<C, R> {
             changed: Condvar::new(),
         });
         let worker = shared.clone();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("storage-executor".into())
             .spawn(move || worker_loop(worker))?;
         Ok(Self {
-            handle: Arc::new(Handle(shared)),
+            handle: Arc::new(Handle(shared, Some(thread))),
         })
     }
     fn shared(&self) -> &Arc<Shared<C, R>> {
@@ -447,12 +457,7 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
     loop {
         let mut s = lock(&shared.state);
         if s.closing {
-            let queued = std::mem::replace(&mut s.queues, std::array::from_fn(|_| VecDeque::new()));
-            for lane in LANES {
-                shared.depth(&s, lane);
-            }
-            drop(s);
-            drop(queued);
+            close_worker(&shared, s);
             return;
         }
         if s.busy {
@@ -522,6 +527,21 @@ fn worker_loop<C: Send + 'static, R: BatchRunner<C>>(shared: Arc<Shared<C, R>>) 
         drop(s);
         execute_batch(&shared, lane, connection, batch);
     }
+}
+
+fn close_worker<C, R: BatchRunner<C>>(
+    shared: &Shared<C, R>,
+    mut state: MutexGuard<'_, State<C, R>>,
+) {
+    let connection = state.connection.take();
+    let queued = std::mem::replace(&mut state.queues, std::array::from_fn(|_| VecDeque::new()));
+    for lane in LANES {
+        shared.depth(&state, lane);
+    }
+    drop(state);
+    // A cancelled job's destructor may itself release an executor handle.
+    drop(queued);
+    drop(connection);
 }
 
 fn run_maintenance<C: Send + 'static, R: BatchRunner<C>>(

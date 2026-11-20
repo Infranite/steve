@@ -116,7 +116,7 @@ async fn local_file_versions_survive_cleanup_and_restart() {
     assert_eq!(bytes(&svc, &new, None), b"second");
     fs::remove_dir_all(&s.cwd).unwrap();
     let reloaded = Service::new(
-        Store::open(home.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap(),
+        svc.store.clone(),
         home.path().to_path_buf(),
         svc.base.clone(),
     );

@@ -8,6 +8,8 @@
 //! - `steve-hub --access …`: issue, list and revoke tokens and clients on this machine, also when the
 //!   Hub does not answer.
 
+use anyhow::Context;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};

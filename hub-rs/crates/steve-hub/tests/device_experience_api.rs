@@ -1,7 +1,6 @@
 //! Device facts and configuration against the real isolated HTTP service.
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -11,6 +10,7 @@ use steve_hub::config::Config;
 use steve_store::Store;
 
 struct Env {
+    store: steve_store::Store,
     _home: tempfile::TempDir,
     db: PathBuf,
     base: String,
@@ -20,7 +20,7 @@ struct Env {
 
 impl Env {
     fn store(&self) -> Store {
-        Store::open(&self.db, steve_store::FnPublisher(|_| {})).expect("store")
+        self.store.clone()
     }
 
     async fn get(&self, path: &str, cookie: Option<&str>, ws: Option<&str>) -> (u16, Value) {
@@ -91,6 +91,7 @@ async fn start(local: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let store = w.modules.as_ref().expect("wired modules").store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_node(w.node.clone())
         .with_modules(w.modules)
@@ -125,9 +126,9 @@ async fn start(local: bool) -> Env {
         .find(|c| c.starts_with("steve_session="))
         .map(|c| c.split(';').next().unwrap_or_default().to_string())
         .expect("owner session cookie");
-    let store = Store::open(cfg.db_path(), steve_store::FnPublisher(|_| {})).expect("store");
     assert!(store.access().owner().unwrap().is_some());
     Env {
+        store,
         _home: home,
         db: cfg.db_path(),
         base,

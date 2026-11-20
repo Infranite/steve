@@ -4,7 +4,6 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -74,12 +73,14 @@ pub struct Hub {
     pub addr: SocketAddr,
     pub ends: Arc<Ends>,
     pub service: Arc<FakeService>,
-    server: tokio::task::JoinHandle<()>,
+    server: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for Hub {
     fn drop(&mut self) {
-        self.server.abort();
+        if let Some(server) = &self.server {
+            server.abort();
+        }
     }
 }
 
@@ -126,17 +127,9 @@ impl Hub {
             "/api",
             nodes::api_router(svc.clone()).layer(middleware::from_fn(caller)),
         );
-        let mut listener = None;
-        for _ in 0..100 {
-            match tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await {
-                Ok(l) => {
-                    listener = Some(l);
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
-        }
-        let listener = listener.expect("bind");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
+            .await
+            .expect("bind");
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(
@@ -154,7 +147,7 @@ impl Hub {
             addr,
             ends,
             service,
-            server,
+            server: Some(server),
         }
     }
 
@@ -356,11 +349,12 @@ impl Hub {
         for n in self.fleet.nodes() {
             self.svc.registry.kill(&n, "hub restart");
         }
-        self.server.abort();
+        let server = self.server.take().unwrap();
+        server.abort();
+        let _ = server.await;
         let port = self.addr.port();
         let dir = std::mem::replace(&mut self.dir, tempfile::tempdir().unwrap());
         drop(self);
-        tokio::time::sleep(Duration::from_millis(300)).await;
         let store = store_at(dir.path());
         Hub::on(dir, store, Some(port)).await
     }
