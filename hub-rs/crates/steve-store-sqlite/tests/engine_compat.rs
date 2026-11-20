@@ -15,7 +15,7 @@ fn candidate_matrix_is_the_same_rule_used_by_opens() {
         caps
     );
     let mut missing = encoded.clone();
-    missing.as_object_mut().unwrap().remove("contract_schema");
+    missing.as_object_mut().unwrap().remove("contract");
     assert!(serde_json::from_value::<StorageCapabilities>(missing).is_err());
     let mut unknown = encoded;
     unknown["unknown"] = serde_json::json!(1);
@@ -63,16 +63,10 @@ fn candidate_matrix_is_the_same_rule_used_by_opens() {
         tx.execute_batch(sql).unwrap();
         let state = open::inspect(&tx).unwrap(); // Observation can describe future headers.
         assert!(caps.can_open(&state, true).is_err());
-        assert_eq!(
-            caps.can_open(&state, false).is_ok(),
-            sql.contains("version=0")
-        );
+        assert!(caps.can_open(&state, false).is_err());
     }
-    let mut candidate = caps.clone();
-    candidate.domains.remove("comms");
-    assert!(candidate.can_open(&StorageState::Empty, false).is_err());
-    candidate = caps;
-    candidate.layout.target = candidate.layout.max_read + 1;
+    let mut candidate = caps;
+    candidate.layout.min_read = candidate.layout.target + 1;
     assert!(candidate.can_open(&current, false).is_err());
 }
 #[test]
@@ -136,13 +130,12 @@ fn empty_partial_unknown_and_readonly_observation_never_guess_a_legacy_database(
 
 #[test]
 fn candidate_declarations_are_independent_of_the_inspecting_binary() {
-    use steve_store_sqlite::compat::LegacyCapabilities;
+    use steve_store_sqlite::compat::SchemaRange;
     let mut candidate = StorageCapabilities::compiled();
-    candidate.legacy = LegacyCapabilities {
+    candidate.legacy = Some(SchemaRange {
         min_read: 114,
-        max_read: 115,
-        convert: true,
-    };
+        target: 115,
+    });
     for (version, allowed) in [(113, false), (114, true), (115, true), (116, false)] {
         assert_eq!(
             candidate
@@ -156,7 +149,7 @@ fn candidate_declarations_are_independent_of_the_inspecting_binary() {
             allowed
         );
     }
-    candidate.legacy.convert = false;
+    candidate.legacy = None;
     assert!(
         candidate
             .can_open(
@@ -175,7 +168,6 @@ fn candidate_declarations_are_independent_of_the_inspecting_binary() {
     )
     .unwrap();
     candidate.layout.min_read = 3;
-    candidate.layout.max_read = 3;
     candidate.layout.target = 3;
     let state = open::inspect(&conn).unwrap();
     assert!(candidate.can_open(&state, true).is_ok());
@@ -202,5 +194,136 @@ fn future_legacy_version_and_reader_request_a_newer_program_without_writing() {
         assert!(e.safe_detail.contains("需要更新的程序"));
         assert!(!e.safe_detail.contains("先升级到上一个发布版"));
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn encoded_storage_is_flat_uniform_strict_and_matches_the_embedded_catalog() {
+    let caps = StorageCapabilities::compiled();
+    let json = caps.encode_build_info_draft().unwrap();
+    let mut keys = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["comms", "contract", "core", "layout", "legacy", "stream"]
+    );
+    for name in keys {
+        assert_eq!(
+            json[name]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["min_read", "target"]
+        );
+    }
+    for set in migrate::CATALOG {
+        assert_eq!(
+            json[set.domain]["min_read"],
+            set.migrations.first().unwrap().version
+        );
+        assert_eq!(
+            json[set.domain]["target"],
+            set.migrations.last().unwrap().version
+        );
+    }
+    let legacy_head = include_str!("../legacy/migrations/LOCK")
+        .lines()
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()?
+                .strip_suffix(".sql")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap();
+    assert_eq!(json["legacy"]["min_read"], legacy_head);
+    assert_eq!(json["legacy"]["target"], legacy_head);
+    assert_eq!(
+        json["layout"]["target"],
+        steve_store_sqlite::layout::LAYOUT_GENERATION
+    );
+    for field in ["layout", "contract", "core", "stream", "comms"] {
+        let mut missing = json.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<StorageCapabilities>(missing).is_err(),
+            "{field}"
+        );
+    }
+    let mut no_legacy = json.clone();
+    no_legacy.as_object_mut().unwrap().remove("legacy");
+    let candidate = serde_json::from_value::<StorageCapabilities>(no_legacy.clone()).unwrap();
+    assert_eq!(candidate.encode_build_info_draft().unwrap(), no_legacy);
+    assert!(
+        candidate
+            .can_open(
+                &StorageState::Legacy {
+                    schema_version: 113
+                },
+                false
+            )
+            .is_err()
+    );
+    for old in ["format_version", "domains", "contract_schema"] {
+        let mut json = json.clone();
+        json[old] = serde_json::json!(1);
+        assert!(serde_json::from_value::<StorageCapabilities>(json).is_err());
+    }
+    for (field, key) in [
+        ("core", "max_read"),
+        ("legacy", "max_read"),
+        ("legacy", "convert"),
+    ] {
+        let mut json = json.clone();
+        json[field][key] = serde_json::json!(1);
+        assert!(serde_json::from_value::<StorageCapabilities>(json).is_err());
+    }
+}
+#[test]
+fn every_item_uses_the_same_inclusive_bounds_and_exact_target_rule() {
+    use steve_store_sqlite::compat::SchemaRange;
+    let c = &mut Connection::open_in_memory().unwrap();
+    migrate::initialize(c, &Layout::single_file()).unwrap();
+    let current = open::inspect(c).unwrap();
+    for item in ["layout", "contract", "core", "stream", "comms"] {
+        let mut candidate = StorageCapabilities::compiled();
+        let range = match item {
+            "layout" => &mut candidate.layout,
+            "contract" => &mut candidate.contract,
+            "core" => &mut candidate.core,
+            "stream" => &mut candidate.stream,
+            _ => &mut candidate.comms,
+        };
+        let actual = range.target;
+        *range = SchemaRange {
+            min_read: actual,
+            target: actual + 1,
+        };
+        assert!(candidate.can_open(&current, false).is_ok(), "{item}");
+        assert!(candidate.can_open(&current, true).is_err(), "{item}");
+        range_for(&mut candidate, item).min_read = actual + 1;
+        assert!(candidate.can_open(&current, false).is_err(), "{item}");
+        *range_for(&mut candidate, item) = SchemaRange {
+            min_read: actual,
+            target: actual,
+        };
+        assert!(candidate.can_open(&current, true).is_ok(), "{item}");
+    }
+    fn range_for<'a>(c: &'a mut StorageCapabilities, n: &str) -> &'a mut SchemaRange {
+        match n {
+            "layout" => &mut c.layout,
+            "contract" => &mut c.contract,
+            "core" => &mut c.core,
+            "stream" => &mut c.stream,
+            _ => &mut c.comms,
+        }
     }
 }
