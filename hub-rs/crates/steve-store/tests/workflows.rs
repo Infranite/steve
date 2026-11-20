@@ -3,7 +3,7 @@ mod common;
 steve_i18n::init!();
 
 use common::*;
-use serde_json::{Value, json};
+use serde_json::json;
 use steve_store::*;
 
 fn setup() -> (T, String, Vec<UnitSpec>) {
@@ -853,31 +853,6 @@ fn shared_project_directory_is_refused_before_creating_child() {
 }
 
 #[test]
-fn migration_applies_once_on_v40_and_leaves_existing_items_unchanged() {
-    let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(40);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..40] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('old','default',1,'旧事项','run','执行',1,1);").unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
-    let title: String = c
-        .query_row("SELECT title FROM items WHERE id='old'", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(title, "旧事项");
-    let check: Value = json!(
-        c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-            .unwrap()
-    );
-    assert_eq!(check, json!("ok"));
-}
-
-#[test]
 fn new_goal_or_cycle_archives_old_results_without_reusing_them() {
     let (t, parent, specs) = setup();
     t.store
@@ -1250,45 +1225,6 @@ fn a_retry_takes_the_replanned_spec_into_its_child() {
         goals,
         vec![(1, "完成 a 并验证".into()), (2, "按新理解完成 a".into())]
     );
-}
-
-/// Retired attempts written before #182 (one per item, keyed by the item alone) are kept by the
-/// migration with the attempt their snapshot recorded, and still read as they were.
-#[test]
-fn migration_keys_earlier_retired_attempts_by_their_recorded_attempt() {
-    let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(0);",
-    )
-    .unwrap();
-    db::migrate(&c).unwrap();
-    // back to the table as 082 left it, with rows an older Hub wrote
-    c.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         DROP TABLE workflow_attempts;
-         CREATE TABLE workflow_attempts (
-          item_id TEXT PRIMARY KEY REFERENCES items(id),
-          workflow_id TEXT NOT NULL REFERENCES workflows(item_id) ON DELETE CASCADE,
-          unit_id TEXT NOT NULL, snapshot TEXT NOT NULL, created INTEGER NOT NULL);
-         INSERT INTO workflow_attempts VALUES
-          ('ST-2','ST-1','api','{\"attempt\":1,\"status\":\"failed\"}',1),
-          ('ST-3','ST-1','api','{\"attempt\":2,\"status\":\"cancelled\"}',2),
-          ('ST-4','ST-1','old','{\"status\":\"cancelled\"}',3);",
-    )
-    .unwrap();
-    c.execute_batch(db::MIGRATIONS[82]).unwrap();
-    let rows: Vec<(String, i64)> = c
-        .prepare("SELECT item_id,attempt FROM workflow_attempts ORDER BY item_id")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        rows,
-        vec![("ST-2".into(), 1), ("ST-3".into(), 2), ("ST-4".into(), 0)]
-    );
-    assert!(columns(&c, "workflow_attempts").contains(&"attempt".to_string()));
 }
 
 #[test]

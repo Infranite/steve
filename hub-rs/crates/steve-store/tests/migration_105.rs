@@ -1,6 +1,4 @@
-//! 105: what the sweep would do (#334), after 104 (#327). The file, the `db.rs` include and the LOCK
-//! line are at their position, and the log's key holds the scope revision and the target: the same
-//! reason on the same turn about another operation, card or wait, or on another goal, is another row.
+//! A sweep-log key includes the scope revision and target.
 
 use rusqlite::Connection;
 use steve_store::db;
@@ -10,20 +8,11 @@ fn one<T: rusqlite::types::FromSql>(c: &Connection, sql: &str) -> T {
 }
 
 #[test]
-fn the_file_is_at_its_position() {
-    assert_eq!(db::MIGRATIONS[104], include_str!("../migrations/105.sql"));
-    assert!(db::MIGRATIONS[104].contains("CREATE TABLE item_would_do"));
-    assert!(db::MIGRATIONS[103].contains("CREATE TABLE item_delivery_facts"));
-}
-
-#[test]
-fn applies_on_a_104_database_and_keys_by_scope_and_target() {
+fn sweep_log_keys_include_scope_and_target() {
     let c = Connection::open_in_memory().unwrap();
-    for m in &db::MIGRATIONS[..105] {
-        c.execute_batch(m).unwrap();
-    }
+    db::migrate(&c).unwrap();
     let n: i64 = one(&c, "SELECT COUNT(*) FROM item_would_do");
-    assert_eq!(n, 0, "empty at migration");
+    assert_eq!(n, 0, "starts empty");
     let insert = |id: &str, scope: i64, target: &str| {
         c.execute(
             "INSERT INTO item_would_do(id,item_id,cycle,session_id,turn_id,scope_revision,target,action,reason,row,code,due_at,first_seen)

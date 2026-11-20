@@ -223,6 +223,16 @@ Omitting `--label` reads the label from the existing service registration; omitt
 
 Backups and transaction records remain under `<home>/setup-reconfigure/`. If interruption leaves a `pending` transaction, rerun `steve setup --reconfigure` with the same home and confirm recovery. Recovery verifies the installation and preserves a committed change or restores an uncommitted change from its private backups. If files have been edited externally, it retains the recovery record and refuses to overwrite them. After recovery, run the wizard again for further changes. EOF or declining confirmation before saving leaves the configuration untouched.
 
+## Storage upgrades and recovery
+
+The Hub automatically converts an existing database on its first start with the new storage layout, before starting normal work. The supported inputs are databases from the previous release, v0.5.0: legacy schema 113 or 114. An older database is refused; first install v0.5.0 and start it once to bring that database to the supported input. A new installation initializes the current layout directly.
+
+Conversion deletes non-owner users' access tokens, registered clients and authentication sessions, together with dependent authentication data. Independent records are retained.
+
+Conversion is one-way. Older releases cannot open the converted database, and reinstalling an older release does not reverse the conversion. Keep the completed pre-upgrade backup made by the upgrade process. If conversion or startup fails, stop the Hub, install the release that introduced this layout change, restore the pre-upgrade database backup using the procedure below, and then start the Hub so that release performs the conversion again. Do not try to open the converted database with an older Hub.
+
+The database permanently retains a reader fence (`schema_compat` with `min_reader = 1000`) to make old programs refuse it. Any legacy fields temporarily retained in a release manifest serve the upgrade tooling only; removing that manifest compatibility wrapper does not remove the reader fence or make downgrades possible.
+
 ## Backups
 
 A running Hub makes a copy of its data once a day, at or after 03:30 local time, in `<home>/backups`; a Hub that was not running then makes the day's copy a few minutes after it next starts. Copies are kept 14 days, and the directory and the files are readable by the owner only:
@@ -238,7 +248,7 @@ Set `STEVE_BACKUP=off` in `steve.env` to turn the daily copy off, for example wh
 
 For an immediate copy, run `STEVE_HOME=<home> <home>/current/bin/steve-hub --admin backup`. It prints the completed manifest as JSON, using the management socket while the Hub runs or the installation lock while stopped. `--reason pre-upgrade` keeps the newest eight upgrade copies; `--reason pre-destructive` names a manual backup before a destructive operation. Diagnostic and pre-destructive copies are not automatically removed. Installers and source deployment scripts use this command and abort if it fails. Legacy flat copies are left untouched.
 
-To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`, and start the Hub. A copy older than the running release is migrated forward at start; a copy made by a newer release than the one running is refused.
+To go back to a copy, stop the Hub (`steve hub stop` with the installation's `--home` and `--label`), move `data/steve.sqlite3` and its `-wal` and `-shm` files aside, copy the database named in the chosen completed manifest in its place as `data/steve.sqlite3`, and start the Hub. A copy with the current layout is migrated forward at start. A legacy copy must be at schema 113 or 114 and follows the [storage conversion procedure](#storage-upgrades-and-recovery); older legacy copies must first be opened by v0.5.0. A copy made by a newer release than the one running is refused.
 
 ## Access tokens and clients
 

@@ -1,8 +1,7 @@
 mod common;
 use common::*;
-use rusqlite::Connection;
 use serde_json::{Value, json};
-use steve_store::{StoreError, Tx, db, jobs::*, runtime};
+use steve_store::{StoreError, Tx, jobs::*, runtime};
 
 fn job(id: &str) -> NewJob<'_> {
     NewJob {
@@ -81,34 +80,6 @@ fn is_conflict<T: std::fmt::Debug>(r: steve_store::Result<T>, want: &str) {
         Err(StoreError::Conflict(d)) => assert!(d.contains(want), "{d}"),
         other => panic!("expected conflict {want:?}, got {other:?}"),
     }
-}
-
-#[test]
-fn applies_on_a_039_database_and_keeps_its_commands() {
-    let c = Connection::open_in_memory().unwrap();
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(39);",
-    )
-    .unwrap();
-    for m in &db::MIGRATIONS[..39] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute_batch("INSERT INTO node_commands(operation_id,node_id,method,request,digest,created,updated) VALUES ('old','n','open_session','{}','d',1,1);").unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(db::compat(&c).unwrap().min_reader, db::SCHEMA_VERSION);
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM node_commands WHERE operation_id='old' AND target_job_attempt IS NULL AND state='pending'"
-        ),
-        1
-    );
-    assert_eq!(count(&c, "SELECT count(*) FROM runtime_jobs"), 0);
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
-        0
-    );
 }
 
 #[test]

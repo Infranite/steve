@@ -326,7 +326,7 @@ fn feed_pages_and_unchanged_are_bounded_after_large_read_history() {
 }
 
 #[test]
-fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
+fn final_reply_commits_follow_completion_instead_of_timestamp_order() {
     let t = fresh();
     seed(&t);
     t.store
@@ -356,21 +356,10 @@ fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
         })
         .unwrap();
     t.store.with_conn(|c| {
-    let triggers = c.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'attention_feed_%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for trigger in triggers { c.execute_batch(&format!("DROP TRIGGER {trigger}"))?; }
-    c.execute_batch("DROP TABLE attention_feed_unread; DROP TABLE attention_feed_scopes; DROP TRIGGER attention_final_reply; DROP TABLE attention_windows; DROP TABLE thread_reply_reads; DROP TABLE thread_reply_commits; DROP TABLE attention_meta;")?;
-    c.execute_batch("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES('origin','default','steve','me','Question',1);
-       INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES('old','default','origin','u','done',1),('new','default','origin','u','running',1);
-       INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES('old_reply','default','steve','steve','Final','{\"run\":\"old\",\"origin\":\"origin\",\"run_receipt\":true}',1);").unwrap();
-    c.execute_batch(steve_store::db::MIGRATIONS.iter().find(|sql| sql.contains("CREATE TABLE attention_meta")).unwrap()).unwrap();
-    assert_eq!(count(c,"SELECT unread_count FROM attention_feed_scopes WHERE user_id='u'"),1,
-        "one-time Feed index preserves existing personal read facts");
+    assert_eq!(count(c,"SELECT unread_count FROM attention_feed_scopes WHERE user_id='u'"),1);
     assert_eq!(count(c,"SELECT unread_count FROM attention_feed_scopes WHERE user_id='other'"),2);
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM thread_reply_commits"),
-        0,
-        "no historical startup rewrite"
-    );
+    c.execute_batch("INSERT INTO messages(id,workspace_id,space,author,text,created) VALUES('origin','default','steve','me','Question',1);
+       INSERT INTO thread_runs(id,workspace_id,message_id,user_id,status,created) VALUES('new','default','origin','u','running',1);").unwrap();
     c.execute_batch("INSERT INTO messages(id,workspace_id,space,author,text,meta,created) VALUES('new_reply','default','steve','steve','Final','{\"run\":\"new\",\"origin\":\"origin\",\"run_receipt\":true}',1);
       UPDATE thread_runs SET status='done',reply_id='new_reply' WHERE id='new';
       UPDATE thread_runs SET ended=2 WHERE id='new';").unwrap();

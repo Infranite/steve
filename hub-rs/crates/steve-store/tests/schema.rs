@@ -131,37 +131,6 @@ fn reopen_changes_nothing() {
 }
 
 #[test]
-fn upgrades_a_version_1_database() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("steve.sqlite3");
-    {
-        let c = Connection::open(&path).unwrap();
-        c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL); INSERT INTO schema_version (v) VALUES (1);").unwrap();
-        c.execute_batch(db::MIGRATIONS[0]).unwrap();
-        c.execute_batch(
-            "INSERT INTO workspaces (id, name, created) VALUES ('default', '默认工作空间', 1);
-             INSERT INTO users (id, workspace_id, subject, name, email, role, created) VALUES ('usr_1', 'default', 'sub', 'Lee', NULL, 'owner', 2);
-             INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('steve', 'default', 'Steve', 'claude-code', 3);
-             INSERT INTO counters (workspace_id, name, value) VALUES ('default', 'item', 7);",
-        )
-        .unwrap();
-    }
-    let s = Store::open(&path, NoPublisher).unwrap();
-    s.ensure_workspace().unwrap();
-    s.with_conn(|c| {
-        assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
-        assert_eq!(count(c, "SELECT count(*) FROM workspace_members WHERE user_id = 'usr_1' AND role = 'owner' AND created = 2"), 1);
-        assert_eq!(count(c, "SELECT count(*) FROM bot_workspaces WHERE bot_id = 'steve' AND workspace_id = 'default' AND created = 3"), 1);
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(s.workspaces().get("default").unwrap().unwrap().name, "个人");
-    assert_eq!(s.peek_counter("item:ST").unwrap(), 7);
-    let fresh_schema = schema(&Connection::open(fresh().store.path()).unwrap());
-    assert_eq!(schema_of(&path), fresh_schema);
-}
-
-#[test]
 fn newer_schema_is_opened_unchanged() {
     let t = fresh();
     let path = t.store.path().to_path_buf();
@@ -363,31 +332,20 @@ fn row_types_follow_column_order() {
 }
 
 #[test]
-fn upgrades_a_version_2_database_with_attachments() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("steve.sqlite3");
-    {
-        let c = Connection::open(&path).unwrap();
-        c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL); INSERT INTO schema_version (v) VALUES (2);").unwrap();
-        c.execute_batch(db::MIGRATIONS[0]).unwrap();
-        c.execute_batch(db::MIGRATIONS[1]).unwrap();
+fn current_rows_and_attachments_round_trip() {
+    let t = fresh();
+    let s = &t.store;
+    let path = s.path();
+    s.with_conn(|c| {
         c.execute_batch(
-            "INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);
-             INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'x', 1, 1);
+            "INSERT INTO items (id, workspace_id, no, title, status, stage, created, updated) VALUES ('ST-1', 'default', 1, 't', 'open', 'x', 1, 1);
              INSERT INTO timeline (item_id, ts, actor, kind, text) VALUES ('ST-1', 1, 'me', 'me', 'old');
              INSERT INTO sessions (id, workspace_id, harness, cwd, status, token_hash, created, updated) VALUES ('ses_1', 'default', 'claude-code', '/', 'idle', 'h', 1, 1);
              INSERT INTO queued (id, session_id, text, via, created) VALUES ('q_1', 'ses_1', 'old', 'me', 1);",
-        )
-        .unwrap();
-    }
-    let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
-        assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+        )?;
         Ok(())
-    })
-    .unwrap();
-    assert_eq!(schema_of(&path), schema_of(fresh().store.path()));
-    // rows from before the migration read with `files: []`
+    }).unwrap();
+    // Rows written without attachments read with `files: []`.
     assert!(s.timeline().list("ST-1").unwrap()[0].files.is_empty());
     assert!(s.queued().list("ses_1").unwrap()[0].files.is_empty());
 

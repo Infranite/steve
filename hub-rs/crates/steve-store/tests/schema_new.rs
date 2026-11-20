@@ -1,5 +1,4 @@
-//! Migrations 5–22 (slice M0, YOLO Y0, stats ST0, thread routing R0, reasoning effort, ownership, space attention, IM reactions): the new module tables appear on an empty database and on databases left
-//! at v2, v3 and v4, running them again changes nothing, and the bundled SQLite has what `kb_fts` needs.
+//! Current module tables, FTS operations, message indexes, and device defaults.
 
 mod common;
 
@@ -7,39 +6,39 @@ use common::*;
 use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
-/// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 31] = [
-    ("connections", 5),
-    ("ext_events", 6),
-    ("spaces", 7),
-    ("kb_chunks", 8),
-    ("mail_drafts", 9),
-    ("gh_prs", 10),
-    ("chan_cursors", 11),
-    ("yolo_scopes", 14),
-    ("yolo_windows", 14),
-    ("yolo_actions", 14),
-    ("agent_turns", 15),
-    ("usage_records", 15),
-    ("item_marks", 15),
-    ("stat_daily", 15),
-    ("item_stats", 15),
-    ("route_log", 16),
-    ("thread_runs", 16),
-    ("thread_items", 16),
-    ("stewards", 18),
-    ("space_prefs", 19),
-    ("chan_reactions", 20),
-    ("outbox_events", 21),
-    ("outbox_consumers", 21),
-    ("outbox_receipts", 21),
-    ("outbox_leases", 21),
-    ("event_payloads", 22),
-    ("event_payload_refs", 22),
-    ("chan_app_registrations", 23),
-    ("session_resume", 24),
-    ("session_dispatch", 24),
-    ("thread_resume", 24),
+/// Representative tables that every fresh database provides.
+const NEW_TABLES: [&str; 31] = [
+    "connections",
+    "ext_events",
+    "spaces",
+    "kb_chunks",
+    "mail_drafts",
+    "gh_prs",
+    "chan_cursors",
+    "yolo_scopes",
+    "yolo_windows",
+    "yolo_actions",
+    "agent_turns",
+    "usage_records",
+    "item_marks",
+    "stat_daily",
+    "item_stats",
+    "route_log",
+    "thread_runs",
+    "thread_items",
+    "stewards",
+    "space_prefs",
+    "chan_reactions",
+    "outbox_events",
+    "outbox_consumers",
+    "outbox_receipts",
+    "outbox_leases",
+    "event_payloads",
+    "event_payload_refs",
+    "chan_app_registrations",
+    "session_resume",
+    "session_dispatch",
+    "thread_resume",
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -49,172 +48,13 @@ fn has_table(c: &Connection, name: &str) -> bool {
     ) == 1
 }
 
-/// A database the way a build with `v` migrations left it, with a row in an old table.
-fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("steve.sqlite3");
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch("CREATE TABLE schema_version (v INTEGER NOT NULL)")
-        .unwrap();
-    for m in &db::MIGRATIONS[..v] {
-        c.execute_batch(m).unwrap();
-    }
-    c.execute("INSERT INTO schema_version (v) VALUES (?)", [v as i64])
-        .unwrap();
-    c.execute_batch("INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);")
-        .unwrap();
-    (dir, path)
-}
-
-// Use the contract boundary so a merge-time renumber cannot silently skip a published migration.
-fn before_usage_ledger() -> usize {
-    db::MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("CREATE TABLE usage_reports"))
-        .unwrap()
-}
-
-fn seed_pre_usage_ledger(c: &Connection) {
-    c.execute_batch(
-        "INSERT INTO devices(id,name,roles,max_sessions,revision,seen,created)
-         VALUES ('ledger-device','Device','[]',32,9,1,1);
-         INSERT INTO usage_records(workspace_id,ts,day,source,purpose,harness,model,
-             input,output,cache_read,cache_write,reasoning,cost_reported,detail)
-         VALUES ('default',1,'2026-01-01','gateway','legacy','custom','model',
-             40,20,60,7,5,0.25,'{\"scope\":\"all\"}');",
-    )
-    .unwrap();
-}
-
-fn assert_pre_usage_ledger_facts(c: &Connection) {
-    assert_eq!(
-        count(c, "SELECT revision FROM devices WHERE id='ledger-device'"),
-        9
-    );
-    assert_eq!(
-        count(
-            c,
-            "SELECT max_sessions FROM devices WHERE id='ledger-device'"
-        ),
-        32
-    );
-    assert_eq!(count(c, "SELECT count(*) FROM usage_records"), 1);
-    assert_eq!(
-        count(
-            c,
-            "SELECT count(*) FROM usage_records WHERE input=40 AND output=20
-             AND cache_read=60 AND cache_write=7 AND reasoning=5 AND cost_reported=0.25
-             AND detail='{\"scope\":\"all\"}'",
-        ),
-        1
-    );
-    assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
-}
-
 #[test]
-fn usage_ledger_upgrade_preserves_published_device_revision_and_legacy_bill() {
-    let (_dir, path) = at_version(before_usage_ledger());
-    let c = Connection::open(&path).unwrap();
-    seed_pre_usage_ledger(&c);
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
-    assert_pre_usage_ledger_facts(&c);
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
-    assert_eq!(count(&c, "SELECT count(*) FROM usage_reports"), 0);
-    assert_eq!(count(&c, "SELECT count(*) FROM gateway_result_ready"), 0);
-    drop(c);
-    let store = Store::open(&path, NoPublisher).unwrap();
-    store
-        .reader(|c| {
-            assert_pre_usage_ledger_facts(c);
-            Ok::<_, steve_store::StoreError>(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn usage_ledger_upgrade_rolls_back_all_pending_migrations_then_retries() {
-    let before = before_usage_ledger();
-    let (_dir, path) = at_version(before);
-    let c = Connection::open(&path).unwrap();
-    seed_pre_usage_ledger(&c);
-    // Fail the last migration after the earlier pending migrations have run in the transaction.
-    c.execute_batch("CREATE TABLE gateway_result_ready(collision INTEGER)")
-        .unwrap();
-    assert!(db::migrate(&c).is_err());
-    assert_eq!(count(&c, "SELECT v FROM schema_version"), before as i64);
-    assert!(!has_table(&c, "usage_reports"));
-    assert!(!has_table(&c, "gateway_calls"));
-    assert!(!columns(&c, "usage_records").contains(&"live_turn_id".to_string()));
-    assert_pre_usage_ledger_facts(&c);
-    c.execute_batch("DROP TABLE gateway_result_ready").unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
-    assert_pre_usage_ledger_facts(&c);
-}
-
-#[test]
-fn realtime_upgrade_preserves_baselines_and_repairs_backwards_stop_boundaries() {
-    let (_dir, path) = at_version(74);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','ended',1,100);
-        INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s','n','{}','s','r','idle',100);
-        INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t','s','finished',1,100);
-        INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a','t',0,'n','o','{}','{}','d','finished',1,100);
-        INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,node_id,started,ended) VALUES ('a','s','default','n',1,20);
-        INSERT INTO realtime_output_samples VALUES ('n','st','e',1,'text','a',99,99,100,'text',400);
-        INSERT INTO realtime_output_samples VALUES ('n','st','e',2,'stop','a',100,20,100,'gap',0);").unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap(); // the repair is migration-once, subsequent opens keep the same record
-    assert_eq!(
-        c.query_row(
-            "SELECT baseline,ended FROM realtime_output_attempts",
-            [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        )
-        .unwrap(),
-        (1, 100)
-    );
-    assert_eq!(
-        c.query_row(
-            "SELECT source_at FROM realtime_output_samples WHERE event_id='stop'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        20
-    );
-    assert_eq!(count(&c, "SELECT COUNT(*) FROM realtime_output_samples"), 2);
-}
-
-#[test]
-fn reasoning_migration_accepts_columns_previously_added_by_ts_hub() {
-    for v in [12, 16] {
-        let (_dir, path) = at_version(v);
-        let c = Connection::open(&path).unwrap();
-        c.execute_batch("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT; ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT;").unwrap();
-        db::migrate(&c).unwrap();
-        db::migrate(&c).unwrap();
-        assert_eq!(
-            count(&c, "SELECT v FROM schema_version"),
-            db::SCHEMA_VERSION
-        );
-    }
-}
-
-#[test]
-fn empty_database_migrates_to_v20() {
+fn fresh_database_has_current_module_tables() {
     let t = fresh();
     t.store
         .with_conn(|c| {
             assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
-            for (name, _) in NEW_TABLES {
+            for name in NEW_TABLES {
                 assert!(has_table(c, name), "{name}");
             }
             assert_eq!(
@@ -225,70 +65,6 @@ fn empty_database_migrates_to_v20() {
             Ok(())
         })
         .unwrap();
-}
-
-#[test]
-fn v2_v3_v4_databases_migrate_to_the_fresh_schema() {
-    let want = schema_of(fresh().store.path());
-    for v in [2, 3, 4, 12, 16, 17, 18, 19, 49] {
-        let (_dir, path) = at_version(v);
-        let s = Store::open(&path, NoPublisher).unwrap();
-        s.with_conn(|c| {
-            assert_eq!(
-                count(c, "SELECT v FROM schema_version"),
-                db::SCHEMA_VERSION,
-                "from v{v}"
-            );
-            assert_eq!(count(c, "SELECT count(*) FROM schema_version"), 1);
-            assert_eq!(count(c, "SELECT count(*) FROM workspaces"), 1, "data kept");
-            assert_eq!(
-                c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?,
-                "ok"
-            );
-            Ok(())
-        })
-        .unwrap();
-        drop(s);
-        assert_eq!(schema_of(&path), want, "from v{v}");
-    }
-}
-
-#[test]
-fn rerunning_the_module_migrations_changes_nothing() {
-    let t = fresh();
-    let path = t.store.path().to_path_buf();
-    drop(t.store);
-    let before = schema_of(&path);
-    let c = Connection::open(&path).unwrap();
-    // Historical module migrations are directly repeatable. 034 contains one-shot ALTERs;
-    // their replay protection is the runner's schema_version transaction, exercised below. 035 and
-    // 036 are indexes only and repeatable again.
-    for m in db::MIGRATIONS[3..33].iter().chain(&db::MIGRATIONS[34..36]) {
-        c.execute_batch(m).unwrap();
-    }
-    // 031 made the merge lane's tables, which a later migration dropped: replayed, they go again
-    let dropped = db::MIGRATIONS
-        .iter()
-        .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
-        .unwrap();
-    c.execute_batch(dropped).unwrap();
-    drop(c);
-    assert_eq!(schema_of(&path), before);
-    db::migrate(&Connection::open(&path).unwrap()).unwrap();
-    // Opening again at the current version runs no one-shot ALTERs.
-    drop(Store::open(&path, NoPublisher).unwrap());
-    assert_eq!(schema_of(&path), before);
-}
-
-#[test]
-fn each_migration_brings_its_own_tables() {
-    for (name, v) in NEW_TABLES {
-        let (_dir, path) = at_version(v as usize - 1);
-        let c = Connection::open(&path).unwrap();
-        assert!(!has_table(&c, name), "{name} before v{v}");
-        c.execute_batch(db::MIGRATIONS[v as usize - 1]).unwrap();
-        assert!(has_table(&c, name), "{name} after v{v}");
-    }
 }
 
 #[test]
@@ -327,188 +103,11 @@ fn kb_fts_writes_queries_and_deletes() {
         .unwrap();
 }
 
-/// 014 (YOLO) does not depend on 013: it runs after the comment-only placeholder, after a stand-in for
-/// a real 013, and a second time, leaving the same tables; a database left at v13 migrates to v20.
 #[test]
-fn yolo_migration_does_not_depend_on_013() {
-    fn yolo(c: &Connection) -> Vec<String> {
-        let mut st = c
-            .prepare("SELECT type || ' ' || name FROM sqlite_master WHERE name LIKE '%yolo%' ORDER BY name")
-            .unwrap();
-        st.query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    }
-    let (_a, path) = at_version(12);
-    let c = Connection::open(&path).unwrap();
-    assert!(
-        db::MIGRATIONS[12]
-            .lines()
-            .all(|l| l.trim().is_empty() || l.starts_with("--"))
-    );
-    c.execute_batch(db::MIGRATIONS[12]).unwrap();
-    c.execute_batch(db::MIGRATIONS[13]).unwrap();
-    let want = yolo(&c);
-    for t in ["yolo_scopes", "yolo_windows", "yolo_actions"] {
-        assert!(has_table(&c, t), "{t}");
-    }
-
-    let (_b, path) = at_version(12);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch(
-        "CREATE TABLE delivery_batches (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL);",
-    )
-    .unwrap();
-    c.execute_batch(db::MIGRATIONS[13]).unwrap();
-    assert_eq!(yolo(&c), want);
-    c.execute_batch(db::MIGRATIONS[13]).unwrap();
-    assert_eq!(yolo(&c), want);
-
-    // the full run also adds 035's indexes on yolo_actions
-    for l in db::MIGRATIONS[34]
-        .lines()
-        .filter(|l| l.contains(" ON yolo_"))
-    {
-        c.execute_batch(l).unwrap();
-    }
-    let want = yolo(&c);
-    let (_c, path) = at_version(13);
-    let s = Store::open(&path, NoPublisher).unwrap();
-    s.with_conn(|c| {
-        assert_eq!(count(c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
-        assert_eq!(yolo(c), want);
-        Ok(())
-    })
-    .unwrap();
-}
-
-#[test]
-fn placeholder_13_is_comments_only() {
-    assert!(
-        db::MIGRATIONS[12]
-            .lines()
-            .all(|l| l.trim().is_empty() || l.starts_with("--")),
-        "013 stays comment-only"
-    );
-    for v in 14..=16 {
-        assert!(
-            db::MIGRATIONS[v - 1]
-                .lines()
-                .any(|l| !l.trim().is_empty() && !l.starts_with("--")),
-            "{v:03} is a real migration"
-        );
-    }
-}
-
-#[test]
-fn v12_database_gets_016_without_013_to_015() {
-    // production is at v12; 016 must not depend on anything 13–15 would create
-    let (_dir, path) = at_version(12);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch(db::MIGRATIONS[15]).unwrap();
-    for t in ["route_log", "thread_runs", "thread_items"] {
-        assert!(has_table(&c, t), "{t}");
-    }
-    // and again: IF NOT EXISTS throughout
-    c.execute_batch(db::MIGRATIONS[15]).unwrap();
-}
-
-/// 15 (statistics) does not depend on 13 or 14: it applies on a v12 database directly, twice.
-#[test]
-fn migration_15_does_not_need_13_or_14() {
-    let (_dir, path) = at_version(12);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch(db::MIGRATIONS[14]).unwrap();
-    c.execute_batch(db::MIGRATIONS[14]).unwrap();
-    for t in [
-        "agent_turns",
-        "usage_records",
-        "item_marks",
-        "stat_daily",
-        "item_stats",
-    ] {
-        assert!(has_table(&c, t), "{t}");
-    }
-}
-
-/// 18 backfills stewards once: “我” owns the live bots (in every workspace they serve), the
-/// personas, the Hub device and the connections of their own accounts; objects that already have a
-/// steward, deleted bots and other devices are left alone, and running it again adds nothing.
-#[test]
-fn migration_18_backfills_owners() {
-    let (_dir, path) = at_version(17);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch(
-        "INSERT INTO workspaces (id, name, created) VALUES ('w2', '团队', 1);
-         INSERT INTO users (id, workspace_id, subject, name, role, created) VALUES ('usr_1', 'default', 's1', '李', 'owner', 1);
-         INSERT INTO workspace_members (workspace_id, user_id, role, created) VALUES ('default', 'usr_1', 'owner', 1), ('w2', 'usr_1', 'owner', 2);
-         INSERT INTO parties (id, workspace_id, type, name, contact_kind, user_id, created_by, created, updated)
-           VALUES ('ct_me', 'default', 'contact', '李', 'real', 'usr_1', 'usr_1', 1, 1),
-                  ('ct_me2', 'w2', 'contact', '李', 'real', 'usr_1', 'usr_1', 1, 1),
-                  ('ct_zhang', 'default', 'contact', '张三', 'real', NULL, 'usr_1', 1, 1);
-         INSERT INTO bots (id, workspace_id, name, harness, updated) VALUES ('steve', 'default', 'Steve', 'claude-code', 1), ('dev', 'default', '开发', 'claude-code', 1), ('old', 'default', '旧', 'claude-code', 1), ('ops', 'default', '运维', 'claude-code', 1);
-         UPDATE bots SET deleted = 1 WHERE id = 'old';
-         INSERT INTO bot_workspaces (bot_id, workspace_id, created) VALUES ('steve', 'w2', 1);
-         INSERT INTO personas (id, workspace_id, name, bot_id, created, updated) VALUES ('per_1', 'default', 'Steve', 'steve', 1, 1);
-         INSERT INTO devices (id, name, roles, seen, created) VALUES ('hub', 'Mac', '[\"Hub\"]', 1, 1), ('dev_2', 'Laptop', '[]', 1, 1);
-         INSERT INTO systems (id, workspace_id, name, kind, family, created) VALUES ('mail', '*', '邮箱', 'comm', 'email', 1);
-         INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
-           VALUES ('acc_1', 'default', 'mail', 'email', 'ct_me', 'personal', 'li@x.com', 'li@x.com', 'connect', 1, 1);
-         INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
-           VALUES ('cn_1', 'default', 'acc_1', 'imap', 'credential', 'usr_1', 1, 1);
-         CREATE TABLE IF NOT EXISTS stewards (workspace_id TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, person_id TEXT NOT NULL REFERENCES parties(id), role TEXT NOT NULL DEFAULT 'owner', source TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'confirmed', source_ref TEXT, decision_id TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (workspace_id, object_type, object_id, person_id, role));
-         INSERT INTO stewards (workspace_id, object_type, object_id, person_id, source, created, updated) VALUES ('default', 'bot', 'ops', 'ct_zhang', 'manual', 1, 1);",
-    )
-    .unwrap();
-    db::migrate(&c).unwrap();
-    let rows = |c: &Connection| -> Vec<String> {
-        let mut st = c
-            .prepare("SELECT workspace_id || ' ' || object_type || ' ' || object_id || ' ' || person_id || ' ' || source FROM stewards ORDER BY 1")
-            .unwrap();
-        st.query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    };
-    let want = vec![
-        "default bot dev ct_me seed",
-        "default bot ops ct_zhang manual",
-        "default bot steve ct_me seed",
-        "default connection cn_1 ct_me seed",
-        "default device hub ct_me seed",
-        "default persona per_1 ct_me seed",
-        "w2 bot steve ct_me2 seed",
-        "w2 device hub ct_me2 seed",
-    ];
-    assert_eq!(rows(&c), want);
-    c.execute_batch(db::MIGRATIONS[17]).unwrap();
-    assert_eq!(rows(&c), want);
-    assert_eq!(
-        count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
-        0
-    );
-}
-
-/// 20 (IM reactions) runs on a database left at v19 (space attention) and a second time without change.
-#[test]
-fn migration_20_reactions_after_19() {
-    let (_dir, path) = at_version(19);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch(db::MIGRATIONS[19]).unwrap();
-    c.execute_batch(db::MIGRATIONS[19]).unwrap();
-    assert!(has_table(&c, "chan_reactions"));
-    assert!(has_table(&c, "space_prefs"));
-}
-
-#[test]
-fn migration_42_records_how_a_message_was_sent() {
-    let (_dir, path) = at_version(41);
-    let c = Connection::open(&path).unwrap();
+fn message_delivery_ids_follow_their_messages() {
+    let t = fresh();
+    let c = Connection::open(t.store.path()).unwrap();
     c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-    assert!(!columns(&c, "chan_messages").contains(&"sent_via".to_string()));
-    assert!(!has_table(&c, "chan_message_seen"));
-    db::migrate(&c).unwrap();
     let cols = columns(&c, "chan_messages");
     assert!(cols.contains(&"sent_via".to_string()), "{cols:?}");
     assert!(cols.contains(&"ext_created".to_string()), "{cols:?}");
@@ -527,20 +126,12 @@ fn migration_42_records_how_a_message_was_sent() {
     )
     .unwrap();
     assert_eq!(count(&c, "SELECT count(*) FROM chan_message_seen"), 0);
-    // opening again runs nothing twice
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
 }
 
 #[test]
-fn migration_43_keeps_content_keys_of_messages() {
-    let (_dir, path) = at_version(42);
-    let c = Connection::open(&path).unwrap();
-    assert!(!columns(&c, "chan_messages").contains(&"content_key".to_string()));
-    db::migrate(&c).unwrap();
+fn message_content_keys_use_the_index() {
+    let t = fresh();
+    let c = Connection::open(t.store.path()).unwrap();
     let cols = columns(&c, "chan_messages");
     assert!(cols.contains(&"content_key".to_string()), "{cols:?}");
     assert!(cols.contains(&"fallback_from".to_string()), "{cols:?}");
@@ -561,19 +152,12 @@ fn migration_43_keeps_content_keys_of_messages() {
         )
         .unwrap();
     assert!(plan.contains("chan_messages_content_key"), "{plan}");
-    // opening again runs nothing twice
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
 }
 
 #[test]
-fn migration_44_finds_the_start_of_a_message_by_index() {
-    let (_dir, path) = at_version(43);
-    let c = Connection::open(&path).unwrap();
-    db::migrate(&c).unwrap();
+fn message_start_lookup_uses_the_index() {
+    let t = fresh();
+    let c = Connection::open(t.store.path()).unwrap();
     assert_eq!(
         count(
             &c,
@@ -592,48 +176,12 @@ fn migration_44_finds_the_start_of_a_message_by_index() {
         )
         .unwrap();
     assert!(plan.contains("events_message_start"), "{plan}");
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
 }
 
 #[test]
-fn migration_45_adds_the_failure_clock_and_the_compaction_table() {
-    let (_dir, path) = at_version(44);
-    let c = Connection::open(&path).unwrap();
-    /* keepSess chosen while it did nothing must not start compacting after the upgrade */
-    c.execute_batch(
-        "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'w2', 1), ('w3', 'w3', 1);
-         INSERT INTO settings (workspace_id, key, value, updated) VALUES
-           ('default', 'keepSess', '\"90 天\"', 1), ('w2', 'keepSess', '\"1 年\"', 1),
-           ('w3', 'keepSess', '\"永久\"', 1), ('default', 'keepRaw', '\"30\"', 1);",
-    )
-    .unwrap();
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND value = '\"永久\"'"
-        ),
-        3
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM settings WHERE key = 'keepSess' AND updated = 1"
-        ),
-        1,
-        "an untouched 永久 keeps its timestamp"
-    );
-    assert_eq!(
-        count(
-            &c,
-            "SELECT count(*) FROM settings WHERE key = 'keepRaw' AND value = '\"30\"'"
-        ),
-        1
-    );
+fn failure_clock_and_compaction_tables_are_present() {
+    let t = fresh();
+    let c = Connection::open(t.store.path()).unwrap();
     let col = |t: &str, n: &str| {
         count(
             &c,
@@ -643,53 +191,16 @@ fn migration_45_adds_the_failure_clock_and_the_compaction_table() {
     assert_eq!(col("outbox_leases", "failing_since"), 1);
     assert!(has_table(&c, "session_compactions"));
     assert_eq!(col("session_compactions", "upto"), 1);
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
 }
 
 #[test]
-fn migration_48_adds_the_model_of_a_turn() {
-    let (_dir, path) = at_version(47);
+fn capacity_defaults_constraints_and_custom_values_survive_reopen() {
+    let t = fresh();
+    let path = t.store.path().to_path_buf();
+    drop(t.store);
     let c = Connection::open(&path).unwrap();
-    assert!(!columns(&c, "agent_turns").contains(&"model".to_string()));
-    c.execute_batch(
-        "INSERT INTO agent_turns (id, workspace_id, session_id, harness, user_seq, attempt, started, ended)
-         VALUES ('tn_old', 'default', 'ses_1', 'claude-code', 1, 0, 1, 2);",
-    )
-    .unwrap();
-    db::migrate(&c).unwrap();
-    assert!(columns(&c, "agent_turns").contains(&"model".to_string()));
-    // a turn ended before keeps no model: it is attributed as before
-    let m: Option<String> = c
-        .query_row(
-            "SELECT model FROM agent_turns WHERE id = 'tn_old'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(m, None);
-    db::migrate(&c).unwrap();
-    assert_eq!(
-        count(&c, "SELECT v FROM schema_version"),
-        db::SCHEMA_VERSION
-    );
-}
-
-#[test]
-fn capacity_migration_updates_old_display_defaults_preserves_custom_values_and_reopens() {
-    // Locate by contract, not merge-time migration number (other branches also add migrations).
-    let before = db::MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("CREATE INDEX node_commands_session_room"))
-        .unwrap();
-    let (_dir, path) = at_version(before);
-    let c = Connection::open(&path).unwrap();
-    c.execute_batch("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',4,1,1),('custom','Custom','[]',8,1,1);
+    c.execute_batch("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',32,1,1),('custom','Custom','[]',8,1,1);
         INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n','u','Node',zeroblob(32),'fp','active',1);") .unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
     assert_eq!(
         count(&c, "SELECT max_sessions FROM devices WHERE id='hub'"),
         32
@@ -745,21 +256,16 @@ fn capacity_migration_updates_old_display_defaults_preserves_custom_values_and_r
 }
 
 #[test]
-fn device_revision_migration_preserves_existing_limits_and_reopens() {
-    let before = db::MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("ALTER TABLE devices ADD COLUMN revision"))
-        .unwrap();
-    let (_dir, path) = at_version(before);
+fn device_revision_defaults_and_existing_limits_survive_reopen() {
+    let t = fresh();
+    let path = t.store.path().to_path_buf();
+    drop(t.store);
     let c = Connection::open(&path).unwrap();
-    assert!(!columns(&c, "devices").contains(&"revision".to_string()));
     c.execute_batch(
         "INSERT INTO devices(id,name,roles,status,max_sessions,seen,created)
         VALUES ('hub','Hub','[]','暂停接活',32,1,1),('custom','Custom','[]','正常',256,1,1);",
     )
     .unwrap();
-    db::migrate(&c).unwrap();
-    db::migrate(&c).unwrap();
     assert_eq!(
         count(&c, "SELECT count(*) FROM devices WHERE revision=0"),
         2
