@@ -201,6 +201,61 @@ impl Core {
     }
 }
 
+fn visible_workflow(g: &Workflow) -> (Workflow, usize) {
+    let mut visible = g.clone();
+    for unit in &mut visible.units {
+        unit.summary = excerpt(
+            &if unit.status == "failed" {
+                workflow_error(&unit.summary)
+            } else {
+                unit.summary.clone()
+            },
+            VIEW_TEXT,
+        );
+        unit.spec.goal = excerpt(&unit.spec.goal, VIEW_TEXT);
+        if let Some(reason) = &unit.reason {
+            unit.reason = Some(excerpt(
+                &if unit.status == "failed" {
+                    workflow_error(reason)
+                } else {
+                    note_shown(reason)
+                },
+                VIEW_TEXT,
+            ));
+        }
+    }
+    let history_total = visible.history.len();
+    visible.history = visible
+        .history
+        .into_iter()
+        .rev()
+        .take(VIEW_HISTORY)
+        .collect();
+    visible.history.reverse();
+    for entry in &mut visible.history {
+        entry.reason = excerpt(&note_shown(&entry.reason), VIEW_TEXT);
+        entry.detail = Value::Null;
+    }
+    (visible, history_total)
+}
+
+struct WorkflowChange<'a> {
+    item: &'a str,
+    parent: &'a Item,
+    graph: Option<&'a Workflow>,
+    rev: i64,
+    reason: &'a str,
+    args: &'a Value,
+    actor: &'a str,
+}
+
+struct WorkflowCapacity {
+    active: usize,
+    tree_active: usize,
+    tree_cap: usize,
+    occupied: Vec<String>,
+}
+
 impl Tx<'_> {
     /// Old attempts remain children after reset; they must never fall back to ordinary delivery.
     pub(crate) fn workflow_child(&self, item: &Item) -> Result<bool> {
@@ -302,6 +357,56 @@ impl Tx<'_> {
         Ok(runs.then_some(NEXT_END_TURN))
     }
 
+    fn workflow_unit_blocker(
+        &self,
+        g: &Workflow,
+        u: &WorkUnit,
+        complete: bool,
+    ) -> Result<Option<String>> {
+        if self.workflow_busy(u)? {
+            return Ok(Some(steve_i18n::t!(
+                "core.workflow.blocker.unsettled",
+                title = u.spec.title
+            )));
+        } else if matches!(u.status.as_str(), "running" | "dispatching") {
+            return Ok(Some(steve_i18n::t!(
+                "core.workflow.blocker.running",
+                title = u.spec.title
+            )));
+        } else if complete && !g.single_session() && u.spec.required && u.status != "succeeded" {
+            return Ok(Some(match u.status.as_str() {
+                "failed" => {
+                    steve_i18n::t!("core.workflow.blocker.failed", title = u.spec.title)
+                }
+                "cancelled" => {
+                    steve_i18n::t!("core.workflow.blocker.cancelled", title = u.spec.title)
+                }
+                "pending" => {
+                    steve_i18n::t!("core.workflow.blocker.pending", title = u.spec.title)
+                }
+                other => steve_i18n::t!(
+                    "core.workflow.blocker.status",
+                    title = u.spec.title,
+                    status = other
+                ),
+            }));
+        } else if complete
+            && !g.single_session()
+            && u.status == "succeeded"
+            && let Some(child) = u.item_id.as_deref()
+            && self
+                .db()
+                .item(child)?
+                .is_none_or(|i| i.phase != CLOSED || i.outcome.as_deref() != Some("completed"))
+        {
+            return Ok(Some(steve_i18n::t!(
+                "core.workflow.blocker.unfrozen",
+                title = u.spec.title
+            )));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn workflow_blockers(&self, item: &str, complete: bool) -> Result<Vec<String>> {
         let mut out = vec![];
         if complete {
@@ -335,47 +440,8 @@ impl Tx<'_> {
             out.push(steve_i18n::t!("core.workflow.blocker.paused"));
         }
         for u in &g.units {
-            if self.workflow_busy(u)? {
-                out.push(steve_i18n::t!(
-                    "core.workflow.blocker.unsettled",
-                    title = u.spec.title
-                ));
-            } else if matches!(u.status.as_str(), "running" | "dispatching") {
-                out.push(steve_i18n::t!(
-                    "core.workflow.blocker.running",
-                    title = u.spec.title
-                ));
-            } else if complete && !g.single_session() && u.spec.required && u.status != "succeeded"
-            {
-                out.push(match u.status.as_str() {
-                    "failed" => {
-                        steve_i18n::t!("core.workflow.blocker.failed", title = u.spec.title)
-                    }
-                    "cancelled" => {
-                        steve_i18n::t!("core.workflow.blocker.cancelled", title = u.spec.title)
-                    }
-                    "pending" => {
-                        steve_i18n::t!("core.workflow.blocker.pending", title = u.spec.title)
-                    }
-                    other => steve_i18n::t!(
-                        "core.workflow.blocker.status",
-                        title = u.spec.title,
-                        status = other
-                    ),
-                });
-            } else if complete
-                && !g.single_session()
-                && u.status == "succeeded"
-                && let Some(child) = u.item_id.as_deref()
-                && self
-                    .db()
-                    .item(child)?
-                    .is_none_or(|i| i.phase != CLOSED || i.outcome.as_deref() != Some("completed"))
-            {
-                out.push(steve_i18n::t!(
-                    "core.workflow.blocker.unfrozen",
-                    title = u.spec.title
-                ));
+            if let Some(blocker) = self.workflow_unit_blocker(&g, u, complete)? {
+                out.push(blocker);
             }
         }
         Ok(out)
@@ -385,40 +451,7 @@ impl Tx<'_> {
         let Some(g) = self.db().store().workflows().get(item)? else {
             return Ok(Value::Null);
         };
-        let mut visible = g.clone();
-        for unit in &mut visible.units {
-            unit.summary = excerpt(
-                &if unit.status == "failed" {
-                    workflow_error(&unit.summary)
-                } else {
-                    unit.summary.clone()
-                },
-                VIEW_TEXT,
-            );
-            unit.spec.goal = excerpt(&unit.spec.goal, VIEW_TEXT);
-            if let Some(reason) = &unit.reason {
-                unit.reason = Some(excerpt(
-                    &if unit.status == "failed" {
-                        workflow_error(reason)
-                    } else {
-                        note_shown(reason)
-                    },
-                    VIEW_TEXT,
-                ));
-            }
-        }
-        let history_total = visible.history.len();
-        visible.history = visible
-            .history
-            .into_iter()
-            .rev()
-            .take(VIEW_HISTORY)
-            .collect();
-        visible.history.reverse();
-        for entry in &mut visible.history {
-            entry.reason = excerpt(&note_shown(&entry.reason), VIEW_TEXT);
-            entry.detail = Value::Null;
-        }
+        let (visible, history_total) = visible_workflow(&g);
         let mut out = serde_json::to_value(&visible)?;
         let current_cycle = self.workflow_current(&g)?;
         let ready = self.rt().check_workflow_execution(item);
@@ -551,6 +584,241 @@ impl Tx<'_> {
         Ok(graph.cycle == item.cycle && graph.goal_version == goal)
     }
 
+    fn workflow_single_session(&mut self, ctx: &WorkflowChange<'_>) -> Result<Option<Value>> {
+        let WorkflowChange {
+            item,
+            graph,
+            rev,
+            reason,
+            actor,
+            ..
+        } = *ctx;
+        let g = graph.as_ref().ok_or_else(|| conflict("尚未建立工作图"))?;
+        if !self.workflow_current(g)? {
+            return Err(conflict("主事项目标或周期已变化，请先重规划再确认验收方式"));
+        }
+        for u in &g.units {
+            if self.workflow_busy(u)? {
+                return Err(conflict(steve_i18n::t!(
+                    "core.workflow.blocker.unsettled",
+                    title = u.spec.title
+                )));
+            }
+        }
+        if g.single_session() {
+            return Ok(Some(self.workflow_view(item)?));
+        }
+        self.db()
+            .store()
+            .workflows()
+            .accept_single_session(item, rev, reason, actor)?;
+        // Settled attempts still keep their child identity; reject late tools/results and
+        // clear their sessions without turning cancelled evidence into successful review.
+        for u in &g.units {
+            if u.status != "succeeded"
+                && let Some(child) = &u.item_id
+            {
+                self.workflow_cancel_child(child)?;
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn workflow_plan_limits(
+        &self,
+        ctx: &WorkflowChange<'_>,
+        specs: &[UnitSpec],
+    ) -> Result<(usize, i64)> {
+        let WorkflowChange {
+            item,
+            graph,
+            args,
+            actor,
+            ..
+        } = *ctx;
+        let parallel = args
+            .get("max_parallel")
+            .map(|v| {
+                v.as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| conflict("max_parallel 必须为正整数"))
+            })
+            .transpose()?
+            .map(|n| usize::try_from(n).map_err(|_| conflict("max_parallel 超出范围")))
+            .transpose()?
+            // Left out, the limit is the graph itself: every ready unit whose resources are free
+            // runs. Only a real constraint (a shared device, a rate limit) asks for less.
+            .unwrap_or(specs.len().max(1));
+        let is_bot = actor == "agent" || self.db().bot(actor)?.is_some();
+        let attempts = args
+            .get("max_attempts")
+            .map(|v| {
+                v.as_i64()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| conflict("max_attempts 必须为正整数"))
+            })
+            .transpose()?
+            .unwrap_or_else(|| {
+                graph
+                    .as_ref()
+                    .map_or(MAX_BOT_INITIAL_ATTEMPTS, |g| g.max_attempts)
+            });
+        if is_bot {
+            let parent_item = self.item(item)?;
+            let goal_ver = self
+                .db()
+                .goals(item)?
+                .last()
+                .map(|g| g.version)
+                .unwrap_or(0);
+            if let Some(old) = &graph
+                && (old.cycle, old.goal_version) == (parent_item.cycle, goal_ver)
+            {
+                if attempts > old.max_attempts {
+                    return Err(conflict(format!(
+                        "工作单元尝试预算上限为 {}，Bot 不能自行调高；请用 steve_ask 向用户汇报已完成成果与具体阻塞原因，由用户决定下一步",
+                        old.max_attempts
+                    )));
+                }
+                let replans = old
+                    .history
+                    .iter()
+                    .filter(|h| {
+                        h.action == "replan"
+                            && h.detail.get("cycle").and_then(Value::as_i64) == Some(old.cycle)
+                    })
+                    .count();
+                if replans >= MAX_BOT_REPLANS_PER_CYCLE {
+                    return Err(conflict(format!(
+                        "本轮重规划已达 {} 次上限，禁止继续循环重规划；请暂停编排或用 steve_ask 向用户汇报已完成成果与阻塞点",
+                        MAX_BOT_REPLANS_PER_CYCLE
+                    )));
+                }
+            } else if attempts > MAX_BOT_INITIAL_ATTEMPTS {
+                return Err(conflict(format!(
+                    "Bot 初始尝试预算不能超过 {} 次",
+                    MAX_BOT_INITIAL_ATTEMPTS
+                )));
+            }
+        }
+        Ok((parallel, attempts))
+    }
+
+    fn workflow_plan(&mut self, ctx: &WorkflowChange<'_>) -> Result<()> {
+        let WorkflowChange {
+            item,
+            parent,
+            graph,
+            rev,
+            reason,
+            args,
+            ..
+        } = *ctx;
+        if let Some(p) = self.db().project(parent.project_id.as_deref())?
+            && (p.kind != "git" || !p.worktree)
+        {
+            return Err(conflict(
+                "协作需要独立工作区：请启用 Git 项目的事项工作区，或使用无项目的独立工作单元",
+            ));
+        }
+        let specs: Vec<UnitSpec> = serde_json::from_value(args["units"].clone())
+            .map_err(|e| conflict(format!("工作单元参数不正确：{e}")))?;
+        if let Some(current) = &graph {
+            if !self.workflow_current(current)? {
+                for unit in &current.units {
+                    if self.workflow_busy(unit)? {
+                        return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
+                    }
+                    if let Some(id) = unit.item_id.as_deref()
+                        && self.item(id)?.phase != "closed"
+                    {
+                        return Err(conflict("旧周期仍有执行或子事项未收尾，暂不能开始新周期"));
+                    }
+                }
+            }
+            for unit in &current.units {
+                if specs.iter().find(|s| s.id == unit.spec.id) != Some(&unit.spec)
+                    && self.workflow_busy(unit)?
+                {
+                    // A durable cancellation is an intent, not proof that its Node has
+                    // stopped. Keep the unit and its resource/close reservation until the
+                    // execution and queued input are confirmed settled.
+                    return Err(conflict(steve_i18n::t!(
+                        "core.workflow.blocker.unsettled_change",
+                        title = unit.spec.title
+                    )));
+                }
+            }
+        }
+        let (parallel, attempts) = self.workflow_plan_limits(ctx, &specs)?;
+        self.db()
+            .store()
+            .workflows()
+            .replace(item, rev, reason, &specs, parallel, attempts)?;
+
+        Ok(())
+    }
+
+    fn workflow_edit_unit(&mut self, ctx: &WorkflowChange<'_>, action: &str) -> Result<()> {
+        let WorkflowChange {
+            item,
+            graph,
+            reason,
+            args,
+            actor,
+            ..
+        } = *ctx;
+        let id = required_text(&args, "unit_id")?;
+        let g = graph.as_ref().ok_or_else(|| conflict("尚未建立工作图"))?;
+        let unit = g
+            .units
+            .iter()
+            .find(|u| u.spec.id == id)
+            .ok_or_else(|| conflict("工作单元不存在"))?;
+        if action == "retry" {
+            if permanent_provider_failure(&unit.summary) && self.db().bot(actor)?.is_some() {
+                return Err(conflict(
+                    "这是上游永久拒绝；请先处理服务策略或无效请求，再由用户确认重试。已成功的单元保持原样",
+                ));
+            }
+            // A retry reruns the unit and its downstream (the store's reset): only those
+            // must be settled and within budget; independent units keep running.
+            let scope = g.reset_scope(id);
+            if let Some(spent) = scope.iter().find(|u| u.attempt >= g.max_attempts) {
+                if actor == "agent" || self.db().bot(actor)?.is_some() {
+                    return Err(conflict(format!(
+                        "「{}」已达到尝试预算上限，不能继续自动重试；请用 steve_ask 向用户汇报已有成果与具体阻塞原因，等待用户决定",
+                        spent.spec.title
+                    )));
+                }
+                return Err(conflict(format!(
+                    "「{}」已达到尝试预算上限，请先调整工作图尝试预算后再重试",
+                    spent.spec.title
+                )));
+            }
+            // a paused unit holds no execution but is still the graph's running unit
+            let busy = match scope.iter().copied().find(|u| u.active()) {
+                Some(running) => Some(running),
+                None => self.workflow_unsettled(scope)?,
+            };
+            if let Some(busy) = busy {
+                return Err(conflict(format!(
+                    "「{}」仍在执行或停止尚未确认：等它结束（Steve 会叫醒你），或先 cancel 它并等停止确认后再重试",
+                    busy.spec.title
+                )));
+            }
+            self.db().store().workflows().reset(item, id, reason)?;
+        } else {
+            self.db().store().workflows().cancel(item, id, reason)?;
+            if let Some(child) = &unit.item_id {
+                self.workflow_cancel_child(child)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn workflow_change(&mut self, item: &str, args: Value, actor: &str) -> Result<Value> {
         let action = args["action"].as_str().unwrap_or("get");
         if action == "get" {
@@ -591,149 +859,22 @@ impl Tx<'_> {
                     .map_err(|e| conflict(e.to_string()))?;
             }
         }
+        let ctx = WorkflowChange {
+            item,
+            parent: &parent,
+            graph: graph.as_ref(),
+            rev,
+            reason,
+            args: &args,
+            actor,
+        };
         match action {
             "single_session" => {
-                let g = graph.as_ref().ok_or_else(|| conflict("尚未建立工作图"))?;
-                if !self.workflow_current(g)? {
-                    return Err(conflict("主事项目标或周期已变化，请先重规划再确认验收方式"));
-                }
-                for u in &g.units {
-                    if self.workflow_busy(u)? {
-                        return Err(conflict(steve_i18n::t!(
-                            "core.workflow.blocker.unsettled",
-                            title = u.spec.title
-                        )));
-                    }
-                }
-                if g.single_session() {
-                    return self.workflow_view(item);
-                }
-                self.db()
-                    .store()
-                    .workflows()
-                    .accept_single_session(item, rev, reason, actor)?;
-                // Settled attempts still keep their child identity; reject late tools/results and
-                // clear their sessions without turning cancelled evidence into successful review.
-                for u in &g.units {
-                    if u.status != "succeeded"
-                        && let Some(child) = &u.item_id
-                    {
-                        self.workflow_cancel_child(child)?;
-                    }
+                if let Some(view) = self.workflow_single_session(&ctx)? {
+                    return Ok(view);
                 }
             }
-            "plan" => {
-                if let Some(p) = self.db().project(parent.project_id.as_deref())?
-                    && (p.kind != "git" || !p.worktree)
-                {
-                    return Err(conflict(
-                        "协作需要独立工作区：请启用 Git 项目的事项工作区，或使用无项目的独立工作单元",
-                    ));
-                }
-                let specs: Vec<UnitSpec> = serde_json::from_value(args["units"].clone())
-                    .map_err(|e| conflict(format!("工作单元参数不正确：{e}")))?;
-                if let Some(current) = &graph {
-                    if !self.workflow_current(current)? {
-                        for unit in &current.units {
-                            if self.workflow_busy(unit)? {
-                                return Err(conflict(
-                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
-                                ));
-                            }
-                            if let Some(id) = unit.item_id.as_deref()
-                                && self.item(id)?.phase != "closed"
-                            {
-                                return Err(conflict(
-                                    "旧周期仍有执行或子事项未收尾，暂不能开始新周期",
-                                ));
-                            }
-                        }
-                    }
-                    for unit in &current.units {
-                        if specs.iter().find(|s| s.id == unit.spec.id) != Some(&unit.spec)
-                            && self.workflow_busy(unit)?
-                        {
-                            // A durable cancellation is an intent, not proof that its Node has
-                            // stopped. Keep the unit and its resource/close reservation until the
-                            // execution and queued input are confirmed settled.
-                            return Err(conflict(steve_i18n::t!(
-                                "core.workflow.blocker.unsettled_change",
-                                title = unit.spec.title
-                            )));
-                        }
-                    }
-                }
-                let parallel = args
-                    .get("max_parallel")
-                    .map(|v| {
-                        v.as_u64()
-                            .filter(|n| *n > 0)
-                            .ok_or_else(|| conflict("max_parallel 必须为正整数"))
-                    })
-                    .transpose()?
-                    .map(|n| usize::try_from(n).map_err(|_| conflict("max_parallel 超出范围")))
-                    .transpose()?
-                    // Left out, the limit is the graph itself: every ready unit whose resources are free
-                    // runs. Only a real constraint (a shared device, a rate limit) asks for less.
-                    .unwrap_or(specs.len().max(1));
-                let is_bot = actor == "agent" || self.db().bot(actor)?.is_some();
-                let attempts = args
-                    .get("max_attempts")
-                    .map(|v| {
-                        v.as_i64()
-                            .filter(|n| *n > 0)
-                            .ok_or_else(|| conflict("max_attempts 必须为正整数"))
-                    })
-                    .transpose()?
-                    .unwrap_or_else(|| {
-                        graph
-                            .as_ref()
-                            .map_or(MAX_BOT_INITIAL_ATTEMPTS, |g| g.max_attempts)
-                    });
-                if is_bot {
-                    let parent_item = self.item(item)?;
-                    let goal_ver = self
-                        .db()
-                        .goals(item)?
-                        .last()
-                        .map(|g| g.version)
-                        .unwrap_or(0);
-                    if let Some(old) = &graph
-                        && (old.cycle, old.goal_version) == (parent_item.cycle, goal_ver)
-                    {
-                        if attempts > old.max_attempts {
-                            return Err(conflict(format!(
-                                "工作单元尝试预算上限为 {}，Bot 不能自行调高；请用 steve_ask 向用户汇报已完成成果与具体阻塞原因，由用户决定下一步",
-                                old.max_attempts
-                            )));
-                        }
-                        let replans = old
-                            .history
-                            .iter()
-                            .filter(|h| {
-                                h.action == "replan"
-                                    && h.detail.get("cycle").and_then(Value::as_i64)
-                                        == Some(old.cycle)
-                            })
-                            .count();
-                        if replans >= MAX_BOT_REPLANS_PER_CYCLE {
-                            return Err(conflict(format!(
-                                "本轮重规划已达 {} 次上限，禁止继续循环重规划；请暂停编排或用 steve_ask 向用户汇报已完成成果与阻塞点",
-                                MAX_BOT_REPLANS_PER_CYCLE
-                            )));
-                        }
-                    } else if attempts > MAX_BOT_INITIAL_ATTEMPTS {
-                        return Err(conflict(format!(
-                            "Bot 初始尝试预算不能超过 {} 次",
-                            MAX_BOT_INITIAL_ATTEMPTS
-                        )));
-                    }
-                }
-                self.db()
-                    .store()
-                    .workflows()
-                    .replace(item, rev, reason, &specs, parallel, attempts)?;
-            }
+            "plan" => self.workflow_plan(&ctx)?,
             "pause" | "resume" => {
                 /* a Bot's pause waits for you; yours is your own (crate::work) */
                 let by = if actor == "agent" || self.db().bot(actor)?.is_some() {
@@ -749,55 +890,7 @@ impl Tx<'_> {
                     self.workflow_stop_units(item)?;
                 }
             }
-            "retry" | "cancel" => {
-                let id = required_text(&args, "unit_id")?;
-                let g = graph.as_ref().ok_or_else(|| conflict("尚未建立工作图"))?;
-                let unit = g
-                    .units
-                    .iter()
-                    .find(|u| u.spec.id == id)
-                    .ok_or_else(|| conflict("工作单元不存在"))?;
-                if action == "retry" {
-                    if permanent_provider_failure(&unit.summary) && self.db().bot(actor)?.is_some()
-                    {
-                        return Err(conflict(
-                            "这是上游永久拒绝；请先处理服务策略或无效请求，再由用户确认重试。已成功的单元保持原样",
-                        ));
-                    }
-                    // A retry reruns the unit and its downstream (the store's reset): only those
-                    // must be settled and within budget; independent units keep running.
-                    let scope = g.reset_scope(id);
-                    if let Some(spent) = scope.iter().find(|u| u.attempt >= g.max_attempts) {
-                        if actor == "agent" || self.db().bot(actor)?.is_some() {
-                            return Err(conflict(format!(
-                                "「{}」已达到尝试预算上限，不能继续自动重试；请用 steve_ask 向用户汇报已有成果与具体阻塞原因，等待用户决定",
-                                spent.spec.title
-                            )));
-                        }
-                        return Err(conflict(format!(
-                            "「{}」已达到尝试预算上限，请先调整工作图尝试预算后再重试",
-                            spent.spec.title
-                        )));
-                    }
-                    // a paused unit holds no execution but is still the graph's running unit
-                    let busy = match scope.iter().copied().find(|u| u.active()) {
-                        Some(running) => Some(running),
-                        None => self.workflow_unsettled(scope)?,
-                    };
-                    if let Some(busy) = busy {
-                        return Err(conflict(format!(
-                            "「{}」仍在执行或停止尚未确认：等它结束（Steve 会叫醒你），或先 cancel 它并等停止确认后再重试",
-                            busy.spec.title
-                        )));
-                    }
-                    self.db().store().workflows().reset(item, id, reason)?;
-                } else {
-                    self.db().store().workflows().cancel(item, id, reason)?;
-                    if let Some(child) = &unit.item_id {
-                        self.workflow_cancel_child(child)?;
-                    }
-                }
-            }
+            "retry" | "cancel" => self.workflow_edit_unit(&ctx, action)?,
             _ => return Err(conflict("未知工作图操作")),
         }
         self.lc_invalidate(
@@ -1035,27 +1128,7 @@ impl Tx<'_> {
                 || (unit.status == "running" && unit.session_id.is_none())))
     }
 
-    fn workflow_drive(&mut self, parent: &str) -> Result<()> {
-        if !self.cfg().dynamic_workflows || self.holding() || self.cfg().no_resume {
-            return Ok(());
-        }
-        let Some(g) = self.db().store().workflows().get(parent)? else {
-            return Ok(());
-        };
-        let item = self.item(parent)?;
-        if g.paused
-            || item.phase == CLOSED
-            || item.status == "pause"
-            || item.status == "block"
-            || !crate::lifecycle::deps_open(self.db(), parent)?.is_empty()
-            || crate::cycle::stopping(&item)
-            || !self.workflow_current(&g)?
-        {
-            return Ok(());
-        }
-        if self.rt().check_workflow_execution(parent).is_err() {
-            return Ok(());
-        }
+    fn workflow_capacity(&self, g: &Workflow, item: &Item) -> Result<WorkflowCapacity> {
         let tree = self.workflow_root(&item)?;
         let tree_cap = self.cfg().max_workflow_parallel.max(1);
         let mut tree_active = 0usize;
@@ -1109,73 +1182,113 @@ impl Tx<'_> {
                 tree_active += 1;
             }
         }
+        Ok(WorkflowCapacity {
+            active,
+            tree_active,
+            tree_cap,
+            occupied,
+        })
+    }
+
+    fn workflow_resume_unit(
+        &mut self,
+        g: &Workflow,
+        u: &WorkUnit,
+        capacity: &mut WorkflowCapacity,
+    ) -> Result<()> {
+        // A paused turn or a crash before its first prompt resumes the same durable session.
+        if let Some(sid) = u.session_id.as_deref()
+            && let Some(s) = self.db().session(sid)?
+            && s.status != "ended"
+            && !self.busy(sid)
+            && !self.rt().uncertain(sid)
+            && !matches!(s.status.as_str(), "running" | "starting")
+            && !self
+                .db()
+                .decisions_of_item(s.item_id.as_deref().unwrap_or(""))?
+                .iter()
+                .any(|d| d.status == "open")
+        {
+            // Resuming a confirmed-idle session acquires capacity again. Logical
+            // `running` survives a pause, but must not bypass another graph's reservation.
+            if !self.workflow_reserves(&g, u)? {
+                if capacity.active >= g.max_parallel
+                    || capacity.tree_active >= capacity.tree_cap
+                    || u.spec
+                        .resources
+                        .iter()
+                        .any(|r| capacity.occupied.contains(r))
+                {
+                    return Ok(());
+                }
+                capacity.active += 1;
+                capacity.tree_active += 1;
+                capacity.occupied.extend(u.spec.resources.clone());
+            }
+            if !self.db().queued(sid)?.is_empty() {
+                self.rt().flush(sid, None);
+            } else if !self
+                .db()
+                .events_after(sid, 0)?
+                .iter()
+                .any(|e| e.kind == "user")
+            {
+                let child = self.item(s.item_id.as_deref().unwrap())?;
+                let bot = self
+                    .db()
+                    .bot(&u.spec.bot_id)?
+                    .ok_or_else(|| conflict("执行 Bot 已不存在"))?;
+                let prompt = format!(
+                    "{}\n\n{}",
+                    self.protocol(&child, &bot, &s)?,
+                    self.workflow_opening(&g, u)?
+                );
+                self.rt().created(sid, None);
+                self.rt().prompt(sid, &prompt, "workflow.start", &[])?;
+            } else {
+                self.rt()
+                    .prompt(sid, crate::orchestrator::RESUME, "workflow.resume", &[])?;
+            }
+        } else if let Some(sid) = u.session_id.as_deref()
+            && let Some(s) = self.db().session(sid)?
+            && s.status == "ended"
+        {
+            self.workflow_report(&s, "工作会话已结束，请核对结果后重试", &[], &[], false)?;
+        }
+
+        Ok(())
+    }
+
+    fn workflow_drive(&mut self, parent: &str) -> Result<()> {
+        if !self.cfg().dynamic_workflows || self.holding() || self.cfg().no_resume {
+            return Ok(());
+        }
+        let Some(g) = self.db().store().workflows().get(parent)? else {
+            return Ok(());
+        };
+        let item = self.item(parent)?;
+        if g.paused
+            || item.phase == CLOSED
+            || item.status == "pause"
+            || item.status == "block"
+            || !crate::lifecycle::deps_open(self.db(), parent)?.is_empty()
+            || crate::cycle::stopping(&item)
+            || !self.workflow_current(&g)?
+        {
+            return Ok(());
+        }
+        if self.rt().check_workflow_execution(parent).is_err() {
+            return Ok(());
+        }
+        let mut capacity = self.workflow_capacity(&g, &item)?;
         for u in &g.units {
             if u.status == "dispatching" {
                 self.workflow_start(&g, u)?;
             } else if u.status == "running" {
-                // A paused turn or a crash before its first prompt resumes the same durable session.
-                if let Some(sid) = u.session_id.as_deref()
-                    && let Some(s) = self.db().session(sid)?
-                    && s.status != "ended"
-                    && !self.busy(sid)
-                    && !self.rt().uncertain(sid)
-                    && !matches!(s.status.as_str(), "running" | "starting")
-                    && !self
-                        .db()
-                        .decisions_of_item(s.item_id.as_deref().unwrap_or(""))?
-                        .iter()
-                        .any(|d| d.status == "open")
-                {
-                    // Resuming a confirmed-idle session acquires capacity again. Logical
-                    // `running` survives a pause, but must not bypass another graph's reservation.
-                    if !self.workflow_reserves(&g, u)? {
-                        if active >= g.max_parallel
-                            || tree_active >= tree_cap
-                            || u.spec.resources.iter().any(|r| occupied.contains(r))
-                        {
-                            continue;
-                        }
-                        active += 1;
-                        tree_active += 1;
-                        occupied.extend(u.spec.resources.clone());
-                    }
-                    if !self.db().queued(sid)?.is_empty() {
-                        self.rt().flush(sid, None);
-                    } else if !self
-                        .db()
-                        .events_after(sid, 0)?
-                        .iter()
-                        .any(|e| e.kind == "user")
-                    {
-                        let child = self.item(s.item_id.as_deref().unwrap())?;
-                        let bot = self
-                            .db()
-                            .bot(&u.spec.bot_id)?
-                            .ok_or_else(|| conflict("执行 Bot 已不存在"))?;
-                        let prompt = format!(
-                            "{}\n\n{}",
-                            self.protocol(&child, &bot, &s)?,
-                            self.workflow_opening(&g, u)?
-                        );
-                        self.rt().created(sid, None);
-                        self.rt().prompt(sid, &prompt, "workflow.start", &[])?;
-                    } else {
-                        self.rt().prompt(
-                            sid,
-                            crate::orchestrator::RESUME,
-                            "workflow.resume",
-                            &[],
-                        )?;
-                    }
-                } else if let Some(sid) = u.session_id.as_deref()
-                    && let Some(s) = self.db().session(sid)?
-                    && s.status == "ended"
-                {
-                    self.workflow_report(&s, "工作会话已结束，请核对结果后重试", &[], &[], false)?;
-                }
+                self.workflow_resume_unit(&g, u, &mut capacity)?;
             } else if u.status == "pending"
-                && active < g.max_parallel
-                && tree_active < tree_cap
+                && capacity.active < g.max_parallel
+                && capacity.tree_active < capacity.tree_cap
                 && u.attempt < g.max_attempts
             {
                 let mut ready = true;
@@ -1195,7 +1308,12 @@ impl Tx<'_> {
                         ready = false;
                     }
                 }
-                if !ready || u.spec.resources.iter().any(|r| occupied.contains(r)) {
+                if !ready
+                    || u.spec
+                        .resources
+                        .iter()
+                        .any(|r| capacity.occupied.contains(r))
+                {
                     continue;
                 }
                 // A retry runs in the child its earlier attempts ran in (#182); a first claim creates it.
@@ -1206,9 +1324,9 @@ impl Tx<'_> {
                     },
                     None => self.db().store().workflows().claim(parent, &u.spec.id)?,
                 };
-                occupied.extend(u.spec.resources.clone());
-                active += 1;
-                tree_active += 1;
+                capacity.occupied.extend(u.spec.resources.clone());
+                capacity.active += 1;
+                capacity.tree_active += 1;
                 self.workflow_start(&g, &claimed)?;
             }
         }
@@ -1376,14 +1494,14 @@ impl Tx<'_> {
         }
     }
 
-    pub(crate) fn workflow_report(
-        &mut self,
-        s: &Session,
+    fn workflow_report_unit<'a>(
+        &self,
+        s: &'a Session,
         summary: &str,
         outputs: &[Output],
         checks: &[Check],
         passed: bool,
-    ) -> Result<()> {
+    ) -> Result<(&'a str, String, WorkUnit)> {
         let child = s
             .item_id
             .as_deref()
@@ -1458,6 +1576,19 @@ impl Tx<'_> {
                 "集成验收需至少一项实际操作检查（operated: true）",
             ));
         }
+        Ok((child, parent, unit))
+    }
+
+    pub(crate) fn workflow_report(
+        &mut self,
+        s: &Session,
+        summary: &str,
+        outputs: &[Output],
+        checks: &[Check],
+        passed: bool,
+    ) -> Result<()> {
+        let (child, parent, unit) =
+            self.workflow_report_unit(s, summary, outputs, checks, passed)?;
         // The full prose lives in the durable output file. The graph keeps its location for
         // downstream work instead of duplicating the report body in SQLite.
         let stored_summary = outputs

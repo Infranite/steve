@@ -422,6 +422,19 @@ impl Tx<'_> {
                 format!("{why}（{STEVE_TRIED} {n} 次，仍然没有交付）")
             }));
         }
+        self.record_continue(i, &s, why, text, &refusals, (n, cap))
+    }
+
+    fn record_continue(
+        &mut self,
+        i: &Item,
+        s: &crate::repo::Session,
+        why: &str,
+        text: &str,
+        refusals: &[String],
+        budget: (u32, u32),
+    ) -> Result<Option<String>> {
+        let (n, cap) = budget;
         self.db().timeline_add(
             &i.id,
             "steve",
@@ -685,6 +698,93 @@ impl Tx<'_> {
             .and_then(own_change_in)
     }
 
+    fn waive_unchanged_requirement(
+        &mut self,
+        i: &Item,
+        rule: &str,
+        op: &steve_store::ItemOperation,
+    ) -> Result<Option<()>> {
+        let own = match crate::cycle::closing_of(i)
+            .and_then(|c| c.fingerprint)
+            .as_deref()
+            .and_then(own_change_in)
+        {
+            Some(o) => Some(o),
+            None => self.own_change_now(i),
+        };
+        if own == Some(false) && op.evidence["pr_merged"] != json!(true) {
+            let branch = i.branch.clone().unwrap_or_default();
+            if op.evidence["pr_none"] != json!(true)
+                && !branch.is_empty()
+                && let Some(slug) = self.github_slug_of(i)?
+            {
+                if op.evidence["own"] != json!(false) {
+                    self.follow_pr(&op.id, &slug, &branch)?;
+                    self.db().store().transaction(|tx| {
+                        steve_store::operation_set_in(tx, &op.id, "pending", &json!({"own": false}))
+                    })?;
+                }
+                return Ok(Some(()));
+            }
+            let note = "事项分支上没有自己的提交，没有要合并的改动";
+            self.db().store().transaction(|tx| {
+                steve_store::operation_set_in(tx, &op.id, "waived", &json!({"note": note}))
+            })?;
+            self.db().timeline_add(
+                &i.id,
+                "steve",
+                "sys",
+                &format!(
+                    "{note}：验收通过即完成，不按约定（{}）判定",
+                    rule_text(rule)
+                ),
+                None,
+            )?;
+            return Ok(Some(()));
+        }
+        Ok(None)
+    }
+
+    fn carry_requirement_pr(
+        &mut self,
+        i: &Item,
+        op: &steve_store::ItemOperation,
+        branch: &str,
+    ) -> Result<Option<()>> {
+        if let Some(prev) = self.pr_followed(i, &op.id, &branch)? {
+            let n = prev.evidence["pr"].as_u64().unwrap_or(0);
+            let open = prev.evidence["pr_state"].as_str() == Some("OPEN")
+                && prev.evidence["pr_merged"] != json!(true);
+            let mut carry = json!({"pr_before": n});
+            if open {
+                let told: Vec<Value> = prev.evidence["pr_told"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|k| k.as_str().is_some_and(crate::pull::is_tell_key))
+                    .cloned()
+                    .collect();
+                carry["pr_told"] = json!(told);
+                carry["pr_ci_notified"] = prev.evidence["pr_ci_notified"].clone();
+                carry["pr_tells"] = json!(prev.evidence["pr_tells"].as_i64().unwrap_or(0));
+            }
+            self.db()
+                .store()
+                .transaction(|tx| steve_store::operation_set_in(tx, &op.id, "pending", &carry))?;
+            if open {
+                self.db().timeline_add(
+                    &i.id,
+                    "steve",
+                    "sys",
+                    &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
+                    None,
+                )?;
+                return Ok(Some(()));
+            }
+        }
+        Ok(None)
+    }
+
     /// The release adapter for a project with a completion rule: the required release is the rule.
     /// Called again before each look at the gate; idempotent.
     pub(crate) fn contract_requirement(&mut self, i: &Item, rule: &str) -> Result<()> {
@@ -710,42 +810,7 @@ impl Tx<'_> {
          * merged pull request of its branch says otherwise: there is no change to merge, so the rule
          * does not apply and the acceptance alone completes it; it is never reported as merged
          * (#218). On GitHub the branch's pull request is looked at once first (`pull`). */
-        let own = match crate::cycle::closing_of(i)
-            .and_then(|c| c.fingerprint)
-            .as_deref()
-            .and_then(own_change_in)
-        {
-            Some(o) => Some(o),
-            None => self.own_change_now(i),
-        };
-        if own == Some(false) && op.evidence["pr_merged"] != json!(true) {
-            let branch = i.branch.clone().unwrap_or_default();
-            if op.evidence["pr_none"] != json!(true)
-                && !branch.is_empty()
-                && let Some(slug) = self.github_slug_of(i)?
-            {
-                if op.evidence["own"] != json!(false) {
-                    self.follow_pr(&op.id, &slug, &branch)?;
-                    self.db().store().transaction(|tx| {
-                        steve_store::operation_set_in(tx, &op.id, "pending", &json!({"own": false}))
-                    })?;
-                }
-                return Ok(());
-            }
-            let note = "事项分支上没有自己的提交，没有要合并的改动";
-            self.db().store().transaction(|tx| {
-                steve_store::operation_set_in(tx, &op.id, "waived", &json!({"note": note}))
-            })?;
-            self.db().timeline_add(
-                &i.id,
-                "steve",
-                "sys",
-                &format!(
-                    "{note}：验收通过即完成，不按约定（{}）判定",
-                    rule_text(rule)
-                ),
-                None,
-            )?;
+        if self.waive_unchanged_requirement(i, rule, &op)?.is_some() {
             return Ok(());
         }
         let Some(p) = self.fresh_probe(i) else {
@@ -807,36 +872,8 @@ impl Tx<'_> {
                  * stays told (the cards about it were the earlier result's). It counts for this
                  * result only once this result saw it open (`pr_before`): one that merged or closed
                  * before is the earlier result's, and the agent hears it needs one of its own */
-                if let Some(prev) = self.pr_followed(i, &op.id, &branch)? {
-                    let n = prev.evidence["pr"].as_u64().unwrap_or(0);
-                    let open = prev.evidence["pr_state"].as_str() == Some("OPEN")
-                        && prev.evidence["pr_merged"] != json!(true);
-                    let mut carry = json!({"pr_before": n});
-                    if open {
-                        let told: Vec<Value> = prev.evidence["pr_told"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|k| k.as_str().is_some_and(crate::pull::is_tell_key))
-                            .cloned()
-                            .collect();
-                        carry["pr_told"] = json!(told);
-                        carry["pr_ci_notified"] = prev.evidence["pr_ci_notified"].clone();
-                        carry["pr_tells"] = json!(prev.evidence["pr_tells"].as_i64().unwrap_or(0));
-                    }
-                    self.db().store().transaction(|tx| {
-                        steve_store::operation_set_in(tx, &op.id, "pending", &carry)
-                    })?;
-                    if open {
-                        self.db().timeline_add(
-                            &i.id,
-                            "steve",
-                            "sys",
-                            &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
-                            None,
-                        )?;
-                        return Ok(());
-                    }
+                if self.carry_requirement_pr(i, &op, &branch)?.is_some() {
+                    return Ok(());
                 }
             }
             let to = self.steve_to(&i.id)?;

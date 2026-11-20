@@ -21,8 +21,6 @@ steve-channels	crates/steve-channels/src/rules.rs	too_many_lines	102
 steve-channels	crates/steve-channels/src/spaces.rs	too_many_lines	167,117
 steve-core	crates/steve-core/src/changes.rs	cognitive_complexity	49,29
 steve-core	crates/steve-core/src/changes.rs	too_many_lines	240,212,206,139,138,116,103,102
-steve-core	crates/steve-core/src/cycle.rs	cognitive_complexity	44
-steve-core	crates/steve-core/src/cycle.rs	too_many_lines	182,138,107
 steve-core	crates/steve-core/src/gateway.rs	cognitive_complexity	28,28,26
 steve-core	crates/steve-core/src/gateway.rs	too_many_lines	142,142,101
 steve-core	crates/steve-core/src/orchestrator.rs	cognitive_complexity	35
@@ -30,15 +28,12 @@ steve-core	crates/steve-core/src/orchestrator.rs	too_many_lines	584,389,180,146,
 steve-core	crates/steve-core/src/pull.rs	cognitive_complexity	53
 steve-core	crates/steve-core/src/pull.rs	too_many_lines	469
 steve-core	crates/steve-core/src/release.rs	too_many_lines	235,126
-steve-core	crates/steve-core/src/takeover.rs	too_many_lines	161,129
 steve-core	crates/steve-core/src/thread/handle.rs	cognitive_complexity	35
 steve-core	crates/steve-core/src/thread/handle.rs	too_many_lines	255,108,102
 steve-core	crates/steve-core/src/thread/mod.rs	cognitive_complexity	27
 steve-core	crates/steve-core/src/thread/mod.rs	too_many_lines	120
 steve-core	crates/steve-core/src/thread/research.rs	cognitive_complexity	39
 steve-core	crates/steve-core/src/thread/research.rs	too_many_lines	249
-steve-core	crates/steve-core/src/workflow.rs	cognitive_complexity	35,26
-steve-core	crates/steve-core/src/workflow.rs	too_many_lines	253,172,160,117
 steve-github	crates/steve-github/src/accept.rs	cognitive_complexity	38,37,27
 steve-github	crates/steve-github/src/accept.rs	too_many_lines	165,152,126
 steve-github	crates/steve-github/src/sync.rs	too_many_lines	185,119,117,109

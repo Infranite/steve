@@ -336,6 +336,16 @@ pub(crate) fn closed_status(outcome: &str) -> &'static str {
     }
 }
 
+struct ClosedPlan {
+    outcome: &'static str,
+    acceptance: Option<String>,
+    plan: Vec<PlanStep>,
+    reason: String,
+    closed: i64,
+    w: LifecycleWrite,
+    note: Option<String>,
+}
+
 impl Tx<'_> {
     /* ── writes ── */
 
@@ -1019,6 +1029,35 @@ impl Tx<'_> {
         Ok(g)
     }
 
+    fn lc_freeze_pending(
+        &mut self,
+        i: &Item,
+        c: &mut Closing,
+        print: &Option<Option<String>>,
+        item_id: &str,
+    ) -> Result<Option<bool>> {
+        if let Some(p) = &print
+            && c.print_pending
+            && c.frozen_revision == i.revision
+        {
+            /* the result frozen before its facts came: they are what was frozen */
+            c.fingerprint = p.clone();
+            c.print_pending = false;
+            let mut w = Self::base(&i);
+            w.closing = Some(serde_json::to_value(&c)?);
+            self.db()
+                .store()
+                .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
+            /* those facts were gathered with nothing frozen to compare against or to look for in a
+             * release: nothing is decided on them, the next gathering asks with what is frozen now
+             * and checks the closing again */
+            let i = self.item(item_id)?;
+            self.git_gather(&i);
+            return Ok(Some(false));
+        }
+        Ok(None)
+    }
+
     /// Commits the closing when nothing holds it any more. `true` when the item is closed now.
     pub(crate) fn lc_try_close(&mut self, item_id: &str) -> Result<bool> {
         let Some(i) = self.db().item(item_id)? else {
@@ -1054,24 +1093,8 @@ impl Tx<'_> {
             false => None,
         };
         let print = seen.as_ref().map(|s| s.as_ref().map(|s| s.print.clone()));
-        if let Some(p) = &print
-            && c.print_pending
-            && c.frozen_revision == i.revision
-        {
-            /* the result frozen before its facts came: they are what was frozen */
-            c.fingerprint = p.clone();
-            c.print_pending = false;
-            let mut w = Self::base(&i);
-            w.closing = Some(serde_json::to_value(&c)?);
-            self.db()
-                .store()
-                .transaction(|tx| steve_store::lifecycle_write_in(tx, item_id, &w))?;
-            /* those facts were gathered with nothing frozen to compare against or to look for in a
-             * release: nothing is decided on them, the next gathering asks with what is frozen now
-             * and checks the closing again */
-            let i = self.item(item_id)?;
-            self.git_gather(&i);
-            return Ok(false);
+        if let Some(result) = self.lc_freeze_pending(&i, &mut c, &print, item_id)? {
+            return Ok(result);
         }
         /* the worktree is fingerprinted once (it runs `git add --all` over all of it), for the gate and
          * for saying what moved. On the periodic tick, not while something else still holds the closing
@@ -1154,7 +1177,7 @@ impl Tx<'_> {
         self.lc_commit(&i, &c)
     }
 
-    fn lc_commit(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+    fn lc_closed_plan(&self, i: &Item, c: &Closing) -> Result<ClosedPlan> {
         let outcome = match c.kind.as_str() {
             COMPLETE => "completed",
             FAIL => "failed",
@@ -1207,7 +1230,6 @@ impl Tx<'_> {
             w.stage = Some("收尾".into());
         }
         w.now = Some(now_text);
-        let (ws, id) = (i.workspace_id.clone(), i.id.clone());
         let note = (c.kind == COMPLETE && !left.is_empty()).then(|| {
             format!(
                 "完成时计划里还有 {} 步没做：{}",
@@ -1215,6 +1237,99 @@ impl Tx<'_> {
                 left.join("；")
             )
         });
+        Ok(ClosedPlan {
+            outcome,
+            acceptance,
+            plan,
+            reason,
+            closed,
+            w,
+            note,
+        })
+    }
+
+    fn lc_closed_effects(
+        &mut self,
+        i: &Item,
+        outcome: &str,
+        acceptance: &Option<String>,
+        reason: &str,
+    ) -> Result<()> {
+        self.lc_finish_children(&i.id)?;
+        /* nothing of Steve's automation for the item is left to run */
+        self.drop_steve_queued(&i.id)?;
+        self.db().timeline_add(
+            &i.id,
+            "steve",
+            "sys",
+            &match outcome {
+                "completed" => match acceptance.as_deref() {
+                    Some("waived") => "事项完成（免确认）".to_string(),
+                    Some("automatic") => "事项完成（自动确认）".to_string(),
+                    _ => "事项完成".to_string(),
+                },
+                "failed" => format!("事项失败：{reason}"),
+                _ => format!("事项已取消：{reason}"),
+            },
+            None,
+        )?;
+        /* observers: after the commit, never deciding anything about this cycle any more */
+        match outcome {
+            "completed" => {
+                flow_quiet(
+                    self.db(),
+                    &i.id,
+                    Update {
+                        kind: "done",
+                        text: format!("{} 完成：{}", i.id, i.title),
+                        ..Default::default()
+                    },
+                );
+                for d in self.db().dependents(&i.id)? {
+                    self.check_blocked(&d)?;
+                }
+                self.hook(crate::modules::Point::Finished, &i.id)?;
+            }
+            _ => {
+                flow_quiet(
+                    self.db(),
+                    &i.id,
+                    Update {
+                        kind: "drop",
+                        text: format!(
+                            "{} {}：{}",
+                            i.id,
+                            if outcome == "failed" {
+                                "失败了"
+                            } else {
+                                "放弃了"
+                            },
+                            i.title
+                        ),
+                        ..Default::default()
+                    },
+                );
+                if let Some(s) = self.active_session(&i.id)? {
+                    self.end_and_release(&s.id)?;
+                }
+                self.tidy_branch(&i.id)?;
+                self.hook(crate::modules::Point::Dropped, &i.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn lc_commit(&mut self, i: &Item, c: &Closing) -> Result<bool> {
+        let ClosedPlan {
+            outcome,
+            acceptance,
+            plan,
+            reason,
+            closed,
+            w,
+            note,
+        } = self.lc_closed_plan(i, c)?;
+        let (ws, id) = (i.workspace_id.clone(), i.id.clone());
         let (cycle, rev) = (i.cycle, i.revision);
         let committed = self.db().store().transaction(|tx| -> Result<bool> {
             /* a cycle closes once: a repeated or concurrent commit changes nothing */
@@ -1282,67 +1397,7 @@ impl Tx<'_> {
         if !committed {
             return Ok(false);
         }
-        self.lc_finish_children(&i.id)?;
-        /* nothing of Steve's automation for the item is left to run */
-        self.drop_steve_queued(&i.id)?;
-        self.db().timeline_add(
-            &i.id,
-            "steve",
-            "sys",
-            &match outcome {
-                "completed" => match acceptance.as_deref() {
-                    Some("waived") => "事项完成（免确认）".to_string(),
-                    Some("automatic") => "事项完成（自动确认）".to_string(),
-                    _ => "事项完成".to_string(),
-                },
-                "failed" => format!("事项失败：{reason}"),
-                _ => format!("事项已取消：{reason}"),
-            },
-            None,
-        )?;
-        /* observers: after the commit, never deciding anything about this cycle any more */
-        match outcome {
-            "completed" => {
-                flow_quiet(
-                    self.db(),
-                    &i.id,
-                    Update {
-                        kind: "done",
-                        text: format!("{} 完成：{}", i.id, i.title),
-                        ..Default::default()
-                    },
-                );
-                for d in self.db().dependents(&i.id)? {
-                    self.check_blocked(&d)?;
-                }
-                self.hook(crate::modules::Point::Finished, &i.id)?;
-            }
-            _ => {
-                flow_quiet(
-                    self.db(),
-                    &i.id,
-                    Update {
-                        kind: "drop",
-                        text: format!(
-                            "{} {}：{}",
-                            i.id,
-                            if outcome == "failed" {
-                                "失败了"
-                            } else {
-                                "放弃了"
-                            },
-                            i.title
-                        ),
-                        ..Default::default()
-                    },
-                );
-                if let Some(s) = self.active_session(&i.id)? {
-                    self.end_and_release(&s.id)?;
-                }
-                self.tidy_branch(&i.id)?;
-                self.hook(crate::modules::Point::Dropped, &i.id)?;
-            }
-        }
+        self.lc_closed_effects(i, outcome, &acceptance, &reason)?;
         Ok(true)
     }
 
@@ -1506,6 +1561,89 @@ impl Tx<'_> {
     }
 }
 
+fn decision_blocker(d: &crate::repo::Decision) -> (&'static str, String) {
+    let q = crate::util::js_head(&d.question, 60).to_string();
+    match (d.kind.as_str(), d.subject_type.as_str()) {
+        ("accept", _) => (
+            "acceptance",
+            steve_i18n::t!("core.blocker.acceptance", q = q),
+        ),
+        ("approve", "tool_call") => (
+            "permission",
+            steve_i18n::t!("core.blocker.permission", q = q),
+        ),
+        ("approve", _) => ("approval", steve_i18n::t!("core.blocker.approval", q = q)),
+        ("ask", _) => ("question", steve_i18n::t!("core.blocker.question", q = q)),
+        ("fail", _) => ("failure", steve_i18n::t!("core.blocker.failure", q = q)),
+        ("propose", _) => ("approval", steve_i18n::t!("core.blocker.propose", q = q)),
+        _ => ("question", q),
+    }
+}
+
+fn operation_blockers(
+    t: &Tx,
+    i: &Item,
+    push: &mut impl FnMut(&str, String),
+    active: &mut i32,
+    named: &mut bool,
+) -> Result<()> {
+    let mut evidence = Vec::new();
+    for o in t.db().store().items().operations(&i.id, i.cycle)? {
+        /* the evidence the item's goal asks for, said by name (ST-57) */
+        if matches!(o.status.as_str(), "pending" | "running")
+            && o.required
+            && o.revision == i.revision
+            && i.phase == CLOSING
+            && matches!(o.kind.as_str(), OP_BUILD | crate::proof::OP_DEPLOY)
+        {
+            let tag = o.evidence["tag"].as_str();
+            let label = match (o.kind.as_str(), tag) {
+                (OP_BUILD, t) => {
+                    steve_i18n::t!("core.blocker.build", tag = t.unwrap_or_default())
+                }
+                (_, Some(t)) => steve_i18n::t!("core.blocker.deploy", tag = t),
+                (_, None) => steve_i18n::t!("core.blocker.deploy_result"),
+            };
+            // the build before this instance, whichever operation was opened first
+            evidence.push((o.kind != OP_BUILD, label));
+            *named = true;
+        }
+        match o.status.as_str() {
+            "running" if o.kind == OP_BUILD => {}
+            "running" => *active += 1,
+            "unknown" => push(
+                "unknown_effect",
+                steve_i18n::t!("core.blocker.unknown_effect", label = o.label),
+            ),
+            "failed" if o.required && o.revision == i.revision && i.phase == CLOSING => push(
+                "failure",
+                steve_i18n::t!("core.blocker.operation_failed", label = o.label),
+            ),
+            _ => {}
+        }
+    }
+    evidence.sort_by_key(|(after, _)| *after);
+    for (_, label) in evidence {
+        push("operation", label);
+    }
+    Ok(())
+}
+
+fn blocker_rank(k: &str) -> i32 {
+    match k {
+        "failure" => 0,
+        "unknown_effect" => 1,
+        "permission" => 2,
+        "acceptance" => 3,
+        "approval" => 4,
+        "question" => 5,
+        "dependency" => 6,
+        "paused" => 7,
+        "operation" => 8,
+        _ => 9,
+    }
+}
+
 /// The lifecycle object of an item, computed from the item, its decisions,
 /// sessions and operations.
 pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
@@ -1533,22 +1671,8 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             if d.status != "open" {
                 continue;
             }
-            let q = crate::util::js_head(&d.question, 60).to_string();
-            match (d.kind.as_str(), d.subject_type.as_str()) {
-                ("accept", _) => push(
-                    "acceptance",
-                    steve_i18n::t!("core.blocker.acceptance", q = q),
-                ),
-                ("approve", "tool_call") => push(
-                    "permission",
-                    steve_i18n::t!("core.blocker.permission", q = q),
-                ),
-                ("approve", _) => push("approval", steve_i18n::t!("core.blocker.approval", q = q)),
-                ("ask", _) => push("question", steve_i18n::t!("core.blocker.question", q = q)),
-                ("fail", _) => push("failure", steve_i18n::t!("core.blocker.failure", q = q)),
-                ("propose", _) => push("approval", steve_i18n::t!("core.blocker.propose", q = q)),
-                _ => push("question", q),
-            }
+            let (kind, label) = decision_blocker(&d);
+            push(kind, label);
         }
         for s in t.db().sessions_of_item(&i.id)? {
             if s.status != "ended"
@@ -1557,45 +1681,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
                 active += 1;
             }
         }
-        let mut evidence = Vec::new();
-        for o in t.db().store().items().operations(&i.id, i.cycle)? {
-            /* the evidence the item's goal asks for, said by name (ST-57) */
-            if matches!(o.status.as_str(), "pending" | "running")
-                && o.required
-                && o.revision == i.revision
-                && i.phase == CLOSING
-                && matches!(o.kind.as_str(), OP_BUILD | crate::proof::OP_DEPLOY)
-            {
-                let tag = o.evidence["tag"].as_str();
-                let label = match (o.kind.as_str(), tag) {
-                    (OP_BUILD, t) => {
-                        steve_i18n::t!("core.blocker.build", tag = t.unwrap_or_default())
-                    }
-                    (_, Some(t)) => steve_i18n::t!("core.blocker.deploy", tag = t),
-                    (_, None) => steve_i18n::t!("core.blocker.deploy_result"),
-                };
-                // the build before this instance, whichever operation was opened first
-                evidence.push((o.kind != OP_BUILD, label));
-                named = true;
-            }
-            match o.status.as_str() {
-                "running" if o.kind == OP_BUILD => {}
-                "running" => active += 1,
-                "unknown" => push(
-                    "unknown_effect",
-                    steve_i18n::t!("core.blocker.unknown_effect", label = o.label),
-                ),
-                "failed" if o.required && o.revision == i.revision && i.phase == CLOSING => push(
-                    "failure",
-                    steve_i18n::t!("core.blocker.operation_failed", label = o.label),
-                ),
-                _ => {}
-            }
-        }
-        evidence.sort_by_key(|(after, _)| *after);
-        for (_, label) in evidence {
-            push("operation", label);
-        }
+        operation_blockers(t, i, &mut push, &mut active, &mut named)?;
         if i.status == "block" && !crate::lifecycle::deps_open(t.db(), &i.id)?.is_empty() {
             push("dependency", steve_i18n::t!("core.blocker.dependency"));
         }
@@ -1611,19 +1697,7 @@ pub(crate) fn lifecycle_view(t: &Tx, i: &Item) -> Result<Value> {
             }
         }
     }
-    let order = |k: &str| match k {
-        "failure" => 0,
-        "unknown_effect" => 1,
-        "permission" => 2,
-        "acceptance" => 3,
-        "approval" => 4,
-        "question" => 5,
-        "dependency" => 6,
-        "paused" => 7,
-        "operation" => 8,
-        _ => 9,
-    };
-    blockers.sort_by_key(|b| order(b["kind"].as_str().unwrap_or("")));
+    blockers.sort_by_key(|b| blocker_rank(b["kind"].as_str().unwrap_or("")));
     let closing = match (&c, &gate) {
         (Some(c), Some(g)) => json!({
             "kind": c.kind, "reason": c.reason, "requested_by": c.by, "requested_at": c.at,
