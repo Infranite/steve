@@ -71,14 +71,19 @@ fn inspect_current(conn: &Connection) -> Result<StorageState, Error> {
         }
     }
     check_reader_fence(conn)?;
+    check_meta_rows(conn)?;
     let layout = Layout::read_state(conn)?;
-    let domains = conn
+    let rows = conn
         .prepare("SELECT domain,version FROM domain_schema")
         .map_err(db_error)?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(db_error)?
-        .collect::<rusqlite::Result<std::collections::BTreeMap<String, u32>>>()
+        .collect::<rusqlite::Result<Vec<(String, u32)>>>()
         .map_err(db_error)?;
+    let domains: std::collections::BTreeMap<_, _> = rows.iter().cloned().collect();
+    if rows.len() != domains.len() {
+        return Err(incompatible("duplicate domain schema"));
+    }
     crate::compat::require_domains(&domains)?;
     let contract_schema = crate::layout::meta(
         conn,
@@ -92,6 +97,32 @@ fn inspect_current(conn: &Connection) -> Result<StorageState, Error> {
         domains,
         contract_schema,
     })
+}
+fn check_meta_rows(conn: &Connection) -> Result<(), Error> {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut statement = conn
+        .prepare("SELECT domain,key,value FROM meta")
+        .map_err(db_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_error)?;
+    for row in rows {
+        let (domain, key, _) = row.map_err(db_error)?;
+        if !crate::layout::DOMAINS
+            .iter()
+            .any(|d| crate::layout::domain_name(*d) == domain)
+            || !keys.insert((domain, key))
+        {
+            return Err(incompatible("duplicate or unknown storage metadata"));
+        }
+    }
+    Ok(())
 }
 fn check_reader_fence(conn: &Connection) -> Result<(), Error> {
     if object_kind(conn, "schema_version")?.is_some() {
@@ -146,7 +177,7 @@ fn inspect_legacy_or_empty(conn: &Connection) -> Result<StorageState, Error> {
     }
     let count: u32 = conn
         .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            "SELECT count(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'",
             [],
             |r| r.get(0),
         )

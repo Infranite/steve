@@ -1,6 +1,7 @@
 //! Device facts and configuration against the real isolated HTTP service.
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
