@@ -152,6 +152,10 @@ impl Journal {
 }
 
 /// Reuse the engine's read-only discriminator, never a runtime/admin open or migration.
+/// SQLITE_OPEN_READ_ONLY does not select a journal mode or run a checkpoint. A live WAL
+/// database also needs access to its -wal/-shm sidecars: SQLite may create or update -shm
+/// when the directory permits it. Read-only here protects the database, not an immutable
+/// snapshot promise for sidecars; do not use immutable=1 for a database the Hub can write.
 fn inspect_storage(db: &Path) -> Result<steve_store_sqlite::compat::StorageState> {
     use steve_store_sqlite::{
         compat::{StorageCapabilities, StorageState},
@@ -162,65 +166,8 @@ fn inspect_storage(db: &Path) -> Result<steve_store_sqlite::compat::StorageState
     }
     let conn = open::open_readonly(db)?;
     let state = open::inspect(&conn)?;
-    match &state {
-        StorageState::Legacy { schema_version } => {
-            let legacy = StorageCapabilities::compiled()
-                .legacy
-                .context("compiled converter missing")?;
-            ensure!(
-                (i64::from(legacy.min_read)..=i64::from(legacy.target)).contains(schema_version),
-                "legacy input outside compiled conversion range"
-            );
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schema_compat')",
-                [],
-                |r| r.get(0),
-            )?;
-            if exists {
-                let (count, minimum): (i64, i64) = conn.query_row(
-                    "SELECT count(*),min(min_reader) FROM schema_compat WHERE typeof(min_reader)='integer'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )?;
-                let views: i64 = conn.query_row(
-                    "SELECT count(*) FROM sqlite_schema WHERE name='schema_compat' AND type!='table'",
-                    [], |r| r.get(0),
-                )?;
-                ensure!(
-                    count == 1
-                        && views == 0
-                        && conn.query_row("SELECT count(*) FROM schema_compat", [], |r| r
-                            .get::<_, i64>(0))?
-                            == 1
-                        && (0..=i64::from(legacy.target)).contains(&minimum),
-                    "invalid legacy minimum reader"
-                );
-            }
-        }
-        StorageState::Current { .. } => {
-            let unknown: i64 = conn.query_row(
-                "SELECT count(*) FROM meta WHERE domain NOT IN ('core','stream','comms') OR typeof(domain)!='text' OR typeof(key)!='text' OR typeof(value)!='text'",
-                [],
-                |r| r.get(0),
-            )?;
-            let duplicates: i64 = conn.query_row("SELECT count(*) FROM (SELECT domain,key FROM meta GROUP BY domain,key HAVING count(*) != 1)", [], |r| r.get(0))?;
-            let count: i64 =
-                conn.query_row("SELECT count(*) FROM domain_schema", [], |r| r.get(0))?;
-            ensure!(
-                unknown == 0 && duplicates == 0 && count == 3,
-                "duplicate or unknown storage metadata"
-            );
-        }
-        StorageState::Empty => {
-            // SQL LIKE treats '_' as a wildcard: sqlitex is user data, not an
-            // internal sqlite_ object. Do not let that spelling pass as empty.
-            let count: i64 = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE lower(substr(name,1,7)) != 'sqlite_'",
-                [],
-                |r| r.get(0),
-            )?;
-            ensure!(count == 0, "unrecognized nonempty storage");
-        }
+    if matches!(&state, StorageState::Legacy { .. }) {
+        StorageCapabilities::compiled().can_open(&state, false)?;
     }
     Ok(state)
 }
