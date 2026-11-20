@@ -346,6 +346,8 @@ mod retry_sequence_tests {
                 (app_tokens, chat_tokens),
                 "the available key is debited even when its partner is in debt"
             );
+            // Per-key deadlines are inferred from balances, not returned by reserve.
+            // The product-facing deadline contract is only the returned maximum below.
             for (bucket, expected_ms) in [(app, app_wait_ms), (chat, chat_wait_ms)] {
                 let deadline =
                     bucket.last + Duration::from_secs_f64((-bucket.tokens / bucket.rate).max(0.0));
