@@ -496,6 +496,147 @@ fn validate_url(var: &'static str, value: &str) -> Result<(), ConfigError> {
     }
 }
 
+struct Endpoints {
+    port: u16,
+    public_url: String,
+    public_urls: Vec<String>,
+    web_port: Option<u16>,
+    client_origins: Vec<String>,
+}
+
+fn endpoints(get: &impl Fn(&str) -> Option<String>) -> Result<Endpoints, ConfigError> {
+    let port_raw = get("STEVE_PORT").unwrap_or_else(|| "8440".into());
+    let port_n = port_raw
+        .parse::<u16>()
+        .ok()
+        .filter(|_| !port_raw.is_empty() && port_raw.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or(ConfigError::Invalid {
+            var: "STEVE_PORT",
+            msg: "expected a decimal port from 0 to 65535".into(),
+        })?;
+
+    // unset: this machine, on the port the Hub listens on
+    let public_raw =
+        get("STEVE_PUBLIC_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
+    validate_url("STEVE_PUBLIC_URL", &public_raw)?;
+    let public_url = strip_slash(&public_raw);
+    let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
+        None => None,
+        Some(v) => match v.trim().parse::<u16>() {
+            Ok(p) if p != 0 && p != port_n => Some(p),
+            _ => {
+                return Err(ConfigError::Invalid {
+                    var: "STEVE_WEB_PORT",
+                    msg: format!("a port other than STEVE_PORT ({port_n}), not {v}"),
+                });
+            }
+        },
+    };
+    let public_urls: Vec<String> = get("STEVE_PUBLIC_URLS")
+        .unwrap_or_else(|| public_raw.clone())
+        .split(',')
+        .map(|u| strip_slash(u.trim()))
+        .filter(|u| !u.is_empty())
+        .collect();
+
+    for url in &public_urls {
+        validate_url("STEVE_PUBLIC_URLS", url)?;
+    }
+    let client_origins: Vec<String> = get("STEVE_CLIENT_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|u| strip_slash(u.trim()))
+        .filter(|u| !u.is_empty())
+        .collect();
+    for url in &client_origins {
+        validate_url("STEVE_CLIENT_ORIGINS", url)?;
+    }
+    Ok(Endpoints {
+        port: port_n,
+        public_url,
+        public_urls,
+        web_port,
+        client_origins,
+    })
+}
+
+fn knowledge_backend(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<steve_knowledge::openviking::OpenVikingConfig>, ConfigError> {
+    // Validate sources even when the optional backend is disabled.
+    let openviking_key = steve_auth::AuthConfig::secret(
+        get,
+        "STEVE_OPENVIKING_KEY",
+        steve_auth::SecretSource::FileOnly,
+    )?;
+    let openviking_url = get("STEVE_OPENVIKING_URL");
+    if let Some(url) = &openviking_url {
+        validate_url("STEVE_OPENVIKING_URL", url)?;
+    }
+
+    // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
+    // key from `STEVE_OPENVIKING_KEY_FILE`
+    let openviking = match get("STEVE_KB_STORE").as_deref() {
+        None | Some("") | Some("sqlite") => None,
+        Some("openviking") => {
+            let key = openviking_key
+                .filter(|k| !k.is_empty())
+                .ok_or(ConfigError::Invalid {
+                    var: "STEVE_OPENVIKING_KEY_FILE",
+                    msg: "required with STEVE_KB_STORE=openviking".into(),
+                })?;
+            Some(steve_knowledge::openviking::OpenVikingConfig {
+                url: openviking_url.unwrap_or_else(|| "http://127.0.0.1:18933".into()),
+                key,
+                account: get("STEVE_OPENVIKING_ACCOUNT").unwrap_or_else(|| "steve".into()),
+            })
+        }
+        Some(other) => {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_KB_STORE",
+                msg: format!("sqlite or openviking, not {other}"),
+            });
+        }
+    };
+
+    Ok(openviking)
+}
+
+fn cache_config(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<steve_runtime::cache::CacheConfig, ConfigError> {
+    let cache_mode = match get("STEVE_CACHE").as_deref() {
+        None | Some("memory") => steve_runtime::cache::CacheMode::Memory,
+        Some("off") => steve_runtime::cache::CacheMode::Off,
+        Some(_) => {
+            return Err(ConfigError::Invalid {
+                var: "STEVE_CACHE",
+                msg: "this version does not support this backend; expected memory or off".into(),
+            });
+        }
+    };
+    let memory_mb = get("STEVE_CACHE_MEMORY_MB")
+        .map(|s| s.parse::<u32>())
+        .transpose()
+        .map_err(|_| ConfigError::Invalid {
+            var: "STEVE_CACHE_MEMORY_MB",
+            msg: "expected a positive integer".into(),
+        })?
+        .unwrap_or(256);
+    if memory_mb == 0 {
+        return Err(ConfigError::Invalid {
+            var: "STEVE_CACHE_MEMORY_MB",
+            msg: "expected a positive integer".into(),
+        });
+    }
+    crate::cache_tags::validate_spaces(crate::cache_tags::SPACES)?;
+    let cache = steve_runtime::cache::CacheConfig {
+        mode: cache_mode,
+        memory_mb,
+    };
+    Ok(cache)
+}
+
 impl Config {
     /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -537,52 +678,13 @@ impl Config {
             })?;
         let home = resolve(&home);
 
-        let port_raw = env("STEVE_PORT", "8440");
-        let port_n = port_raw
-            .parse::<u16>()
-            .ok()
-            .filter(|_| !port_raw.is_empty() && port_raw.bytes().all(|b| b.is_ascii_digit()))
-            .ok_or(ConfigError::Invalid {
-                var: "STEVE_PORT",
-                msg: "expected a decimal port from 0 to 65535".into(),
-            })?;
-
-        // unset: this machine, on the port the Hub listens on
-        let public_raw =
-            get("STEVE_PUBLIC_URL").unwrap_or_else(|| format!("http://127.0.0.1:{port_n}"));
-        validate_url("STEVE_PUBLIC_URL", &public_raw)?;
-        let public_url = strip_slash(&public_raw);
-        let web_port = match get("STEVE_WEB_PORT").filter(|v| !v.trim().is_empty()) {
-            None => None,
-            Some(v) => match v.trim().parse::<u16>() {
-                Ok(p) if p != 0 && p != port_n => Some(p),
-                _ => {
-                    return Err(ConfigError::Invalid {
-                        var: "STEVE_WEB_PORT",
-                        msg: format!("a port other than STEVE_PORT ({port_n}), not {v}"),
-                    });
-                }
-            },
-        };
-        let public_urls: Vec<String> = get("STEVE_PUBLIC_URLS")
-            .unwrap_or_else(|| public_raw.clone())
-            .split(',')
-            .map(|u| strip_slash(u.trim()))
-            .filter(|u| !u.is_empty())
-            .collect();
-
-        for url in &public_urls {
-            validate_url("STEVE_PUBLIC_URLS", url)?;
-        }
-        let client_origins: Vec<String> = get("STEVE_CLIENT_ORIGINS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|u| strip_slash(u.trim()))
-            .filter(|u| !u.is_empty())
-            .collect();
-        for url in &client_origins {
-            validate_url("STEVE_CLIENT_ORIGINS", url)?;
-        }
+        let Endpoints {
+            port: port_n,
+            public_url,
+            public_urls,
+            web_port,
+            client_origins,
+        } = endpoints(&get)?;
         let client_secret = steve_auth::AuthConfig::secret(
             &get,
             "STEVE_OIDC_CLIENT_SECRET",
@@ -592,41 +694,7 @@ impl Config {
         if let Some(url) = &issuer {
             validate_url("STEVE_OIDC_ISSUER", url)?;
         }
-        // Validate sources even when the optional backend is disabled.
-        let openviking_key = steve_auth::AuthConfig::secret(
-            &get,
-            "STEVE_OPENVIKING_KEY",
-            steve_auth::SecretSource::FileOnly,
-        )?;
-        let openviking_url = get("STEVE_OPENVIKING_URL");
-        if let Some(url) = &openviking_url {
-            validate_url("STEVE_OPENVIKING_URL", url)?;
-        }
-
-        // `STEVE_KB_STORE=openviking`: the OpenViking server on loopback (ops/openviking), its root
-        // key from `STEVE_OPENVIKING_KEY_FILE`
-        let openviking = match get("STEVE_KB_STORE").as_deref() {
-            None | Some("") | Some("sqlite") => None,
-            Some("openviking") => {
-                let key = openviking_key
-                    .filter(|k| !k.is_empty())
-                    .ok_or(ConfigError::Invalid {
-                        var: "STEVE_OPENVIKING_KEY_FILE",
-                        msg: "required with STEVE_KB_STORE=openviking".into(),
-                    })?;
-                Some(steve_knowledge::openviking::OpenVikingConfig {
-                    url: openviking_url.unwrap_or_else(|| "http://127.0.0.1:18933".into()),
-                    key,
-                    account: env("STEVE_OPENVIKING_ACCOUNT", "steve"),
-                })
-            }
-            Some(other) => {
-                return Err(ConfigError::Invalid {
-                    var: "STEVE_KB_STORE",
-                    msg: format!("sqlite or openviking, not {other}"),
-                });
-            }
-        };
+        let openviking = knowledge_backend(&get)?;
 
         // the harness manifest: adapters of one's own, and commands for the built-in ones where no
         // STEVE_ADAPTER_* names one
@@ -692,36 +760,7 @@ impl Config {
             }
         })?;
 
-        let cache_mode = match get("STEVE_CACHE").as_deref() {
-            None | Some("memory") => steve_runtime::cache::CacheMode::Memory,
-            Some("off") => steve_runtime::cache::CacheMode::Off,
-            Some(_) => {
-                return Err(ConfigError::Invalid {
-                    var: "STEVE_CACHE",
-                    msg: "this version does not support this backend; expected memory or off"
-                        .into(),
-                });
-            }
-        };
-        let memory_mb = get("STEVE_CACHE_MEMORY_MB")
-            .map(|s| s.parse::<u32>())
-            .transpose()
-            .map_err(|_| ConfigError::Invalid {
-                var: "STEVE_CACHE_MEMORY_MB",
-                msg: "expected a positive integer".into(),
-            })?
-            .unwrap_or(256);
-        if memory_mb == 0 {
-            return Err(ConfigError::Invalid {
-                var: "STEVE_CACHE_MEMORY_MB",
-                msg: "expected a positive integer".into(),
-            });
-        }
-        crate::cache_tags::validate_spaces(crate::cache_tags::SPACES)?;
-        let cache = steve_runtime::cache::CacheConfig {
-            mode: cache_mode,
-            memory_mb,
-        };
+        let cache = cache_config(&get)?;
         Ok(Config {
             cache,
             data_dir: home.join("data"),
@@ -859,6 +898,51 @@ mod tests {
             m.entry(var.into()).or_insert("/x/adapter".into());
         }
         Config::from_vars(|k| m.get(k).cloned()).expect("config")
+    }
+
+    #[test]
+    fn configuration_errors_keep_source_order() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            (
+                "STEVE_PORT",
+                &[("STEVE_PORT", "invalid"), ("STEVE_PUBLIC_URL", "invalid")],
+            ),
+            (
+                "STEVE_PUBLIC_URL",
+                &[
+                    ("STEVE_PUBLIC_URL", "invalid"),
+                    ("STEVE_OIDC_ISSUER", "invalid"),
+                ],
+            ),
+            (
+                "STEVE_OPENVIKING_URL",
+                &[
+                    ("STEVE_OPENVIKING_URL", "invalid"),
+                    ("STEVE_CACHE", "invalid"),
+                ],
+            ),
+        ];
+        for (expected, values) in cases {
+            let error = Config::from_vars(|key| {
+                if key == "STEVE_HOME" {
+                    return Some(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/config-home")
+                            .display()
+                            .to_string(),
+                    );
+                }
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+            .expect_err("invalid configuration");
+            assert!(
+                matches!(error, ConfigError::Invalid { var, .. } if var == *expected),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -1111,32 +1111,7 @@ impl Service {
         directory(&retired)?;
         let archive;
         if pending["phase"] == "pending" {
-            let name = pending["archive"].as_str().unwrap_or_default();
-            let suffix = name.strip_prefix(&format!("{}-", self.component));
-            ensure!(
-                suffix.is_some_and(|s| s.len() == 32
-                    && s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-                    && pending["config"] == text(&self.config)?,
-                "uninstall receipt does not identify this service archive"
-            );
-            archive = retired.join(name);
-            directory(&archive)?;
-            let saved = regular(&archive.join("definition"))?;
-            ensure!(
-                pending["definition_sha256"] == digest(&saved),
-                "uninstall backup changed; no definition will be removed"
-            );
-            if !pending["record_sha256"].is_null() {
-                ensure!(
-                    pending["record_sha256"] == digest(&regular(&archive.join("record.json"))?),
-                    "uninstall record backup changed; inspect the retained archive"
-                );
-            }
-            ensure!(
-                definition.as_ref().is_none_or(|bytes| *bytes == saved),
-                "service definition changed during uninstall; original backup is retained"
-            );
+            archive = self.resume_uninstall_archive(&retired, &pending, definition.as_deref())?;
         } else {
             let definition = definition
                 .as_ref()
@@ -1203,6 +1178,41 @@ impl Service {
         Ok(
             json!({"installed":false,"changed":true,"started":false,"home_preserved":true,"archive":text(&archive)?}),
         )
+    }
+
+    fn resume_uninstall_archive(
+        &self,
+        retired: &Path,
+        pending: &Value,
+        definition: Option<&[u8]>,
+    ) -> Result<PathBuf> {
+        let name = pending["archive"].as_str().unwrap_or_default();
+        let suffix = name.strip_prefix(&format!("{}-", self.component));
+        ensure!(
+            suffix.is_some_and(|s| s.len() == 32
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                && pending["config"] == text(&self.config)?,
+            "uninstall receipt does not identify this service archive"
+        );
+        let archive = retired.join(name);
+        directory(&archive)?;
+        let saved = regular(&archive.join("definition"))?;
+        ensure!(
+            pending["definition_sha256"] == digest(&saved),
+            "uninstall backup changed; no definition will be removed"
+        );
+        if !pending["record_sha256"].is_null() {
+            ensure!(
+                pending["record_sha256"] == digest(&regular(&archive.join("record.json"))?),
+                "uninstall record backup changed; inspect the retained archive"
+            );
+        }
+        ensure!(
+            definition.is_none_or(|bytes| bytes == saved.as_slice()),
+            "service definition changed during uninstall; original backup is retained"
+        );
+        Ok(archive)
     }
 
     fn status(&self, candidate: Option<&Path>, doctor: bool) -> Result<Value> {

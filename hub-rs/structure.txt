@@ -127,7 +127,7 @@ steve-hub	crates/steve-hub/src/api/misc.rs	too_many_lines	105
 steve-hub	crates/steve-hub/src/api/outputs.rs	too_many_lines	102
 steve-hub	crates/steve-hub/src/api/outputs/node.rs	too_many_lines	112
 steve-hub	crates/steve-hub/src/api/projects.rs	too_many_lines	131
-steve-hub	crates/steve-hub/src/config.rs	too_many_lines	276
+steve-hub	crates/steve-hub/src/config.rs	too_many_lines	181
 steve-hub	crates/steve-hub/src/daily_backup.rs	cognitive_complexity	38
 steve-hub	crates/steve-hub/src/deliveries/mod.rs	too_many_lines	114
 steve-hub	crates/steve-hub/src/deliveries/receive.rs	too_many_lines	118
@@ -176,7 +176,7 @@ steve-install	crates/steve-install/src/main.rs	too_many_lines	315
 steve-install	crates/steve-install/src/output.rs	cognitive_complexity	100
 steve-install	crates/steve-install/src/output.rs	too_many_lines	230
 steve-install	crates/steve-install/src/release.rs	too_many_lines	149
-steve-install	crates/steve-install/src/service.rs	too_many_lines	145
+steve-install	crates/steve-install/src/service.rs	too_many_lines	120
 steve-install	crates/steve-install/src/setup.rs	cognitive_complexity	71,34,28
 steve-install	crates/steve-install/src/setup.rs	too_many_lines	401,143,114
 steve-install	crates/steve-install/src/setup/reconfigure.rs	cognitive_complexity	30
