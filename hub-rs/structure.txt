@@ -193,9 +193,8 @@ steve-mail	crates/steve-mail/src/send.rs	too_many_lines	113
 steve-mail	crates/steve-mail/src/store.rs	too_many_lines	149
 steve-modules	crates/steve-modules/src/accounts/connections/integration.rs	too_many_lines	108
 steve-modules	crates/steve-modules/src/accounts/connections/service.rs	cognitive_complexity	26
-steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	279,101
-steve-modules	crates/steve-modules/src/accounts/enrich.rs	cognitive_complexity	32
-steve-modules	crates/steve-modules/src/accounts/enrich.rs	too_many_lines	233,105
+steve-modules	crates/steve-modules/src/accounts/connections/service.rs	too_many_lines	101
+steve-modules	crates/steve-modules/src/accounts/enrich.rs	too_many_lines	105
 steve-modules	crates/steve-modules/src/accounts/identify.rs	too_many_lines	124
 steve-modules	crates/steve-modules/src/caps/a2a.rs	too_many_lines	134
 steve-modules	crates/steve-modules/src/caps/mcp.rs	too_many_lines	184
