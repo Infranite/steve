@@ -254,7 +254,9 @@ async fn rejected_incremental_uid_fetch_preserves_the_saved_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disconnected_search_is_transient_and_does_not_confirm_the_window() {
+// The fake handles drop_connections only after the paused command resumes and completes.
+// This covers a post-command disconnect, not clean EOF in the middle of SEARCH/EXAMINE.
+async fn disconnect_after_search_completion_keeps_the_unstored_window() {
     let h = setup().await;
     h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
     let conn = h.connect().await;
@@ -401,7 +403,9 @@ async fn find_uid_checks_later_candidates_before_rejected_or_gone() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn clean_examine_disconnect_does_not_reset_the_persisted_window() {
+// The fake handles drop_connections only after the paused command resumes and completes.
+// This covers a post-command disconnect, not clean EOF in the middle of SEARCH/EXAMINE.
+async fn disconnect_after_examine_completion_preserves_saved_state() {
     let h = setup().await;
     h.inject("INBOX", fixtures::get("gbk.eml").unwrap());
     let conn = h.connect().await;

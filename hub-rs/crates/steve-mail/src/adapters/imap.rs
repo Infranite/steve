@@ -725,6 +725,20 @@ fn folder_error(folder: &str, error: AdapterError) -> AdapterError {
     }
 }
 
+/// An untagged SELECT/EXAMINE refusal may leave this command's completion and metadata unread.
+/// Reuse the session only after a fresh, bounded NOOP has consumed everything up to its own OK.
+async fn after_rejection(s: &mut Session, folder: &str, message: &str) -> Result<(), AdapterError> {
+    let command = message
+        .split_once(": ")
+        .map_or("IMAP", |(command, _)| command);
+    tracing::warn!(folder, command, error = message, "IMAP folder rejected");
+    timed(checked_command(s, "NOOP", |_| {}))
+        .await
+        .map_err(|error| {
+            AdapterError::Transient(format!("IMAP {folder} NOOP: 响应重同步失败: {error}"))
+        })
+}
+
 /// async-imap can return a default Mailbox on clean EOF. Never treat that as an epoch change.
 fn mailbox_validity(
     mb: &async_imap::types::Mailbox,
@@ -1223,8 +1237,10 @@ impl ImapAdapter {
             match Self::find_in_mailbox(s, name, wire, known, message_id, write).await {
                 Ok(Some(uid)) => return Ok((wire.clone(), uid)),
                 Ok(None) => {}
-                Err(error @ AdapterError::Rejected(_)) => {
-                    rejected.get_or_insert_with(|| folder_error(name, error));
+                Err(AdapterError::Rejected(message)) => {
+                    after_rejection(s, name, &message).await?;
+                    rejected
+                        .get_or_insert_with(|| folder_error(name, AdapterError::Rejected(message)));
                 }
                 Err(error) => return Err(error),
             }
@@ -1532,8 +1548,11 @@ impl SyncSession for ImapSync {
             .await
             {
                 Ok(()) => {}
-                Err(error @ AdapterError::Rejected(_)) => {
-                    rejected.get_or_insert_with(|| folder_error(&f.name, error));
+                Err(AdapterError::Rejected(message)) => {
+                    after_rejection(&mut s, &f.name, &message).await?;
+                    rejected.get_or_insert_with(|| {
+                        folder_error(&f.name, AdapterError::Rejected(message))
+                    });
                 }
                 Err(error) => return Err(error),
             }
@@ -1658,6 +1677,162 @@ mod tests {
             search_uids(&mut session, "ALL").await.unwrap(),
             HashSet::from([1])
         );
+    }
+
+    fn folder_state(name: &str) -> crate::adapter::FolderState {
+        crate::adapter::FolderState {
+            ext_id: name.into(),
+            name: name.into(),
+            role: "other".into(),
+            mode: ScopeMode::Record,
+            uidvalidity: None,
+            last_uid: None,
+            modseq: None,
+            cursor: None,
+            synced: None,
+            flags_checked: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn uidnotsticky_responses_cannot_pollute_the_next_mailbox() {
+        for recovery_fails in [false, true] {
+            let (fake, mut session) = fake_session().await;
+            // parse_mailbox stops at this untagged rejection. Its remaining metadata belongs
+            // to A, while B's normal fake response has no HIGHESTMODSEQ. No fake code changes.
+            fake.fail_next("NOOP", "OK staged\r\n* NO [UIDNOTSTICKY] no persistent UIDs\r\n* OK [UIDNEXT 999] stale next\r\n* OK [HIGHESTMODSEQ 777] stale modseq");
+            session.noop().await.unwrap();
+            fake.fail_next("EXAMINE", "OK A completed");
+            if recovery_fails {
+                fake.fail_next("NOOP", "NO [UNAVAILABLE] private-server-detail");
+            }
+            let mut state = SyncState {
+                folders: vec![folder_state("INBOX"), folder_state("Sent")],
+                cursor: None,
+                sync_days: 30,
+                now: 123,
+            };
+            let job = ImapSync {
+                s: session,
+                // Model a peer that advertised CONDSTORE but omits this optional field on B.
+                caps: Caps {
+                    condstore: true,
+                    ..Default::default()
+                },
+                wires: BTreeMap::from([
+                    ("INBOX".into(), ("INBOX".into(), "inbox".into())),
+                    ("Sent".into(), ("Sent".into(), "sent".into())),
+                ]),
+            };
+            let start = fake.commands().len();
+            let error = Box::new(job)
+                .sync(&mut state, &mut NoWrites)
+                .await
+                .unwrap_err();
+            if recovery_fails {
+                assert!(matches!(error, AdapterError::Transient(_)), "{error:?}");
+                assert_eq!(state.folders[1], folder_state("Sent"));
+                assert!(
+                    fake.commands()[start..]
+                        .iter()
+                        .all(|c| !(c.contains("EXAMINE") && c.contains("Sent")))
+                );
+            } else {
+                assert!(matches!(error, AdapterError::Rejected(_)), "{error:?}");
+                assert_eq!(
+                    state.folders[1].modseq, None,
+                    "A's 777 is not B's epoch metadata"
+                );
+                assert_eq!(state.folders[1].last_uid, Some(0));
+                assert_eq!(state.folders[1].synced, Some(123));
+                let commands = fake.commands();
+                let commands = &commands[start..];
+                let noop = commands.iter().position(|c| c.ends_with(" NOOP")).unwrap();
+                let b = commands
+                    .iter()
+                    .position(|c| c.contains("EXAMINE") && c.contains("Sent"))
+                    .unwrap();
+                assert!(noop < b, "resynchronize before selecting B: {commands:?}");
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<BTreeMap<String, String>>>>);
+    struct Fields(BTreeMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().into(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().into(), value.into());
+        }
+    }
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+            *meta.level() == tracing::Level::WARN && meta.target() == "steve_mail::adapters::imap"
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn every_rejected_folder_warns_with_folder_and_command() {
+        use tracing::instrument::WithSubscriber;
+        let (fake, session) = fake_session().await;
+        fake.fail_next("UID SEARCH", "NO [UNAVAILABLE] private-server-detail");
+        fake.fail_next("UID SEARCH", "BAD private-server-detail");
+        let warnings = Warnings(Default::default());
+        let observed = warnings.0.clone();
+        let job = ImapSync {
+            s: session,
+            caps: Caps::default(),
+            wires: BTreeMap::from([
+                ("INBOX".into(), ("INBOX".into(), "inbox".into())),
+                ("Sent".into(), ("Sent".into(), "sent".into())),
+            ]),
+        };
+        let mut state = SyncState {
+            folders: vec![folder_state("INBOX"), folder_state("Sent")],
+            cursor: None,
+            sync_days: 30,
+            now: 123,
+        };
+        let error = Box::new(job)
+            .sync(&mut state, &mut NoWrites)
+            .with_subscriber(warnings)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AdapterError::Rejected(_)));
+        let records = observed.lock().unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "one warning for each refused folder: {records:?}"
+        );
+        for (record, folder) in records.iter().zip(["INBOX", "Sent"]) {
+            assert!(
+                record.get("folder").is_some_and(|v| v.contains(folder)),
+                "{record:?}"
+            );
+            assert!(
+                record
+                    .get("command")
+                    .is_some_and(|v| v.contains("UID SEARCH")),
+                "{record:?}"
+            );
+            assert!(!format!("{record:?}").contains("private-server-detail"));
+        }
     }
 
     /// The form and the name in the reader's language; zh-CN as declared.
