@@ -1466,19 +1466,22 @@ impl LocalNode {
         self.0.confine.state()
     }
 
-    /// Whether opening the journal under `home` (a [`NodeConfig::home`]) upgrades its schema,
-    /// after which no older release can open it. Reads the version only; creates and changes
-    /// nothing.
-    pub fn journal_upgrade_pending(home: &Path) -> ApiResult<bool> {
-        journal::upgrade_pending(&home.join("node.sqlite3"))
-    }
-
     /// Takes the home (one Node per journal) and opens a new incarnation. A normal v4 restart
     /// stops nothing: groups left by the old incarnation keep their sessions held until the Hub
     /// abandons them. The one-time v3 upgrade refuses to discard the old command and process
     /// ledgers until every recorded process group is confirmed gone; stop the old Node and its
     /// subprocesses cleanly before upgrading.
     pub fn open(cfg: NodeConfig) -> ApiResult<LocalNode> {
+        Self::open_upgrading(cfg, &mut || Ok(()))
+    }
+
+    /// [`LocalNode::open`]; `before_upgrade` runs (holding the home) once the journal's schema
+    /// is about to move past what older releases can open, after the upgrade's own checks. An
+    /// error leaves the journal as it was and fails the open.
+    pub fn open_upgrading(
+        cfg: NodeConfig,
+        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+    ) -> ApiResult<LocalNode> {
         std::fs::create_dir_all(&cfg.home)
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node home: {e}")))?;
         let lock = HomeLock::take(&cfg.home)?;
@@ -1486,7 +1489,8 @@ impl LocalNode {
         secrets::cleanup(&cfg.home);
         // and the throwaway repositories of pushes
         git::cleanup(&cfg.home);
-        let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
+        let (j, incarnation) =
+            Journal::open_upgrading(&cfg.home.join("node.sqlite3"), before_upgrade)?;
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
             for p in t.procs()? {

@@ -84,7 +84,7 @@ fn migrate(c: &mut Connection) {
         limit: u64::MAX,
         appended: Cell::new(0),
     };
-    t.initialize(3).unwrap();
+    t.initialize(3, &mut || Ok(())).unwrap();
     t.sql.commit().unwrap();
 }
 
@@ -313,7 +313,7 @@ fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
         _ => Authorization::Allow,
     }))
     .unwrap();
-    assert!(Writer::from_connection(&p, c).is_err());
+    assert!(Writer::from_connection(&p, c, &mut || Ok(())).is_err());
     let c = Connection::open(&p).unwrap();
     assert_eq!(
         c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -520,7 +520,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
         _ => Authorization::Allow,
     }))
     .unwrap();
-    let (w, inc) = Writer::from_connection(&p, c).unwrap();
+    let (w, inc) = Writer::from_connection(&p, c, &mut || Ok(())).unwrap();
     assert_eq!(inc, 1);
     assert_eq!(
         w.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
@@ -554,7 +554,7 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
         }
     }))
     .unwrap();
-    let (mut w, inc) = Writer::from_connection(&p, c).unwrap();
+    let (mut w, inc) = Writer::from_connection(&p, c, &mut || Ok(())).unwrap();
     assert_eq!(inc, 2);
     assert_eq!(
         w.read(|t| t.procs()).unwrap().len(),
@@ -885,24 +885,63 @@ fn failed_ledger_deletion_rolls_back_everything() {
     assert_eq!(Writer::open(&p).unwrap().1, 8);
 }
 
+fn version_of(path: &Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap()
+}
+
 #[test]
-fn an_upgrade_is_pending_only_for_an_older_journal_and_checking_changes_nothing() {
+fn the_hook_runs_once_just_before_an_upgrade_and_its_refusal_keeps_the_old_journal() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("node.sqlite3");
-    assert!(
-        !crate::journal::upgrade_pending(&path).unwrap(),
-        "no journal yet"
-    );
-    assert!(!path.exists(), "checking creates nothing");
     drop(v3(&path, true, false, 3));
-    assert!(crate::journal::upgrade_pending(&path).unwrap());
-    assert!(
-        crate::journal::upgrade_pending(&path).unwrap(),
-        "checking upgrades nothing"
+    let refused = crate::journal::Writer::open_upgrading(&path, &mut || {
+        Err(ApiError::new(ErrorCode::Offline, "not now"))
+    });
+    assert!(refused.is_err());
+    assert_eq!(
+        version_of(&path),
+        3,
+        "a refusal leaves the journal as it was"
     );
-    drop(crate::journal::Writer::open(&path).unwrap());
-    assert!(
-        !crate::journal::upgrade_pending(&path).unwrap(),
-        "already v4"
+    let mut calls = 0;
+    drop(
+        crate::journal::Writer::open_upgrading(&path, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap(),
     );
+    assert_eq!((calls, version_of(&path)), (1, 4));
+    // an upgraded or a new journal never asks
+    let mut asked = false;
+    let mut ask = || {
+        asked = true;
+        Ok(())
+    };
+    drop(crate::journal::Writer::open_upgrading(&path, &mut ask).unwrap());
+    drop(crate::journal::Writer::open_upgrading(&d.path().join("new.sqlite3"), &mut ask).unwrap());
+    assert!(!asked);
+}
+
+#[test]
+fn the_hook_is_not_asked_when_old_processes_still_block_the_upgrade() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("node.sqlite3");
+    let c = v3(&path, true, false, 3);
+    // not a process group that can be proven gone
+    c.execute("UPDATE procs SET pgid=1", []).unwrap();
+    drop(c);
+    let mut asked = false;
+    assert!(
+        crate::journal::Writer::open_upgrading(&path, &mut || {
+            asked = true;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!asked);
+    assert_eq!(version_of(&path), 3);
 }

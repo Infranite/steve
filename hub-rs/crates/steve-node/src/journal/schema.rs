@@ -111,7 +111,12 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
-    pub(super) fn initialize(&self, version: i64) -> ApiResult<()> {
+    /// `before_upgrade`: see [`super::Journal::open_upgrading`].
+    pub(super) fn initialize(
+        &self,
+        version: i64,
+        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+    ) -> ApiResult<()> {
         if version == 0 && !self.table_exists("ops")? {
             self.c().execute_batch(BASE_SCHEMA).map_err(internal)?;
             self.c().execute_batch(PROCS_V4).map_err(internal)?;
@@ -124,7 +129,7 @@ impl Tx<'_> {
                 self.migrate_to_v3()?;
             }
             if version < 4 {
-                self.migrate_v3_to_v4()?;
+                self.migrate_v3_to_v4(before_upgrade)?;
             }
         }
         if version < VERSION {
@@ -155,8 +160,10 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
-    fn migrate_v3_to_v4(&self) -> ApiResult<()> {
+    fn migrate_v3_to_v4(&self, before: &mut dyn FnMut() -> ApiResult<()>) -> ApiResult<()> {
         self.require_legacy_processes_gone()?;
+        // past this point no older release can open the journal
+        before()?;
         // The old command ledger is intentionally discarded. Keep payloads the Hub has not
         // acknowledged: stream/event shapes did not change and their positions remain valid.
         // Clear whole dependent tables, including orphan rows whose op/attempt is already gone.

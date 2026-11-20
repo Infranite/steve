@@ -163,12 +163,13 @@ pub fn note_linked(home: &Path) {
     }
 }
 
-/// Called by a Node about to upgrade its journal's schema, before it opens the journal: no older
-/// release can open it afterwards, so going back would leave a Node that cannot start. A switch
-/// helper still waiting for this build — possibly from the release being replaced, which knows
-/// only `linked` as success — is told now, before the upgrade, that the switch is through. One
-/// whose wait is over or nearly over may already be going back: the journal is left as it is and
-/// this start fails, for the previous release to start in its place.
+/// Called by a Node about to upgrade its journal's schema (holding its home, after the upgrade's
+/// own checks): no older release can open the journal afterwards, so going back would leave a
+/// Node that cannot start. A switch helper still waiting for this build — possibly from the
+/// release being replaced, which knows only `linked` as success — is told now that the switch is
+/// through. One whose wait is over or nearly over may already be going back: the journal is left
+/// as it is and this start fails, for the previous release to start in its place. A record whose
+/// helper is long gone is left to [`settle`].
 pub fn claim_switch_before_journal_upgrade(home: &Path) -> anyhow::Result<()> {
     claim_switch(home, own_build().as_ref(), now())
 }
@@ -176,17 +177,24 @@ pub fn claim_switch_before_journal_upgrade(home: &Path) -> anyhow::Result<()> {
 fn claim_switch(home: &Path, me: Option<&BuildIdentity>, t: i64) -> anyhow::Result<()> {
     use anyhow::Context;
     let Some(me) = me else { return Ok(()) };
-    for mut r in records(home) {
-        if r.state.phase != "switching" || r.request.build != *me {
-            continue;
-        }
+    let waiting: Vec<Record> = records(home)
+        .into_iter()
+        .filter(|r| r.state.phase == "switching" && r.request.build == *me)
+        .filter(|r| t - r.state.updated.0 <= STRANDED + r.request.health_secs as i64 * 1000)
+        .collect();
+    // The helper's own wait starts after the switch was recorded and the old release stopped,
+    // so this deadline is earlier than its own: a late claim errs towards going back. A wall
+    // clock stepped back by more than the margin defeats this.
+    for r in &waiting {
         let wait = r.request.health_secs as i64 * 1000;
-        let op = r.state.operation.as_str().to_owned();
-        // the helper's own wait starts after it stopped the old release, so this is earlier
         anyhow::ensure!(
             t < r.state.updated.0 + wait - (wait / 4).min(CLAIM_MARGIN_MS),
-            "node upgrade {op}: the switch helper is done waiting; leaving the journal to the release it goes back to"
+            "node upgrade {}: the switch helper is done waiting; leaving the journal to the release it goes back to",
+            r.state.operation.as_str()
         );
+    }
+    for mut r in waiting {
+        let op = r.state.operation.as_str().to_owned();
         r.state.phase = "linked".into();
         r.state.error = None;
         r.state.updated = Timestamp(t);
@@ -1382,6 +1390,30 @@ mod tests {
         assert_eq!(s.phase, "rolled_back");
         assert_eq!(std::fs::read_to_string(&svc.journal).unwrap(), "3");
         assert_eq!(svc.old_started, Some(true));
+    }
+
+    #[test]
+    fn a_claim_is_refused_from_the_margin_until_the_helper_is_surely_gone() {
+        let home = tempfile::tempdir().unwrap();
+        switching(home.path(), "nup_edge");
+        let r = load(home.path(), "nup_edge").unwrap().unwrap();
+        let (me, at) = (r.request.build.clone(), r.state.updated.0);
+        // health_secs 1: the claim must land 250 ms before the wait ends
+        assert!(claim_switch(home.path(), Some(&me), at + 750).is_err());
+        assert!(claim_switch(home.path(), Some(&me), at + 1_000 + STRANDED).is_err());
+        let r = load(home.path(), "nup_edge").unwrap().unwrap();
+        assert_eq!(r.state.phase, "switching", "a refusal claims nothing");
+        // long past: the helper is gone and settle ends the record, the journal may move on
+        claim_switch(home.path(), Some(&me), at + 1_001 + STRANDED).unwrap();
+        assert_eq!(
+            load(home.path(), "nup_edge").unwrap().unwrap().state.phase,
+            "switching"
+        );
+        claim_switch(home.path(), Some(&me), at + 749).unwrap();
+        assert_eq!(
+            load(home.path(), "nup_edge").unwrap().unwrap().state.phase,
+            "linked"
+        );
     }
 
     #[test]

@@ -129,8 +129,19 @@ impl Drop for Journal {
 }
 
 impl Journal {
+    #[cfg(test)]
     pub fn open(path: &Path) -> ApiResult<(Self, u64)> {
-        let (writer, incarnation) = Writer::open(path)?;
+        Self::open_upgrading(path, &mut || Ok(()))
+    }
+
+    /// [`Journal::open`]; `before_upgrade` runs once the schema is about to move to this
+    /// version (inside the upgrading transaction, after its checks): an error leaves the journal
+    /// as it was.
+    pub fn open_upgrading(
+        path: &Path,
+        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+    ) -> ApiResult<(Self, u64)> {
+        let (writer, incarnation) = Writer::open_upgrading(path, before_upgrade)?;
         let metrics = writer.metrics.clone();
         let writer = Arc::new(Mutex::new(writer));
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -379,23 +390,6 @@ fn conv<T>(r: Result<T, BadId>) -> rusqlite::Result<T> {
     })
 }
 
-/// See [`crate::journal_upgrade_pending`].
-pub(crate) fn upgrade_pending(path: &Path) -> ApiResult<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    // read-write without create: a WAL journal left by a crash cannot be read read-only
-    let c = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(internal)?;
-    let version: i64 = c
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(internal)?;
-    Ok(version > 0 && version < VERSION)
-}
-
 pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(ErrorCode::Internal, format!("journal: {e}"))
 }
@@ -439,11 +433,27 @@ fn stamp_usage(
 impl Writer {
     /// Opens (or creates) the journal and begins a new incarnation: what was live is now unknown,
     /// sessions are released (their processes belong to the old incarnation).
+    #[cfg(test)]
     pub fn open(path: &Path) -> ApiResult<(Self, u64)> {
-        Self::from_connection(path, Connection::open(path).map_err(internal)?)
+        Self::open_upgrading(path, &mut || Ok(()))
     }
 
-    fn from_connection(path: &Path, c: Connection) -> ApiResult<(Self, u64)> {
+    fn open_upgrading(
+        path: &Path,
+        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+    ) -> ApiResult<(Self, u64)> {
+        Self::from_connection(
+            path,
+            Connection::open(path).map_err(internal)?,
+            before_upgrade,
+        )
+    }
+
+    fn from_connection(
+        path: &Path,
+        c: Connection,
+        before_upgrade: &mut dyn FnMut() -> ApiResult<()>,
+    ) -> ApiResult<(Self, u64)> {
         c.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
         )
@@ -477,7 +487,7 @@ impl Writer {
         };
         let (incarnation, id) = j.tx(|t| {
             // Schema, version, incarnation and recovery either all commit or all roll back.
-            t.initialize(version)?;
+            t.initialize(version, before_upgrade)?;
             let id = t.journal_id()?;
             let inc = t.bump("incarnation")?;
             t.mark_unknown()?;

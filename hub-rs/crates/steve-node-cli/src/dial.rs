@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
 use steve_node::LocalNode;
-use steve_node_api::NodeId;
+use steve_node_api::{ApiError, ErrorCode, NodeId};
 use steve_node_wire::handshake::{self, NodeIntro};
 use steve_node_wire::identity::{self, Identity};
 use steve_node_wire::tls::{self, Trust};
@@ -228,12 +228,12 @@ pub async fn run(home: &Home) -> Result<()> {
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
     };
-    let cfg = home.node_config(node_id)?;
     // past a schema upgrade, going back to the release before cannot work
-    if LocalNode::journal_upgrade_pending(&cfg.home).map_err(|e| anyhow!("{e}"))? {
-        crate::upgrade::claim_switch_before_journal_upgrade(&home.0)?;
-    }
-    let node = LocalNode::open(cfg).map_err(|e| anyhow!("{e}"))?;
+    let node = LocalNode::open_upgrading(home.node_config(node_id)?, &mut || {
+        crate::upgrade::claim_switch_before_journal_upgrade(&home.0)
+            .map_err(|e| ApiError::new(ErrorCode::Offline, format!("{e:#}")))
+    })
+    .map_err(|e| anyhow!("{e}"))?;
     // installed as a service from a release: its Hub may upgrade it
     if let Some(u) = crate::upgrade::ServiceUpgrader::detect(&home.0) {
         node.set_upgrader(u);
