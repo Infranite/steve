@@ -74,7 +74,9 @@ fn minimum_reader(c: &Connection, fallback: i64) -> Result<i64> {
         .query_map([], |row| row.get::<_, i64>(0))?
         .collect::<Result<Vec<_>>>()?;
     match rows.as_slice() {
-        [minimum] if (0..=SCHEMA_VERSION).contains(minimum) => Ok(*minimum),
+        // The final hook also reads the permanent current fence. The legacy
+        // version discriminator above enforces its own compiled upper bound.
+        [minimum] if *minimum >= 0 => Ok(*minimum),
         _ => Err(rusqlite::Error::InvalidParameterName(
             "invalid legacy minimum reader".into(),
         )),
