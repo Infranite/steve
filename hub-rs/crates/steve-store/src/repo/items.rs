@@ -1149,3 +1149,19 @@ impl Items<'_> {
         })
     }
 }
+
+impl Items<'_> {
+    /// Whole-state read on the shared engine pool, reusing an active transaction if present.
+    pub fn state_extras(
+        &self,
+        ws: &str,
+    ) -> Result<std::collections::HashMap<String, super::ItemExtrasRead>> {
+        self.0
+            .read(|c| crate::read_snapshot(c, |tx| Ok(super::state::item_extras(tx, ws)?)))
+    }
+    /// Whole-state read on the shared engine pool, reusing an active transaction if present.
+    pub fn closeout_data(&self, id: &str) -> Result<Option<super::CloseoutRead>> {
+        self.0
+            .read(|c| crate::read_snapshot(c, |tx| Ok(super::state::item_closeout(tx, id)?)))
+    }
+}

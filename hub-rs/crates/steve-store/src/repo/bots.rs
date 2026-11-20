@@ -476,3 +476,16 @@ impl Memories<'_> {
         })
     }
 }
+
+impl Bots<'_> {
+    /// Whole-state read on the shared engine pool, reusing an active transaction if present.
+    pub fn state_extras(&self, ws: &str) -> Result<super::BotExtrasRead> {
+        self.0
+            .read(|c| crate::read_snapshot(c, |tx| Ok(super::state::bot_extras(tx, ws)?)))
+    }
+    /// Whole-state read on the shared engine pool, reusing an active transaction if present.
+    pub fn mcp_summaries(&self, id: &str) -> Result<Vec<super::McpServerRead>> {
+        self.0
+            .read(|c| crate::read_snapshot(c, |tx| Ok(super::state::bot_mcp_servers(tx, id)?)))
+    }
+}
