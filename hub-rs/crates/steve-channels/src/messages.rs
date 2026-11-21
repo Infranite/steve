@@ -472,7 +472,6 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 
 /// Messages of a space older than `before` (all when `None`), newest first.
 /// Single-user reads include every receiving identity; the caller checks the workspace.
-/// G2-T7: retain the legacy mask parameter until these predicates are removed in wave 4.
 pub fn page(
     c: &Connection,
     space: &str,
@@ -480,14 +479,12 @@ pub fn page(
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask();
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
-            AND (m.seen_by = 0 OR (m.seen_by & ?4) <> 0)
           ORDER BY m.created DESC, m.id DESC LIMIT ?3"
     ))?;
     let mut rows = st
-        .query_map(params![space, before, limit as i64, mask], msg_row)?
+        .query_map(params![space, before, limit as i64], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
         with_basis(c, m)?;
@@ -504,7 +501,6 @@ pub fn page_before(
     before: Option<(i64, &str)>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
-    let mask = crate::spaces::viewer_mask();
     let (at, id) = match before {
         Some((at, id)) => (Some(at), Some(id)),
         None => (None, None),
@@ -512,11 +508,10 @@ pub fn page_before(
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
             AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
-            AND (m.seen_by = 0 OR (m.seen_by & ?5) <> 0)
           ORDER BY m.created DESC, m.id DESC LIMIT ?4"
     ))?;
     let mut rows = st
-        .query_map(params![space, at, id, limit as i64, mask], msg_row)?
+        .query_map(params![space, at, id, limit as i64], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
         with_basis(c, m)?;
@@ -626,10 +621,9 @@ impl TimelineSource for MessageTimeline {
              SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
                 AND (?3 IS NULL OR m.created < ?3)
-                AND {} AND {}
+                AND {}
               ORDER BY m.created DESC, m.id DESC LIMIT ?4",
             crate::spaces::visible_sql("?5"),
-            crate::spaces::seen_visible_sql("m", "?5")
         );
         let ps = vec![
             Sql::Text(party.into()),

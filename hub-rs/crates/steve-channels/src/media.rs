@@ -1,9 +1,7 @@
 //! Images, files and cards of channel messages:
 //!
 //! - [`present`]: what a stored message shows — provider keys removed, a `url` for each resource
-//!   that can be fetched now or the reason it cannot (`unavailable`); a message stored before
-//!   cards and post images were read is read again from its own raw event when that is still kept
-//!   ([`effective`]).
+//!   that can be fetched now or the reason it cannot (`unavailable`).
 //! - [`fetch_for_viewer`] (the `GET /chan-messages/:id/resources/:n` route) and [`fetch_bound`]
 //!   (the agent's composer): one resource, located only through the stored message — its
 //!   workspace, space, provider message id and the key recorded at index `n` — fetched as the
@@ -43,13 +41,6 @@ pub trait MediaFetch: Send + Sync {
         image: bool,
         max: usize,
     ) -> Result<Vec<u8>, MediaError>;
-
-    /// A message stored before its attachments were read fully, read again from the remote's raw
-    /// payload kept for it: `(text, attachments)`. `None`: keep it as stored. Nothing is fetched.
-    fn reparse(&self, msg: &MessageRef, raw: &Value) -> Option<(String, Vec<Value>)> {
-        let _ = (msg, raw);
-        None
-    }
 }
 
 /// The media views of the channels built in this process, for what shows a stored message without
@@ -63,16 +54,6 @@ pub(crate) fn publish(m: &Arc<dyn MediaFetch>) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .insert(m.adapter_id().to_string(), m.clone());
-}
-
-/// Every published view, in adapter order.
-fn views() -> Vec<Arc<dyn MediaFetch>> {
-    VIEWS
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .cloned()
-        .collect()
 }
 
 fn view(adapter: &str) -> Option<Arc<dyn MediaFetch>> {
@@ -274,76 +255,6 @@ fn load(c: &Connection, id: &str) -> rusqlite::Result<Option<Row>> {
     .optional()
 }
 
-/// Text that says a stored message was read before cards / media were (`[interactive消息]`,
-/// `[audio消息]` …, a post with `[图片]`).
-fn legacy_text(t: &str) -> bool {
-    matches!(
-        t,
-        "[interactive消息]" | "[audio消息]" | "[media消息]" | "[sticker消息]" | "[folder消息]"
-    ) || t.contains("[图片]")
-        || t.contains("[视频]")
-}
-
-/// Attachments in the shape before this contract: no `source`, no card.
-fn legacy_attachments(a: &Value) -> bool {
-    a.as_array().is_none_or(|xs| {
-        xs.iter()
-            .all(|x| x.get("source").is_none() && x["type"] != "card")
-    })
-}
-
-/// The message as it reads now: `(text, attachments)`. An inbound message stored before cards and
-/// post media were read is read again from its own raw event, when the event is still kept for
-/// exactly this message (same workspace, space, message, provider message id) and nothing was
-/// purged, by the [`MediaFetch`] of the connection's adapter — or, once no connection of the
-/// message is left, by the view that recognizes the event as this message. Nothing is written,
-/// nothing replayed, nothing fetched.
-fn effective(c: &Connection, r: &Row) -> (Option<String>, Value) {
-    let unchanged = (r.text.clone(), r.attachments.clone());
-    let (Some(text), Some(ev)) = (&r.text, &r.event_id) else {
-        return unchanged;
-    };
-    if r.direction != "in"
-        || r.purged.is_some()
-        || !legacy_attachments(&r.attachments)
-        || !legacy_text(text)
-    {
-        return unchanged;
-    }
-    let payload: Option<String> = c
-        .query_row(
-            "SELECT payload FROM ext_events
-              WHERE id = ?1 AND workspace_id = ?2 AND space_id = ?3 AND message_id = ?4
-                AND payload IS NOT NULL AND payload_purged IS NULL",
-            params![ev, r.ws, r.space_id, r.id],
-            |x| x.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten();
-    let Some(payload) = payload.and_then(|p| serde_json::from_str::<Value>(&p).ok()) else {
-        return unchanged;
-    };
-    let raw = &payload["raw"];
-    let conn = connection_of(c, r, None);
-    let Some(msg) = r.message_ref(c, conn.as_ref().map(|(x, _)| x.as_str())) else {
-        return unchanged;
-    };
-    // the view of the connection's adapter; once that connection is gone, the view that knows
-    // this raw event as this very message (each refuses another message's event)
-    let read = match conn {
-        Some((_, a)) => view(&a).and_then(|m| m.reparse(&msg, raw).map(|x| (a, x))),
-        None => views().iter().find_map(|m| {
-            m.reparse(&msg, raw)
-                .map(|x| (m.adapter_id().to_string(), x))
-        }),
-    };
-    match read {
-        Some((a, (t, atts))) => (Some(t), Value::Array(stamped(&atts, &a))),
-        None => unchanged,
-    }
-}
-
 /// The connection to fetch as: the one whose event recorded the message, else the one the space
 /// was first seen through, else its voice; with `want`, only a connection of that adapter (the
 /// one the resource's key belongs to). `(connection, adapter)`; `None` when none is left.
@@ -466,7 +377,7 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
     if r.purged.is_some() || r.text.is_none() {
         return Some((None, json!([])));
     }
-    let (text, atts) = effective(c, &r);
+    let (text, atts) = (r.text.clone(), &r.attachments);
     let Some(xs) = atts.as_array().filter(|x| !x.is_empty()) else {
         return Some((text, json!([])));
     };
@@ -619,8 +530,8 @@ fn plan(c: &Connection, r: &Row, index: usize) -> Result<Plan, MediaError> {
     if !matches!(r.status.as_str(), "received" | "sent") {
         return Err(MediaError::Recalled);
     }
-    let (_, atts) = effective(c, r);
-    let a = atts
+    let a = r
+        .attachments
         .as_array()
         .and_then(|x| x.get(index))
         .filter(|a| is_resource(a))

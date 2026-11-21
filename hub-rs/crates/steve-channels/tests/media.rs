@@ -41,7 +41,6 @@ struct H {
     _keys: TempDir,
     fake: FakeFeishu,
     ch: Channels,
-    con: String,
     api: Router,
     _lc: LongConnection,
 }
@@ -120,7 +119,6 @@ async fn setup() -> H {
         _keys: keys,
         fake,
         ch,
-        con,
         api,
         _lc: lc,
     }
@@ -663,137 +661,4 @@ async fn a_card_and_a_post_with_media_arrive_readable() {
     );
     let (st, _, b) = get(&h, (WS, ME), &format!("/chan-messages/{pm}/resources/3")).await;
     assert_eq!((st, reason(&b).as_str()), (409, "folder"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_old_card_is_read_again_from_its_own_raw_event_only() {
-    let h = setup().await;
-    let content = json!({"title": "旧卡片", "elements": [[{"tag": "text", "text": "正文"}, {"tag": "img", "image_key": "img_1"}]]});
-    let msg = push(
-        &h,
-        envelope(
-            "om_old00000000000000000000000000001",
-            "interactive",
-            &content,
-            "ev_old_1",
-        ),
-    )
-    .await;
-    // as it was stored before cards were read
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET text = '[interactive消息]', attachments = '[]' WHERE id = '{msg}'"
-        ),
-    );
-    let m = shown(&h, &msg).await;
-    assert_eq!(m["text"], "旧卡片\n正文\n[图片：图片]");
-    assert_eq!(m["attachments"][0]["format"], "flattened");
-    // nothing was written back
-    assert_eq!(
-        one(
-            &h,
-            &format!("SELECT text FROM chan_messages WHERE id = '{msg}'")
-        ),
-        json!("[interactive消息]")
-    );
-
-    // an event of another message is not borrowed
-    let other = push(&h, fixture("message_image").unwrap()).await;
-    let ev = one(
-        &h,
-        &format!("SELECT event_id FROM chan_messages WHERE id = '{other}'"),
-    );
-    let ev_old = one(
-        &h,
-        &format!("SELECT event_id FROM chan_messages WHERE id = '{msg}'"),
-    );
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET event_id = '{}' WHERE id = '{msg}'",
-            ev.as_str().unwrap()
-        ),
-    );
-    assert_eq!(shown(&h, &msg).await["text"], "[interactive消息]");
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET event_id = '{}' WHERE id = '{msg}'",
-            ev_old.as_str().unwrap()
-        ),
-    );
-
-    // the raw payload purged: stays as it was
-    sql(
-        &h,
-        &format!(
-            "UPDATE ext_events SET payload = NULL, payload_purged = 1 WHERE id = '{}'",
-            ev_old.as_str().unwrap()
-        ),
-    );
-    let m = shown(&h, &msg).await;
-    assert_eq!(
-        (m["text"].clone(), m["attachments"].clone()),
-        (json!("[interactive消息]"), json!([]))
-    );
-    let _ = &h.con;
-}
-
-/// An old card is read again from its own raw event even once the connection that received it is
-/// removed (its row gone, the space's connection cleared): the stored fallback text does not come
-/// back.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_old_card_is_read_again_after_its_connection_is_removed() {
-    let h = setup().await;
-    let content = json!({"title": "旧卡片", "elements": [[{"tag": "text", "text": "正文"}]]});
-    let msg = push(
-        &h,
-        envelope(
-            "om_old00000000000000000000000000002",
-            "interactive",
-            &content,
-            "ev_old_2",
-        ),
-    )
-    .await;
-    sql(
-        &h,
-        &format!(
-            "UPDATE chan_messages SET text = '[interactive消息]', attachments = '[]' WHERE id = '{msg}'"
-        ),
-    );
-    let read = |h: &H| {
-        h.env
-            .store()
-            .reader(|c| Ok::<_, steve_store::StoreError>(steve_channels::media::present(c, &msg)))
-            .expect("present")
-            .expect("stored")
-    };
-    assert_eq!(read(&h).0.as_deref(), Some("旧卡片\n正文"));
-    // the connection is removed: its row goes, the space keeps no connection
-    h.ch.connections()
-        .disconnect(&caller(WS, ME), &h.con)
-        .await
-        .expect("disconnected");
-    assert_eq!(
-        one(
-            &h,
-            &format!("SELECT count(*) FROM connections WHERE id = '{}'", h.con)
-        ),
-        json!(0)
-    );
-    assert_eq!(
-        one(
-            &h,
-            &format!(
-                "SELECT count(*) FROM spaces WHERE connection_id IS NOT NULL AND id = '{}'",
-                space_of(&h, &msg)
-            )
-        ),
-        json!(0)
-    );
-    let (text, atts) = read(&h);
-    assert_eq!(text.as_deref(), Some("旧卡片\n正文"));
-    assert_eq!(atts[0]["format"], "flattened");
 }

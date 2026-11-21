@@ -1363,9 +1363,9 @@ pub fn attention(
         // The same definition of live, incoming, not-self and visible as count_new. Stable
         // persisted message ID is the event identity, never a mutable rowid or unread count.
         let latest_sql = format!("SELECT m.id,m.created FROM chan_messages m
-          WHERE m.space_id=?1 AND m.direction='in' AND m.history IS NULL AND m.created>?3 AND {seen}
+          WHERE m.space_id=?1 AND m.direction='in' AND m.history IS NULL AND m.created>?3
             AND NOT EXISTS (SELECT 1 FROM parties pp WHERE pp.id=m.sender_party_id AND pp.user_id=?2)
-          ORDER BY m.created DESC,m.id DESC LIMIT 1",seen=spaces::seen_visible_sql("m","?2"));
+          ORDER BY m.created DESC,m.id DESC LIMIT 1");
         let (message, created): (String, i64) = c.query_row(
             &latest_sql,
             params![
@@ -1401,7 +1401,7 @@ pub fn list(
 }
 
 /// The conversations of the spaces the viewer sees: every space with a message of its conversation
-/// or a channel message the viewer may see ([`crate::spaces::seen_visible_sql`]), by their latest
+/// or a channel message, by their latest
 /// activity, newest first. Each row is the space's badge with `count` (messages of its
 /// conversation), `last` / `last_text` / `last_author` (the newer of its conversation's last message
 /// and its last visible channel message), `closed` and `unread` ([`crate::conv_record::unread`] at
@@ -1441,14 +1441,14 @@ pub fn list_page(
           WHERE workspace_id = ?1 AND space LIKE 'chan:%' GROUP BY space
         ), base AS (
           SELECT s.id, s.name, s.system_id, g.space AS conv, g.n, g.last AS conv_last,
-            (SELECT m.id FROM chan_messages m WHERE m.space_id = s.id AND {seen}
+            (SELECT m.id FROM chan_messages m WHERE m.space_id = s.id
               ORDER BY m.created DESC, m.id DESC LIMIT 1) AS chan_id
           FROM spaces s LEFT JOIN grouped g ON g.space = 'chan:' || s.id
           WHERE s.workspace_id = ?1 AND {visibility}
             AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
               WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
             AND (?8 = 0 OR EXISTS (SELECT 1 FROM chan_messages m
-              WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out' AND {seen}
+              WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out'
                 AND (m.status = 'sent' OR (m.status = 'draft' AND EXISTS (
                   SELECT 1 FROM decisions d WHERE d.id = m.decision_id AND d.workspace_id = ?1
                     AND d.kind = 'approve' AND d.status = 'open'
@@ -1478,7 +1478,6 @@ pub fn list_page(
           AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || coalesce(last_text, '')), lower(?4)) > 0)
         )",
         visibility = spaces::visible_sql("?2"),
-        seen = spaces::seen_visible_sql("m", "?2"),
     );
     let total: i64 = c.query_row(
         &format!("{cte} SELECT count(*) FROM filtered"),

@@ -17,8 +17,7 @@
 //! never further back than [`UNREAD_HORIZON_MS`].
 //!
 //! Visibility is the conversation list's: the space must be one the viewer sees
-//! ([`crate::spaces::own`]) and each message one an identity the viewer may see received
-//! ([`crate::spaces::viewer_mask`]). Everything here is read-only but the viewer's own read marker.
+//! ([`crate::spaces::own`]). Everything here is read-only but the viewer's own read marker.
 
 use std::collections::HashMap;
 
@@ -73,10 +72,8 @@ fn count_new(c: &Connection, space: &str, user: &str, since: i64, cap: i64) -> C
     let mut st = c.prepare_cached(&format!(
         "SELECT count(*) FROM (SELECT 1 FROM chan_messages m
            WHERE m.space_id = ?1 AND m.direction = 'in' AND m.history IS NULL AND m.created > ?3
-             AND {seen}
              AND NOT EXISTS (SELECT 1 FROM parties pp WHERE pp.id = m.sender_party_id AND pp.user_id = ?2)
-           LIMIT ?4)",
-        seen = spaces::seen_visible_sql("m", "?2")
+           LIMIT ?4)"
     ))?;
     Ok(st.query_row(params![space, user, since, cap], |r| r.get(0))?)
 }
@@ -583,9 +580,8 @@ pub fn channels(
             AND (s.connection_id = ?3 OR EXISTS (SELECT 1 FROM space_identities li
               WHERE li.space_id = s.id AND li.connection_id = ?3 AND li.left_at IS NULL))
             AND (EXISTS (SELECT 1 FROM messages x WHERE x.workspace_id = ?1 AND x.space = 'chan:' || s.id)
-              OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id AND {seen}))",
+              OR EXISTS (SELECT 1 FROM chan_messages m WHERE m.space_id = s.id))",
         visibility = spaces::visible_sql("?2"),
-        seen = spaces::seen_visible_sql("m", "?2"),
     ))?;
     let mut out = Vec::new();
     for a in crate::channel_accounts::list(ch, c, viewer)? {
