@@ -1112,7 +1112,8 @@ for line in sys.stdin:
                 data: None,
             }))
         });
-        let mut sampler = Sampler::start(None, "s1", "test", Epoch::new("test").unwrap()).await;
+        let mut sampler =
+            Sampler::start_source(None, "s1", "test", Epoch::new("test").unwrap()).await;
         let err = drive_prompt(
             &conn,
             &mut rx,

@@ -1660,12 +1660,6 @@ impl Core {
             )?;
         }
         self.thread_postback()?;
-        for w in self.store().store().workspaces().all()? {
-            let hid = flowback::cleanup(self.store(), &w.id)?;
-            if !hid.is_empty() {
-                tracing::info!(ws = w.id, n = hid.len(), "flow-back folded into item cards");
-            }
-        }
         Ok(())
     }
 
