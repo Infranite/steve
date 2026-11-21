@@ -1,6 +1,6 @@
 # Existing Chinese comparisons; replace display text with domain code values. Only shrinks.
 # file under hub-rs/crates<TAB>JSON-escaped literal<TAB>count.
-# Rewrite: STEVE_GUARD_BLESS=1 cargo test -p steve-hub --test zh_compare
+# Rewrite after removals: STEVE_GUARD_BLESS=1
 steve-acp/src/capacity.rs	"(?i)(?:expected to be available at|预计恢复时间[:：])\\s*<?"	1
 steve-acp/src/capacity.rs	"预计恢复时间："	1
 steve-calendar/src/query.rs	"我"	1
@@ -142,13 +142,6 @@ steve-channels/src/drafts.rs	"是 AI 助手"	1
 steve-channels/src/drafts.rs	"由 Steve 驱动"	1
 steve-channels/src/drafts.rs	"私聊"	1
 steve-channels/src/drafts.rs	"职责"	1
-steve-channels/src/media.rs	"[audio消息]"	1
-steve-channels/src/media.rs	"[folder消息]"	1
-steve-channels/src/media.rs	"[interactive消息]"	1
-steve-channels/src/media.rs	"[media消息]"	1
-steve-channels/src/media.rs	"[sticker消息]"	1
-steve-channels/src/media.rs	"[图片]"	1
-steve-channels/src/media.rs	"[视频]"	1
 steve-channels/src/names.rs	"所有人"	1
 steve-channels/src/names.rs	"私聊"	1
 steve-channels/src/outbound.rs	"\n\n检查："	1
@@ -725,15 +718,8 @@ steve-hub/src/wire/core.rs	"评审"	2
 steve-hub/src/wire/core.rs	"调研"	1
 steve-hub/src/wire/node_runtime/plan.rs	"暂停接活"	1
 steve-hub/src/wire/output_files.rs	"交付摘要"	2
-steve-hub/src/wire/output_files.rs	"分析"	2
-steve-hub/src/wire/output_files.rs	"报告"	2
-steve-hub/src/wire/output_files.rs	"报表"	2
-steve-hub/src/wire/output_files.rs	"方案"	2
 steve-hub/src/wire/output_files.rs	"本次交付摘要"	1
 steve-hub/src/wire/output_files.rs	"本次交付正文"	1
-steve-hub/src/wire/output_files.rs	"结论"	2
-steve-hub/src/wire/output_files.rs	"设计"	2
-steve-hub/src/wire/output_files.rs	"评审"	2
 steve-install/src/setup.rs	"否"	1
 steve-install/src/setup.rs	"是"	1
 steve-knowledge/src/candidates.rs	"以后"	1
