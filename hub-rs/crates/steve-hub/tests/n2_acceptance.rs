@@ -1112,6 +1112,17 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
             None,
         )
         .await;
+    // A linked Node is pending until its first probe lands; wait for both to become candidates.
+    eventually("Both test Nodes are discovered as candidates.", || async {
+        let (_, v) = c.call("GET", &path, None).await;
+        [&id_a, &id_b].iter().all(|id| {
+            v["candidates"].as_array().is_some_and(|all| {
+                all.iter()
+                    .any(|n| n["id"] == id.as_str() && n["state"] == "candidate")
+            })
+        })
+    })
+    .await;
     let (status, discovery) = c.call("GET", &path, None).await;
     assert_eq!(status, 200, "{discovery}");
     assert!(

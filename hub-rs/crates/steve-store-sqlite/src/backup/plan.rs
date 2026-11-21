@@ -1204,6 +1204,10 @@ mod retention_tests {
     }
 
     #[test]
+    // The fixture makes removal fail with a read-only copy. Some macOS releases also refuse to
+    // rename a directory without write permission, so the failure would come a step earlier;
+    // the accounting under test is the same on every platform.
+    #[cfg_attr(target_os = "macos", ignore)]
     fn failed_retirement_is_accounted_and_retried_before_new_candidates() {
         let root = tempfile::tempdir().unwrap();
         let old = copy(root.path(), Reason::Daily, 1);
