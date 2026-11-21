@@ -4188,7 +4188,7 @@ impl Discovery for LocalNode {
                 .accept("install_harness", &c, |_| unreachable!())
                 .map(|(r, _)| r);
         }
-        if !cfg.managed_adapter(&harness) || steve_acp::adapters::components(&harness).is_empty() {
+        if !cfg.managed_adapter(&harness) || steve_harness_spec::components(&harness).is_empty() {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
                 "only built-in components in this Node's configured managed prefix may be installed; custom commands are left untouched",
@@ -4320,7 +4320,7 @@ impl Discovery for LocalNode {
         let (probed, adapters) = tokio::join!(binaries, adapters);
         let mut requirements = HashMap::new();
         for id in self.0.cfg.acp.adapters.keys() {
-            if !steve_acp::adapters::components(id).is_empty() {
+            if !steve_harness_spec::components(id).is_empty() {
                 requirements.insert(
                     id.clone(),
                     adapter_setup::requirements(&self.0.cfg.acp, id).await,
@@ -4366,7 +4366,7 @@ impl Discovery for LocalNode {
                     resume: true,
                     cancel: true,
                     permissions: self.0.cfg.acp.adapter_properties(h).permission_policy
-                        == steve_acp::adapters::PermissionPolicy::Acp,
+                        == steve_harness_spec::PermissionPolicy::Acp,
                     images: true,
                     enforcement: vec![],
                     adapter: None,

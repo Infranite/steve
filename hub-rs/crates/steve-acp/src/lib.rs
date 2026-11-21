@@ -42,6 +42,3 @@ pub use errors::{is_dead_agent, is_stream_interruption, is_transient, stream_int
 pub use oneshot::{Image, OneShotError, TOOL_REFUSED};
 pub use rollout::find as codex_rollout;
 pub use rpc::RpcError;
-
-// Transitional declaration facade, G4-W39A-ACP-REEXPORT: remove in W3.9c.
-pub use steve_harness_spec::{AdapterEntry, AdapterProperties, Declaration, Login, StateDir};

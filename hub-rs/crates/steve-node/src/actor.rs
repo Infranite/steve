@@ -2135,7 +2135,7 @@ fn read_owner_regular_file(own: &std::path::Path, segs: &[std::ffi::OsString]) -
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
     skills: Option<&str>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
@@ -2252,22 +2252,22 @@ fn node_var(inner: &Inner, harness: &str, name: &str) -> Option<std::ffi::OsStri
         .or_else(|| std::env::var_os(name))
 }
 
-/// [`steve_acp::StateDir::node_store`] on this Node.
+/// [`steve_harness_spec::StateDir::node_store`] on this Node.
 fn node_store(
     inner: &Inner,
     harness: &str,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
 ) -> Option<(std::ffi::OsString, std::ffi::OsString, std::path::PathBuf)> {
     sd.node_store(&inner.cfg.acp.user_home, |n| node_var(inner, harness, n))
 }
 
-/// The Node's credential store of `harness` ([`steve_acp::Login`]): in the directory its store
+/// The Node's credential store of `harness` ([`steve_harness_spec::Login`]): in the directory its store
 /// variable names when it has one, else in its own directory; `None` when it declares no name
 /// there or the Node has no such directory.
 fn node_login_store(
     inner: &Inner,
     harness: &str,
-    sd: &steve_acp::StateDir,
+    sd: &steve_harness_spec::StateDir,
 ) -> Option<crate::confine::LoginStore> {
     let names = sd.login.store_names();
     if names.is_empty() {

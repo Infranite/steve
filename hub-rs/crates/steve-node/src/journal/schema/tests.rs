@@ -243,7 +243,6 @@ fn v3_discards_the_entire_ledger_and_retires_compatibility_schema() {
     assert_eq!(state_default, None);
 }
 
-
 #[test]
 fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
     let d = tempfile::tempdir().unwrap();
@@ -312,7 +311,6 @@ fn a_mid_migration_failure_rolls_back_every_ddl_and_row() {
         "all legacy command rows survive the failed migration"
     );
 }
-
 
 #[test]
 fn restart_uses_one_indexed_update_and_never_touches_finished_or_unknown_receipts() {
@@ -460,7 +458,6 @@ fn fresh_and_v4_startup_execute_no_ddl_or_column_probes() {
     assert_eq!(denied.load(Ordering::SeqCst), 0);
 }
 
-
 #[test]
 fn acceptance_and_transitions_keep_receipt_and_column_in_sync() {
     let d = tempfile::tempdir().unwrap();
@@ -541,5 +538,3 @@ fn transitions_target_the_requested_row_even_when_a_stored_receipt_has_a_wrong_i
 
 // All command records are discarded, including compatible ones. Pending payloads and session
 // stream heads are a separate durable ledger and must survive this one-time schema upgrade.
-
-

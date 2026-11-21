@@ -172,14 +172,14 @@ fn found() -> BTreeMap<(String, String), usize> {
 
 #[test]
 fn literals_cover_all_builtin_adapter_ids_and_bins() {
-    for id in steve_acp::adapters::builtin_ids() {
+    for id in steve_harness_spec::builtin_ids() {
         let lit = format!("\"{id}\"");
         assert!(
             LITERALS.contains(&lit.as_str()),
             "missing builtin adapter id literal {lit} in LITERALS"
         );
     }
-    for (_id, cli_bin, detect_bins) in steve_acp::adapters::builtin_bins() {
+    for (_id, cli_bin, detect_bins) in steve_harness_spec::builtin_bins() {
         for bin in std::iter::once(cli_bin).chain(detect_bins.iter().copied()) {
             let lit = format!("\"{bin}\"");
             assert!(

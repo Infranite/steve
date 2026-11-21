@@ -242,7 +242,7 @@ fn undo_patch(u: &Value) -> Map<String, Value> {
 /// The bot that develops Steve itself, as `seed` makes it beside Steve's own source (a `NewBot` as JSON).
 pub(crate) fn dev_bot(project: Option<&str>) -> Value {
     json!({
-        "name": "Steve 开发", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "auto",
+        "name": "Steve 开发", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::DEV_ROLE), "accept_mode": "inherit", "perm_mode": "auto",
         "persona": seeded::text(seeded::DEV_PERSONA), "default_project": project, "avatar": {"color": "#8c7ae6", "round": 45},
         "rules": seeded::text(seeded::DEV_RULES),
     })
@@ -261,7 +261,7 @@ impl Core {
             "steve",
             true,
             json!({
-                "name": "Steve", "harness": steve_acp::adapters::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::STEVE_ROLE), "accept_mode": "inherit", "perm_mode": "default",
+                "name": "Steve", "harness": steve_harness_spec::DEFAULT_ADAPTER.0, "role": seeded::text(seeded::STEVE_ROLE), "accept_mode": "inherit", "perm_mode": "default",
                 "persona": seeded::text(seeded::STEVE_PERSONA), "avatar": {"color": "#7aa7c7", "round": 70},
                 "rules": seeded::text(seeded::STEVE_RULES),
             }),
@@ -301,7 +301,7 @@ impl Core {
         db.store().with_conn(|c| {
             c.execute(
                 "UPDATE bots SET harness = ?1 WHERE id = 'steve' AND harness = ''",
-                [steve_acp::adapters::DEFAULT_ADAPTER.0],
+                [steve_harness_spec::DEFAULT_ADAPTER.0],
             )?;
             Ok(())
         })?;

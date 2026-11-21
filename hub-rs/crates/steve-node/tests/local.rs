@@ -5420,9 +5420,9 @@ async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal(
     // configuration. A real process startup gets this value from its operator configuration.
     cfg.acp.declared.insert(
         "pi".into(),
-        steve_acp::Declaration {
-            properties: steve_acp::adapters::PropertiesPatch {
-                state: Some(steve_acp::adapters::StateDir {
+        steve_harness_spec::Declaration {
+            properties: steve_harness_spec::PropertiesPatch {
+                state: Some(steve_harness_spec::StateDir {
                     env: "PI_CODING_AGENT_DIR".into(),
                     default: ".pi/agent".into(),
                     home: Some("adapter-home".into()),
@@ -5499,7 +5499,7 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
     cfg.acp.adapters.insert("fake".into(), t.adapter.clone());
     cfg.acp.declared.insert(
         "fake".into(),
-        steve_acp::Declaration {
+        steve_harness_spec::Declaration {
             name: Some("Fake Agent".into()),
             ..Default::default()
         },

@@ -143,7 +143,7 @@ impl Local {
 
     /// The adapter as Steve's default one, keeping its own sandbox (so its log reaches the test).
     fn acp(root: &Path) -> steve_acp::AcpConfig {
-        let id = steve_acp::adapters::DEFAULT_ADAPTER.0.to_string();
+        let id = steve_harness_spec::DEFAULT_ADAPTER.0.to_string();
         steve_acp::AcpConfig {
             declared: HashMap::from([(
                 id.clone(),
@@ -874,7 +874,7 @@ async fn research_job_run_keeps_observed_consumption_after_drop() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),
@@ -1037,7 +1037,7 @@ async fn research_job_run_dropped_waiter_applies_late_final_to_the_same_failed_c
     let a = ResearchAttempt {
         run: "research-tail".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "m".into(),
         effort: None,
         prompt: "controlled research".into(),
@@ -1387,7 +1387,7 @@ async fn review_research_cancel_must_collect_persisted_tail() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),
@@ -1533,7 +1533,7 @@ async fn review_research_persisted_tail_is_readable_before_cancel() {
     let a = ResearchAttempt {
         run: "research-owner".into(),
         workspace: "default".into(),
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness: steve_harness_spec::DEFAULT_ADAPTER.0.into(),
         model: "meter-model".into(),
         effort: None,
         prompt: "hang".into(),

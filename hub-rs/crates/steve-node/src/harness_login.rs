@@ -1,4 +1,4 @@
-//! The harness's sign-in on this Node in a session's harness directory ([`steve_acp::Login`]).
+//! The harness's sign-in on this Node in a session's harness directory ([`steve_harness_spec::Login`]).
 //!
 //! The harness signs in by itself on the Node: its own login command, its own settings, set up by
 //! whoever installed it on this machine. Steve never configures a provider and never handles a
@@ -11,7 +11,7 @@
 //!   sign it out. The link is made even before the Node signs in, so a later sign-in is seen. A
 //!   file the harness or a person put there is left alone (a sign-in of that directory's own).
 //! - **A credential store variable** (Claude Code's `CLAUDE_SECURESTORAGE_CONFIG_DIR`): set in the
-//!   harness's environment by the caller ([`steve_acp::StateDir::node_store`]); nothing is written.
+//!   harness's environment by the caller ([`steve_harness_spec::StateDir::node_store`]); nothing is written.
 //! - **Sign-in entries of the settings file** (which provider or gateway, a key helper): in every
 //!   session's file these entries are the Node's own as it has them now; everything else in that
 //!   file stays the session's. A file the harness has never had is made only when the Node's has
@@ -25,7 +25,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_acp::Login;
+use steve_harness_spec::Login;
 
 use crate::attachments::{private_dir, publish, publish_private};
 

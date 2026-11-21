@@ -27,6 +27,7 @@ steve-work-api = { path = "../steve-work-api" }
 steve-stats = { path = "../steve-stats" }
 # One-shot ACP calls of the gateway in process; the gateway keeps model choice and fallback.
 steve-acp = { path = "../steve-acp" }
+steve-harness-spec = { path = "../steve-harness-spec" }
 steve-transcript = { path = "../steve-transcript" }
 steve-i18n = { path = "../steve-i18n" }
 # The Workspace port's git kinds, for items on a Node (node_git).

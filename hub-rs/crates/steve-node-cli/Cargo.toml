@@ -25,6 +25,7 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["json", 
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 steve-acp = { path = "../steve-acp" }
+steve-harness-spec = { path = "../steve-harness-spec" }
 steve-node = { path = "../steve-node" }
 steve-node-api = { path = "../steve-node-api" }
 steve-node-wire = { path = "../steve-node-wire" }
