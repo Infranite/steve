@@ -31,41 +31,6 @@ pub enum Release {
 }
 
 impl NodeRuntime {
-    pub(super) fn repair_startup_queues(&self) -> Result<(), StoreError> {
-        let sessions = self.store.reader(|c| {
-            let mut q = c.prepare("SELECT s.id,s.status FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE r.node_id=? AND ((s.status='ended' AND (EXISTS(SELECT 1 FROM queued WHERE session_id=s.id) OR EXISTS(SELECT 1 FROM decisions WHERE session_id=s.id AND subject_type='session_start' AND status='open'))) OR (s.status='error' AND r.phase='released' AND EXISTS(SELECT 1 FROM queued WHERE session_id=s.id) AND (SELECT c.state IN ('finished','rejected') AND COALESCE(json_extract(c.receipt,'$.success'),0)=0 FROM node_commands c WHERE c.method='open_session' AND json_extract(c.request,'$.body.session')=s.id ORDER BY c.created DESC,c.rowid DESC LIMIT 1)))")?;
-            let rows = q.query_map([self.node_id.as_str()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
-            Ok::<_,StoreError>(rows)
-        })?;
-        for (session, status) in sessions {
-            if status == "ended" {
-                self.store.sessions().retire_queue(&session)?;
-            } else {
-                self.tx(|tx| {
-                    if ended_in(tx, &session)? || super::plan::startup_blocked_in(tx, &session)? {
-                        return Ok(());
-                    }
-                    let detail: Option<String> = tx
-                        .query_row(
-                            "SELECT error FROM session_stops WHERE session_id=?",
-                            [&session],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .flatten();
-                    self.startup_failed_in(
-                        tx,
-                        &session,
-                        detail
-                            .as_deref()
-                            .unwrap_or("上次启动失败，已保留排队消息，请检查配置后手动重试。"),
-                    )
-                })?;
-            }
-        }
-        Ok(())
-    }
-
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
     /// two commands (the open waits for the prepare). Idempotent for the same binding. Refused
     /// once [`Self::stop`] was called: nothing would ever send those commands.

@@ -9,9 +9,6 @@ install! { install(reg, cx) [] => [db] {
         db.stats()
             .gateway_recover()
             .map_err(|e| BackendError::msg(format!("recover gateway accounting: {e}")))?;
-        if let Err(error) = output_files::recover_legacy(&db, &cfg.home, &cfg.db_path()) {
-            tracing::warn!(%error, "legacy delivery output recovery failed; will retry on next start");
-        }
     }
 
 }}
