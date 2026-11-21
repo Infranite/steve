@@ -3,7 +3,7 @@
 //! and the hooks that turn item and Bot changes into module events.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use steve_core::Core;
@@ -206,15 +206,15 @@ impl steve_mail::attach::FileStore for HubFiles {
 /// S10: a dropped item becomes an `item.dropped` event (flows can follow up), spawned after the
 /// lifecycle step. `item.done` comes through the outbox instead (`steve_flow::ItemTrigger`).
 #[derive(Clone, Default)]
-pub struct FlowItemEvents(pub Arc<OnceLock<Arc<steve_flow::FlowCx>>>);
+pub struct FlowItemEvents(pub Arc<OnceLock<Weak<steve_flow::FlowCx>>>);
 
 impl FlowItemEvents {
-    pub fn bind(&self, flow: Arc<steve_flow::FlowCx>) {
-        let _ = self.0.set(flow);
+    pub fn bind(&self, flow: &Arc<steve_flow::FlowCx>) {
+        let _ = self.0.set(Arc::downgrade(flow));
     }
 
     fn spawn(&self, item: &Item, ev: steve_flow::ItemEvent) {
-        let Some(flow) = self.0.get().cloned() else {
+        let Some(flow) = self.0.get().and_then(Weak::upgrade) else {
             return;
         };
         let (ws, id) = (item.workspace_id.clone(), item.id.clone());
@@ -258,14 +258,20 @@ impl steve_modules::BotDeleted for BotHeirs {
 
 /// S10: the flow module's report notes for `/汇报`.
 #[derive(Clone, Default)]
-pub struct FlowDigest(pub Arc<OnceLock<Arc<steve_flow::FlowCx>>>);
+pub struct FlowDigest(pub Arc<OnceLock<Weak<steve_flow::FlowCx>>>);
+
+impl FlowDigest {
+    pub fn bind(&self, flow: &Arc<steve_flow::FlowCx>) {
+        let _ = self.0.set(Arc::downgrade(flow));
+    }
+}
 
 impl steve_modules::DigestNotes for FlowDigest {
     fn take(&self, ws: &str) -> Vec<String> {
-        let Some(flow) = self.0.get() else {
+        let Some(flow) = self.0.get().and_then(Weak::upgrade) else {
             return Vec::new();
         };
-        match steve_flow::digest::take_now(flow, ws, 0) {
+        match steve_flow::digest::take_now(&flow, ws, 0) {
             Ok(v) => v.into_iter().map(|e| e.text).collect(),
             Err(e) => {
                 tracing::warn!("digest notes: {e}");

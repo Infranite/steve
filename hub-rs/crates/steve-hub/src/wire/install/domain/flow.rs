@@ -67,8 +67,8 @@ install! { install(reg, cx) [conns, declared, digest, gh, item_events, late, mai
         .alarm_source(Arc::new(steve_digest::brief::BriefAlarms));
     let flow = setup.build(modules.clone(), Arc::new(steve_flow::GraphEngine));
     mail_events.bind(&flow);
-    item_events.bind(flow.clone());
-    let _ = digest.0.set(flow.clone());
+    item_events.bind(&flow);
+    digest.bind(&flow);
     let sink: Arc<dyn steve_flow::EventSink> = Arc::new(flow.clone());
 }}
 
