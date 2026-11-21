@@ -1121,6 +1121,9 @@ impl HubTools for Tools {
             }],
         })
     }
+    async fn session_catalog(&self, _s: SessionId) -> ApiResult<Catalog> {
+        Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.calls.lock().unwrap().push(q);
         Ok(ToolResult::Completed {

@@ -83,6 +83,20 @@ fn authorize_session(
     {
         return Err(denied());
     }
+    let (s, gated) = authorize_steve_session(store, session, active, allow_dependency_management)?;
+    Ok((s, spec, gated))
+}
+
+/// The session side of every Steve tool authorization, for an attempt's calls and a session's
+/// list alike: a live Steve session of this Hub, its item and Bot still in its workspace. `gate`:
+/// fresh work, which the workflow gate stops; a gated session then gets dependency management
+/// only, if `allow_dependency_management` and that is allowed. Returns whether it is gated.
+fn authorize_steve_session(
+    store: &Store,
+    session: &SessionId,
+    gate: bool,
+    allow_dependency_management: bool,
+) -> ApiResult<(Session, bool)> {
     let s = store
         .sessions()
         .get(session.as_str())
@@ -95,7 +109,7 @@ fn authorize_session(
     // Steve tools enter through the Node without a harness permission card. Recheck the same
     // persisted gate used for turns before every fresh call, including the check after its fence.
     // A known ToolKey must still be readable when a wait/replan stops further work.
-    let gated = active
+    let gated = gate
         && store
             .reader(|c| steve_store::workflow_gate::session_blocker(c, &s.id))
             .map_err(internal)?
@@ -131,7 +145,28 @@ fn authorize_session(
             return Err(denied());
         }
     }
-    Ok((s, spec, gated))
+    Ok((s, gated))
+}
+
+/// Who lists a session's tools: a session of this Node (bound here under its own id) whose tool
+/// grant in force is the Hub's, authorized as a fresh call would be, but with no attempt needed.
+fn session_lister(store: &Store, node: &NodeId, session: &SessionId) -> ApiResult<Caller> {
+    let config = store
+        .reader(|c| {
+            let here: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_sessions WHERE session_id=?1 AND node_id=?2 AND node_session_id=?1)",
+                params![session.as_str(), node.as_str()],
+                |r| r.get(0),
+            )?;
+            here.then(|| super::node_runtime::config_in(c, session.as_str()))
+                .transpose()
+        })
+        .map_err(internal)?
+        .ok_or_else(denied)?;
+    if config.policy.tools.as_str() != "hub" {
+        return Err(denied());
+    }
+    authorize_steve_session(store, session, true, true).map(session_caller)
 }
 
 /// A research job of this Node (grant [`RESEARCH_GRANT`]) and its thread run: the job attempt must
@@ -404,18 +439,19 @@ impl NodeTools {
 /// [`authorize`] for a turn, [`authorize_research`] for a job.
 fn caller(store: &Store, node: &NodeId, exec: &ExecutionRef, active: bool) -> ApiResult<Caller> {
     match exec {
-        ExecutionRef::Turn { .. } => {
-            authorize_session(store, node, exec, active, true).map(|(s, _, gated)| {
-                if gated {
-                    Caller::DependencyManagement(s)
-                } else {
-                    Caller::Session(s)
-                }
-            })
-        }
+        ExecutionRef::Turn { .. } => authorize_session(store, node, exec, active, true)
+            .map(|(s, _, gated)| session_caller((s, gated))),
         ExecutionRef::Job { .. } => {
             authorize_research(store, node, exec, active).map(Caller::Research)
         }
+    }
+}
+/// A session's caller: only dependency management while the workflow gate holds it.
+fn session_caller((s, gated): (Session, bool)) -> Caller {
+    if gated {
+        Caller::DependencyManagement(s)
+    } else {
+        Caller::Session(s)
     }
 }
 fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option<ToolResult>> {
@@ -454,6 +490,11 @@ fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Optio
 impl HubTools for NodeTools {
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         let caller = self.authorized(&execution, true).await?;
+        Self::catalog_of(&*self.service()?, &caller).await
+    }
+    async fn session_catalog(&self, session: SessionId) -> ApiResult<Catalog> {
+        let (store, node) = (self.store.clone(), self.node.clone());
+        let caller = blocking(move || session_lister(&store, &node, &session)).await?;
         Self::catalog_of(&*self.service()?, &caller).await
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
@@ -891,6 +932,57 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             tools.call_status(q.key()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+    }
+    /// A harness lists Steve's tools when it connects, before any attempt runs: its session lists
+    /// on its own Node with no attempt running, while calls still need the running attempt.
+    #[tokio::test]
+    async fn a_session_lists_without_an_attempt_on_its_own_node_only() {
+        let h = fixture(vec![]).await;
+        let mock = || {
+            Arc::new(Mock {
+                calls: AtomicUsize::new(0),
+                gate: None,
+            })
+        };
+        let tools =
+            NodeTools::open(h.store.clone(), NodeId::new("local").unwrap(), h.dir.path()).unwrap();
+        tools.install(mock()).unwrap();
+        let q = request(&tools, h.exec.clone()).await;
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute_batch(
+                    "UPDATE runtime_attempts SET state='finished';
+                     UPDATE runtime_turns SET active_attempt=NULL;
+                     UPDATE runtime_sessions SET active_attempt=NULL;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let s1 = SessionId::new("s1").unwrap();
+        let listed = tools.session_catalog(s1.clone()).await.unwrap();
+        assert_eq!(listed.tools[0].name, "test");
+        assert_eq!(tools.call(q).await.unwrap_err().code, ErrorCode::Denied);
+        let other = NodeTools::open(
+            h.store.clone(),
+            NodeId::new("other").unwrap(),
+            &h.dir.path().join("other"),
+        )
+        .unwrap();
+        other.install(mock()).unwrap();
+        assert_eq!(
+            other.session_catalog(s1.clone()).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+        h.store
+            .transaction::<_, StoreError>(|tx| {
+                tx.execute("UPDATE sessions SET status='ended' WHERE id='s1'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            tools.session_catalog(s1).await.unwrap_err().code,
             ErrorCode::Denied
         );
     }

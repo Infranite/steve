@@ -1321,6 +1321,9 @@ struct Tools {
 #[async_trait::async_trait]
 impl HubTools for Tools {
     async fn catalog(&self, _e: ExecutionRef) -> ApiResult<Catalog> {
+        self.session_catalog(SessionId::new("s_1").unwrap()).await
+    }
+    async fn session_catalog(&self, _s: SessionId) -> ApiResult<Catalog> {
         Ok(Catalog {
             revision: Revision::new("c1").unwrap(),
             tools: vec![ToolDescriptor {
@@ -1482,49 +1485,40 @@ fn tool_server(t: &T) -> (String, String) {
     (server["url"].as_str().unwrap().to_string(), token)
 }
 
-/// A harness lists Steve's tools as soon as it connects to the server, which may be before the
-/// first turn (Claude Code does, when its connection wins the race with the first prompt; it then
-/// keeps the empty list for good). The list waits for the attempt instead of failing, and once the
-/// Node knows the catalog it is listed at idle at once. Calls still need the running attempt.
+/// A harness lists Steve's tools as soon as it connects, before its session's first turn (Claude
+/// Code keeps what it got then): a session lists with no attempt running, but calls still need
+/// one. An attempt whose harness never listed them says so, once per attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
+async fn steves_tools_are_listed_without_an_attempt_and_missing_ones_are_reported() {
     let t = T::new(&[]);
     let n = t.node();
     let tools = Arc::new(Tools::default());
     n.connect_tools(tools.clone()).await.unwrap();
     ready(&n, "s_1").await;
-    let (url, token) = tool_server(&t);
-    let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let early = tokio::spawn({
-        let (url, token, list) = (url.clone(), token.clone(), list.clone());
-        async move { mcp(&url, &token, list).await }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000")))
+    let missing = |t: &T| {
+        t.sink
+            .events()
+            .into_iter()
+            .filter(|e| {
+                matches!(&e.body, EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING)
+            })
+            .count()
+    };
+    n.start_turn(now_cmd("op_t1", turn("s_1", "t_1", "a_1", "@say one")))
         .await
         .unwrap();
-    let (s, early) = early.await.unwrap();
-    assert_eq!(s, 200, "{early}");
-    assert_eq!(
-        early["result"]["tools"][0]["name"], "steve_update",
-        "listed before the first turn: {early}"
-    );
-    n.cancel(now_cmd(
-        "op_c",
-        Cancel {
-            target: OperationId::new("op_t").unwrap(),
-            reason: "x".into(),
-        },
-    ))
-    .await
-    .unwrap();
-    t.wait_for("the end", |t| !t.ended().is_empty()).await;
-    let (s, idle) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), mcp(&url, &token, list))
-            .await
-            .expect("answered at once at idle");
-    assert_eq!(s, 200, "{idle}");
-    assert_eq!(idle["result"]["tools"][0]["name"], "steve_update", "{idle}");
+    t.wait_for("the first end", |t| t.ended().len() == 1).await;
+    assert_eq!(missing(&t), 1, "never listed");
+
+    let (url, token) = tool_server(&t);
+    let (s, list) = mcp(
+        &url,
+        &token,
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{list}");
+    assert_eq!(list["result"]["tools"][0]["name"], "steve_update", "{list}");
     let (_, call) = mcp(
         &url,
         &token,
@@ -1532,8 +1526,17 @@ async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
             "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
     )
     .await;
-    assert!(call.get("error").is_some(), "no call at idle: {call}");
+    assert!(
+        call.get("error").is_some(),
+        "no call without an attempt: {call}"
+    );
     assert!(tools.calls.lock().unwrap().is_empty());
+
+    n.start_turn(now_cmd("op_t2", turn("s_1", "t_2", "a_2", "@say two")))
+        .await
+        .unwrap();
+    t.wait_for("the second end", |t| t.ended().len() == 2).await;
+    assert_eq!(missing(&t), 1, "listed this time");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

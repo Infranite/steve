@@ -544,7 +544,7 @@ impl NodeRuntime {
     /// The session's open request as in force: as last opened or configured (the turn must match
     /// it exactly).
     pub(super) fn open_of(&self, tx: &Tx, session: &str) -> Result<OpenSession, StoreError> {
-        self.config_of_in(tx, session)
+        config_in(tx, session)
     }
 
     /// A turn of `session` is in flight (planned, running, waiting, retrying or unknown), or the
