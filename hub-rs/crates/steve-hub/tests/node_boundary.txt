@@ -62,7 +62,7 @@ Fs	steve-hub/src/system.rs	1
 Fs	steve-hub/src/upgrades/cli.rs	8
 Fs	steve-hub/src/upgrades/client.rs	6
 Fs	steve-hub/src/upgrades/mod.rs	11
-Fs	steve-hub/src/upgrades/runner.rs	14
+Fs	steve-hub/src/upgrades/runner.rs	8
 Fs	steve-hub/src/upgrades/signing.rs	4
 Fs	steve-hub/src/upgrades/supervisor.rs	11
 Fs	steve-hub/src/web.rs	3
@@ -70,7 +70,6 @@ Fs	steve-hub/src/wire/host_node.rs	2
 Fs	steve-hub/src/wire/local_service.rs	10
 Fs	steve-hub/src/wire/node_files.rs	1
 Fs	steve-hub/src/wire/node_tools.rs	2
-Fs	steve-hub/src/wire/output_files.rs	9
 Fs	steve-install/src/common.rs	7
 Fs	steve-install/src/publish.rs	7
 Fs	steve-install/src/release.rs	16
@@ -117,7 +116,7 @@ Spawn	steve-hub/src/nodes/tailcat.rs	2
 Spawn	steve-hub/src/plugins/run.rs	1
 Spawn	steve-hub/src/system.rs	1
 Spawn	steve-hub/src/upgrades/cli.rs	1
-Spawn	steve-hub/src/upgrades/runner.rs	6
+Spawn	steve-hub/src/upgrades/runner.rs	2
 Spawn	steve-hub/src/upgrades/signing.rs	2
 Spawn	steve-hub/src/upgrades/supervisor.rs	2
 Spawn	steve-hub/src/wire/local_service.rs	2

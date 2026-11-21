@@ -8,6 +8,7 @@ edge steve-channels steve-runtime	1
 edge steve-channels steve-types	1
 edge steve-channels steve-work-api	1
 edge steve-confine steve-harness-spec	1
+edge steve-core steve-harness-spec	1
 edge steve-core steve-node-api	1
 edge steve-core steve-runtime	1
 edge steve-core steve-types	1
@@ -40,11 +41,13 @@ edge steve-modules steve-runtime	1
 edge steve-modules steve-types	1
 edge steve-node steve-acp	1
 edge steve-node steve-confine	1
+edge steve-node steve-harness-spec	1
 edge steve-node steve-node-api	1
 edge steve-node steve-research	1
 edge steve-node steve-toolchains	1
 edge steve-node steve-vault	1
 edge steve-node-api steve-types	1
+edge steve-node-cli steve-harness-spec	1
 edge steve-node-cli steve-node-api	1
 edge steve-node-wire steve-node-api	1
 edge steve-research steve-confine	1
