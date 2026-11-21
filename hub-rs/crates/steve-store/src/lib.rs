@@ -91,6 +91,34 @@ pub enum StoreError {
     Conflict(String),
 }
 
+impl StoreError {
+    /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), not
+    /// the write being attempted: retrying the same write later can succeed.
+    pub fn is_storage_failure(&self) -> bool {
+        use rusqlite::ErrorCode::*;
+        match self {
+            Self::Pool(_) => true,
+            Self::Sqlite(e) => matches!(
+                e.sqlite_error_code(),
+                Some(
+                    DatabaseBusy
+                        | DatabaseLocked
+                        | OutOfMemory
+                        | ReadOnly
+                        | OperationInterrupted
+                        | SystemIoFailure
+                        | DatabaseCorrupt
+                        | DiskFull
+                        | CannotOpen
+                        | FileLockingProtocolFailed
+                        | NotADatabase
+                )
+            ),
+            _ => false,
+        }
+    }
+}
+
 /// Runs inside the transaction that deletes an item: `(tx, workspace_id, item_id)`.
 pub type ItemDeletedHook = dyn Fn(&Tx, &str, &str) -> std::result::Result<(), String> + Send + Sync;
 

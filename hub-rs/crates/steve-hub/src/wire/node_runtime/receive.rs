@@ -86,6 +86,9 @@ impl NodeRuntime {
                             applied = true;
                             at = seq;
                         }
+                        // the database failing is not this event's fault: the whole batch
+                        // rolls back and the Node sends it again
+                        Err(why) if why.is_storage_failure() => return Err(why),
                         Err(why) => {
                             self.unstage(mark);
                             self.fault_in(tx, k, e, &why, received)?;
