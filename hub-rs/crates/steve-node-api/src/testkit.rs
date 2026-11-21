@@ -2252,7 +2252,8 @@ impl Discovery for FakeNode {
         Ok(())
     }
 
-    /// Fixed figures: 8 CPUs at load 2, 16 GiB of which 4 GiB free, nothing under roots.
+    /// Fixed figures: 8 CPUs at load 2, 16 GiB of which 4 GiB free, nothing under roots; a journal
+    /// of 4 KiB after 7 commits with 2 events not acknowledged, and 1 MiB written by the process.
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         Ok(NodeVitals {
             at: Timestamp(1),
@@ -2262,6 +2263,16 @@ impl Discovery for FakeNode {
             mem_available: Some(4 << 30),
             roots: vec![],
             sessions: 0,
+            meters: Some(NodeMeters {
+                journal_bytes: 4096,
+                journal_commits: 7,
+                event_backlog: 2,
+                process: Some(ProcessMeters {
+                    disk_written_bytes: Some(1 << 20),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
         })
     }
     /// A fixed machine: `Studio Mac`, macOS 26.1 on aarch64 with the CPUs and memory of

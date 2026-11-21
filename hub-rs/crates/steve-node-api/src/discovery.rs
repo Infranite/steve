@@ -305,6 +305,47 @@ pub struct NodeVitals {
     /// Sessions this Node is running now.
     #[serde(default)]
     pub sessions: u32,
+    /// The Node process's own meters; the Hub exports them as `steve_node_*{node}` and does not
+    /// keep them with the samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meters: Option<NodeMeters>,
+}
+
+/// What the Node process does to its machine and how far its journal is behind. Totals count from
+/// the Node process's start: a restart begins them at zero again.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NodeMeters {
+    /// Live journal bytes, and the journal file's size.
+    pub journal_bytes: u64,
+    pub journal_file_bytes: u64,
+    /// Journal write transactions committed. Each is durable on its own (WAL, `synchronous=FULL`):
+    /// one commit is one fsync of the log.
+    pub journal_commits: u64,
+    /// Journaled events the Hub has not acknowledged yet, and their bytes.
+    pub event_backlog: u64,
+    pub event_backlog_bytes: u64,
+    /// Harness process groups the Node runs, and what their live processes use together.
+    pub adapters: u32,
+    pub adapter_cpu_seconds: f64,
+    pub adapter_resident_bytes: u64,
+    /// The Node process itself; `None` when the platform cannot say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessMeters>,
+}
+
+/// One process's use of its machine. A figure the platform does not give is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcessMeters {
+    pub cpu_seconds: f64,
+    pub resident_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_read_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_written_bytes: Option<u64>,
 }
 
 /// What the Node's machine is (H→N `node.host`): fixed while the Node runs,

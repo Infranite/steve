@@ -4288,10 +4288,14 @@ impl Discovery for LocalNode {
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();
         let sessions = self.0.actors.lock().unwrap().len() as u32;
-        // statvfs and vm_stat may block for a moment on a slow disk
-        tokio::task::spawn_blocking(move || vitals::measure(&roots, sessions))
-            .await
-            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
+        let inner = self.0.clone();
+        // statvfs, vm_stat and the journal's backlog may block for a moment on a slow disk
+        tokio::task::spawn_blocking(move || NodeVitals {
+            meters: Some(vitals::meters(&inner.j)),
+            ..vitals::measure(&roots, sessions)
+        })
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
         self.start_adapter_updates();
