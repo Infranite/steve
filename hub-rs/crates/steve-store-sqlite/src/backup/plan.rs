@@ -1204,21 +1204,21 @@ mod retention_tests {
     }
 
     #[test]
+    // The fixture makes removal fail with a read-only copy. Some macOS releases also refuse to
+    // rename a directory without write permission, so the failure would come a step earlier;
+    // the accounting under test is the same on every platform.
+    #[cfg_attr(target_os = "macos", ignore)]
     fn failed_retirement_is_accounted_and_retried_before_new_candidates() {
         let root = tempfile::tempdir().unwrap();
         let old = copy(root.path(), Reason::Daily, 1);
         let middle = copy(root.path(), Reason::Daily, 2);
         let latest = copy(root.path(), Reason::Daily, 3);
         fs::set_permissions(&old.directory, fs::Permissions::from_mode(0o500)).unwrap();
-        if fs::write(old.directory.join("denied"), "denied").is_ok() {
-            // This user is not bound by directory permissions (as on some CI hosts), so the
-            // failed removal this test needs cannot be produced here.
-            fs::set_permissions(&old.directory, fs::Permissions::from_mode(0o700)).unwrap();
-            return;
-        }
+        let denied = fs::write(old.directory.join("denied"), "denied").is_err();
         let first = retain_at(root.path(), u64::MAX, DEFAULT_DAILY_KEEP_DAYS);
         let retired = root.path().join(format!("{}.retiring", old.id));
         fs::set_permissions(&retired, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(denied, "fixture must deny file removal");
         let first = first.unwrap();
         assert_eq!((first.removed, first.failures), (1, 1));
         assert!(!old.directory.exists() && !middle.directory.exists() && latest.directory.exists());
